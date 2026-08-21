@@ -22,8 +22,11 @@ corepack pnpm build:native
 - `winwincode_native.node`：Node 原生模块；
 - `winwincode-kernel-helper`：Codex 文件系统和子进程内部入口；
 - `codex-linux-sandbox`：仅 Linux 提供，与 helper 是同一程序的固定名称入口；
+- `codex-resources/bwrap`：仅 Linux 提供，作为系统 bubblewrap 不可用时的后备程序；
 - `build-info.json`：源码身份、工具链、补丁列表、文件大小和 SHA-256；
 - `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`、`rust-dependencies.json` 和 `licenses/`：项目许可、第三方归属、目标专属依赖及其原始许可文件。
+
+Linux 构建机需要 `binutils`、`pkg-config` 和 `libcap` 开发文件。Ubuntu 24.04 默认用 AppArmor 限制用户命名空间，运行前还需要管理员允许实际使用的 `bwrap` 创建用户命名空间；其他没有这项限制的系统可以直接使用包内版本。GitHub 托管的 Linux 运行器会安装系统 `bubblewrap`，并只在这台临时机器上关闭该项 AppArmor 限制，再同时验证文件边界和网络隔离。原生发布 CI 不随提交自动运行；手动选择 `linux` 时只跑两个 Linux 目标，确认全绿后再手动选择 `macos` 做一次回归检查。
 
 `@winwincode/native` 是小型加载器。安装时只会选择当前主机对应的平台包；Windows 或其他处理器会明确报错，不会选择相近产物，也不会回退到外部 Codex CLI。
 

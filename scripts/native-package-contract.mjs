@@ -205,6 +205,18 @@ export function verifyNativePrebuild({
     errors.push('native package CPU selector is wrong')
   }
   if (manifest.winwincodeNativeTarget !== target) errors.push('native package target is wrong')
+  const expectedExecutableFiles = [
+    ...(configuration.os === 'linux'
+      ? ['./prebuild/codex-linux-sandbox', './prebuild/codex-resources/bwrap']
+      : []),
+    './prebuild/winwincode-kernel-helper',
+  ]
+  if (
+    JSON.stringify(manifest.publishConfig?.executableFiles)
+    !== JSON.stringify(expectedExecutableFiles)
+  ) {
+    errors.push('native package executable file declarations are wrong')
+  }
   if (requireCurrentHost && hostNativeTarget() !== target) {
     errors.push(`native package ${target} cannot be loaded on ${process.platform}/${process.arch}`)
   }
@@ -291,7 +303,9 @@ export function verifyNativePrebuild({
   const expectedArtifactNames = [
     'winwincode-kernel-helper',
     'winwincode_native.node',
-    ...(configuration.os === 'linux' ? ['codex-linux-sandbox'] : []),
+    ...(configuration.os === 'linux'
+      ? ['codex-linux-sandbox', 'codex-resources/bwrap']
+      : []),
   ].sort()
   const artifacts = buildInfo.artifacts ?? {}
   if (JSON.stringify(Object.keys(artifacts).sort()) !== JSON.stringify(expectedArtifactNames)) {
@@ -315,6 +329,32 @@ export function verifyNativePrebuild({
     if (existsSync(join(root, name)) && descriptor?.sha256 !== sha256(join(root, name))) {
       errors.push(`legal file ${name} does not match the canonical repository copy`)
     }
+  }
+  const bubblewrapLicense = buildInfo.legal?.bubblewrapLicense
+  if (configuration.os === 'linux') {
+    descriptorError(
+      errors,
+      prebuildRoot,
+      bubblewrapLicense,
+      'bundled bubblewrap license',
+    )
+    if (bubblewrapLicense?.path !== 'codex-resources/bwrap.LICENSE') {
+      errors.push('bundled bubblewrap license has the wrong path')
+    }
+    const sourceLicense = join(
+      root,
+      'third_party',
+      'codex',
+      'codex-rs',
+      'vendor',
+      'bubblewrap',
+      'COPYING',
+    )
+    if (bubblewrapLicense?.sha256 !== sha256(sourceLicense)) {
+      errors.push('bundled bubblewrap license does not match the pinned source')
+    }
+  } else if (bubblewrapLicense !== undefined) {
+    errors.push('macOS package unexpectedly contains a bubblewrap license')
   }
   verifyRustDependencies(errors, root, prebuildRoot, target, buildInfo)
   return { errors, buildInfo, configuration, packageRoot, prebuildRoot }

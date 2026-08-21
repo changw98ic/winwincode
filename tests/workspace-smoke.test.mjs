@@ -53,20 +53,30 @@ test('maps every Rust target to one deterministic optional package', () => {
   )
 })
 
-test('native release workflow covers exactly the four claimed hosts', () => {
+test('native release workflow exposes separate manual Linux and macOS lanes', () => {
   const workflow = readFileSync(
     resolve(root, '.github/workflows/native-release.yml'),
     'utf8',
   )
-  const matrix = [...workflow.matchAll(
-    /- target: ([^\n]+)\n\s+runner: ([^\n]+)/gu,
-  )].map(match => [match[1], match[2]])
-  assert.deepEqual(matrix, [
-    ['aarch64-apple-darwin', 'macos-15'],
-    ['x86_64-apple-darwin', 'macos-15-intel'],
+  assert.match(workflow, /^  workflow_dispatch:$/mu)
+  assert.doesNotMatch(workflow, /^  (?:pull_request|push):$/mu)
+  const platformOptions = [...workflow.matchAll(/^          - (linux|macos)$/gmu)]
+    .map(match => match[1])
+  assert.deepEqual(platformOptions, ['linux', 'macos'])
+  assert.ok(workflow.includes('binutils bubblewrap pkg-config libcap-dev'))
+  assert.ok(workflow.includes('kernel.apparmor_restrict_unprivileged_userns=0'))
+  assert.ok(workflow.includes('bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net'))
+  for (const [target, runner] of [
     ['aarch64-unknown-linux-gnu', 'ubuntu-24.04-arm'],
     ['x86_64-unknown-linux-gnu', 'ubuntu-24.04'],
-  ])
+    ['aarch64-apple-darwin', 'macos-15'],
+    ['x86_64-apple-darwin', 'macos-15-intel'],
+  ]) {
+    assert.ok(
+      workflow.includes(`\"target\":\"${target}\",\"runner\":\"${runner}\"`),
+      `native release workflow is missing ${target} on ${runner}`,
+    )
+  }
   assert.equal(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '24.19.0')
   for (const command of [
     'corepack pnpm build:native --release --target ${{ matrix.target }}',

@@ -18,6 +18,17 @@ OpenAI Codex includes code derived from Ratatui.
 Copyright (c) 2016-2022 Florian Dehau
 Copyright (c) 2023-2025 The Ratatui Developers
 
+Linux native packages also include Bubblewrap 0.11.2, built from the source
+pinned inside the OpenAI Codex source tree. Bubblewrap is licensed under
+LGPL-2.0-or-later.
+
+Bubblewrap
+Copyright (C) 2016 Alexander Larsson
+
+The complete Bubblewrap license is included in Linux native packages at
+`codex-resources/bwrap.LICENSE`. The corresponding source is available in this
+repository at `third_party/codex/codex-rs/vendor/bubblewrap`.
+
 ## DeepSeek Harness and Ratatui MIT terms
 
 WinWinCode uses DeepSeek Harness packages from release `0.1.0-rc.8` and Cordis

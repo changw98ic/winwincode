@@ -1,17 +1,22 @@
 name: Native release matrix
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform family to verify
+        required: true
+        default: linux
+        type: choice
+        options:
+          - linux
+          - macos
 
 permissions:
   contents: read
 
 concurrency:
-  group: native-release-${{ github.workflow }}-${{ github.ref }}
+  group: native-release-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
   cancel-in-progress: true
 
 jobs:
@@ -22,15 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-15
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
+        include: ${{ fromJSON(inputs.platform == 'linux' && '[{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-24.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-24.04"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-15"},{"target":"x86_64-apple-darwin","runner":"macos-15-intel"}]') }}
     env:
       CARGO_INCREMENTAL: "0"
       CI: "1"
@@ -45,6 +42,18 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
+
+      - name: Install Linux native build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils bubblewrap pkg-config libcap-dev
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
 
       - name: Install pinned Rust
         shell: bash

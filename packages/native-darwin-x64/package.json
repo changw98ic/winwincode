@@ -19,7 +19,10 @@
     "prebuild"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "executableFiles": [
+      "./prebuild/winwincode-kernel-helper"
+    ]
   },
   "winwincodeNativeTarget": "x86_64-apple-darwin"
 }
