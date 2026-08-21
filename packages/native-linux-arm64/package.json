@@ -20,7 +20,11 @@
     "prebuild"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "executableFiles": [
+      "./prebuild/codex-linux-sandbox",
+      "./prebuild/winwincode-kernel-helper"
+    ]
   },
   "winwincodeNativeTarget": "aarch64-unknown-linux-gnu"
 }
