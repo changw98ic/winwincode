@@ -1,0 +1,477 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -28,6 +28,7 @@
+ use std::sync::Mutex as StdMutex;
+ use std::sync::OnceLock;
+ use std::sync::atomic::AtomicBool;
++use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::Ordering;
+ 
+ use codex_api::AgentIdentityTelemetry;
+@@ -94,9 +95,11 @@
+ use eventsource_stream::Event;
+ use eventsource_stream::EventStreamError;
+ use futures::StreamExt;
++use futures::future::BoxFuture;
+ use http::HeaderMap as ApiHeaderMap;
+ use http::HeaderValue;
+ use http::StatusCode;
++use serde::Serialize;
+ use std::time::Duration;
+ use std::time::Instant;
+ use tokio::sync::mpsc;
+@@ -168,6 +171,30 @@
+ #[cfg(test)]
+ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
+     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
++
++/// Secret-free, provider-neutral model request handed to an injected host transport.
++///
++/// The host receives the already-normalized Responses payload plus stable Codex identities. It
++/// does not receive HTTP headers, authentication state, or provider credentials.
++#[derive(Debug, Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ModelStreamRequest {
++    pub request_id: String,
++    pub provider: String,
++    pub session_id: String,
++    pub thread_id: String,
++    pub turn_id: Option<String>,
++    pub request: ResponsesApiRequest,
++}
++
++/// Optional host-owned transport for streaming model inference without an HTTP compatibility
++/// gateway. The default Codex construction leaves this unset and retains the upstream transport.
++pub trait ModelStreamTransport: std::fmt::Debug + Send + Sync {
++    fn stream(
++        &self,
++        request: ModelStreamRequest,
++    ) -> BoxFuture<'static, std::result::Result<codex_api::ResponseStream, ApiError>>;
++}
+ 
+ pub(crate) struct CompactConversationRequestSettings {
+     pub(crate) effort: Option<ReasoningEffortConfig>,
+@@ -216,6 +243,9 @@
+     disable_websockets: AtomicBool,
+     agent_identity_session_fallback: AgentIdentitySessionFallback,
+     cached_websocket_session: StdMutex<WebsocketSession>,
++    model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
++    model_stream_provider_id: String,
++    model_stream_request_sequence: AtomicU64,
+ }
+ 
+ /// Resolved API client setup for a single request attempt.
+@@ -443,6 +473,7 @@
+         http_client_factory: HttpClientFactory,
+     ) -> Self {
+         let model_provider = create_model_provider(provider_info, auth_manager);
++        let model_stream_provider_id = model_provider.info().name.clone();
+         let codex_api_key_env_enabled = model_provider
+             .auth_manager()
+             .as_ref()
+@@ -467,6 +498,9 @@
+                 disable_websockets: AtomicBool::new(false),
+                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
++                model_stream_transport: None,
++                model_stream_provider_id,
++                model_stream_request_sequence: AtomicU64::new(0),
+             }),
+             agent_identity_policy,
+             prompt_cache_key_override: None,
+@@ -474,6 +508,24 @@
+         }
+     }
+ 
++    /// Inject a host-owned model stream transport before this client is shared with a session.
++    pub fn with_model_stream_transport(
++        mut self,
++        provider_id: String,
++        transport: Arc<dyn ModelStreamTransport>,
++    ) -> Self {
++        let Some(state) = Arc::get_mut(&mut self.state) else {
++            unreachable!("model stream transport must be set before ModelClient is shared");
++        };
++        state.model_stream_provider_id = provider_id;
++        state.model_stream_transport = Some(transport);
++        self
++    }
++
++    pub(crate) fn model_stream_transport(&self) -> Option<Arc<dyn ModelStreamTransport>> {
++        self.state.model_stream_transport.clone()
++    }
++
+     pub(crate) fn with_prompt_cache_key_override(
+         mut self,
+         prompt_cache_key_override: Option<String>,
+@@ -953,7 +1005,8 @@
+     ///
+     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
+     pub fn responses_websocket_enabled(&self) -> bool {
+-        if !self.state.provider.info().supports_websockets
++        if self.state.model_stream_transport.is_some()
++            || !self.state.provider.info().supports_websockets
+             || self.state.disable_websockets.load(Ordering::Relaxed)
+         {
+             return false;
+@@ -1027,6 +1080,9 @@
+     }
+ 
+     pub(crate) async fn prewarm_auth(&self) -> Result<()> {
++        if self.state.model_stream_transport.is_some() {
++            return Ok(());
++        }
+         self.current_client_setup().await.map(|_| ())
+     }
+ 
+@@ -1850,6 +1906,68 @@
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
++    async fn stream_injected_transport(
++        &self,
++        prompt: &Prompt,
++        model_info: &ModelInfo,
++        session_telemetry: &SessionTelemetry,
++        effort: Option<ReasoningEffortConfig>,
++        summary: ReasoningSummaryConfig,
++        service_tier: Option<String>,
++        responses_metadata: &CodexResponsesMetadata,
++        inference_trace: &InferenceTraceContext,
++        transport: Arc<dyn ModelStreamTransport>,
++    ) -> Result<ResponseStream> {
++        let mut request = self.client.build_responses_request(
++            prompt,
++            model_info,
++            effort,
++            summary,
++            service_tier,
++            responses_metadata,
++        )?;
++        self.client
++            .prepare_response_items_for_request(&mut request.input);
++        let request_session_telemetry = session_telemetry_for_request(session_telemetry, &request);
++        let inference_trace_attempt = inference_trace.start_attempt();
++        inference_trace_attempt.record_started(&request);
++        let sequence = self
++            .client
++            .state
++            .model_stream_request_sequence
++            .fetch_add(1, Ordering::Relaxed)
++            .saturating_add(1);
++        let transport_request = ModelStreamRequest {
++            request_id: format!("{}:{sequence}", self.client.state.thread_id),
++            provider: self.client.state.model_stream_provider_id.clone(),
++            session_id: responses_metadata.session_id.clone(),
++            thread_id: responses_metadata.thread_id.clone(),
++            turn_id: responses_metadata.turn_id.clone(),
++            request,
++        };
++        match transport.stream(transport_request).await {
++            Ok(stream) => {
++                let (stream, _) = map_response_stream(
++                    stream,
++                    request_session_telemetry,
++                    inference_trace_attempt,
++                    Arc::clone(&self.client.state.provider),
++                );
++                Ok(stream)
++            }
++            Err(error) => {
++                let error = self.client.state.provider.map_api_error(error);
++                inference_trace_attempt.record_failed(
++                    &error,
++                    /*upstream_request_id*/ None,
++                    /*output_items*/ &[],
++                );
++                Err(error)
++            }
++        }
++    }
++
++    #[allow(clippy::too_many_arguments)]
+     /// Streams a single model request within the current turn.
+     ///
+     /// The caller is responsible for passing per-turn settings explicitly (model selection,
+@@ -1869,6 +1987,21 @@
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
+     ) -> Result<ResponseStream> {
++        if let Some(transport) = self.client.state.model_stream_transport.clone() {
++            return self
++                .stream_injected_transport(
++                    prompt,
++                    model_info,
++                    session_telemetry,
++                    effort,
++                    summary,
++                    service_tier,
++                    responses_metadata,
++                    inference_trace,
++                    transport,
++                )
++                .await;
++        }
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+             WireApi::Responses => {
+diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
+--- a/codex-rs/core/src/codex_delegate.rs
++++ b/codex-rs/core/src/codex_delegate.rs
+@@ -92,6 +92,10 @@
+         installation_id: parent_session.installation_id.clone(),
+         auth_manager,
+         models_manager,
++        model_stream_transport: parent_session
++            .services
++            .model_client
++            .model_stream_transport(),
+         environment_manager: parent_session
+             .services
+             .turn_environments
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -185,6 +185,8 @@
+ pub use attestation::GenerateAttestationFuture;
+ pub use client::ModelClient;
+ pub use client::ModelClientSession;
++pub use client::ModelStreamRequest;
++pub use client::ModelStreamTransport;
+ pub use client::X_CODEX_INSTALLATION_ID_HEADER;
+ pub use client::X_CODEX_ROUTING_HINT_HEADER;
+ pub use client::X_CODEX_TURN_METADATA_HEADER;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -179,6 +179,7 @@
+ use uuid::Uuid;
+ 
+ use crate::client::ModelClient;
++use crate::client::ModelStreamTransport;
+ use crate::codex_thread::CodexThreadSettingsOverrides;
+ use crate::codex_thread::ThreadConfigSnapshot;
+ #[cfg(test)]
+@@ -396,6 +397,7 @@
+     pub(crate) installation_id: String,
+     pub(crate) auth_manager: Arc<AuthManager>,
+     pub(crate) models_manager: SharedModelsManager,
++    pub(crate) model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
+     pub(crate) environment_manager: Arc<EnvironmentManager>,
+     pub(crate) skills_service: Arc<HostSkillsService>,
+     pub(crate) plugins_manager: Arc<PluginsManager>,
+@@ -493,6 +495,7 @@
+             installation_id,
+             auth_manager,
+             models_manager,
++            model_stream_transport,
+             environment_manager,
+             skills_service,
+             plugins_manager,
+@@ -734,6 +737,7 @@
+             installation_id,
+             auth_manager.clone(),
+             models_manager.clone(),
++            model_stream_transport,
+             model_info,
+             exec_policy,
+             tx_event.clone(),
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -2,6 +2,7 @@
+ use super::mcp_refresh::McpRefresh;
+ use super::*;
+ use crate::agents_md_manager::AgentsMdManager;
++use crate::client::ModelStreamTransport;
+ use crate::config::ConstraintError;
+ use crate::environment_selection::ThreadEnvironments;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+@@ -649,6 +650,7 @@
+         installation_id: String,
+         auth_manager: Arc<AuthManager>,
+         models_manager: SharedModelsManager,
++        model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
+         model_info: ModelInfo,
+         exec_policy: Arc<ExecPolicyManager>,
+         tx_event: Sender<Event>,
+@@ -1388,33 +1390,42 @@
+                 thread_store: Arc::clone(&thread_store),
+                 attestation_provider: attestation_provider.clone(),
+                 time_provider,
+-                model_client: ModelClient::new(
+-                    Some(Arc::clone(&auth_manager)),
+-                    if config.features.enabled(Feature::UseAgentIdentity) {
+-                        AgentIdentityAuthPolicy::ChatGptAuth
+-                    } else {
+-                        AgentIdentityAuthPolicy::JwtOnly
+-                    },
+-                    thread_id,
+-                    session_configuration.provider.info().clone(),
+-                    session_configuration.session_source.clone(),
+-                    session_configuration.originator.clone(),
+-                    config.model_verbosity,
+-                    config.features.enabled(Feature::EnableRequestCompression),
+-                    config.features.enabled(Feature::RuntimeMetrics),
+-                    Self::build_model_client_beta_features_header(config.as_ref()),
+-                    /*concurrent_reasoning_summaries_enabled*/ config
+-                        .features
+-                        .enabled(Feature::ConcurrentReasoningSummaries),
+-                    attestation_provider,
+-                    config.http_client_factory(),
+-                )
+-                .with_prompt_cache_key_override(
+-                    crate::guardian::prompt_cache_key_override_for_review_session(
+-                        &session_configuration.session_source,
+-                        session_configuration.parent_thread_id,
+-                    ),
+-                ),
++                model_client: {
++                    let client = ModelClient::new(
++                        Some(Arc::clone(&auth_manager)),
++                        if config.features.enabled(Feature::UseAgentIdentity) {
++                            AgentIdentityAuthPolicy::ChatGptAuth
++                        } else {
++                            AgentIdentityAuthPolicy::JwtOnly
++                        },
++                        thread_id,
++                        session_configuration.provider.info().clone(),
++                        session_configuration.session_source.clone(),
++                        session_configuration.originator.clone(),
++                        config.model_verbosity,
++                        config.features.enabled(Feature::EnableRequestCompression),
++                        config.features.enabled(Feature::RuntimeMetrics),
++                        Self::build_model_client_beta_features_header(config.as_ref()),
++                        /*concurrent_reasoning_summaries_enabled*/ config
++                            .features
++                            .enabled(Feature::ConcurrentReasoningSummaries),
++                        attestation_provider,
++                        config.http_client_factory(),
++                    );
++                    let client = match model_stream_transport {
++                        Some(transport) => client.with_model_stream_transport(
++                            config.model_provider_id.clone(),
++                            transport,
++                        ),
++                        None => client,
++                    };
++                    client.with_prompt_cache_key_override(
++                        crate::guardian::prompt_cache_key_override_for_review_session(
++                            &session_configuration.session_source,
++                            session_configuration.parent_thread_id,
++                        ),
++                    )
++                },
+                 executed_tool_calls,
+                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
+                     Arc::clone(&code_mode_session_provider),
+diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
+--- a/codex-rs/core/src/session/tests/guardian_tests.rs
++++ b/codex-rs/core/src/session/tests/guardian_tests.rs
+@@ -805,6 +805,7 @@
+         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+         models_manager,
++        model_stream_transport: None,
+         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+         skills_service,
+         plugins_manager,
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -5718,6 +5718,7 @@
+         "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+         models_manager,
++        /*model_stream_transport*/ None,
+         model_info,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
+@@ -6154,6 +6155,7 @@
+         "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+         models_manager,
++        /*model_stream_transport*/ None,
+         model_info,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
+@@ -6275,6 +6277,7 @@
+         "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+         models_manager,
++        /*model_stream_transport*/ None,
+         model_info,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1,6 +1,7 @@
+ use crate::CodexAppsToolsCache;
+ use crate::agent::AgentControl;
+ use crate::attestation::AttestationProvider;
++use crate::client::ModelStreamTransport;
+ use crate::codex_thread::CodexThread;
+ use crate::config::Config;
+ use crate::config::ThreadStoreConfig;
+@@ -354,6 +355,7 @@
+     session_source: SessionSource,
+     installation_id: String,
+     analytics_events_client: Option<AnalyticsEventsClient>,
++    model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
+     // Captures submitted ops for testing purpose when test mode is enabled.
+     ops_log: Option<SharedCapturedOps>,
+ }
+@@ -482,6 +484,7 @@
+                 session_source,
+                 installation_id,
+                 analytics_events_client,
++                model_stream_transport: None,
+                 ops_log: should_use_test_thread_manager_behavior()
+                     .then(|| Arc::new(std::sync::Mutex::new(Vec::new()))),
+             }),
+@@ -498,6 +501,15 @@
+             unreachable!("thread ID generator must be set before thread manager is shared");
+         };
+         state.thread_id_generator = Arc::new(generator);
++        self
++    }
++
++    /// Inject a host-owned model stream transport for every root and descendant thread.
++    pub fn with_model_stream_transport(mut self, transport: Arc<dyn ModelStreamTransport>) -> Self {
++        let Some(state) = Arc::get_mut(&mut self.state) else {
++            unreachable!("model stream transport must be set before thread manager is shared");
++        };
++        state.model_stream_transport = Some(transport);
+         self
+     }
+ 
+@@ -631,6 +643,7 @@
+                 session_source: SessionSource::Exec,
+                 installation_id,
+                 analytics_events_client: None,
++                model_stream_transport: None,
+                 ops_log: should_use_test_thread_manager_behavior()
+                     .then(|| Arc::new(std::sync::Mutex::new(Vec::new()))),
+             }),
+@@ -1862,6 +1875,7 @@
+             installation_id: self.installation_id.clone(),
+             auth_manager,
+             models_manager: Arc::clone(&self.models_manager),
++            model_stream_transport: self.model_stream_transport.clone(),
+             environment_manager: Arc::clone(&self.environment_manager),
+             skills_service: Arc::clone(&self.skills_service),
+             plugins_manager: Arc::clone(&self.plugins_manager),
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -34,6 +34,8 @@
+ pub use codex_core::ForkSnapshot;
+ pub use codex_core::LoadedAgentsMd;
+ pub use codex_core::McpManager;
++pub use codex_core::ModelStreamRequest;
++pub use codex_core::ModelStreamTransport;
+ pub use codex_core::NetworkDomainPermission;
+ pub use codex_core::NetworkDomainPermissionEntry;
+ pub use codex_core::NetworkDomainPermissions;

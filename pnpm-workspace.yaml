@@ -1,0 +1,21 @@
+packages:
+  - apps/*
+  - packages/*
+
+catalogMode: strict
+linkWorkspacePackages: true
+preferWorkspacePackages: true
+
+onlyBuiltDependencies: []
+
+allowBuilds:
+  # DSH's reviewed local subprocess provider builds its packaged runtime boundary.
+  '@deepseek-ai/dsh-subprocess-local': true
+  # These optional model-provider lifecycle scripts are upstream-reviewed no-ops.
+  '@google/genai': false
+  # DSH JSONL durability uses the reviewed koffi package for Windows-only atomic publication.
+  koffi: true
+  # DSH's persistent terminal backend needs its native PTY build.
+  node-pty: true
+  # The protobuf lifecycle hook is not needed here.
+  protobufjs: false

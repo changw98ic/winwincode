@@ -1,0 +1,25 @@
+{
+  "name": "@winwincode/native-darwin-x64",
+  "version": "0.0.0-dev.0",
+  "description": "WinWinCode embedded Codex kernel binary for Intel macOS",
+  "license": "Apache-2.0",
+  "type": "module",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "exports": {
+    "./build-info.json": "./prebuild/build-info.json",
+    "./winwincode-kernel-helper": "./prebuild/winwincode-kernel-helper",
+    "./winwincode_native.node": "./prebuild/winwincode_native.node"
+  },
+  "files": [
+    "prebuild"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "winwincodeNativeTarget": "x86_64-apple-darwin"
+}

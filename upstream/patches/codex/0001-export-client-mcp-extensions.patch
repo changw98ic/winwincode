@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+index 1d15e7a..b8d282a 100644
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -101,6 +101,7 @@ pub use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
+ pub use codex_protocol::dynamic_tools::DynamicToolSpec;
+ pub use codex_protocol::error::Result as CodexResult;
++pub use codex_protocol::mcp::ClientMcpExtensions;
+ pub use codex_protocol::models::PermissionProfile;
+ pub use codex_protocol::models::PermissionProfileSnapshot;
+ pub use codex_protocol::openai_models::ModelPreset;
+ pub use codex_protocol::protocol::AskForApproval;

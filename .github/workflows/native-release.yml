@@ -1,0 +1,83 @@
+name: Native release matrix
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CI: "1"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt,rust-src
+          rustup override set 1.95.0
+          rustc -Vv
+          cargo -V
+
+      - name: Install JavaScript dependencies
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+
+      - name: Build TypeScript packages
+        run: corepack pnpm build:ts
+
+      - name: Build native release package
+        run: corepack pnpm build:native --release --target ${{ matrix.target }}
+
+      - name: Verify package identity, checksums, and notices
+        run: node scripts/verify-native-package.mjs --target ${{ matrix.target }} --require-release
+
+      - name: Verify clean install, keyless kernel, and sandbox
+        run: node scripts/verify-native-install.mjs --target ${{ matrix.target }} --require-release
+
+      - name: Pack release artifacts
+        run: node scripts/pack-native-release.mjs --target ${{ matrix.target }} --output release-artifacts
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: release-artifacts/
+          if-no-files-found: error

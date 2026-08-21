@@ -1,0 +1,26 @@
+{
+  "name": "@winwincode/native-linux-arm64",
+  "version": "0.0.0-dev.0",
+  "description": "WinWinCode embedded Codex kernel binary for GNU Linux arm64",
+  "license": "Apache-2.0",
+  "type": "module",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "exports": {
+    "./build-info.json": "./prebuild/build-info.json",
+    "./codex-linux-sandbox": "./prebuild/codex-linux-sandbox",
+    "./winwincode-kernel-helper": "./prebuild/winwincode-kernel-helper",
+    "./winwincode_native.node": "./prebuild/winwincode_native.node"
+  },
+  "files": [
+    "prebuild"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "winwincodeNativeTarget": "aarch64-unknown-linux-gnu"
+}

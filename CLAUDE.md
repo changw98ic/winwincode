@@ -2,6 +2,27 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Repository Contract
+
+WinWinCode is a Node.js 24 ESM and Rust 1.95 workspace. The DSH chat surface is
+the default UI, StrongFlow is the advanced UI, and both use one embedded Codex
+Core execution kernel.
+
+Supported release targets are `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
+`x86_64-unknown-linux-gnu`. Do not add fallback execution through an installed
+Codex CLI or another programming agent.
+
+Keep TypeScript packages in `apps/` and `packages/`, Rust crates in `crates/`,
+tests in `tests/`, upstream pins and patch records in `upstream/`, and accepted
+architecture decisions in `docs/decisions/`. Generated dependency, build,
+coverage, package, credential, and log files must remain ignored.
+
+Project-owned code is Apache-2.0 only. Preserve mandatory third-party license
+and notice files without presenting their licenses as a second WinWinCode
+project license. Migrate old contracts into one canonical path rather than
+adding compatibility copies.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
@@ -60,18 +81,23 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+corepack pnpm install --frozen-lockfile
+corepack pnpm typecheck
+corepack pnpm test
+corepack pnpm lint
+corepack pnpm build
+corepack pnpm verify
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+The TypeScript host composes DSH UI and model services. A native Node boundary
+embeds the Rust Codex Core kernel. The default chat UI and StrongFlow advanced
+mode submit to that same kernel.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+Use strict TypeScript, ESM, Cargo workspace lints, exact external dependency
+versions, workspace protocol for internal packages, and explicit package file
+allowlists.

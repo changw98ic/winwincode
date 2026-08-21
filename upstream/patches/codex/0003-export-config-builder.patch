@@ -1,0 +1,11 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -57,6 +57,7 @@ pub use codex_core::TurnStartOptions;
+ pub use codex_core::WaitForEnvironmentToolConfig;
+ pub use codex_core::build_models_manager;
+ pub use codex_core::config::Config;
++pub use codex_core::config::ConfigBuilder;
+ pub use codex_core::config::Constrained;
+ pub use codex_core::config::ExtraConfig;
+ pub use codex_core::config::GhostSnapshotConfig;

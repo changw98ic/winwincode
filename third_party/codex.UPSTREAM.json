@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/openai/codex",
+  "tag": "rust-v0.149.0",
+  "version": "0.149.0",
+  "commit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
+  "archiveSha256": "0413a0e7680bcc2b6c6e998a6ad358115707317ef5d0121dcb9275e88c36121a",
+  "cargoLockSha256BeforePatches": "0c32858e9c47d0acf82735c8620c96840a5381152eec63acad15d1acadb9edad",
+  "license": "Apache-2.0",
+  "patchesApplied": [
+    "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
+    "upstream/patches/codex/0002-inject-model-stream-transport.patch",
+    "upstream/patches/codex/0003-export-config-builder.patch"
+  ]
+}

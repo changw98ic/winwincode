@@ -4,3 +4,29 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# JavaScript / TypeScript
+node_modules/
+dist/
+.cache/
+*.tgz
+packages/native-*/prebuild/
+
+# Rust
+target/
+
+# Coverage and test output
+coverage/
+test-results/
+playwright-report/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.log
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

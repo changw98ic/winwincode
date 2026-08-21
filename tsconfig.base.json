@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "allowJs": false,
+    "declaration": true,
+    "declarationMap": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "lib": [
+      "ES2023"
+    ],
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "moduleResolution": "Bundler",
+    "noEmitOnError": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "paths": {
+      "@winwincode/contracts": [
+        "./packages/contracts/src/index.ts"
+      ],
+      "@winwincode/dsh-profile": [
+        "./packages/dsh-profile/src/index.ts"
+      ],
+      "@winwincode/native": [
+        "./packages/native/src/index.ts"
+      ],
+      "@winwincode/strongflow": [
+        "./packages/strongflow/src/index.ts"
+      ]
+    },
+    "resolveJsonModule": true,
+    "rootDir": ".",
+    "skipLibCheck": false,
+    "sourceMap": true,
+    "strict": true,
+    "target": "ES2023",
+    "types": [
+      "node"
+    ],
+    "useDefineForClassFields": true,
+    "useUnknownInCatchVariables": true,
+    "verbatimModuleSyntax": true
+  }
+}

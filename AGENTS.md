@@ -2,6 +2,38 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
+## Repository Contract
+
+WinWinCode is a Node.js 24 ESM and Rust 1.95 workspace. The DSH chat surface is
+the default UI, StrongFlow is the advanced UI, and both use one embedded Codex
+Core execution kernel.
+
+Supported release targets are `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
+`x86_64-unknown-linux-gnu`. Do not add fallback execution through an installed
+Codex CLI or another programming agent.
+
+Use these repository entry points:
+
+```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm typecheck
+corepack pnpm test
+corepack pnpm lint
+corepack pnpm build
+corepack pnpm verify
+```
+
+Keep TypeScript packages in `apps/` and `packages/`, Rust crates in `crates/`,
+tests in `tests/`, upstream pins and patch records in `upstream/`, and accepted
+architecture decisions in `docs/decisions/`. Generated dependency, build,
+coverage, package, credential, and log files must remain ignored.
+
+Project-owned code is Apache-2.0 only. Preserve mandatory third-party license
+and notice files without presenting their licenses as a second WinWinCode
+project license. Migrate old contracts into one canonical path rather than
+adding compatibility copies.
+
 > **Architecture in one line:** Issues live in a local Dolt database
 > (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
 > git-compatible protocol), stored under `refs/dolt/data` on your git
