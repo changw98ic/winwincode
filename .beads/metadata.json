@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "winwincode",
+  "project_id": "695831bc-38c3-411e-b2f0-b03093fd80c0"
+}
