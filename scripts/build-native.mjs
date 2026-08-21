@@ -88,21 +88,42 @@ function capturedCommand(command, arguments_) {
 }
 
 function buildBundledBwrap(target, profile) {
-  const codexCargoRoot = join(root, 'third_party', 'codex', 'codex-rs')
-  const targetRoot = join(root, 'target', 'codex-bwrap')
+  const sourceRoot = join(
+    root,
+    'third_party',
+    'codex',
+    'codex-rs',
+    'vendor',
+    'bubblewrap',
+  )
+  const outputRoot = join(root, 'target', 'codex-bwrap', target, profile)
+  const includeRoot = join(outputRoot, 'include')
+  rmSync(outputRoot, { force: true, recursive: true })
+  mkdirSync(includeRoot, { recursive: true })
+  writeFileSync(
+    join(includeRoot, 'config.h'),
+    '#pragma once\n#define PACKAGE_STRING "bubblewrap 0.11.2"\n',
+  )
+  const libcapFlags = capturedCommand('pkg-config', ['--cflags', '--libs', 'libcap'])
+    .split(/\s+/u)
+    .filter(Boolean)
+  const path = join(outputRoot, 'bwrap')
   const arguments_ = [
-    'build',
-    '--locked',
-    '--target-dir',
-    targetRoot,
-    '--target',
-    target,
-    '--bin',
-    'bwrap',
+    profile === 'release' ? '-O2' : '-O0',
+    ...(profile === 'release' ? [] : ['-g']),
+    '-D_GNU_SOURCE',
+    '-I',
+    includeRoot,
+    '-I',
+    sourceRoot,
+    ...['bubblewrap.c', 'bind-mount.c', 'network.c', 'utils.c']
+      .map(name => join(sourceRoot, name)),
+    ...libcapFlags,
+    '-o',
+    path,
   ]
-  if (profile === 'release') arguments_.push('--release')
-  const build = spawnSync('cargo', arguments_, {
-    cwd: codexCargoRoot,
+  const build = spawnSync('cc', arguments_, {
+    cwd: root,
     env: process.env,
     stdio: 'inherit',
   })
@@ -112,11 +133,11 @@ function buildBundledBwrap(target, profile) {
       `bundled bwrap build failed with ${build.signal ?? `exit code ${build.status}`}`,
     )
   }
-  const path = join(targetRoot, target, profile, 'bwrap')
-  if (!existsSync(path)) throw new Error(`cargo did not produce bundled bwrap: ${path}`)
+  if (!existsSync(path)) throw new Error(`C compiler did not produce bundled bwrap: ${path}`)
   if (profile === 'release') {
     capturedCommand('strip', ['--strip-debug', '--strip-unneeded', path])
   }
+  chmodSync(path, 0o755)
   return { path, sha256: digest(path) }
 }
 
