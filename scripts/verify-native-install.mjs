@@ -145,6 +145,9 @@ try {
     failures.push('installed-kernel sandbox did not enforce the workspace boundary')
   }
   if (report.sandboxHelperBundled !== true) failures.push('Linux sandbox helper is missing')
+  if (report.bubblewrapBundled !== true) {
+    failures.push('bundled bubblewrap is missing or not executable')
+  }
   for (const kind of ['exec_command_begin', 'exec_command_end', 'turn_complete']) {
     if (!report.eventKinds.includes(kind)) failures.push(`installed-kernel events are missing ${kind}`)
   }

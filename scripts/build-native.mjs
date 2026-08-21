@@ -87,6 +87,39 @@ function capturedCommand(command, arguments_) {
   return result.stdout.trim()
 }
 
+function buildBundledBwrap(target, profile) {
+  const codexCargoRoot = join(root, 'third_party', 'codex', 'codex-rs')
+  const targetRoot = join(root, 'target', 'codex-bwrap')
+  const arguments_ = [
+    'build',
+    '--locked',
+    '--target-dir',
+    targetRoot,
+    '--target',
+    target,
+    '--bin',
+    'bwrap',
+  ]
+  if (profile === 'release') arguments_.push('--release')
+  const build = spawnSync('cargo', arguments_, {
+    cwd: codexCargoRoot,
+    env: process.env,
+    stdio: 'inherit',
+  })
+  if (build.error !== undefined) throw build.error
+  if (build.status !== 0) {
+    throw new Error(
+      `bundled bwrap build failed with ${build.signal ?? `exit code ${build.status}`}`,
+    )
+  }
+  const path = join(targetRoot, target, profile, 'bwrap')
+  if (!existsSync(path)) throw new Error(`cargo did not produce bundled bwrap: ${path}`)
+  if (profile === 'release') {
+    capturedCommand('strip', ['--strip-debug', '--strip-unneeded', path])
+  }
+  return { path, sha256: digest(path) }
+}
+
 function rustToolchain() {
   const verbose = capturedCommand('rustc', ['-Vv'])
   const lines = verbose.split('\n')
@@ -219,12 +252,18 @@ if (
   throw new Error(`${targetConfiguration.packageDirectory} does not declare native target ${target}`)
 }
 
+const profile = release ? 'release' : 'debug'
+const bundledBwrap = targetConfiguration.os === 'linux'
+  ? buildBundledBwrap(target, profile)
+  : undefined
 const cargoArguments = ['build', '--workspace', '--locked']
 if (release) cargoArguments.push('--release')
 if (requestedTarget !== undefined) cargoArguments.push('--target', target)
 const build = spawnSync('cargo', cargoArguments, {
   cwd: root,
-  env: process.env,
+  env: bundledBwrap === undefined
+    ? process.env
+    : { ...process.env, CODEX_BWRAP_SHA256: bundledBwrap.sha256 },
   stdio: 'inherit',
 })
 if (build.error !== undefined) throw build.error
@@ -232,7 +271,6 @@ if (build.status !== 0) {
   throw new Error(`cargo build failed with ${build.signal ?? `exit code ${build.status}`}`)
 }
 
-const profile = release ? 'release' : 'debug'
 const artifactRoot = requestedTarget === undefined
   ? join(root, 'target', profile)
   : join(root, 'target', target, profile)
@@ -257,11 +295,22 @@ const artifactPaths = new Map([
   ['winwincode-kernel-helper', helperDestination],
   ['winwincode_native.node', nativeDestination],
 ])
-if (target.includes('unknown-linux-gnu')) {
+let bubblewrapLicenseDestination
+if (targetConfiguration.os === 'linux') {
   const sandboxDestination = join(prebuildRoot, 'codex-linux-sandbox')
   linkSync(helperDestination, sandboxDestination)
   chmodSync(sandboxDestination, 0o755)
   artifactPaths.set('codex-linux-sandbox', sandboxDestination)
+  const resourceRoot = join(prebuildRoot, 'codex-resources')
+  mkdirSync(resourceRoot)
+  const bwrapDestination = join(resourceRoot, 'bwrap')
+  copyExecutable(bundledBwrap.path, bwrapDestination)
+  artifactPaths.set('codex-resources/bwrap', bwrapDestination)
+  bubblewrapLicenseDestination = join(resourceRoot, 'bwrap.LICENSE')
+  copyFileSync(
+    join(root, 'third_party', 'codex', 'codex-rs', 'vendor', 'bubblewrap', 'COPYING'),
+    bubblewrapLicenseDestination,
+  )
 }
 
 const legalSourceNames = ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']
@@ -317,6 +366,14 @@ const buildInfo = {
       join(prebuildRoot, 'THIRD_PARTY_NOTICES.md'),
       'THIRD_PARTY_NOTICES.md',
     ),
+    ...(bubblewrapLicenseDestination === undefined
+      ? {}
+      : {
+          bubblewrapLicense: fileDescriptor(
+            bubblewrapLicenseDestination,
+            'codex-resources/bwrap.LICENSE',
+          ),
+        }),
     rustDependencies: {
       ...fileDescriptor(rustNotices.inventoryPath, 'rust-dependencies.json'),
       dependencyCount: rustNotices.dependencyCount,

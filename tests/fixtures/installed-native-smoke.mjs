@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 import {
   WinWinCodeKernel,
@@ -129,10 +129,9 @@ const modelPort = {
 const target = resolveReleaseTarget()
 const packageName = nativePackageName(target)
 const require = createRequire(import.meta.url)
-const packageBuildInfo = JSON.parse(readFileSync(
-  require.resolve(`${packageName}/build-info.json`),
-  'utf8',
-))
+const packageBuildInfoPath = require.resolve(`${packageName}/build-info.json`)
+const nativePrebuildRoot = dirname(packageBuildInfoPath)
+const packageBuildInfo = JSON.parse(readFileSync(packageBuildInfoPath, 'utf8'))
 const kernel = new WinWinCodeKernel({ home, modelPort })
 const eventKinds = []
 const diagnosticEvents = []
@@ -177,6 +176,11 @@ try {
     parentWriteBlocked: !existsSync(blockedPath),
     sandboxHelperBundled: process.platform !== 'linux'
       || existsSync(require.resolve(`${packageName}/codex-linux-sandbox`)),
+    bubblewrapBundled: process.platform !== 'linux'
+      || (
+        existsSync(join(nativePrebuildRoot, 'codex-resources', 'bwrap'))
+        && (statSync(join(nativePrebuildRoot, 'codex-resources', 'bwrap')).mode & 0o111) !== 0
+      ),
     eventKinds,
     diagnosticEvents,
     errors,

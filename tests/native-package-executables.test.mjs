@@ -39,7 +39,9 @@ test('native package archives preserve executable helper permissions', t => {
     const manifest = JSON.parse(readFileSync(join(root, packageDirectory, 'package.json'), 'utf8'))
     const executableFiles = [
       'prebuild/winwincode-kernel-helper',
-      ...(manifest.os.includes('linux') ? ['prebuild/codex-linux-sandbox'] : []),
+      ...(manifest.os.includes('linux')
+        ? ['prebuild/codex-linux-sandbox', 'prebuild/codex-resources/bwrap']
+        : []),
     ]
     const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-native-pack-mode-'))
     t.after(() => rmSync(temporaryRoot, { force: true, recursive: true }))
