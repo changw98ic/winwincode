@@ -61,9 +61,22 @@ const allowedPath = join(workspace, 'sandbox-smoke.txt')
 mkdirSync(home, { recursive: true })
 mkdirSync(workspace, { recursive: true })
 rmSync(blockedPath, { force: true })
+// GitHub's Linux runners deny loopback setup inside a new network namespace.
+// This smoke verifies the filesystem boundary, so it keeps network access unchanged.
 writeFileSync(
   join(home, 'config.toml'),
-  'approval_policy = "never"\ndefault_permissions = ":workspace"\n',
+  process.platform === 'linux'
+    ? `approval_policy = "never"
+default_permissions = "workspace-smoke"
+
+[permissions.workspace-smoke]
+extends = ":workspace"
+
+[permissions.workspace-smoke.network]
+enabled = true
+mode = "full"
+`
+    : 'approval_policy = "never"\ndefault_permissions = ":workspace"\n',
 )
 
 const requests = []

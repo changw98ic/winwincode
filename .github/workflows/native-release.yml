@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils bubblewrap pkg-config libcap-dev
-          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
+          bwrap --ro-bind / / --unshare-user --unshare-pid --as-pid-1 -- true
 
       - name: Install pinned Rust
         shell: bash
