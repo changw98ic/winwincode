@@ -63,6 +63,8 @@ test('native release workflow exposes separate manual Linux and macOS lanes', ()
   const platformOptions = [...workflow.matchAll(/^          - (linux|macos)$/gmu)]
     .map(match => match[1])
   assert.deepEqual(platformOptions, ['linux', 'macos'])
+  assert.ok(workflow.includes('binutils bubblewrap pkg-config libcap-dev'))
+  assert.ok(workflow.includes('bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net'))
   for (const [target, runner] of [
     ['aarch64-unknown-linux-gnu', 'ubuntu-24.04-arm'],
     ['x86_64-unknown-linux-gnu', 'ubuntu-24.04'],
