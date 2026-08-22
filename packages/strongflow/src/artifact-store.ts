@@ -41,6 +41,8 @@ import {
   type StrongFlowRoleId,
 } from '@winwincode/contracts'
 
+import { containsStrongFlowCredentialMaterial } from './security-audit.js'
+
 export const STRONGFLOW_ARTIFACT_STORE_SCHEMA_VERSION = 1 as const
 export const STRONGFLOW_ARTIFACT_STORE_MAX_BLOB_BYTES = 64 * 1024 * 1024
 export const STRONGFLOW_ARTIFACT_STORE_MAX_LIST_LIMIT = 1_000
@@ -84,6 +86,7 @@ export type StrongFlowArtifactStoreErrorCode =
   | 'CONTENT_MISSING'
   | 'CONTENT_DIGEST_MISMATCH'
   | 'CONTENT_TOO_LARGE'
+  | 'CREDENTIAL_MATERIAL_DENIED'
   | 'STORE_CORRUPT'
   | 'STORE_IO_ERROR'
 
@@ -1210,6 +1213,12 @@ export class StrongFlowArtifactStore {
   async #publish(draft: PublicationDraft): Promise<StrongFlowArtifactStorePublishReceipt> {
     if (draft.content.byteLength > STRONGFLOW_ARTIFACT_STORE_MAX_BLOB_BYTES) {
       storeError('CONTENT_TOO_LARGE', 'content exceeds the artifact store limit')
+    }
+    if (containsStrongFlowCredentialMaterial(draft)) {
+      storeError(
+        'CREDENTIAL_MATERIAL_DENIED',
+        'credential material cannot be published to the StrongFlow artifact store',
+      )
     }
     const blob = Object.freeze({
       blobId: StrongFlowBlobId(`sha256-${sha256(draft.content)}`),

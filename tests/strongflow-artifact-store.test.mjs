@@ -189,6 +189,18 @@ async function countPublishedBlobs(store) {
   return count
 }
 
+async function treeContainsBytes(root, wanted) {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) {
+      if (await treeContainsBytes(path, wanted)) return true
+    } else if (entry.isFile() && (await readFile(path)).includes(wanted)) {
+      return true
+    }
+  }
+  return false
+}
+
 test('publishes, reopens, and idempotently reads one canonical artifact', async t => {
   const home = await temporaryHome(t, 'artifact')
   const jobId = JobId('artifact-store-job-artifact')
@@ -309,18 +321,80 @@ test('records full candidate links and keeps direct evidence distinct from model
   )
 })
 
+test('rejects credential material before artifact or evidence bytes become durable', async t => {
+  const home = await temporaryHome(t, 'credential-gate')
+  const jobId = JobId('artifact-store-job-credential-gate')
+  const store = await StrongFlowArtifactStore.create({ home, jobId, createdAtMillis: 1 })
+  const requirement = requirementArtifact(jobId, 'credential-gate')
+  const secret = 'fixture-secret-that-must-never-be-published'
+  const credentialArtifact = structuredClone(requirement)
+  credentialArtifact.payload.summary = `Authorization: Bearer ${secret}`
+
+  await assert.rejects(
+    store.publishArtifact(credentialArtifact),
+    error => {
+      assert.ok(error instanceof StrongFlowArtifactStoreError)
+      assert.equal(error.code, 'CREDENTIAL_MATERIAL_DENIED')
+      assert.equal(error.message.includes(secret), false)
+      return true
+    },
+  )
+  assert.equal((await store.list({ limit: 10 })).records.length, 0)
+  assert.equal(await countPublishedBlobs(store), 0)
+
+  await store.publishArtifact(requirement)
+  await assert.rejects(
+    store.publishDirectEvidence(directEvidence(
+      jobId,
+      'evidence-credential-gate',
+      evidenceProducer(requirement),
+      { content: Buffer.from(`{"apiKey":"${secret}"}`, 'utf8') },
+    )),
+    expectStoreError('CREDENTIAL_MATERIAL_DENIED'),
+  )
+  await assert.rejects(
+    store.publishModelObservation({
+      jobId,
+      evidenceId: 'observation-credential-gate',
+      evidenceKind: 'other',
+      content: Buffer.from(`PASSWORD=${secret}`, 'utf8'),
+      mediaType: 'text/plain; charset=utf-8',
+      producer: evidenceProducer(requirement),
+      candidate: null,
+      createdAtMillis: 1_930_000_000_203,
+      sourceArtifact: {
+        kind: 'artifact',
+        artifactKind: 'REQUIREMENT_SPEC',
+        artifactId: requirement.artifactId,
+      },
+    }),
+    expectStoreError('CREDENTIAL_MATERIAL_DENIED'),
+  )
+  assert.equal((await store.list({ limit: 10 })).records.length, 1)
+  assert.equal(await countPublishedBlobs(store), 1)
+  assert.equal(await treeContainsBytes(home, Buffer.from(secret, 'utf8')), false)
+
+  const redacted = await store.publishDirectEvidence(directEvidence(
+    jobId,
+    'evidence-redacted-credential',
+    evidenceProducer(requirement),
+    { content: Buffer.from('TOKEN=[REDACTED]', 'utf8') },
+  ))
+  assert.equal(redacted.outcome, 'published')
+})
+
 test('missing direct evidence fails closed without copying evidence bytes into diagnostics', async t => {
   const home = await temporaryHome(t, 'missing-direct-evidence')
   const jobId = JobId('artifact-store-job-missing-direct-evidence')
   const store = await StrongFlowArtifactStore.create({ home, jobId, createdAtMillis: 1 })
   const requirement = requirementArtifact(jobId, 'missing-direct-evidence')
   await store.publishArtifact(requirement)
-  const secretEvidence = 'TOKEN=fixture-secret-that-must-not-enter-an-error'
+  const evidenceBytes = 'fixture evidence bytes that must not enter an error'
   const receipt = await store.publishDirectEvidence(directEvidence(
     jobId,
     'evidence-missing-direct',
     evidenceProducer(requirement),
-    { content: Buffer.from(secretEvidence, 'utf8') },
+    { content: Buffer.from(evidenceBytes, 'utf8') },
   ))
 
   await unlink(blobFile(store, receipt.record.blob.blobId))
@@ -330,7 +404,7 @@ test('missing direct evidence fails closed without copying evidence bytes into d
     error => {
       assert.ok(error instanceof StrongFlowArtifactStoreError)
       assert.equal(error.code, 'CONTENT_MISSING')
-      assert.doesNotMatch(error.message, new RegExp(secretEvidence, 'u'))
+      assert.doesNotMatch(error.message, new RegExp(evidenceBytes, 'u'))
       return true
     },
   )

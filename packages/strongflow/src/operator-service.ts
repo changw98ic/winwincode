@@ -70,6 +70,7 @@ import {
   StrongFlowJobStoreError,
   type StrongFlowStoredJob,
 } from './job-store.js'
+import { containsStrongFlowCredentialMaterial } from './security-audit.js'
 
 export const STRONGFLOW_OPERATOR_SERVICE_SCHEMA_VERSION = 1 as const
 
@@ -170,6 +171,7 @@ interface OpenedOperatorJob {
 
 class OperatorFault extends Error {
   readonly code:
+    | 'INVALID_REQUEST'
     | 'JOB_NOT_FOUND'
     | 'ARTIFACT_NOT_FOUND'
     | 'JOB_CONFLICT'
@@ -1099,6 +1101,13 @@ export class StrongFlowLocalJobService implements StrongFlowOperatorInvoker {
   async #createJob(
     request: Extract<StrongFlowOperatorRequest, { readonly operation: 'job.create' }>,
   ): Promise<StrongFlowOperatorResponse> {
+    if (containsStrongFlowCredentialMaterial(request.payload)) {
+      throw new OperatorFault(
+        'INVALID_REQUEST',
+        '创建请求包含原始凭据内容，尚未建立作业。',
+        { field: 'request.payload' },
+      )
+    }
     const configuration = await this.#ensureJobConfiguration(request)
     const actorId = requestActorId(request.requestId)
     const createdEvent = createStrongFlowJobEvent({
@@ -1730,6 +1739,12 @@ export class StrongFlowLocalJobService implements StrongFlowOperatorInvoker {
       return new OperatorFault('STORE_FAILURE', 'StrongFlow 作业记录读取或写入失败。')
     }
     if (error instanceof StrongFlowArtifactStoreError) {
+      if (error.code === 'CREDENTIAL_MATERIAL_DENIED') {
+        return new OperatorFault(
+          'INVALID_REQUEST',
+          '提交内容包含原始凭据，未写入 StrongFlow 制品。',
+        )
+      }
       if (error.code === 'JOB_NOT_FOUND') {
         return new OperatorFault('JOB_NOT_FOUND', 'StrongFlow 作业制品不存在。')
       }

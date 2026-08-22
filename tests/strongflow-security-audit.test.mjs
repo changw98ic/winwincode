@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import {
+  containsStrongFlowCredentialMaterial,
   DurableStrongFlowSecurityAudit,
   StrongFlowSecurityAuditError,
   redactStrongFlowSecurityValue,
@@ -94,8 +95,29 @@ test('strictly rejects a modified durable security record', async t => {
   )
 })
 
+test('oversized audit facts keep redacted identities when replaced by a bounded summary', async t => {
+  const home = await fixture(t)
+  const secret = 'fixture-oversized-audit-secret'
+  const audit = new DurableStrongFlowSecurityAudit({ home, sensitiveValues: [secret] })
+  await audit.append(event({
+    contextId: secret,
+    facts: Object.freeze(Object.fromEntries(Array.from({ length: 32 }, (_, index) => [
+      `diagnostic-${index}`,
+      `${secret}${'x'.repeat(20_000)}`,
+    ]))),
+  }))
+
+  const [record] = await audit.read('job-security-audit')
+  assert.equal(JSON.stringify(record).includes(secret), false)
+  assert.equal(record.event.contextId, '[REDACTED]')
+  assert.deepEqual(record.event.facts, {
+    summary: 'Security facts exceeded the durable audit size limit.',
+  })
+})
+
 test('redacts key names, bearer values, assignments, JWTs, private keys, and exact secrets', () => {
   const secret = 'fixture-sensitive-value'
+  const providerSecret = 'sk-1234567890abcdefghijklmnop'
   const redacted = redactStrongFlowSecurityValue({
     apiKey: secret,
     diagnostic: [
@@ -104,10 +126,48 @@ test('redacts key names, bearer values, assignments, JWTs, private keys, and exa
       'eyJheader.payload.signature',
       `-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----`,
       `exact ${secret}`,
+      providerSecret,
+      'Basic Zml4dHVyZTpwYXNzd29yZA==',
+      `https://fixture:${secret}@example.invalid/path`,
+      `{"accessToken":"${secret}"}`,
     ],
   }, [secret])
   const text = JSON.stringify(redacted)
   assert.equal(text.includes(secret), false)
+  assert.equal(text.includes(providerSecret), false)
+  assert.equal(text.includes('Zml4dHVyZTpwYXNzd29yZA=='), false)
   assert.equal(text.includes('eyJheader.payload.signature'), false)
   assert.equal(text.includes('BEGIN PRIVATE KEY'), false)
+})
+
+test('detects raw credential material without rejecting budgets, references, or redaction markers', () => {
+  const exact = 'fixture-sensitive-value'
+  for (const value of [
+    { apiKey: exact },
+    `Authorization: Bearer ${exact}`,
+    `PASSWORD=${exact}`,
+    '{"accessToken":"fixture-access-token"}',
+    'eyJheader.payload.signature',
+    `-----BEGIN PRIVATE KEY-----\n${exact}\n-----END PRIVATE KEY-----`,
+    'sk-1234567890abcdefghijklmnop',
+    Buffer.from(`Basic Zml4dHVyZTpwYXNzd29yZA==`, 'utf8'),
+    `neutral wrapper ${exact}`,
+  ]) {
+    assert.equal(
+      containsStrongFlowCredentialMaterial(value, [exact]),
+      true,
+      JSON.stringify(value),
+    )
+  }
+
+  for (const value of [
+    { tokenBudget: 10_000, credentialRef: 'dsh-model-default' },
+    { credentials: 'dsh-reference-only' },
+    'Authorization: Bearer [REDACTED]',
+    'TOKEN=[REDACTED]',
+    '{"apiKey":"<redacted>"}',
+    'Use TOKEN or ${TOKEN} as a placeholder.',
+  ]) {
+    assert.equal(containsStrongFlowCredentialMaterial(value), false, JSON.stringify(value))
+  }
 })

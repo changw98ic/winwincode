@@ -30,6 +30,7 @@ import {
   resolveStrongFlowWorkspaceWritePath,
 } from './workspace-policy.js'
 import {
+  containsStrongFlowCredentialMaterial,
   redactStrongFlowSecurityValue,
   strongFlowSecurityDigestText,
   type StrongFlowSecurityAuditEvent,
@@ -654,8 +655,7 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
       )
       if (
         (qualified === 'artifact.write' || qualified === 'candidate.patch')
-        && JSON.stringify(redactStrongFlowSecurityValue(validated.arguments))
-          !== JSON.stringify(validated.arguments)
+        && containsStrongFlowCredentialMaterial(validated.arguments)
       ) throw new StrongFlowRoleAuthorityError(
         'TOOL_DENIED',
         `${qualified} contains credential-shaped content`,

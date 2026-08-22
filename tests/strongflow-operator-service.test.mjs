@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -69,6 +69,18 @@ function createRequest(fixture, suffix, submittedFrom = 'local-ui') {
     request: `Implement the ${suffix} StrongFlow fixture.`,
     submittedFrom,
   })
+}
+
+async function treeContainsBytes(root, wanted) {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) {
+      if (await treeContainsBytes(path, wanted)) return true
+    } else if (entry.isFile() && (await readFile(path)).includes(wanted)) {
+      return true
+    }
+  }
+  return false
 }
 
 function jobRequest(operation, requestId, jobId, extra = {}) {
@@ -255,6 +267,35 @@ function reviewRequest(operation, requestId, jobId, definition, extra = {}) {
     ...extra,
   })
 }
+
+test('job creation rejects credential material before taking durable job ownership', async t => {
+  const scheduled = []
+  const fixture = await operatorFixture(t, 'credential-create', {
+    scheduler: { jobReady: job => scheduled.push(job) },
+  })
+  const secret = 'fixture-job-secret-that-must-not-be-stored'
+  const request = materializeStrongFlowOperatorRequest(
+    'job.create',
+    'create-credential-material',
+    {
+      repositoryPath: fixture.repositoryPath,
+      baseRevision: null,
+      title: 'Credential-free fixture',
+      request: `Use Authorization: Bearer ${secret}`,
+      submittedFrom: 'local-ui',
+    },
+  )
+
+  const response = await fixture.service.invoke(request)
+  assert.equal(response.ok, false)
+  assert.equal(response.error.code, 'INVALID_REQUEST')
+  assert.equal(response.error.retryable, false)
+  assert.equal(response.error.field, 'request.payload')
+  assert.deepEqual(await StrongFlowJobStore.list(fixture.home), [])
+  assert.equal(scheduled.length, 0)
+  assert.equal(await treeContainsBytes(fixture.home, Buffer.from(secret, 'utf8')), false)
+  assert.deepEqual(await fixture.service.invoke(request), response)
+})
 
 test('DSH Remote and CLI create and inspect the same durable job identities', async t => {
   const fixture = await operatorFixture(t, 'adapters')

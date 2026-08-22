@@ -3,8 +3,8 @@
 - 状态：已接受
 - 日期：2026-08-22
 - 对应任务：`winwincode-9c4.5.3`
-- 实现：[`crates/kernel/src/governed_command.rs`](../../crates/kernel/src/governed_command.rs)、[`packages/native/src/index.ts`](../../packages/native/src/index.ts)、[`packages/strongflow/src/governed-process-executor.ts`](../../packages/strongflow/src/governed-process-executor.ts)、[`packages/strongflow/src/security-audit.ts`](../../packages/strongflow/src/security-audit.ts)、[`packages/dsh-profile/src/model-port.ts`](../../packages/dsh-profile/src/model-port.ts)
-- 测试：[`tests/native-governed-command.test.mjs`](../../tests/native-governed-command.test.mjs)、[`tests/strongflow-governed-process-executor.test.mjs`](../../tests/strongflow-governed-process-executor.test.mjs)、[`tests/strongflow-security-audit.test.mjs`](../../tests/strongflow-security-audit.test.mjs)、[`tests/dsh-model-port.test.mjs`](../../tests/dsh-model-port.test.mjs)、[`tests/fixtures/installed-native-smoke.mjs`](../../tests/fixtures/installed-native-smoke.mjs)
+- 实现：[`crates/kernel/src/governed_command.rs`](../../crates/kernel/src/governed_command.rs)、[`packages/native/src/index.ts`](../../packages/native/src/index.ts)、[`packages/strongflow/src/governed-process-executor.ts`](../../packages/strongflow/src/governed-process-executor.ts)、[`packages/strongflow/src/security-audit.ts`](../../packages/strongflow/src/security-audit.ts)、[`packages/strongflow/src/artifact-store.ts`](../../packages/strongflow/src/artifact-store.ts)、[`packages/dsh-profile/src/model-port.ts`](../../packages/dsh-profile/src/model-port.ts)
+- 测试：[`tests/native-governed-command.test.mjs`](../../tests/native-governed-command.test.mjs)、[`tests/strongflow-governed-process-executor.test.mjs`](../../tests/strongflow-governed-process-executor.test.mjs)、[`tests/strongflow-security-audit.test.mjs`](../../tests/strongflow-security-audit.test.mjs)、[`tests/strongflow-artifact-store.test.mjs`](../../tests/strongflow-artifact-store.test.mjs)、[`tests/dsh-model-port.test.mjs`](../../tests/dsh-model-port.test.mjs)、[`tests/fixtures/installed-native-smoke.mjs`](../../tests/fixtures/installed-native-smoke.mjs)
 
 ## 结论
 
@@ -82,6 +82,12 @@ Executor 和 Remediator 可以写候选工作区，其他可运行验证探针�
 - 只保留提供商请求编号的 SHA-256，不保留原值。
 
 因此 DSH 原始密钥不会进入 StrongFlow 角色环境、Codex 错误事件或持久化安全记录。
+
+## 制品和证据的最终写入边界
+
+内容寻址存储在计算摘要和创建 blob 之前统一检查完整发布内容，包括严格格式化的制品、交接单、直接命令证据、模型观察和记录元数据。`job.create` 还会在创建作业配置、事件和制品目录前检查整个创建参数，避免一次被拒绝的用户请求留下不完整作业。原始认证头、环境赋值、JWT、私钥、常见提供商密钥格式、URL 用户信息和凭据字段值会返回 `CREDENTIAL_MATERIAL_DENIED`；错误只说明拒绝类别，不复制被拒绝的内容。`[REDACTED]`、DSH 凭据引用和命令里的变量占位符仍可保存。
+
+这一检查是角色工具边界之后的第二道拒绝线。测试会先尝试发布带固定测试密钥的制品和两类证据，再遍历整个作业存储目录，确认没有创建记录、没有创建 blob，也没有出现测试密钥字节。
 
 ## 持久化安全审计
 
