@@ -15,6 +15,8 @@ import {
   StrongFlowWorkspaceId,
   VerificationSnapshotId,
   createStrongFlowRoleConfiguration,
+  strongFlowPermissionPolicyForPreset,
+  strongFlowPermissionPolicyForRole,
 } from '../packages/contracts/dist/index.js'
 import {
   DshModelPort,
@@ -290,10 +292,13 @@ class InstrumentedContextInstaller {
   probeTool(kernelSessionId, tool) {
     const context = this.byKernelSession.get(kernelSessionId)
     if (context === undefined) throw new Error(`no installed fixture context ${kernelSessionId}`)
+    const permission = strongFlowPermissionPolicyForPreset(
+      context.roleSpec.permissionPreset,
+    )
     return Object.freeze({
       roleId: context.roleSpec.id,
       tool,
-      allowed: context.roleSpec.allowedTools.includes(tool),
+      allowed: permission.tools.allowed.includes(tool),
       workspaceMode: context.workspace.mode,
       workspacePath: context.workspace.path,
     })
@@ -520,14 +525,16 @@ test('all eight roles keep separate model, prompt, tool, workspace, and artifact
 
     for (const tool of STRONGFLOW_ROLE_TOOLS) {
       const probe = installer.probeTool(session.kernel.kernelSessionId, tool)
-      assert.equal(probe.allowed, spec.allowedTools.includes(tool), `${spec.id}/${tool}`)
+      const permission = strongFlowPermissionPolicyForRole(spec.id)
+      assert.equal(probe.allowed, permission.tools.allowed.includes(tool), `${spec.id}/${tool}`)
       assert.equal(probe.workspaceMode, spec.workspaceMode)
       assert.equal(probe.workspacePath, session.context.workspace.path)
     }
     const candidateWriter = ['executor', 'remediator'].includes(spec.id)
-    assert.equal(spec.allowedTools.includes('candidate.patch'), candidateWriter)
+    const permission = strongFlowPermissionPolicyForRole(spec.id)
+    assert.equal(permission.tools.allowed.includes('candidate.patch'), candidateWriter)
     assert.equal(spec.workspaceMode === 'candidate-write', candidateWriter)
-    assert.equal(spec.sandboxPolicy.filesystem === 'candidate-write', candidateWriter)
+    assert.equal(permission.filesystem.mode === 'candidate-write', candidateWriter)
 
     const expectedCreate = kernel.creates.find(call => (
       call.provider === spec.modelRoute.provider

@@ -45,6 +45,8 @@ const packages = [
       'package/dist/strongflow-job.d.ts',
       'package/dist/strongflow-operator.js',
       'package/dist/strongflow-operator.d.ts',
+      'package/dist/strongflow-permission.js',
+      'package/dist/strongflow-permission.d.ts',
       'package/dist/strongflow-role.js',
       'package/dist/strongflow-role.d.ts',
       'package/dist/strongflow-workspace.js',

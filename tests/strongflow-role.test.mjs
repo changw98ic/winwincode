@@ -9,6 +9,7 @@ import {
   StrongFlowRoleConfigurationError,
   createStrongFlowRoleConfiguration,
   parseStrongFlowRoleConfiguration,
+  strongFlowPermissionPolicyForRole,
 } from '../packages/contracts/dist/index.js'
 
 const modelCatalog = Object.freeze([
@@ -72,18 +73,20 @@ test('creates the eight canonical roles with only two candidate writers', () => 
   )
   for (const role of configuration.roles) {
     const writer = ['executor', 'remediator'].includes(role.id)
-    assert.equal(role.sandboxPolicy.filesystem, writer ? 'candidate-write' : 'read-only')
-    assert.equal(role.sandboxPolicy.network, 'disabled')
-    assert.equal(role.sandboxPolicy.approval, 'never')
-    assert.equal(role.allowedTools.includes('candidate.patch'), writer)
-    assert.equal(role.allowedTools.includes('human-approval'), false)
+    const permission = strongFlowPermissionPolicyForRole(role.id)
+    assert.equal(role.permissionPreset, permission.presetId)
+    assert.equal(permission.filesystem.mode, writer ? 'candidate-write' : 'read-only')
+    assert.equal(permission.network.access, 'disabled')
+    assert.equal(permission.approval.definitionDecision, 'forbidden')
+    assert.equal(permission.tools.allowed.includes('candidate.patch'), writer)
+    assert.equal(permission.tools.allowed.includes('human-approval'), false)
     assert.ok(role.budget.maxTurns > 0)
     assert.ok(role.budget.maxWallTimeMillis > 0)
     assert.ok(role.budget.maxTotalTokens > 0)
     assert.ok(role.budget.maxCostUsdMicros > 0)
     assert.ok(Object.isFrozen(role))
-    assert.ok(Object.isFrozen(role.allowedTools))
-    assert.ok(Object.isFrozen(role.sandboxPolicy))
+    assert.ok(Object.isFrozen(permission))
+    assert.ok(Object.isFrozen(permission.tools.allowed))
   }
 
   const requirements = configuration.roles.find(role => role.id === 'requirements')
@@ -125,7 +128,7 @@ test('JSON round-trip validates model routes and restores canonical role order',
   )
 })
 
-test('startup rejects unknown roles, models, efforts, tools, and artifacts', () => {
+test('startup rejects unknown roles, models, efforts, permission presets, and artifacts', () => {
   const configuration = createStrongFlowRoleConfiguration(assignments(), modelCatalog)
   const cases = [
     {
@@ -147,9 +150,9 @@ test('startup rejects unknown roles, models, efforts, tools, and artifacts', () 
       },
     },
     {
-      code: 'UNKNOWN_TOOL',
+      code: 'INVALID_CONFIGURATION',
       change(value) {
-        value.roles[0].allowedTools.push('human-approval')
+        value.roles[0].permissionPreset = 'unconfined'
       },
     },
     {
@@ -222,10 +225,10 @@ test('canonical role policies cannot be broadened through configuration', () => 
       value.roles.find(role => role.id === 'reviewer').workspaceMode = 'candidate-write'
     },
     value => {
-      value.roles.find(role => role.id === 'reviewer').sandboxPolicy.filesystem = 'candidate-write'
+      value.roles.find(role => role.id === 'reviewer').permissionPreset = 'candidate-write'
     },
     value => {
-      value.roles.find(role => role.id === 'executor').sandboxPolicy.approval = 'on-request'
+      value.roles.find(role => role.id === 'executor').permissionPreset = 'snapshot-verify'
     },
     value => {
       value.roles.find(role => role.id === 'requirements').requiredOutputArtifacts.push(

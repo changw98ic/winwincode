@@ -23,6 +23,7 @@ import {
   VerificationSnapshotId,
   STRONGFLOW_ROLE_IDS,
   createStrongFlowRoleConfiguration,
+  strongFlowPermissionPolicyForRole,
 } from '../packages/contracts/dist/index.js'
 import {
   StrongFlowRoleSessionError,
@@ -337,7 +338,7 @@ test('publishes a role session only after its full context is installed and stor
   assert.equal(session.context.workspace.path, value.source)
   assert.ok(Object.isFrozen(session.context))
   assert.ok(Object.isFrozen(session.context.roleSpec))
-  assert.ok(Object.isFrozen(session.context.roleSpec.allowedTools))
+  assert.ok(Object.isFrozen(strongFlowPermissionPolicyForRole('requirements')))
   assert.ok(Object.isFrozen(session.context.roleSpec.budget))
   assert.ok(Object.isFrozen(session.context.workspace))
   assert.deepEqual(kernel.creates, [{

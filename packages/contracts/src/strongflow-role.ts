@@ -1,6 +1,13 @@
 /** Canonical role roster and validated runtime configuration for StrongFlow. */
 
-export const STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION = 1 as const
+import {
+  STRONGFLOW_PERMISSION_PRESET_IDS,
+  strongFlowPermissionPolicyForPreset,
+  type StrongFlowPermissionPolicy,
+  type StrongFlowPermissionPresetId,
+} from './strongflow-permission.js'
+
+export const STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION = 2 as const
 
 export const STRONGFLOW_ROLE_IDS = Object.freeze([
   'requirements',
@@ -33,19 +40,6 @@ export const STRONGFLOW_ROLE_ARTIFACT_KINDS = Object.freeze([
 
 export type StrongFlowRoleArtifactKind = typeof STRONGFLOW_ROLE_ARTIFACT_KINDS[number]
 
-export const STRONGFLOW_ROLE_TOOLS = Object.freeze([
-  'artifact.read',
-  'artifact.write',
-  'workspace.read',
-  'code.search',
-  'candidate.diff',
-  'command.run',
-  'test.run',
-  'candidate.patch',
-] as const)
-
-export type StrongFlowRoleTool = typeof STRONGFLOW_ROLE_TOOLS[number]
-
 export type StrongFlowRoleWorkspaceMode =
   | 'source-read-only'
   | 'candidate-read-only'
@@ -63,12 +57,6 @@ export interface StrongFlowRoleBudget {
   readonly maxCostUsdMicros: number
 }
 
-export interface StrongFlowRoleSandboxPolicy {
-  readonly filesystem: 'read-only' | 'candidate-write'
-  readonly network: 'disabled'
-  readonly approval: 'never'
-}
-
 export interface StrongFlowRoleSpec {
   readonly id: StrongFlowRoleId
   readonly displayName: string
@@ -76,8 +64,7 @@ export interface StrongFlowRoleSpec {
   readonly reasoningEffort: string | null
   readonly budget: StrongFlowRoleBudget
   readonly systemInstructions: string
-  readonly allowedTools: readonly StrongFlowRoleTool[]
-  readonly sandboxPolicy: StrongFlowRoleSandboxPolicy
+  readonly permissionPreset: StrongFlowPermissionPresetId
   readonly workspaceMode: StrongFlowRoleWorkspaceMode
   readonly acceptedInputArtifacts: readonly StrongFlowRoleArtifactKind[]
   readonly requiredOutputArtifacts: readonly StrongFlowRoleArtifactKind[]
@@ -111,7 +98,6 @@ export type StrongFlowRoleConfigurationErrorCode =
   | 'DUPLICATE_ROLE'
   | 'UNKNOWN_MODEL_ROUTE'
   | 'UNKNOWN_REASONING_EFFORT'
-  | 'UNKNOWN_TOOL'
   | 'UNKNOWN_ARTIFACT'
   | 'POLICY_MISMATCH'
 
@@ -128,8 +114,7 @@ export class StrongFlowRoleConfigurationError extends Error {
 interface CanonicalRolePolicy {
   readonly displayName: string
   readonly systemInstructions: string
-  readonly allowedTools: readonly StrongFlowRoleTool[]
-  readonly sandboxPolicy: StrongFlowRoleSandboxPolicy
+  readonly permissionPreset: StrongFlowPermissionPresetId
   readonly workspaceMode: StrongFlowRoleWorkspaceMode
   readonly acceptedInputArtifacts: readonly StrongFlowRoleArtifactKind[]
   readonly requiredOutputArtifacts: readonly StrongFlowRoleArtifactKind[]
@@ -138,18 +123,6 @@ interface CanonicalRolePolicy {
 function frozenList<Value extends string>(...values: readonly Value[]): readonly Value[] {
   return Object.freeze([...values])
 }
-
-const READ_ONLY_SANDBOX: StrongFlowRoleSandboxPolicy = Object.freeze({
-  filesystem: 'read-only',
-  network: 'disabled',
-  approval: 'never',
-})
-
-const CANDIDATE_WRITE_SANDBOX: StrongFlowRoleSandboxPolicy = Object.freeze({
-  filesystem: 'candidate-write',
-  network: 'disabled',
-  approval: 'never',
-})
 
 const DEFINITION_INPUTS = frozenList<StrongFlowRoleArtifactKind>(
   'REQUIREMENT_SPEC',
@@ -173,13 +146,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   requirements: Object.freeze({
     displayName: 'Requirements Analyst',
     systemInstructions: 'Produce only a RequirementSpec from the user request and verified repository facts. Record goals, constraints, acceptance checks, risks, and unresolved questions. Do not choose architecture, implementation, files, commands, patches, model routes, or an approval outcome.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-    ),
-    sandboxPolicy: READ_ONLY_SANDBOX,
+    permissionPreset: 'definition-read',
     workspaceMode: 'source-read-only',
     acceptedInputArtifacts: frozenList('USER_REQUEST'),
     requiredOutputArtifacts: frozenList('REQUIREMENT_SPEC'),
@@ -187,13 +154,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   solution: Object.freeze({
     displayName: 'Solution Architect',
     systemInstructions: 'Produce a structured SolutionDesign and the two required diagram payloads for exactly one RequirementSpec. Record components, connections, trust boundaries, external systems, and unresolved facts; preserve the built-in process stages and stable node identities. Never emit Mermaid, SVG, HTML, scripts, external resources, or links. Do not approve the definition, plan execution, or modify the candidate workspace.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-    ),
-    sandboxPolicy: READ_ONLY_SANDBOX,
+    permissionPreset: 'solution-read',
     workspaceMode: 'source-read-only',
     acceptedInputArtifacts: frozenList('REQUIREMENT_SPEC'),
     requiredOutputArtifacts: frozenList(
@@ -205,13 +166,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   planner: Object.freeze({
     displayName: 'Planner',
     systemInstructions: 'Produce an ExecutionPlan only from the exact requirement, solution, diagrams, and authenticated human approval supplied to this run. Keep work bounded and verifiable. Do not change the approved definition, write candidate files, or declare completion.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-    ),
-    sandboxPolicy: READ_ONLY_SANDBOX,
+    permissionPreset: 'source-read',
     workspaceMode: 'source-read-only',
     acceptedInputArtifacts: APPROVED_DEFINITION_INPUTS,
     requiredOutputArtifacts: frozenList('EXECUTION_PLAN'),
@@ -219,17 +174,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   executor: Object.freeze({
     displayName: 'Executor',
     systemInstructions: 'Implement only the approved ExecutionPlan in the assigned candidate workspace. Record the exact changed files, commands, tests, and evidence in a PatchManifest. Do not alter definition artifacts, approve work, or declare verification success.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-      'candidate.diff',
-      'command.run',
-      'test.run',
-      'candidate.patch',
-    ),
-    sandboxPolicy: CANDIDATE_WRITE_SANDBOX,
+    permissionPreset: 'candidate-write',
     workspaceMode: 'candidate-write',
     acceptedInputArtifacts: frozenList('EXECUTION_PLAN'),
     requiredOutputArtifacts: frozenList('PATCH_MANIFEST'),
@@ -237,16 +182,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   reviewer: Object.freeze({
     displayName: 'Reviewer',
     systemInstructions: 'Inspect the frozen candidate against the approved definition and ExecutionPlan. Produce a ReviewReport with exact findings and evidence. Do not modify candidate files, approve the definition, or convert review findings into a completion decision.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-      'candidate.diff',
-      'command.run',
-      'test.run',
-    ),
-    sandboxPolicy: READ_ONLY_SANDBOX,
+    permissionPreset: 'snapshot-verify',
     workspaceMode: 'candidate-read-only',
     acceptedInputArtifacts: CANDIDATE_INPUTS,
     requiredOutputArtifacts: frozenList('REVIEW_REPORT'),
@@ -254,16 +190,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   verifier: Object.freeze({
     displayName: 'Verifier',
     systemInstructions: 'Run the frozen acceptance checks against the read-only candidate and produce a VerificationReport from observed evidence. Do not change candidate files, weaken checks, approve the definition, or declare final delivery.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-      'candidate.diff',
-      'command.run',
-      'test.run',
-    ),
-    sandboxPolicy: READ_ONLY_SANDBOX,
+    permissionPreset: 'snapshot-verify',
     workspaceMode: 'candidate-read-only',
     acceptedInputArtifacts: frozenList(...CANDIDATE_INPUTS, 'REVIEW_REPORT'),
     requiredOutputArtifacts: frozenList('VERIFICATION_REPORT'),
@@ -271,16 +198,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   'adversarial-verifier': Object.freeze({
     displayName: 'Adversarial Verifier',
     systemInstructions: 'Challenge the frozen candidate, approved assumptions, trust boundaries, failure handling, and negative cases from a read-only workspace. Produce an independent VerificationReport with reproducible evidence. Do not modify files or approve delivery.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-      'candidate.diff',
-      'command.run',
-      'test.run',
-    ),
-    sandboxPolicy: READ_ONLY_SANDBOX,
+    permissionPreset: 'snapshot-verify',
     workspaceMode: 'candidate-read-only',
     acceptedInputArtifacts: frozenList(
       ...CANDIDATE_INPUTS,
@@ -292,17 +210,7 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
   remediator: Object.freeze({
     displayName: 'Remediator',
     systemInstructions: 'Apply only the bounded RemediationRequest to the assigned candidate workspace. Preserve unrelated accepted work and record changes and evidence in a new PatchManifest and RemediationReport. Do not broaden scope, approve work, or declare verification success.',
-    allowedTools: frozenList(
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-      'candidate.diff',
-      'command.run',
-      'test.run',
-      'candidate.patch',
-    ),
-    sandboxPolicy: CANDIDATE_WRITE_SANDBOX,
+    permissionPreset: 'remediation-write',
     workspaceMode: 'candidate-write',
     acceptedInputArtifacts: frozenList(
       ...CANDIDATE_INPUTS,
@@ -313,6 +221,13 @@ const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = O
     requiredOutputArtifacts: frozenList('PATCH_MANIFEST', 'REMEDIATION_REPORT'),
   }),
 })
+
+/** Resolve the complete immutable permission policy selected by one canonical model role. */
+export function strongFlowPermissionPolicyForRole(
+  roleId: StrongFlowRoleId,
+): StrongFlowPermissionPolicy {
+  return strongFlowPermissionPolicyForPreset(ROLE_POLICIES[roleId].permissionPreset)
+}
 
 /** Returns the one ordered model-visible input contract for a canonical role. */
 export function strongFlowRoleAcceptedInputArtifacts(
@@ -368,7 +283,7 @@ function stringArray<Value extends string>(
   value: unknown,
   allowed: readonly Value[],
   label: string,
-  unknownCode: 'UNKNOWN_TOOL' | 'UNKNOWN_ARTIFACT',
+  unknownCode: 'UNKNOWN_ARTIFACT',
 ): readonly Value[] {
   if (!Array.isArray(value) || value.length === 0) {
     configurationError('INVALID_CONFIGURATION', `${label} must be a non-empty array`)
@@ -482,8 +397,7 @@ function parseRole(
     'reasoningEffort',
     'budget',
     'systemInstructions',
-    'allowedTools',
-    'sandboxPolicy',
+    'permissionPreset',
     'workspaceMode',
     'acceptedInputArtifacts',
     'requiredOutputArtifacts',
@@ -560,12 +474,18 @@ function parseRole(
       `role ${id} systemInstructions must be a string`,
     )
   }
-  const tools = stringArray(
-    value.allowedTools,
-    STRONGFLOW_ROLE_TOOLS,
-    `role ${id} allowedTools`,
-    'UNKNOWN_TOOL',
-  )
+  if (
+    typeof value.permissionPreset !== 'string'
+    || !STRONGFLOW_PERMISSION_PRESET_IDS.includes(
+      value.permissionPreset as StrongFlowPermissionPresetId,
+    )
+  ) {
+    return configurationError(
+      'INVALID_CONFIGURATION',
+      `role ${id} permissionPreset is unknown`,
+    )
+  }
+  const permissionPreset = value.permissionPreset as StrongFlowPermissionPresetId
   const acceptedInputs = stringArray(
     value.acceptedInputArtifacts,
     STRONGFLOW_ROLE_ARTIFACT_KINDS,
@@ -579,38 +499,6 @@ function parseRole(
     'UNKNOWN_ARTIFACT',
   )
 
-  if (!isRecord(value.sandboxPolicy)) {
-    return configurationError(
-      'INVALID_CONFIGURATION',
-      `role ${id} sandboxPolicy must be an object`,
-    )
-  }
-  exactKeys(
-    value.sandboxPolicy,
-    ['filesystem', 'network', 'approval'],
-    `role ${id} sandboxPolicy`,
-  )
-  if (
-    value.sandboxPolicy.filesystem !== 'read-only'
-    && value.sandboxPolicy.filesystem !== 'candidate-write'
-  ) {
-    return configurationError(
-      'INVALID_CONFIGURATION',
-      `role ${id} sandbox filesystem mode is unknown`,
-    )
-  }
-  if (value.sandboxPolicy.network !== 'disabled') {
-    return configurationError(
-      'POLICY_MISMATCH',
-      `role ${id} cannot enable sandbox network access`,
-    )
-  }
-  if (value.sandboxPolicy.approval !== 'never') {
-    return configurationError(
-      'POLICY_MISMATCH',
-      `role ${id} cannot receive approval authority`,
-    )
-  }
   if (
     value.workspaceMode !== 'source-read-only'
     && value.workspaceMode !== 'candidate-read-only'
@@ -624,14 +512,7 @@ function parseRole(
 
   requirePolicy(displayName === policy.displayName, id, 'displayName')
   requirePolicy(value.systemInstructions === policy.systemInstructions, id, 'systemInstructions')
-  requirePolicy(sameList(tools, policy.allowedTools), id, 'allowedTools')
-  requirePolicy(
-    value.sandboxPolicy.filesystem === policy.sandboxPolicy.filesystem
-    && value.sandboxPolicy.network === policy.sandboxPolicy.network
-    && value.sandboxPolicy.approval === policy.sandboxPolicy.approval,
-    id,
-    'sandboxPolicy',
-  )
+  requirePolicy(permissionPreset === policy.permissionPreset, id, 'permissionPreset')
   requirePolicy(value.workspaceMode === policy.workspaceMode, id, 'workspaceMode')
   requirePolicy(
     sameList(acceptedInputs, policy.acceptedInputArtifacts),
@@ -651,12 +532,7 @@ function parseRole(
     reasoningEffort: reasoningEffort as string | null,
     budget,
     systemInstructions: value.systemInstructions,
-    allowedTools: tools,
-    sandboxPolicy: Object.freeze({
-      filesystem: value.sandboxPolicy.filesystem as 'read-only' | 'candidate-write',
-      network: 'disabled',
-      approval: 'never',
-    }),
+    permissionPreset,
     workspaceMode: value.workspaceMode as StrongFlowRoleWorkspaceMode,
     acceptedInputArtifacts: acceptedInputs,
     requiredOutputArtifacts: requiredOutputs,
@@ -750,8 +626,7 @@ export function createStrongFlowRoleConfiguration(
       reasoningEffort: assignment.reasoningEffort,
       budget: assignment.budget,
       systemInstructions: policy.systemInstructions,
-      allowedTools: policy.allowedTools,
-      sandboxPolicy: policy.sandboxPolicy,
+      permissionPreset: policy.permissionPreset,
       workspaceMode: policy.workspaceMode,
       acceptedInputArtifacts: policy.acceptedInputArtifacts,
       requiredOutputArtifacts: policy.requiredOutputArtifacts,
