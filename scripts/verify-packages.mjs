@@ -10,6 +10,7 @@ import {
   nativeTargetConfiguration,
   verifyNativePrebuild,
 } from './native-package-contract.mjs'
+import { scanPackedPackageCpbBoundary } from './cpb-boundary-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const releaseTarget = hostNativeTarget()
@@ -149,7 +150,8 @@ for (const entry of packages) {
     errors.push(`${entry.directory}: invalid npm pack report: ${error.message}`)
     continue
   }
-  const files = report.files.map(file => `package/${file.path}`)
+  const packedPaths = report.files.map(file => file.path)
+  const files = packedPaths.map(path => `package/${path}`)
   for (const required of entry.required) {
     if (!files.includes(required)) errors.push(`${entry.directory}: package is missing ${required}`)
   }
@@ -167,6 +169,10 @@ for (const entry of packages) {
   if (manifest.license !== 'Apache-2.0') {
     errors.push(`${entry.directory}: published package license is not Apache-2.0`)
   }
+  errors.push(...scanPackedPackageCpbBoundary({
+    packageDirectory: directory,
+    files: packedPaths,
+  }).map(error => `${entry.directory}: ${error}`))
 }
 
 const loaderManifest = JSON.parse(

@@ -12,7 +12,7 @@ WinWinCode 是一个面向 macOS 和 Linux 的开源 Agent 工作台。默认入
 - 模型兼容：DSH `ctx.llm`、`llm-pi-ai`、设置和凭据服务。
 - 首发平台：Apple Silicon / Intel macOS，arm64 / x64 GNU Linux。
 - 项目许可证：Apache-2.0。上游 MIT 内容只作为第三方通知保留，不形成项目双许可证。
-- CPB：只迁移设计知识，不迁移运行数据。
+- CPB：只迁移设计知识，不迁移运行数据、源码依赖或旧路径；来源清单、采用/重写/删除取舍和自动检查见 [`docs/decisions/0022-cpb-design-knowledge-migration.md`](docs/decisions/0022-cpb-design-knowledge-migration.md)。
 
 固定的上游版本、组件闭包、补丁边界与许可义务见 [`docs/decisions/0001-upstream-integration.md`](docs/decisions/0001-upstream-integration.md)。
 
