@@ -147,6 +147,23 @@ export const STRONGFLOW_PERMISSION_SUPPORTED_HOSTS = Object.freeze([
   'linux/x64',
 ] as const)
 
+/** Workspace paths that model roles and their child processes must never read or write. */
+export const STRONGFLOW_CREDENTIAL_SENSITIVE_WORKSPACE_PATTERNS = Object.freeze([
+  '**/.env',
+  '**/.env.*',
+  '**/.credentials.yaml',
+  '**/.netrc',
+  '**/.npmrc',
+  '**/.pypirc',
+  '**/*.pem',
+  '**/*.key',
+  '**/*.p12',
+  '**/*.pfx',
+  '**/id_rsa',
+  '**/id_ed25519',
+  '**/.docker/config.json',
+] as const)
+
 export type StrongFlowPermissionSupportedHost =
   typeof STRONGFLOW_PERMISSION_SUPPORTED_HOSTS[number]
 export type StrongFlowPermissionHostPlatform = 'darwin' | 'linux'

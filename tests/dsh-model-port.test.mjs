@@ -248,7 +248,8 @@ test('rejects unsupported capabilities before DSH preparation or provider I/O', 
   }])
 })
 
-test('retains DSH error category, retry delay, request ID, and cancellation', async () => {
+test('retains safe DSH error facts while redacting provider diagnostics and cancellation', async () => {
+  const secret = 'TOKEN-structured-provider-secret'
   const fixture = fixtureRuntime(async function* cancelled(options) {
     await new Promise(resolvePromise => options.signal.addEventListener(
       'abort',
@@ -261,7 +262,7 @@ test('retains DSH error category, retry delay, request ID, and cancellation', as
         kind: 'aborted',
         failure: {
           code: 'RATE_LIMIT',
-          message: 'retry later',
+          message: `retry later with ${secret}`,
           status: 429,
           providerRetryAfterMs: 750,
           requestId: 'provider-request-1',
@@ -280,12 +281,42 @@ test('retains DSH error category, retry delay, request ID, and cancellation', as
     type: 'error',
     error: {
       code: 'RATE_LIMIT',
-      message: 'retry later',
+      message: 'DSH model request failed with code RATE_LIMIT',
       status: 429,
       providerRetryAfterMillis: 750,
-      providerRequestId: 'provider-request-1',
+      providerRequestId: 'sha256:8ecc55c1261eef75e54d383e6d41733fce87238da9837cd4ea112e5f89a549fc',
     },
   })
+  assert.equal(JSON.stringify((await terminal).value).includes(secret), false)
+})
+
+test('rejects credential-bearing prepared config before adapter dispatch', async () => {
+  const secret = 'TOKEN-prepared-config-secret'
+  let streamCalls = 0
+  const runtime = {
+    async prepareCall(config) {
+      return {
+        config: { ...config, apiKey: secret },
+        stream() {
+          streamCalls += 1
+          return streamedAnswer()
+        },
+      }
+    },
+  }
+  const messages = await collect(new DshModelPort(runtime).stream(
+    modelRequest(),
+    new AbortController().signal,
+  ))
+  assert.equal(streamCalls, 0)
+  assert.deepEqual(messages, [{
+    type: 'error',
+    error: {
+      code: 'MODEL_PORT_PREPARED_CONFIG_INVALID',
+      message: 'DSH prepared a model call with an invalid or credential-bearing configuration',
+    },
+  }])
+  assert.equal(JSON.stringify(messages).includes(secret), false)
 })
 
 test('does not copy DSH credentials or unknown thrown text into kernel messages', async () => {

@@ -12565,6 +12565,8 @@ dependencies = [
  "codex-core-api",
  "codex-model-provider-info",
  "codex-protocol",
+ "codex-sandboxing",
+ "codex-utils-path-uri",
  "futures",
  "serde",
  "serde_json",
@@ -12586,6 +12588,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde_json",
  "tokio",
  "winwincode-kernel",
 ]

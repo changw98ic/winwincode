@@ -1,7 +1,8 @@
-import { resolve } from 'node:path'
+import { relative, resolve, sep } from 'node:path'
 
 import {
   STRONGFLOW_ROLE_TOOLS,
+  STRONGFLOW_CREDENTIAL_SENSITIVE_WORKSPACE_PATTERNS,
   strongFlowPermissionPolicyForPreset,
   type StrongFlowPermissionPolicy,
   type StrongFlowRoleArtifactKind,
@@ -28,10 +29,16 @@ import {
   resolveExistingStrongFlowWorkspacePath,
   resolveStrongFlowWorkspaceWritePath,
 } from './workspace-policy.js'
+import {
+  redactStrongFlowSecurityValue,
+  strongFlowSecurityDigestText,
+  type StrongFlowSecurityAuditEvent,
+  type StrongFlowSecurityAuditSink,
+  type StrongFlowSecurityAuditSource,
+} from './security-audit.js'
 
 const MAX_TOOL_OUTPUT_BYTES = 8 * 1024 * 1024
 const MAX_APPROVAL_SCOPE_BYTES = 256 * 1024
-const SENSITIVE_KEY = /(?:auth|credential|key|password|secret|token)/iu
 
 export type StrongFlowRoleAuthorityErrorCode =
   | 'INVALID_AUTHORITY_CONTEXT'
@@ -40,7 +47,7 @@ export type StrongFlowRoleAuthorityErrorCode =
   | 'TOOL_DENIED'
   | 'TOOL_ARGUMENT_INVALID'
   | 'TOOL_EXECUTION_FAILED'
-  | 'APPROVAL_AUDIT_FAILED'
+  | 'SECURITY_AUDIT_FAILED'
   | 'INSTALLATION_DISPOSED'
 
 /** Stable denial at the role-authority boundary. */
@@ -73,12 +80,36 @@ export interface StrongFlowRoleToolExecutionRequest {
   readonly tool: StrongFlowRoleTool
   readonly arguments: Readonly<Record<string, unknown>>
   readonly resolvedWorkspacePaths: readonly string[]
+  readonly excludedWorkspacePatterns: readonly string[]
   readonly signal: AbortSignal
 }
 
 /** Host-owned execution seam. Implementations must retain the supplied sandbox and root. */
 export interface StrongFlowRoleToolExecutor {
   execute(request: StrongFlowRoleToolExecutionRequest): Promise<unknown>
+}
+
+export type StrongFlowRoleToolFailureKind =
+  | 'policy-denied'
+  | 'sandbox-denied'
+  | 'task-failed'
+
+/** Stable host-executor outcome that keeps policy denial separate from command failure. */
+export class StrongFlowRoleToolExecutionError extends Error {
+  readonly kind: StrongFlowRoleToolFailureKind
+  readonly code: string
+
+  constructor(
+    kind: StrongFlowRoleToolFailureKind,
+    code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'StrongFlowRoleToolExecutionError'
+    this.kind = kind
+    this.code = /^[A-Z][A-Z0-9_]{0,63}$/u.test(code) ? code : 'TOOL_EXECUTION_FAILED'
+  }
 }
 
 export type StrongFlowRoleApprovalOutcome =
@@ -114,39 +145,6 @@ export interface StrongFlowRoleApprovalInteraction {
   request(request: StrongFlowRoleApprovalRequest): Promise<StrongFlowRoleApprovalOutcome>
 }
 
-export type StrongFlowRoleApprovalAuditEvent =
-  | {
-    readonly schemaVersion: 1
-    readonly type: 'strongflow.approval.requested'
-    readonly jobId: string
-    readonly stageRunId: string
-    readonly attemptId: string
-    readonly roleId: string
-    readonly contextId: string
-    readonly operationKind: 'exec' | 'patch'
-    readonly operationId: string
-    readonly requestedScope: Readonly<Record<string, unknown>>
-    readonly source: StrongFlowRoleApprovalSource
-  }
-  | {
-    readonly schemaVersion: 1
-    readonly type: 'strongflow.approval.decided'
-    readonly jobId: string
-    readonly stageRunId: string
-    readonly attemptId: string
-    readonly roleId: string
-    readonly contextId: string
-    readonly operationKind: 'exec' | 'patch'
-    readonly operationId: string
-    readonly requestedScope: Readonly<Record<string, unknown>>
-    readonly decision: StrongFlowRoleApprovalOutcome
-    readonly source: StrongFlowRoleApprovalSource
-  }
-
-export interface StrongFlowRoleApprovalAuditSink {
-  append(event: StrongFlowRoleApprovalAuditEvent): Promise<void> | void
-}
-
 export interface StrongFlowRoleAuthorityKernelPort {
   resolveApproval(response: ApprovalResponse): Promise<string>
   resolveDynamicTool(response: DynamicToolResponse): Promise<string>
@@ -156,7 +154,7 @@ export interface StrongFlowGovernedRoleContextInstallerOptions {
   readonly kernel: StrongFlowRoleAuthorityKernelPort
   readonly tools: StrongFlowRoleToolExecutor
   readonly approvals: StrongFlowRoleApprovalInteraction
-  readonly approvalAudit: StrongFlowRoleApprovalAuditSink
+  readonly securityAudit: StrongFlowSecurityAuditSink
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,8 +258,12 @@ export function verifyStrongFlowRoleKernelEvidence(
     || evidence.visibleTools.some((tool, index) => tool !== authority.visibleTools[index])
     || evidence.filesystem !== filesystem
     || evidence.network !== 'restricted'
-    || evidence.process !== 'dynamic-tools-only'
+    || evidence.process !== 'dynamic-tools-with-governed-command-api'
     || evidence.environment !== 'empty'
+    || evidence.governedProcess !== 'platform-sandbox-required'
+    || evidence.governedProcessNetwork !== 'restricted'
+    || evidence.governedProcessEnvironment !== 'explicit-allowlist'
+    || evidence.credentials !== 'dsh-reference-only'
     || evidence.approvalPolicy !== 'on-request'
     || evidence.approvalsReviewer !== 'user'
     || evidence.loginShell !== false
@@ -401,15 +403,36 @@ async function validatedToolArguments(
   })
 }
 
-function toolOutputText(value: unknown): string {
-  const text = typeof value === 'string' ? value : JSON.stringify(value)
+function credentialSensitiveWorkspacePath(workspace: string, path: string): boolean {
+  const portable = relative(resolve(workspace), resolve(path)).split(sep).join('/')
+  const segments = portable.split('/')
+  const name = segments.at(-1) ?? ''
+  return name === '.env'
+    || name.startsWith('.env.')
+    || ['.credentials.yaml', '.netrc', '.npmrc', '.pypirc', 'id_rsa', 'id_ed25519'].includes(name)
+    || /\.(?:pem|key|p12|pfx)$/iu.test(name)
+    || portable.endsWith('/.docker/config.json')
+    || portable === '.docker/config.json'
+}
+
+function toolOutput(value: unknown): {
+  readonly text: string
+  readonly digest: string
+  readonly bytes: number
+} {
+  const redacted = redactStrongFlowSecurityValue(value)
+  const text = typeof redacted === 'string' ? redacted : JSON.stringify(redacted)
   if (text === undefined || Buffer.byteLength(text) > MAX_TOOL_OUTPUT_BYTES) {
     throw new StrongFlowRoleAuthorityError(
       'TOOL_EXECUTION_FAILED',
       'StrongFlow tool output is empty or exceeds its bounded result size',
     )
   }
-  return text
+  return Object.freeze({
+    text,
+    digest: strongFlowSecurityDigestText(text),
+    bytes: Buffer.byteLength(text),
+  })
 }
 
 function sourceFor(
@@ -426,22 +449,42 @@ function sourceFor(
   })
 }
 
-function redactedScope(value: Record<string, unknown>): Readonly<Record<string, unknown>> {
-  const walk = (input: unknown, key = ''): unknown => {
-    if (SENSITIVE_KEY.test(key)) return '[REDACTED]'
-    if (Array.isArray(input)) return input.map(entry => walk(entry))
-    if (isRecord(input)) {
-      return Object.fromEntries(Object.entries(input).map(([childKey, child]) => (
-        [childKey, walk(child, childKey)]
-      )))
-    }
-    if (typeof input === 'string') return input.length > 16_384
-      ? `${input.slice(0, 16_384)}…`
-      : input
-    if (typeof input === 'number' || typeof input === 'boolean' || input === null) return input
-    return String(input)
+function securitySourceFor(
+  event: StrongFlowRoleKernelEvent,
+  turnId: string | undefined,
+  operationId: string,
+): StrongFlowSecurityAuditSource {
+  return Object.freeze({
+    authority: 'codex-core',
+    kernelSessionLineageId: event.kernelSessionLineageId,
+    kernelSessionId: event.kernelSessionId,
+    kernelStreamId: event.kernelStreamId,
+    kernelSequence: event.event.sequence.toString(),
+    turnId: turnId ?? null,
+    operationId,
+  })
+}
+
+function toolFailure(error: unknown): {
+  readonly kind: StrongFlowRoleToolFailureKind
+  readonly code: string
+} {
+  if (error instanceof StrongFlowRoleToolExecutionError) {
+    return Object.freeze({ kind: error.kind, code: error.code })
   }
-  const result = walk(value)
+  if (error instanceof StrongFlowRoleAuthorityError) {
+    return Object.freeze({
+      kind: error.code === 'TOOL_DENIED' || error.code === 'TOOL_ARGUMENT_INVALID'
+        ? 'policy-denied'
+        : 'task-failed',
+      code: error.code,
+    })
+  }
+  return Object.freeze({ kind: 'task-failed', code: 'TOOL_EXECUTION_FAILED' })
+}
+
+function redactedScope(value: Record<string, unknown>): Readonly<Record<string, unknown>> {
+  const result = redactStrongFlowSecurityValue(value)
   if (!isRecord(result)) {
     throw new StrongFlowRoleAuthorityError('INVALID_KERNEL_EVENT', 'approval scope is invalid')
   }
@@ -511,6 +554,56 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
     this.#handled.clear()
   }
 
+  async auditInstallation(
+    source: StrongFlowSecurityAuditSource,
+    evidence: GovernedSessionEffectivePolicy,
+  ): Promise<void> {
+    await this.#audit(
+      'strongflow.security.session.accepted',
+      'accepted',
+      source,
+      Object.freeze({ effectivePolicy: evidence }),
+    )
+    await this.#audit(
+      'strongflow.security.credential.boundary',
+      'accepted',
+      source,
+      Object.freeze({
+        use: this.#policy.credentials.use,
+        rawValues: this.#policy.credentials.rawValues,
+        environment: this.#policy.credentials.environment,
+      }),
+    )
+  }
+
+  async #audit(
+    type: StrongFlowSecurityAuditEvent['type'],
+    outcome: StrongFlowSecurityAuditEvent['outcome'],
+    source: StrongFlowSecurityAuditSource,
+    facts: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    try {
+      await this.#options.securityAudit.append(Object.freeze({
+        schemaVersion: 1,
+        type,
+        jobId: this.#request.context.jobId,
+        stageRunId: this.#request.context.stageRunId,
+        attemptId: this.#request.context.attemptId,
+        roleId: this.#request.context.roleSpec.id,
+        contextId: this.#request.context.contextId,
+        source,
+        outcome,
+        facts: frozenRecord(facts as Record<string, unknown>),
+      }))
+    } catch (error) {
+      throw new StrongFlowRoleAuthorityError(
+        'SECURITY_AUDIT_FAILED',
+        'StrongFlow could not record a required security decision',
+        { cause: error },
+      )
+    }
+  }
+
   async #handleTool(event: StrongFlowRoleKernelEvent): Promise<void> {
     const message = eventMessage(event)
     const callId = nonEmptyText(message.call_id, 'dynamic-tool call id')
@@ -518,6 +611,7 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
     const namespace = nonEmptyText(message.namespace, 'dynamic-tool namespace')
     const name = nonEmptyText(message.tool, 'dynamic-tool name')
     const qualified = `${namespace}.${name}`
+    const source = securitySourceFor(event, turnId, callId)
     const key = `tool:${callId}`
     if (this.#handled.has(key)) {
       throw new StrongFlowRoleAuthorityError(
@@ -526,8 +620,23 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
       )
     }
     this.#handled.add(key)
+    await this.#audit(
+      'strongflow.security.tool.requested',
+      'requested',
+      source,
+      Object.freeze({
+        tool: qualified,
+        arguments: redactedScope(isRecord(message.arguments) ? message.arguments : {}),
+      }),
+    )
     const allowed = this.#policy.tools.allowed.includes(qualified as StrongFlowRoleTool)
     if (!allowed || !STRONGFLOW_ROLE_TOOLS.includes(qualified as StrongFlowRoleTool)) {
+      await this.#audit(
+        'strongflow.security.tool.denied',
+        'policy-denied',
+        source,
+        Object.freeze({ tool: qualified, code: 'TOOL_DENIED' }),
+      )
       await this.#options.kernel.resolveDynamicTool({
         sessionId: event.kernelSessionId,
         callId,
@@ -542,6 +651,20 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
         qualified as StrongFlowRoleTool,
         message.arguments,
         this.#request.context,
+      )
+      if (
+        (qualified === 'artifact.write' || qualified === 'candidate.patch')
+        && JSON.stringify(redactStrongFlowSecurityValue(validated.arguments))
+          !== JSON.stringify(validated.arguments)
+      ) throw new StrongFlowRoleAuthorityError(
+        'TOOL_DENIED',
+        `${qualified} contains credential-shaped content`,
+      )
+      if (validated.resolvedWorkspacePaths.some(path => (
+        credentialSensitiveWorkspacePath(this.#request.context.workspace.path, path)
+      ))) throw new StrongFlowRoleAuthorityError(
+        'TOOL_DENIED',
+        `${qualified} targets a credential-sensitive workspace path`,
       )
       const output = await this.#options.tools.execute(Object.freeze({
         jobId: this.#request.context.jobId,
@@ -558,18 +681,37 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
         tool: qualified as StrongFlowRoleTool,
         arguments: validated.arguments,
         resolvedWorkspacePaths: validated.resolvedWorkspacePaths,
+        excludedWorkspacePatterns: STRONGFLOW_CREDENTIAL_SENSITIVE_WORKSPACE_PATTERNS,
         signal: this.#request.signal,
       }))
+      const result = toolOutput(output)
+      await this.#audit(
+        'strongflow.security.tool.completed',
+        'completed',
+        source,
+        Object.freeze({
+          tool: qualified,
+          outputSha256: result.digest,
+          outputBytes: result.bytes,
+        }),
+      )
       response = {
         success: true,
-        text: toolOutputText(output),
+        text: result.text,
       }
     } catch (error) {
+      const failure = toolFailure(error)
+      await this.#audit(
+        failure.kind === 'policy-denied'
+          ? 'strongflow.security.tool.denied'
+          : 'strongflow.security.tool.failed',
+        failure.kind,
+        source,
+        Object.freeze({ tool: qualified, code: failure.code }),
+      )
       response = {
         success: false,
-        text: error instanceof StrongFlowRoleAuthorityError
-          ? `StrongFlow denied ${qualified}: ${error.message}`
-          : `StrongFlow tool ${qualified} failed inside its host executor.`,
+        text: `StrongFlow ${failure.kind} ${qualified} (${failure.code}).`,
       }
     }
     await this.#options.kernel.resolveDynamicTool({
@@ -612,10 +754,13 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
       source,
     })
     try {
-      await this.#options.approvalAudit.append(Object.freeze({
-        ...common,
-        type: 'strongflow.approval.requested',
-      }))
+      const auditSource = securitySourceFor(event, turnId, operationId)
+      await this.#audit(
+        'strongflow.security.approval.requested',
+        'requested',
+        auditSource,
+        Object.freeze({ operationKind, requestedScope }),
+      )
       const outcome = await this.#options.approvals.request(Object.freeze({
         jobId: common.jobId,
         stageRunId: common.stageRunId,
@@ -631,11 +776,12 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
       if (!['approved', 'rejected', 'cancelled', 'unavailable'].includes(outcome)) {
         throw new Error('DSH approval answerer returned an unknown outcome')
       }
-      await this.#options.approvalAudit.append(Object.freeze({
-        ...common,
-        type: 'strongflow.approval.decided',
-        decision: outcome,
-      }))
+      await this.#audit(
+        'strongflow.security.approval.decided',
+        outcome,
+        auditSource,
+        Object.freeze({ operationKind, requestedScope }),
+      )
       const response: ApprovalResponse = Object.freeze({
         sessionId: event.kernelSessionId,
         kind: operationKind,
@@ -660,7 +806,7 @@ class GovernedInstallation implements StrongFlowRoleContextInstallation {
         // The original audit/interaction failure remains the authoritative setup failure.
       }
       throw new StrongFlowRoleAuthorityError(
-        'APPROVAL_AUDIT_FAILED',
+        'SECURITY_AUDIT_FAILED',
         `approval ${operationId} could not be decided through the DSH audit surface`,
         { cause: error },
       )
@@ -679,10 +825,10 @@ export class StrongFlowGovernedRoleContextInstaller implements StrongFlowRoleCon
       || typeof options.kernel?.resolveDynamicTool !== 'function'
       || typeof options.tools?.execute !== 'function'
       || typeof options.approvals?.request !== 'function'
-      || typeof options.approvalAudit?.append !== 'function'
+      || typeof options.securityAudit?.append !== 'function'
     ) throw new StrongFlowRoleAuthorityError(
       'INVALID_AUTHORITY_CONTEXT',
-      'governed role installer requires kernel, tool, DSH approval, and audit ports',
+      'governed role installer requires kernel, tool, DSH approval, and security audit ports',
     )
     this.#options = options
   }
@@ -690,8 +836,22 @@ export class StrongFlowGovernedRoleContextInstaller implements StrongFlowRoleCon
   async install(
     request: StrongFlowRoleContextInstallationRequest,
   ): Promise<StrongFlowRoleContextInstallation> {
-    verifyStrongFlowRoleKernelEvidence(request.context, request.kernel.effectivePolicy)
-    return new GovernedInstallation(request, this.#options)
+    const evidence = verifyStrongFlowRoleKernelEvidence(
+      request.context,
+      request.kernel.effectivePolicy,
+    )
+    const installation = new GovernedInstallation(request, this.#options)
+    const source = Object.freeze({
+      authority: 'codex-core' as const,
+      kernelSessionLineageId: request.context.kernelSessionLineageId,
+      kernelSessionId: request.kernel.kernelSessionId,
+      kernelStreamId: request.kernel.kernelStreamId,
+      kernelSequence: null,
+      turnId: null,
+      operationId: null,
+    })
+    await installation.auditInstallation(source, evidence)
+    return installation
   }
 }
 

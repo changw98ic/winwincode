@@ -1,13 +1,65 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 
 import {
+  GOVERNED_COMMAND_SCHEMA_VERSION,
+  GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION,
+  KernelError,
   WinWinCodeKernel,
   nativePackageName,
   resolveReleaseTarget,
 } from '@winwincode/native'
+
+function governedAuthority(workspaceRoot, overrides = {}) {
+  return Object.freeze({
+    schemaVersion: GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION,
+    roleId: 'executor',
+    permissionPreset: 'candidate-write',
+    workspaceMode: 'candidate-write',
+    workspaceRoot,
+    systemInstructions: 'Execute only the installed-package governed smoke grant.',
+    reasoningEffort: 'medium',
+    visibleTools: Object.freeze([
+      'artifact.read',
+      'artifact.write',
+      'workspace.read',
+      'code.search',
+      'candidate.diff',
+      'command.run',
+      'test.run',
+      'candidate.patch',
+    ]),
+    ...overrides,
+  })
+}
+
+function governedCommand(sessionId, commandId, argv, cwd, overrides = {}) {
+  return Object.freeze({
+    schemaVersion: GOVERNED_COMMAND_SCHEMA_VERSION,
+    sessionId,
+    commandId,
+    tool: 'command.run',
+    argv: Object.freeze(argv),
+    cwd,
+    environment: Object.freeze({ LANG: 'C.UTF-8' }),
+    timeoutMillis: 10_000,
+    outputLimitBytes: 1_048_576,
+    ...overrides,
+  })
+}
+
+async function listen(server) {
+  await new Promise((resolvePromise, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolvePromise)
+  })
+  const address = server.address()
+  if (address === null || typeof address !== 'object') throw new Error('network fixture has no port')
+  return address.port
+}
 
 function findTool(tools, name, namespace) {
   for (const tool of tools ?? []) {
@@ -137,6 +189,19 @@ const kernel = new WinWinCodeKernel({ home, modelPort })
 const eventKinds = []
 const diagnosticEvents = []
 const errors = []
+const governedSecret = 'TOKEN-installed-governed-secret'
+const governedCredentialPath = join(workspace, '.env')
+const governedInsidePath = join(workspace, 'governed-inside.txt')
+const governedOutsidePath = join(root, 'governed-outside.txt')
+const governedRemotePath = join(workspace, 'governed-remote.txt')
+writeFileSync(governedCredentialPath, `${governedSecret}\n`)
+process.env.WINWINCODE_INSTALLED_UNRELATED_SECRET = governedSecret
+let networkConnections = 0
+const networkServer = createServer(socket => {
+  networkConnections += 1
+  socket.end()
+})
+const networkPort = await listen(networkServer)
 
 try {
   const session = await kernel.createSession({
@@ -164,6 +229,107 @@ try {
     if (poll.event.kind === 'turn_complete') break
   }
   await kernel.closeSession(session.sessionId)
+
+  const governedSession = await kernel.createSession({
+    cwd: workspace,
+    provider: 'keyless-fixture',
+    model: 'keyless-fixture-model',
+    governedAuthority: governedAuthority(workspace),
+  })
+  const governedEnvironment = await kernel.executeGovernedCommand(governedCommand(
+    governedSession.sessionId,
+    'installed-environment',
+    ['/usr/bin/env'],
+    workspace,
+  ))
+  const governedWrite = await kernel.executeGovernedCommand(governedCommand(
+    governedSession.sessionId,
+    'installed-write',
+    ['/bin/bash', '-c', `printf governed > ${JSON.stringify(governedInsidePath)}`],
+    workspace,
+  ))
+  const governedOutside = await kernel.executeGovernedCommand(governedCommand(
+    governedSession.sessionId,
+    'installed-outside',
+    ['/bin/bash', '-c', `printf escaped > ${JSON.stringify(governedOutsidePath)}`],
+    workspace,
+  ))
+  const governedCredential = await kernel.executeGovernedCommand(governedCommand(
+    governedSession.sessionId,
+    'installed-credential',
+    [
+      '/bin/bash',
+      '-c',
+      `while IFS= read -r line; do printf '%s' "$line"; done < ${JSON.stringify(governedCredentialPath)}`,
+    ],
+    workspace,
+  ))
+  const governedNetwork = await kernel.executeGovernedCommand(governedCommand(
+    governedSession.sessionId,
+    'installed-network',
+    [
+      '/bin/bash',
+      '-c',
+      `printf x > /dev/tcp/127.0.0.1/${networkPort} && printf remote > ${JSON.stringify(governedRemotePath)}`,
+    ],
+    workspace,
+  ))
+  const governedTimeout = await kernel.executeGovernedCommand(governedCommand(
+    governedSession.sessionId,
+    'installed-timeout',
+    ['/bin/bash', '-c', 'while :; do :; done'],
+    workspace,
+    { timeoutMillis: 50 },
+  ))
+  await kernel.closeSession(governedSession.sessionId)
+
+  const readOnlySession = await kernel.createSession({
+    cwd: workspace,
+    provider: 'keyless-fixture',
+    model: 'keyless-fixture-model',
+    governedAuthority: governedAuthority(workspace, {
+      roleId: 'verifier',
+      permissionPreset: 'snapshot-verify',
+      workspaceMode: 'candidate-read-only',
+      visibleTools: Object.freeze([
+        'artifact.read',
+        'artifact.write',
+        'workspace.read',
+        'code.search',
+        'candidate.diff',
+        'command.run',
+        'test.run',
+      ]),
+    }),
+  })
+  const readOnlyTarget = join(workspace, 'read-only-write.txt')
+  const readOnlyWrite = await kernel.executeGovernedCommand(governedCommand(
+    readOnlySession.sessionId,
+    'installed-read-only',
+    ['/bin/bash', '-c', `printf denied > ${JSON.stringify(readOnlyTarget)}`],
+    workspace,
+    { tool: 'test.run' },
+  ))
+  await kernel.closeSession(readOnlySession.sessionId)
+
+  const ordinarySession = await kernel.createSession({
+    cwd: workspace,
+    provider: 'keyless-fixture',
+    model: 'keyless-fixture-model',
+  })
+  let ordinaryDenied = false
+  try {
+    await kernel.executeGovernedCommand(governedCommand(
+      ordinarySession.sessionId,
+      'installed-ordinary',
+      ['/usr/bin/true'],
+      workspace,
+    ))
+  } catch (error) {
+    ordinaryDenied = error instanceof KernelError
+      && error.code === 'GOVERNED_COMMAND_POLICY_DENIED'
+  }
+  await kernel.closeSession(ordinarySession.sessionId)
   const report = {
     target,
     packageName,
@@ -177,12 +343,35 @@ try {
     parentWriteBlocked: !existsSync(blockedPath),
     sandboxHelperBundled: process.platform !== 'linux'
       || existsSync(require.resolve(`${packageName}/codex-linux-sandbox`)),
+    governed: {
+      sandbox: governedEnvironment.sandbox,
+      network: governedEnvironment.network,
+      environmentSecretExcluded: !governedEnvironment.stdout.includes(governedSecret)
+        && !governedEnvironment.stdout.includes('WINWINCODE_INSTALLED_UNRELATED_SECRET'),
+      environmentNames: governedEnvironment.environmentNames,
+      workspaceWriteSucceeded: governedWrite.status === 'exited'
+        && governedWrite.exitCode === 0
+        && readFileSync(governedInsidePath, 'utf8') === 'governed',
+      outsideWriteBlocked: governedOutside.status === 'sandbox-denied'
+        && !existsSync(governedOutsidePath),
+      credentialReadBlocked: governedCredential.status === 'sandbox-denied'
+        && !`${governedCredential.stdout}${governedCredential.stderr}`.includes(governedSecret),
+      networkBlocked: governedNetwork.status === 'sandbox-denied'
+        && networkConnections === 0
+        && !existsSync(governedRemotePath),
+      timeoutStopped: governedTimeout.status === 'timed-out',
+      readOnlyWriteBlocked: readOnlyWrite.status === 'sandbox-denied'
+        && !existsSync(readOnlyTarget),
+      ordinaryDenied,
+    },
     eventKinds,
     diagnosticEvents,
     errors,
   }
   process.stdout.write(`${JSON.stringify(report)}\n`)
 } finally {
+  delete process.env.WINWINCODE_INSTALLED_UNRELATED_SECRET
+  await new Promise(resolvePromise => networkServer.close(resolvePromise))
   await kernel.shutdown()
   rmSync(blockedPath, { force: true })
 }

@@ -132,8 +132,8 @@ try {
   if (JSON.stringify(report.packageBuildInfo) !== JSON.stringify(expectedBuild)) {
     failures.push('installed package reported a different build identity')
   }
-  if (report.kernelBuildInfo?.interfaceVersion !== 3) {
-    failures.push('installed native interface version is not 3')
+  if (report.kernelBuildInfo?.interfaceVersion !== 4) {
+    failures.push('installed native interface version is not 4')
   }
   if (report.kernelBuildInfo?.codexCommit !== expectedBuild.source.codex.commit) {
     failures.push('installed kernel Codex commit does not match package source identity')
@@ -145,6 +145,19 @@ try {
     failures.push('installed-kernel sandbox did not enforce the workspace boundary')
   }
   if (report.sandboxHelperBundled !== true) failures.push('Linux sandbox helper is missing')
+  const expectedSandbox = process.platform === 'darwin' ? 'macos-seatbelt' : 'linux-seccomp'
+  if (
+    report.governed?.sandbox !== expectedSandbox
+    || report.governed?.network !== 'restricted'
+    || report.governed?.environmentSecretExcluded !== true
+    || report.governed?.workspaceWriteSucceeded !== true
+    || report.governed?.outsideWriteBlocked !== true
+    || report.governed?.credentialReadBlocked !== true
+    || report.governed?.networkBlocked !== true
+    || report.governed?.timeoutStopped !== true
+    || report.governed?.readOnlyWriteBlocked !== true
+    || report.governed?.ordinaryDenied !== true
+  ) failures.push('installed governed-command boundary did not enforce every claimed mode')
   for (const kind of ['exec_command_begin', 'exec_command_end', 'turn_complete']) {
     if (!report.eventKinds.includes(kind)) failures.push(`installed-kernel events are missing ${kind}`)
   }

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import {
   ModelPortError,
   type CodexTokenUsage,
@@ -138,6 +140,16 @@ interface OpenBlock {
   finalized: boolean
 }
 
+const DSH_CALL_CONFIG_KEYS = new Set([
+  'provider',
+  'model',
+  'reasoningEffort',
+  'temperature',
+  'maxTokens',
+  'stop',
+])
+const SAFE_FAILURE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u
+
 const CUSTOM_TOOL_PARAMETERS = Object.freeze({
   type: 'object',
   properties: Object.freeze({
@@ -149,6 +161,43 @@ const CUSTOM_TOOL_PARAMETERS = Object.freeze({
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function preparedCallConfig(value: unknown): DshCallConfig {
+  const maxTokens = isRecord(value) ? value.maxTokens : undefined
+  if (
+    !isRecord(value)
+    || Object.keys(value).some(key => !DSH_CALL_CONFIG_KEYS.has(key))
+    || typeof value.provider !== 'string'
+    || value.provider.length === 0
+    || typeof value.model !== 'string'
+    || value.model.length === 0
+    || (value.reasoningEffort !== undefined && typeof value.reasoningEffort !== 'string')
+    || (value.temperature !== undefined && (
+      typeof value.temperature !== 'number' || !Number.isFinite(value.temperature)
+    ))
+    || (maxTokens !== undefined && (
+      typeof maxTokens !== 'number' || !Number.isSafeInteger(maxTokens) || maxTokens <= 0
+    ))
+    || (value.stop !== undefined && (
+      !Array.isArray(value.stop)
+      || value.stop.some(entry => typeof entry !== 'string')
+    ))
+  ) return bridgeError(
+    'MODEL_PORT_PREPARED_CONFIG_INVALID',
+    'DSH prepared a model call with an invalid or credential-bearing configuration',
+  )
+  const stop = value.stop as string[] | undefined
+  return Object.freeze({
+    provider: value.provider,
+    model: value.model,
+    ...(value.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: value.reasoningEffort }),
+    ...(value.temperature === undefined ? {} : { temperature: value.temperature }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(stop === undefined ? {} : { stop: [...stop] }),
+  })
 }
 
 function bridgeError(code: string, message: string): never {
@@ -536,17 +585,33 @@ function failureFromUnknown(error: unknown): ModelPortFailure {
   if (error instanceof ModelPortError) return error.failure
   if (isRecord(error) && isRecord(error.failure)) {
     const failure = error.failure
-    if (typeof failure.code === 'string' && typeof failure.message === 'string') {
+    if (
+      typeof failure.code === 'string'
+      && SAFE_FAILURE_CODE.test(failure.code)
+      && typeof failure.message === 'string'
+    ) {
+      const status = typeof failure.status === 'number'
+        && Number.isInteger(failure.status)
+        && failure.status >= 100
+        && failure.status <= 599
+        ? failure.status
+        : undefined
+      const retryAfter = typeof failure.providerRetryAfterMs === 'number'
+        && Number.isFinite(failure.providerRetryAfterMs)
+        && failure.providerRetryAfterMs > 0
+        && failure.providerRetryAfterMs <= Number.MAX_SAFE_INTEGER
+        ? failure.providerRetryAfterMs
+        : undefined
+      const providerRequestId = typeof failure.requestId === 'string'
+        && failure.requestId.length > 0
+        ? `sha256:${createHash('sha256').update(failure.requestId).digest('hex')}`
+        : undefined
       return {
         code: failure.code,
-        message: failure.message,
-        ...(typeof failure.status === 'number' ? { status: failure.status } : {}),
-        ...(typeof failure.providerRetryAfterMs === 'number'
-          ? { providerRetryAfterMillis: failure.providerRetryAfterMs }
-          : {}),
-        ...(typeof failure.requestId === 'string'
-          ? { providerRequestId: failure.requestId }
-          : {}),
+        message: `DSH model request failed with code ${failure.code}`,
+        ...(status === undefined ? {} : { status }),
+        ...(retryAfter === undefined ? {} : { providerRetryAfterMillis: retryAfter }),
+        ...(providerRequestId === undefined ? {} : { providerRequestId }),
       }
     }
   }
@@ -706,8 +771,9 @@ export class DshModelPort implements ModelPort {
     try {
       const translated = translateRequest(request)
       const prepared = await this.#llm.prepareCall(translated.config, signal)
+      const config = preparedCallConfig(prepared.config)
       const options: DshGenerateOptions = {
-        ...prepared.config,
+        ...config,
         messages: translated.messages,
         ...(translated.system === undefined ? {} : { system: translated.system }),
         ...(translated.tools === undefined ? {} : { tools: translated.tools }),
@@ -721,7 +787,7 @@ export class DshModelPort implements ModelPort {
       let terminal = false
 
       yield { type: 'created' }
-      yield { type: 'server_model', model: prepared.config.model }
+      yield { type: 'server_model', model: config.model }
 
       for await (const chunk of chunks) {
         if (terminal) {

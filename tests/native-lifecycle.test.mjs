@@ -48,7 +48,7 @@ test('TypeScript owns the complete embedded kernel lifecycle contract', () => {
   const report = JSON.parse(child.stdout.trim().split('\n').at(-1))
 
   assert.deepEqual(report.buildInfo, {
-    interfaceVersion: 3,
+    interfaceVersion: 4,
     codexTag: 'rust-v0.149.0',
     codexCommit: '758ef40f50c1a458425c7cfbf1eb12cbc07af0b0',
     patchSet: [

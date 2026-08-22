@@ -476,6 +476,16 @@ test('model, tool, and sandbox failures stop the exact role turn', async t => {
         call_id: 'approval-1',
       }),
     },
+    {
+      name: 'policy denial',
+      code: 'POLICY_DENIED',
+      event: rawEvent(2, 'dynamic_tool_call_response', {
+        turn_id: 'turn-role-fixture',
+        call_id: 'tool-policy',
+        success: false,
+        text: 'StrongFlow policy-denied command.run (PROCESS_GRANT_REQUIRED).',
+      }),
+    },
   ]
   for (const fixtureCase of cases) {
     await t.test(fixtureCase.name, async () => {

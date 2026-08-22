@@ -69,6 +69,6 @@ StrongFlow 不再把工具名单、文件权限和审批开关散落在不同调
 
 角色或可信主体启动前，宿主必须证明文件限制、进程限制、网络限制、环境变量白名单、带来源身份的人工决定、DSH 凭据引用、发布身份保护和持久化脱敏审计全部可用。任一项缺失或只实现了一部分都会返回明确错误；不降级到无沙箱运行，也没有 `danger-full-access` 预设。
 
-## 后续执行
+## 执行状态
 
-`winwincode-9c4.5.2` 已把模型角色部分安装到每个 Codex Core 会话：线程启动前固定工具和基础限制，启动后核对实际配置，宿主按工作区和工具名单处理调用，并把 Codex 审批送到 DSH 的非模型交互入口。具体实现和失败顺序见 [ADR-0020](./0020-governed-role-kernel-authority.md)。`winwincode-9c4.5.3` 继续完成并验证操作系统进程沙箱、网络隔离、凭据注入和持久化安全审计。
+`winwincode-9c4.5.2` 已把模型角色权限安装到每个 Codex Core 会话，具体实现和失败顺序见 [ADR-0020](./0020-governed-role-kernel-authority.md)。`winwincode-9c4.5.3` 已完成受管进程的 macOS/Linux 沙箱、网络拒绝、环境变量白名单、DSH 凭据引用边界、持久化脱敏审计和四平台安装验证，详见 [ADR-0021](./0021-governed-process-credential-and-audit-boundaries.md)。

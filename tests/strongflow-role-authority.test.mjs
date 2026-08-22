@@ -89,8 +89,12 @@ function evidenceFor(context, overrides = {}) {
       ? 'managed-workspace-write'
       : 'managed-read-only',
     network: 'restricted',
-    process: 'dynamic-tools-only',
+    process: 'dynamic-tools-with-governed-command-api',
     environment: 'empty',
+    governedProcess: 'platform-sandbox-required',
+    governedProcessNetwork: 'restricted',
+    governedProcessEnvironment: 'explicit-allowlist',
+    credentials: 'dsh-reference-only',
     approvalPolicy: 'on-request',
     approvalsReviewer: 'user',
     loginShell: false,
@@ -138,6 +142,7 @@ async function fixture(t) {
   await mkdir(outside)
   await mkdir(join(root, '.output'))
   await writeFile(join(root, 'inside.txt'), 'inside\n')
+  await writeFile(join(root, '.env'), 'TOKEN=must-not-be-read\n')
   return { home, root: await realpath(root), outside: await realpath(outside) }
 }
 
@@ -174,7 +179,7 @@ function ports(options = {}) {
           return Promise.resolve(options.approvalOutcome ?? 'unavailable')
         },
       },
-      approvalAudit: {
+      securityAudit: {
         append(event) {
           audit.push(structuredClone(event))
         },
@@ -258,7 +263,7 @@ test('an artifact write outside the role output contract never reaches its execu
   assert.equal(portSet.executions.length, 0)
   assert.equal(portSet.dynamic.length, 1)
   assert.equal(portSet.dynamic[0].success, false)
-  assert.match(portSet.dynamic[0].text, /outside the assigned role output contract/u)
+  assert.equal(portSet.dynamic[0].text, 'StrongFlow policy-denied artifact.write (TOOL_DENIED).')
 })
 
 test('traversal and symlink escapes fail before a write executor is called', async t => {
@@ -304,12 +309,89 @@ test('an allowed call receives a canonical in-root path and returns through Code
   assert.equal(portSet.executions.length, 1)
   assert.deepEqual(portSet.executions[0].resolvedWorkspacePaths, [join(value.root, 'inside.txt')])
   assert.equal(portSet.executions[0].tool, 'workspace.read')
+  assert.ok(portSet.executions[0].excludedWorkspacePatterns.includes('**/.env'))
   assert.deepEqual(portSet.dynamic, [{
     sessionId: kernel.kernelSessionId,
     callId: 'call-read',
     success: true,
     text: '{"text":"accepted"}',
   }])
+})
+
+test('credential-sensitive workspace paths never reach read, search, diff, or patch executors', async t => {
+  const value = await fixture(t)
+  for (const [index, call] of [
+    { role: 'requirements', namespace: 'workspace', tool: 'read', arguments: { path: '.env' } },
+    { role: 'requirements', namespace: 'code', tool: 'search', arguments: { query: 'TOKEN', paths: ['.env'] } },
+    { role: 'executor', namespace: 'candidate', tool: 'diff', arguments: { path: '.env' } },
+    { role: 'executor', namespace: 'candidate', tool: 'patch', arguments: { path: '.env', patch: 'TOKEN=x' } },
+  ].entries()) {
+    const context = contextFor(call.role, value.root)
+    const portSet = ports()
+    const { kernel, installation } = await install(context, portSet)
+    await installation.handleEvent(kernelEvent(
+      context,
+      kernel,
+      20 + index,
+      'dynamic_tool_call_request',
+      {
+        call_id: `call-credential-${index}`,
+        turn_id: 'turn-credential',
+        namespace: call.namespace,
+        tool: call.tool,
+        arguments: call.arguments,
+      },
+    ))
+    assert.equal(portSet.executions.length, 0)
+    assert.equal(portSet.dynamic[0].success, false)
+    assert.match(portSet.dynamic[0].text, /policy-denied/u)
+  }
+})
+
+test('credential-shaped artifact content and tool output never cross the role boundary', async t => {
+  const value = await fixture(t)
+  const secret = 'fixture-role-boundary-secret'
+  const context = contextFor('requirements', value.root)
+  const denied = ports()
+  const deniedInstall = await install(context, denied)
+  await deniedInstall.installation.handleEvent(kernelEvent(
+    context,
+    deniedInstall.kernel,
+    30,
+    'dynamic_tool_call_request',
+    {
+      call_id: 'call-credential-artifact',
+      turn_id: 'turn-credential-artifact',
+      namespace: 'artifact',
+      tool: 'write',
+      arguments: {
+        kind: 'REQUIREMENT_SPEC',
+        artifact: { title: 'fixture', apiKey: secret },
+      },
+    },
+  ))
+  assert.equal(denied.executions.length, 0)
+  assert.equal(JSON.stringify(denied.dynamic).includes(secret), false)
+  assert.equal(JSON.stringify(denied.audit).includes(secret), false)
+
+  const output = ports({ toolOutput: `Authorization: Bearer ${secret}` })
+  const outputInstall = await install(context, output)
+  await outputInstall.installation.handleEvent(kernelEvent(
+    context,
+    outputInstall.kernel,
+    31,
+    'dynamic_tool_call_request',
+    {
+      call_id: 'call-credential-output',
+      turn_id: 'turn-credential-output',
+      namespace: 'workspace',
+      tool: 'read',
+      arguments: { path: 'inside.txt' },
+    },
+  ))
+  assert.equal(JSON.stringify(output.dynamic).includes(secret), false)
+  assert.equal(JSON.stringify(output.audit).includes(secret), false)
+  assert.match(output.dynamic[0].text, /Bearer \[REDACTED\]/u)
 })
 
 test('approval routing records job, role, scope, human decision, and exact kernel source', async t => {
@@ -343,10 +425,12 @@ test('approval routing records job, role, scope, human decision, and exact kerne
     turnId: 'turn-9',
   })
   assert.deepEqual(portSet.audit.map(event => event.type), [
-    'strongflow.approval.requested',
-    'strongflow.approval.decided',
+    'strongflow.security.session.accepted',
+    'strongflow.security.credential.boundary',
+    'strongflow.security.approval.requested',
+    'strongflow.security.approval.decided',
   ])
-  assert.equal(portSet.audit[1].decision, 'approved')
+  assert.equal(portSet.audit[3].outcome, 'approved')
   assert.deepEqual(portSet.approvals, [{
     sessionId: kernel.kernelSessionId,
     kind: 'exec',
@@ -368,7 +452,7 @@ test('a missing DSH answerer fails closed and never grants the operation', async
     reason: 'Apply candidate change.',
   }))
 
-  assert.equal(portSet.audit[1].decision, 'unavailable')
+  assert.equal(portSet.audit[3].outcome, 'unavailable')
   assert.deepEqual(portSet.approvals[0].decision, {
     kind: 'denied',
     rejection: 'No DSH approval answerer was available.',

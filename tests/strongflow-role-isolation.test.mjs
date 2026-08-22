@@ -162,8 +162,12 @@ function effectivePolicyFor(options) {
       ? 'managed-workspace-write'
       : 'managed-read-only',
     network: 'restricted',
-    process: 'dynamic-tools-only',
+    process: 'dynamic-tools-with-governed-command-api',
     environment: 'empty',
+    governedProcess: 'platform-sandbox-required',
+    governedProcessNetwork: 'restricted',
+    governedProcessEnvironment: 'explicit-allowlist',
+    credentials: 'dsh-reference-only',
     approvalPolicy: 'on-request',
     approvalsReviewer: 'user',
     loginShell: false,

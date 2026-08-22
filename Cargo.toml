@@ -20,6 +20,8 @@ codex-core-api = { path = "third_party/codex/codex-rs/core-api" }
 codex-api = { path = "third_party/codex/codex-rs/codex-api" }
 codex-arg0 = { path = "third_party/codex/codex-rs/arg0" }
 codex-protocol = { path = "third_party/codex/codex-rs/protocol" }
+codex-sandboxing = { path = "third_party/codex/codex-rs/sandboxing" }
+codex-utils-path-uri = { path = "third_party/codex/codex-rs/utils/path-uri" }
 codex-model-provider-info = { path = "third_party/codex/codex-rs/model-provider-info" }
 futures = "=0.3.31"
 napi = { version = "=3.12.1", features = ["napi9", "serde-json", "tokio_rt", "web_stream"] }

@@ -206,8 +206,12 @@ export interface GovernedSessionEffectivePolicy {
   readonly visibleTools: readonly StrongFlowRoleTool[]
   readonly filesystem: 'managed-read-only' | 'managed-workspace-write'
   readonly network: 'restricted'
-  readonly process: 'dynamic-tools-only'
+  readonly process: 'dynamic-tools-with-governed-command-api'
   readonly environment: 'empty'
+  readonly governedProcess: 'platform-sandbox-required'
+  readonly governedProcessNetwork: 'restricted'
+  readonly governedProcessEnvironment: 'explicit-allowlist'
+  readonly credentials: 'dsh-reference-only'
   readonly approvalPolicy: 'on-request'
   readonly approvalsReviewer: 'user'
   readonly loginShell: false
@@ -221,6 +225,42 @@ export interface DynamicToolResponse {
   readonly callId: string
   readonly success: boolean
   readonly text: string
+}
+
+export const GOVERNED_COMMAND_SCHEMA_VERSION = 1 as const
+
+export type GovernedCommandStatus =
+  | 'exited'
+  | 'sandbox-denied'
+  | 'timed-out'
+  | 'cancelled'
+  | 'output-limit'
+
+/** Trusted command grant. The native kernel derives workspace and role authority from sessionId. */
+export interface GovernedCommandRequest {
+  readonly schemaVersion: typeof GOVERNED_COMMAND_SCHEMA_VERSION
+  readonly sessionId: string
+  readonly commandId: string
+  readonly tool: 'command.run' | 'test.run'
+  readonly argv: readonly string[]
+  readonly cwd: string
+  readonly environment: Readonly<Record<string, string>>
+  readonly timeoutMillis: number
+  readonly outputLimitBytes: number
+}
+
+/** Bounded output plus the concrete host enforcement used for one governed command. */
+export interface GovernedCommandResult {
+  readonly schemaVersion: typeof GOVERNED_COMMAND_SCHEMA_VERSION
+  readonly sessionId: string
+  readonly commandId: string
+  readonly status: GovernedCommandStatus
+  readonly exitCode?: number
+  readonly stdout: string
+  readonly stderr: string
+  readonly sandbox: 'macos-seatbelt' | 'linux-seccomp'
+  readonly network: 'restricted'
+  readonly environmentNames: readonly string[]
 }
 
 export interface KernelBuildInfo {
@@ -316,6 +356,31 @@ interface NativeDynamicToolResponse {
   text: string
 }
 
+interface NativeGovernedCommandRequest {
+  schemaVersion: number
+  sessionId: string
+  commandId: string
+  tool: string
+  argv: string[]
+  cwd: string
+  environmentJson: string
+  timeoutMillis: number
+  outputLimitBytes: number
+}
+
+interface NativeGovernedCommandResult {
+  schemaVersion: number
+  sessionId: string
+  commandId: string
+  status: string
+  exitCode?: number | null
+  stdout: string
+  stderr: string
+  sandbox: string
+  network: string
+  environmentNames: string[]
+}
+
 interface NativeBuildInfo {
   interfaceVersion: number
   codexTag: string
@@ -363,6 +428,10 @@ interface NativeKernelBinding {
   interrupt(sessionId: string): Promise<string>
   resolveApproval(response: NativeApprovalResponse): Promise<string>
   resolveDynamicTool(response: NativeDynamicToolResponse): Promise<string>
+  executeGovernedCommand(
+    request: NativeGovernedCommandRequest,
+  ): Promise<NativeGovernedCommandResult>
+  cancelGovernedCommand(sessionId: string, commandId: string): Promise<void>
   nextEvent(sessionId: string, timeoutMillis?: number): Promise<NativeEventPoll>
   listSessions(): Promise<string[]>
   closeSession(sessionId: string): Promise<void>
@@ -512,6 +581,8 @@ function loadBinding(path: string): NativeBindingModule {
     'interrupt',
     'resolveApproval',
     'resolveDynamicTool',
+    'executeGovernedCommand',
+    'cancelGovernedCommand',
     'nextEvent',
     'listSessions',
     'closeSession',
@@ -640,6 +711,10 @@ function effectivePolicy(value: string): GovernedSessionEffectivePolicy {
       'network',
       'process',
       'environment',
+      'governedProcess',
+      'governedProcessNetwork',
+      'governedProcessEnvironment',
+      'credentials',
       'approvalPolicy',
       'approvalsReviewer',
       'loginShell',
@@ -675,8 +750,12 @@ function effectivePolicy(value: string): GovernedSessionEffectivePolicy {
     ))
     || !['managed-read-only', 'managed-workspace-write'].includes(String(parsed.filesystem))
     || parsed.network !== 'restricted'
-    || parsed.process !== 'dynamic-tools-only'
+    || parsed.process !== 'dynamic-tools-with-governed-command-api'
     || parsed.environment !== 'empty'
+    || parsed.governedProcess !== 'platform-sandbox-required'
+    || parsed.governedProcessNetwork !== 'restricted'
+    || parsed.governedProcessEnvironment !== 'explicit-allowlist'
+    || parsed.credentials !== 'dsh-reference-only'
     || parsed.approvalPolicy !== 'on-request'
     || parsed.approvalsReviewer !== 'user'
     || parsed.loginShell !== false
@@ -790,6 +869,95 @@ function nativeDynamicToolResponse(response: DynamicToolResponse): NativeDynamic
     'dynamic-tool response',
   )
   return { ...response }
+}
+
+function nativeGovernedCommandRequest(
+  request: GovernedCommandRequest,
+): NativeGovernedCommandRequest {
+  if (!isRecord(request) || Array.isArray(request)) {
+    throw new KernelError('INVALID_GOVERNED_COMMAND', 'governed command must be an object')
+  }
+  exactKeys(request, [
+    'schemaVersion',
+    'sessionId',
+    'commandId',
+    'tool',
+    'argv',
+    'cwd',
+    'environment',
+    'timeoutMillis',
+    'outputLimitBytes',
+  ], [], 'governed command')
+  if (
+    request.schemaVersion !== GOVERNED_COMMAND_SCHEMA_VERSION
+    || typeof request.sessionId !== 'string'
+    || request.sessionId.length === 0
+    || typeof request.commandId !== 'string'
+    || request.commandId.length === 0
+    || !['command.run', 'test.run'].includes(request.tool)
+    || !Array.isArray(request.argv)
+    || request.argv.length === 0
+    || request.argv.some(argument => typeof argument !== 'string' || argument.length === 0)
+    || typeof request.cwd !== 'string'
+    || !isAbsolute(request.cwd)
+    || !isRecord(request.environment)
+    || Array.isArray(request.environment)
+    || Object.values(request.environment).some(value => typeof value !== 'string')
+  ) throw new KernelError('INVALID_GOVERNED_COMMAND', 'governed command is invalid')
+  validateUint32(request.timeoutMillis, 'governed command timeoutMillis')
+  validateUint32(request.outputLimitBytes, 'governed command outputLimitBytes')
+  return {
+    schemaVersion: request.schemaVersion,
+    sessionId: request.sessionId,
+    commandId: request.commandId,
+    tool: request.tool,
+    argv: [...request.argv],
+    cwd: request.cwd,
+    environmentJson: JSON.stringify(request.environment),
+    timeoutMillis: request.timeoutMillis,
+    outputLimitBytes: request.outputLimitBytes,
+  }
+}
+
+function governedCommandResult(result: NativeGovernedCommandResult): GovernedCommandResult {
+  const statuses: readonly GovernedCommandStatus[] = [
+    'exited',
+    'sandbox-denied',
+    'timed-out',
+    'cancelled',
+    'output-limit',
+  ]
+  if (
+    result.schemaVersion !== GOVERNED_COMMAND_SCHEMA_VERSION
+    || typeof result.sessionId !== 'string'
+    || typeof result.commandId !== 'string'
+    || !statuses.includes(result.status as GovernedCommandStatus)
+    || (result.exitCode !== undefined && result.exitCode !== null
+      && !Number.isInteger(result.exitCode))
+    || typeof result.stdout !== 'string'
+    || typeof result.stderr !== 'string'
+    || !['macos-seatbelt', 'linux-seccomp'].includes(result.sandbox)
+    || result.network !== 'restricted'
+    || !Array.isArray(result.environmentNames)
+    || result.environmentNames.some(name => typeof name !== 'string')
+  ) throw new KernelError(
+    'NATIVE_PROTOCOL_INVALID',
+    'native kernel returned an invalid governed command result',
+  )
+  return Object.freeze({
+    schemaVersion: GOVERNED_COMMAND_SCHEMA_VERSION,
+    sessionId: result.sessionId,
+    commandId: result.commandId,
+    status: result.status as GovernedCommandStatus,
+    ...(result.exitCode === undefined || result.exitCode === null
+      ? {}
+      : { exitCode: result.exitCode }),
+    stdout: result.stdout,
+    stderr: result.stderr,
+    sandbox: result.sandbox as GovernedCommandResult['sandbox'],
+    network: 'restricted',
+    environmentNames: Object.freeze([...result.environmentNames]),
+  })
 }
 
 function nativeApprovalResponse(response: ApprovalResponse): NativeApprovalResponse {
@@ -943,6 +1111,24 @@ export class WinWinCodeKernel {
   async resolveDynamicTool(response: DynamicToolResponse): Promise<string> {
     try {
       return await this.#binding.resolveDynamicTool(nativeDynamicToolResponse(response))
+    } catch (error) {
+      throw translateError(error)
+    }
+  }
+
+  async executeGovernedCommand(request: GovernedCommandRequest): Promise<GovernedCommandResult> {
+    try {
+      return governedCommandResult(
+        await this.#binding.executeGovernedCommand(nativeGovernedCommandRequest(request)),
+      )
+    } catch (error) {
+      throw translateError(error)
+    }
+  }
+
+  async cancelGovernedCommand(sessionId: string, commandId: string): Promise<void> {
+    try {
+      await this.#binding.cancelGovernedCommand(sessionId, commandId)
     } catch (error) {
       throw translateError(error)
     }

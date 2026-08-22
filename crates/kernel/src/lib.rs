@@ -1,7 +1,11 @@
 //! Embedded Codex Core ownership boundary.
 
+mod governed_command;
 mod model_port;
 
+pub use governed_command::GOVERNED_COMMAND_SCHEMA_VERSION;
+pub use governed_command::GovernedCommandRequest;
+pub use governed_command::GovernedCommandResult;
 pub use model_port::ModelPort;
 pub use model_port::ModelPortFailure;
 pub use model_port::ModelPortRequest;
@@ -81,7 +85,7 @@ pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 /// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
 /// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 3;
+pub const INTERFACE_VERSION: u32 = 4;
 /// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
@@ -279,6 +283,10 @@ struct GovernedSessionEffectivePolicy {
     network: &'static str,
     process: &'static str,
     environment: &'static str,
+    governed_process: &'static str,
+    governed_process_network: &'static str,
+    governed_process_environment: &'static str,
+    credentials: &'static str,
     approval_policy: &'static str,
     approvals_reviewer: &'static str,
     login_shell: bool,
@@ -372,6 +380,8 @@ pub type KernelResult<T> = Result<T, KernelFailure>;
 struct SessionRuntime {
     thread: Arc<CodexThread>,
     config: Config,
+    governed_authority: Option<GovernedSessionAuthority>,
+    governed_commands: governed_command::GovernedCommandController,
     events: Mutex<mpsc::Receiver<KernelEvent>>,
     stop: watch::Sender<bool>,
     event_task: Mutex<Option<JoinHandle<()>>>,
@@ -1031,8 +1041,12 @@ impl Kernel {
             visible_tools: authority.visible_tools.clone(),
             filesystem: policy.filesystem,
             network: "restricted",
-            process: "dynamic-tools-only",
+            process: "dynamic-tools-with-governed-command-api",
             environment: "empty",
+            governed_process: "platform-sandbox-required",
+            governed_process_network: "restricted",
+            governed_process_environment: "explicit-allowlist",
+            credentials: "dsh-reference-only",
             approval_policy: "on-request",
             approvals_reviewer: "user",
             login_shell: false,
@@ -1062,7 +1076,8 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let config = Self::session_config(&runtime, &options)?;
-            let authority = options.governed_authority.as_ref();
+            let governed_authority = options.governed_authority.clone();
+            let authority = governed_authority.as_ref();
             let thread = runtime
                 .manager
                 .start_thread(Self::start_thread_options(config.clone(), authority))
@@ -1080,8 +1095,14 @@ impl Kernel {
                 }
                 None => None,
             };
-            self.register_session(&runtime, thread, config, effective_policy_json)
-                .await
+            self.register_session(
+                &runtime,
+                thread,
+                config,
+                governed_authority,
+                effective_policy_json,
+            )
+            .await
         })
         .await
     }
@@ -1106,7 +1127,8 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let config = Self::session_config(&runtime, &options)?;
-            let authority = options.governed_authority.as_ref();
+            let governed_authority = options.governed_authority.clone();
+            let authority = governed_authority.as_ref();
             let thread = match authority {
                 Some(authority) => {
                     Box::pin(runtime.manager.resume_thread_from_rollout_with_options(
@@ -1140,8 +1162,14 @@ impl Kernel {
                 }
                 None => None,
             };
-            self.register_session(&runtime, thread, config, effective_policy_json)
-                .await
+            self.register_session(
+                &runtime,
+                thread,
+                config,
+                governed_authority,
+                effective_policy_json,
+            )
+            .await
         })
         .await
     }
@@ -1160,6 +1188,12 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let source = self.session(&runtime, source_session_id).await?;
+            if source.governed_authority.is_some() {
+                return Err(KernelFailure::new(
+                    "GOVERNED_SESSION_FORK_DENIED",
+                    "governed StrongFlow sessions cannot fork outside their immutable authority",
+                ));
+            }
             source.thread.ensure_rollout_materialized().await;
             source
                 .thread
@@ -1200,7 +1234,8 @@ impl Kernel {
             ))
             .await
             .map_err(|error| KernelFailure::new("SESSION_FORK_FAILED", error.to_string()))?;
-            self.register_session(&runtime, thread, config, None).await
+            self.register_session(&runtime, thread, config, None, None)
+                .await
         })
         .await
     }
@@ -1395,6 +1430,57 @@ impl Kernel {
         .await
     }
 
+    /// Execute one already-authorized `StrongFlow` command under the stored native role authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed policy denial for an ordinary session, a role/tool mismatch, invalid
+    /// command facts, or an unavailable platform sandbox.
+    pub async fn execute_governed_command(
+        &self,
+        request: GovernedCommandRequest,
+    ) -> KernelResult<GovernedCommandResult> {
+        Self::guard(async {
+            let runtime = self.runtime().await?;
+            let session = self.session(&runtime, &request.session_id).await?;
+            let authority = session.governed_authority.as_ref().ok_or_else(|| {
+                KernelFailure::new(
+                    "GOVERNED_COMMAND_POLICY_DENIED",
+                    "ordinary DSH chat sessions cannot execute governed commands",
+                )
+            })?;
+            session
+                .governed_commands
+                .execute(&self.options, authority, &session.config, request)
+                .await
+        })
+        .await
+    }
+
+    /// Cancel one active governed command by its source identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for an unknown session or command.
+    pub async fn cancel_governed_command(
+        &self,
+        session_id: &str,
+        command_id: &str,
+    ) -> KernelResult<()> {
+        Self::guard(async {
+            let runtime = self.runtime().await?;
+            let session = self.session(&runtime, session_id).await?;
+            if !session.governed_commands.cancel(command_id).await {
+                return Err(KernelFailure::new(
+                    "GOVERNED_COMMAND_NOT_FOUND",
+                    "governed command is not active in this session",
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Gracefully close and unregister one session.
     ///
     /// # Errors
@@ -1410,6 +1496,7 @@ impl Kernel {
                 .await
                 .remove(session_id)
                 .ok_or_else(|| session_not_found(session_id))?;
+            session.governed_commands.cancel_all().await;
             let _ = session.stop.send(true);
             tokio::time::timeout(
                 self.options.shutdown_timeout,
@@ -1461,6 +1548,7 @@ impl Kernel {
                 .map(|(_, session)| session)
                 .collect::<Vec<_>>();
             for session in &sessions {
+                session.governed_commands.cancel_all().await;
                 let _ = session.stop.send(true);
             }
             let report = runtime
@@ -1496,6 +1584,7 @@ impl Kernel {
         runtime: &Runtime,
         new_thread: NewThread,
         config: Config,
+        governed_authority: Option<GovernedSessionAuthority>,
         effective_policy_json: Option<String>,
     ) -> KernelResult<SessionInfo> {
         let session_id = new_thread.thread_id.to_string();
@@ -1510,6 +1599,8 @@ impl Kernel {
         let session = Arc::new(SessionRuntime {
             thread: new_thread.thread,
             config,
+            governed_authority,
+            governed_commands: governed_command::GovernedCommandController::new(),
             events: Mutex::new(event_rx),
             stop,
             event_task: Mutex::new(Some(event_task)),
@@ -1584,6 +1675,7 @@ impl Kernel {
                 .map(|(_, session)| session)
                 .collect::<Vec<_>>();
             for session in &sessions {
+                session.governed_commands.cancel_all().await;
                 let _ = session.stop.send(true);
             }
             let _ = runtime.manager.shutdown_all_threads_bounded(timeout).await;
@@ -1983,7 +2075,7 @@ mod tests {
         let kernel = Kernel::new(options, Arc::new(UnusedModelPort)).expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 3);
+        assert_eq!(build.interface_version, 4);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,

@@ -149,6 +149,7 @@ export type StrongFlowRoleRunFailureCategory =
   | 'kernel'
   | 'model'
   | 'tool'
+  | 'policy'
   | 'sandbox'
   | 'budget'
   | 'artifact'
@@ -172,6 +173,7 @@ export type StrongFlowRoleRunFailureCode =
   | 'TURN_PROTOCOL_INVALID'
   | 'MODEL_FAILED'
   | 'TOOL_FAILED'
+  | 'POLICY_DENIED'
   | 'SANDBOX_DENIED'
   | 'USAGE_MISSING'
   | 'USAGE_INVALID'
@@ -701,16 +703,20 @@ function toolFailure(event: ParsedKernelEvent): RoleRunFault | undefined {
     || (typeof exitCode === 'number' && exitCode !== 0)
   if (!failed) return undefined
   const serialized = JSON.stringify(event.message).toLowerCase()
+  const policy = ['policy-denied', 'policy denied', 'process_grant_required', 'tool_denied']
+    .some(marker => serialized.includes(marker))
   const sandbox = ['sandbox', 'permission denied', 'operation not permitted', 'landlock', 'seccomp']
     .some(marker => serialized.includes(marker))
     || status === 'declined'
     || status === 'denied'
   return new RoleRunFault({
-    code: sandbox ? 'SANDBOX_DENIED' : 'TOOL_FAILED',
-    category: sandbox ? 'sandbox' : 'tool',
-    message: sandbox
-      ? 'The governed role attempted an operation denied by its sandbox policy'
-      : 'A tool used by the governed role failed',
+    code: policy ? 'POLICY_DENIED' : sandbox ? 'SANDBOX_DENIED' : 'TOOL_FAILED',
+    category: policy ? 'policy' : sandbox ? 'sandbox' : 'tool',
+    message: policy
+      ? 'The governed role attempted an operation outside its approved authority'
+      : sandbox
+        ? 'The governed role attempted an operation denied by its sandbox policy'
+        : 'A tool used by the governed role failed',
     interrupt: true,
   })
 }
