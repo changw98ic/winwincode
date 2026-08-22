@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
@@ -48,6 +49,43 @@ function governedCommand(sessionId, commandId, argv, cwd, overrides = {}) {
     timeoutMillis: 10_000,
     outputLimitBytes: 1_048_576,
     ...overrides,
+  })
+}
+
+function outputSummary(output) {
+  return Object.freeze({
+    bytes: Buffer.byteLength(output, 'utf8'),
+    sha256: createHash('sha256').update(output, 'utf8').digest('hex'),
+  })
+}
+
+function governedDiagnostic(result) {
+  let category
+  switch (result.status) {
+    case 'exited':
+      category = result.exitCode === 0 ? 'exited-zero' : 'exited-nonzero'
+      break
+    case 'sandbox-denied':
+      category = 'sandbox-policy-denial'
+      break
+    case 'timed-out':
+      category = 'deadline-enforced'
+      break
+    case 'cancelled':
+      category = 'cancelled'
+      break
+    case 'output-limit':
+      category = 'output-limit-enforced'
+      break
+    default:
+      category = 'unknown-status'
+  }
+  return Object.freeze({
+    status: result.status,
+    exitCode: result.exitCode ?? null,
+    category,
+    stdout: outputSummary(result.stdout),
+    stderr: outputSummary(result.stderr),
   })
 }
 
@@ -367,6 +405,15 @@ try {
       readOnlyWriteBlocked: readOnlyWrite.status === 'sandbox-denied'
         && !existsSync(readOnlyTarget),
       ordinaryDenied,
+      diagnostics: {
+        environment: governedDiagnostic(governedEnvironment),
+        workspaceWrite: governedDiagnostic(governedWrite),
+        outsideWrite: governedDiagnostic(governedOutside),
+        credentialRead: governedDiagnostic(governedCredential),
+        network: governedDiagnostic(governedNetwork),
+        timeout: governedDiagnostic(governedTimeout),
+        readOnlyWrite: governedDiagnostic(readOnlyWrite),
+      },
     },
     eventKinds,
     diagnosticEvents,

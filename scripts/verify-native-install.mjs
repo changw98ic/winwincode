@@ -70,6 +70,53 @@ function pack(root, directory, destination) {
   return resolve(join(root, directory), filename)
 }
 
+function hasSafeGovernedDiagnostics(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const expectedNames = [
+    'environment',
+    'workspaceWrite',
+    'outsideWrite',
+    'credentialRead',
+    'network',
+    'timeout',
+    'readOnlyWrite',
+  ]
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expectedNames].sort())) {
+    return false
+  }
+  const statuses = new Set(['exited', 'sandbox-denied', 'timed-out', 'cancelled', 'output-limit'])
+  return Object.values(value).every(diagnostic => {
+    if (diagnostic === null || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) {
+      return false
+    }
+    if (
+      JSON.stringify(Object.keys(diagnostic).sort())
+      !== JSON.stringify(['category', 'exitCode', 'status', 'stderr', 'stdout'])
+    ) return false
+    if (!statuses.has(diagnostic.status)) return false
+    if (diagnostic.exitCode !== null && !Number.isInteger(diagnostic.exitCode)) return false
+    const expectedCategory = diagnostic.status === 'exited'
+      ? (diagnostic.exitCode === 0 ? 'exited-zero' : 'exited-nonzero')
+      : {
+          'sandbox-denied': 'sandbox-policy-denial',
+          'timed-out': 'deadline-enforced',
+          cancelled: 'cancelled',
+          'output-limit': 'output-limit-enforced',
+        }[diagnostic.status]
+    if (diagnostic.category !== expectedCategory) return false
+    return ['stdout', 'stderr'].every(stream => {
+      const summary = diagnostic[stream]
+      return summary !== null
+        && typeof summary === 'object'
+        && !Array.isArray(summary)
+        && Number.isSafeInteger(summary.bytes)
+        && summary.bytes >= 0
+        && /^[a-f0-9]{64}$/u.test(summary.sha256)
+        && JSON.stringify(Object.keys(summary).sort()) === JSON.stringify(['bytes', 'sha256'])
+    })
+  })
+}
+
 const root = resolve(import.meta.dirname, '..')
 const { target, requireRelease } = parseArguments(process.argv.slice(2))
 if (target === undefined) {
@@ -161,6 +208,9 @@ try {
     || report.governed?.readOnlyWriteBlocked !== true
     || report.governed?.ordinaryDenied !== true
   ) failures.push('installed governed-command boundary did not enforce every claimed mode')
+  if (!hasSafeGovernedDiagnostics(report.governed?.diagnostics)) {
+    failures.push('installed governed-command diagnostics are missing or expose raw output')
+  }
   for (const kind of ['exec_command_begin', 'exec_command_end', 'turn_complete']) {
     if (!report.eventKinds.includes(kind)) failures.push(`installed-kernel events are missing ${kind}`)
   }
