@@ -171,7 +171,13 @@ impl GovernedCommandController {
         let command_id = request.command_id.clone();
         let outcome = async {
             let environment = governed_environment(&request.environment, temp)?;
-            let permissions = governed_permissions(authority, &workspace, temp, &program)?;
+            let permissions = governed_permissions(
+                authority,
+                &workspace,
+                temp,
+                &program,
+                options.linux_sandbox_executable.as_deref(),
+            )?;
             let manager = SandboxManager::new();
             let sandbox = manager.select_initial(
                 &permissions,
@@ -472,6 +478,7 @@ fn governed_permissions(
     workspace: &Path,
     temp: &Path,
     program: &Path,
+    sandbox_helper: Option<&Path>,
 ) -> KernelResult<PermissionProfile> {
     let workspace_access = if authority.workspace_mode == "candidate-write" {
         FileSystemAccessMode::Write
@@ -489,6 +496,25 @@ fn governed_permissions(
         path_entry(temp, FileSystemAccessMode::Write, "command temp")?,
         path_entry(program, FileSystemAccessMode::Read, "command executable")?,
     ];
+    if let Some(sandbox_helper) = sandbox_helper {
+        let sandbox_helper = std::fs::canonicalize(sandbox_helper).map_err(|error| {
+            KernelFailure::new(
+                "ENFORCEMENT_UNAVAILABLE",
+                format!("Linux sandbox helper cannot be resolved: {error}"),
+            )
+        })?;
+        if !sandbox_helper.is_file() {
+            return Err(KernelFailure::new(
+                "ENFORCEMENT_UNAVAILABLE",
+                "Linux sandbox helper is not a file",
+            ));
+        }
+        entries.push(path_entry(
+            &sandbox_helper,
+            FileSystemAccessMode::Read,
+            "Linux sandbox helper",
+        )?);
+    }
     if workspace_access == FileSystemAccessMode::Write {
         for metadata in [".git", ".agents", ".codex"] {
             entries.push(FileSystemSandboxEntry::skip_missing_path(
@@ -662,9 +688,12 @@ const fn sandbox_name(sandbox: SandboxType) -> &'static str {
 mod tests {
     use super::GOVERNED_COMMAND_SCHEMA_VERSION;
     use super::GovernedCommandRequest;
+    use super::governed_permissions;
     use super::validate_request;
     use crate::GovernedSessionAuthority;
+    use codex_protocol::permissions::FileSystemAccessMode;
     use std::collections::HashMap;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -712,6 +741,31 @@ mod tests {
                 .expect_err("credential argument must be denied")
                 .code(),
             "GOVERNED_COMMAND_POLICY_DENIED"
+        );
+    }
+
+    #[test]
+    fn grants_read_only_access_to_the_linux_sandbox_reexec() {
+        let workspace = Path::new("/fixture");
+        let sandbox_helper = std::env::current_exe().expect("current test executable");
+        let sibling = sandbox_helper.with_file_name("private-state");
+        let permissions = governed_permissions(
+            &authority(),
+            workspace,
+            Path::new("/fixture-command-temp"),
+            Path::new("/usr/bin/env"),
+            Some(&sandbox_helper),
+        )
+        .expect("governed permissions");
+        let (file_system, _) = permissions.to_runtime_permissions();
+
+        assert_eq!(
+            file_system.resolve_access_with_cwd(&sandbox_helper, workspace),
+            FileSystemAccessMode::Read,
+        );
+        assert_eq!(
+            file_system.resolve_access_with_cwd(&sibling, workspace),
+            FileSystemAccessMode::Deny,
         );
     }
 }
