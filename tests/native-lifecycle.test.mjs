@@ -56,6 +56,7 @@ test('TypeScript owns the complete embedded kernel lifecycle contract', () => {
       'upstream/patches/codex/0002-inject-model-stream-transport.patch',
       'upstream/patches/codex/0003-export-config-builder.patch',
       'upstream/patches/codex/0004-resume-with-caller-options.patch',
+      'upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch',
     ],
     eventCapacity: 16,
   })

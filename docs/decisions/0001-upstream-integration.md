@@ -109,6 +109,7 @@ Codex `0.149.0` 的 `ModelClient` 会自行创建 `HttpClientFactory` 和 `Reqwe
 | `codex/0002-inject-model-stream-transport.patch` | `codex-rs/core/src/client.rs`、会话/线程管理和 `codex-rs/core-api/src/lib.rs` | 注入一个窄的异步模型流接口，并让根线程、恢复会话、分叉和子 Agent 共用该接口；未注入时仍走上游原有 HTTP 路径 |
 | `codex/0003-export-config-builder.patch` | `codex-rs/core-api/src/lib.rs` | 重导出上游已有的 `ConfigBuilder`，让嵌入内核读取自己数据目录中的 `config.toml`，而不是退回到不读取配置文件的默认只读设置 |
 | `codex/0004-resume-with-caller-options.patch` | `codex-rs/core/src/thread_manager.rs` | 恢复 rollout 时保留调用方已经固定的动态工具、环境选择和扩展设置，使角色恢复不能重新获得默认工具或丢失原有权限边界 |
+| `codex/0005-remount-split-bwrap-root-read-only.patch` | `codex-rs/linux-sandbox/src/bwrap.rs` | 在完成批准挂载和 `/proc` 创建后把合成根目录重新挂为只读，阻止命令在明确可写根之外创建临时同级路径 |
 | `packages/dsh-profile/cordis.patch.yml` | 不修改 DSH 源文件；作为 WinWinCode 自有 bundle 的最终组合层 | 禁用 DSH 执行行并装载 Codex AgentFactory、模型桥和 StrongFlow UI/API |
 
 升级时每个补丁必须能以零模糊匹配应用；失败即表示集成边界变化，必须重新审查。

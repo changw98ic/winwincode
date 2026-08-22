@@ -92,6 +92,7 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0002-inject-model-stream-transport.patch",
     "upstream/patches/codex/0003-export-config-builder.patch",
     "upstream/patches/codex/0004-resume-with-caller-options.patch",
+    "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
 ];
 
 const GOVERNED_AUTHORITY_SCHEMA_VERSION: u32 = 1;
@@ -2084,6 +2085,7 @@ mod tests {
                 "upstream/patches/codex/0002-inject-model-stream-transport.patch",
                 "upstream/patches/codex/0003-export-config-builder.patch",
                 "upstream/patches/codex/0004-resume-with-caller-options.patch",
+                "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);

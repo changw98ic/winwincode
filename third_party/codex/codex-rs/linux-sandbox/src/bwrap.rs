@@ -323,6 +323,10 @@ fn create_bwrap_flags(
             .glob_scan_max_depth
             .or(file_system_sandbox_policy.glob_scan_max_depth),
     )?;
+    let uses_synthetic_root = matches!(
+        filesystem_args.as_slice(),
+        [mount, root, ..] if mount == "--tmpfs" && root == "/"
+    );
     let normalized_command_cwd = normalize_command_cwd_for_bwrap(command_cwd);
     let mut args = Vec::new();
     args.push("--new-session".to_string());
@@ -340,6 +344,13 @@ fn create_bwrap_flags(
     if options.mount_proc {
         args.push("--proc".to_string());
         args.push("/proc".to_string());
+    }
+    if uses_synthetic_root {
+        // The fresh tmpfs root exists only to host approved mounts. Freeze it
+        // after creating /proc so commands cannot create sibling paths outside
+        // the explicit writable binds layered above.
+        args.push("--remount-ro".to_string());
+        args.push("/".to_string());
     }
     if normalized_command_cwd.as_path() != command_cwd {
         // Bubblewrap otherwise inherits the helper's logical cwd, which can be
@@ -1400,6 +1411,55 @@ mod tests {
                 "--".to_string(),
                 "/bin/true".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn split_policy_remounts_synthetic_root_read_only_after_proc() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let writable_root = temp_dir.path().join("workspace");
+        std::fs::create_dir(&writable_root).expect("create workspace");
+        let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+            path: AbsolutePathBuf::from_absolute_path(&writable_root)
+                .expect("absolute workspace")
+                .into(),
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        }]);
+
+        let args = create_bwrap_command_args(
+            vec!["/bin/true".to_string()],
+            &policy,
+            temp_dir.path(),
+            &writable_root,
+            BwrapOptions::default(),
+        )
+        .expect("create bwrap args");
+
+        let proc_index = args
+            .args
+            .windows(2)
+            .position(|window| window == ["--proc", "/proc"])
+            .expect("fresh proc mount");
+        let root_remount_index = args
+            .args
+            .windows(2)
+            .position(|window| window == ["--remount-ro", "/"])
+            .expect("synthetic root should be remounted read-only");
+        let command_index = args
+            .args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("command separator");
+        let writable_root = path_to_string(&writable_root);
+
+        assert!(args.args.windows(3).any(|window| {
+            window == ["--bind", writable_root.as_str(), writable_root.as_str()]
+        }));
+        assert!(
+            proc_index < root_remount_index && root_remount_index < command_index,
+            "expected synthetic root to become read-only after creating /proc and before exec: {:#?}",
+            args.args
         );
     }
 

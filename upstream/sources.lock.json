@@ -616,6 +616,14 @@
       ]
     },
     {
+      "id": "codex-remount-split-bwrap-root-read-only",
+      "file": "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
+      "planned": false,
+      "targets": [
+        "codex-rs/linux-sandbox/src/bwrap.rs"
+      ]
+    },
+    {
       "id": "dsh-winwincode-profile",
       "file": "packages/dsh-profile/cordis.patch.yml",
       "planned": false,
