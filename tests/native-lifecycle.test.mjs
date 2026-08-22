@@ -48,13 +48,14 @@ test('TypeScript owns the complete embedded kernel lifecycle contract', () => {
   const report = JSON.parse(child.stdout.trim().split('\n').at(-1))
 
   assert.deepEqual(report.buildInfo, {
-    interfaceVersion: 2,
+    interfaceVersion: 3,
     codexTag: 'rust-v0.149.0',
     codexCommit: '758ef40f50c1a458425c7cfbf1eb12cbc07af0b0',
     patchSet: [
       'upstream/patches/codex/0001-export-client-mcp-extensions.patch',
       'upstream/patches/codex/0002-inject-model-stream-transport.patch',
       'upstream/patches/codex/0003-export-config-builder.patch',
+      'upstream/patches/codex/0004-resume-with-caller-options.patch',
     ],
     eventCapacity: 16,
   })

@@ -1411,16 +1411,14 @@ export class StrongFlowRoleRunner {
         }
         if (state.firstSequence === undefined) continue
         if (
-          event.type === 'exec_approval_request'
-          || event.type === 'apply_patch_approval_request'
-          || event.type === 'request_permissions'
+          event.type === 'request_permissions'
           || event.type === 'request_user_input'
           || event.type === 'elicitation_request'
         ) {
           throw new RoleRunFault({
             code: 'SANDBOX_DENIED',
             category: 'sandbox',
-            message: 'The governed role requested an operation outside its no-approval sandbox',
+            message: 'The governed role requested a model-facing permission interaction',
             interrupt: true,
           })
         }

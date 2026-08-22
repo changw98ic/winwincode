@@ -471,7 +471,7 @@ test('model, tool, and sandbox failures stop the exact role turn', async t => {
     {
       name: 'sandbox denial',
       code: 'SANDBOX_DENIED',
-      event: rawEvent(2, 'exec_approval_request', {
+      event: rawEvent(2, 'request_permissions', {
         turn_id: 'turn-role-fixture',
         call_id: 'approval-1',
       }),
@@ -496,6 +496,32 @@ test('model, tool, and sandbox failures stop the exact role turn', async t => {
       }])
     })
   }
+})
+
+test('kernel command approvals remain in-band after the host submits a human decision', async () => {
+  const spec = roleSpec('executor')
+  const session = new FakeRoleSession(spec, {
+    events: [
+      rawEvent(1, 'task_started', { turn_id: 'turn-role-fixture' }),
+      rawEvent(2, 'exec_approval_request', {
+        turn_id: 'turn-role-fixture',
+        call_id: 'approval-1',
+      }),
+      usageEvent(3),
+      rawEvent(4, 'task_complete', {
+        turn_id: 'turn-role-fixture',
+        last_agent_message: outputEnvelope(spec),
+        error: null,
+      }),
+    ],
+  })
+  const { value } = runner()
+
+  const result = await value.run(requestFor(session))
+
+  assert.equal(result.outcome, 'succeeded')
+  assert.equal(result.eventInterval.eventCount, 4)
+  assert.deepEqual(session.failures, [])
 })
 
 test('cancellation, timeout, and each budget limit return bounded non-success results', async t => {

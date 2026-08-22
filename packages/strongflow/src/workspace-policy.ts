@@ -816,6 +816,51 @@ export async function resolveExistingStrongFlowWorkspacePath(
   return realCandidate
 }
 
+/**
+ * Resolve an existing or new write target while rejecting traversal and every existing symlink
+ * ancestor that leaves the assigned workspace. The executor must still open the returned path
+ * through its sandbox because the filesystem can change after this admission check.
+ */
+export async function resolveStrongFlowWorkspaceWritePath(
+  rootInput: string,
+  relativePath: string,
+): Promise<string> {
+  const root = absolutePath(rootInput, 'workspace containment root')
+  const segments = portableRelativePath(relativePath)
+  let realRoot: string
+  try {
+    realRoot = await realpath(root)
+  } catch (error) {
+    return policyError('PATH_NOT_FOUND', 'workspace root does not exist', { cause: error })
+  }
+  let current = realRoot
+  for (const [index, segment] of segments.entries()) {
+    const candidate = join(current, segment)
+    try {
+      const resolvedCandidate = await realpath(candidate)
+      if (!isContained(realRoot, resolvedCandidate)) {
+        return policyError('SYMLINK_ESCAPE', 'workspace path resolves outside its assigned root')
+      }
+      current = resolvedCandidate
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : undefined
+      if (code !== 'ENOENT') {
+        return policyError('PATH_NOT_FOUND', 'workspace write path cannot be resolved', {
+          cause: error,
+        })
+      }
+      const unresolved = join(current, ...segments.slice(index))
+      if (!isContained(realRoot, unresolved)) {
+        return policyError('SYMLINK_ESCAPE', 'workspace write path leaves its assigned root')
+      }
+      return unresolved
+    }
+  }
+  return current
+}
+
 function sameLease(
   current: StrongFlowCandidateWriterLease,
   request: StrongFlowCandidateWriterLease,

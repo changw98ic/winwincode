@@ -60,6 +60,7 @@ export * from './operator-remote.js'
 export * from './operator-remote-client.js'
 export * from './operator-service.js'
 export * from './role-runner.js'
+export * from './role-authority.js'
 export * from './role-session.js'
 export * from './workspace-policy.js'
 

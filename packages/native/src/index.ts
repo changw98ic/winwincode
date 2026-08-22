@@ -1,9 +1,18 @@
 import type {
+  StrongFlowPermissionPresetId,
+  StrongFlowRoleId,
+  StrongFlowRoleTool,
+  StrongFlowRoleWorkspaceMode,
   SupportedReleaseTarget,
   WorkspaceComponentDescriptor,
 } from '@winwincode/contracts'
+import {
+  STRONGFLOW_PERMISSION_PRESET_IDS,
+  STRONGFLOW_ROLE_IDS,
+  STRONGFLOW_ROLE_TOOLS,
+} from '@winwincode/contracts'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 const RELEASE_TARGET_BY_HOST = new Map<string, SupportedReleaseTarget>([
   ['darwin/arm64', 'aarch64-apple-darwin'],
@@ -138,6 +147,7 @@ export interface SessionOptions {
   readonly cwd: string
   readonly provider: string
   readonly model: string
+  readonly governedAuthority?: GovernedSessionAuthority
 }
 
 export interface ResumeOptions extends SessionOptions {
@@ -171,6 +181,48 @@ export interface ApprovalResponse {
   readonly decision: ApprovalDecision
 }
 
+export const GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION = 1 as const
+
+/** Immutable StrongFlow authority that must be applied before Codex starts a thread. */
+export interface GovernedSessionAuthority {
+  readonly schemaVersion: typeof GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
+  readonly roleId: StrongFlowRoleId
+  readonly permissionPreset: StrongFlowPermissionPresetId
+  readonly workspaceMode: StrongFlowRoleWorkspaceMode
+  readonly workspaceRoot: string
+  readonly systemInstructions: string
+  readonly reasoningEffort: string | null
+  readonly visibleTools: readonly StrongFlowRoleTool[]
+}
+
+/** Actual Codex thread settings observed after startup and before host publication. */
+export interface GovernedSessionEffectivePolicy {
+  readonly schemaVersion: typeof GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
+  readonly authority: 'codex-core'
+  readonly roleId: StrongFlowRoleId
+  readonly permissionPreset: StrongFlowPermissionPresetId
+  readonly workspaceMode: StrongFlowRoleWorkspaceMode
+  readonly workspaceRoot: string
+  readonly visibleTools: readonly StrongFlowRoleTool[]
+  readonly filesystem: 'managed-read-only' | 'managed-workspace-write'
+  readonly network: 'restricted'
+  readonly process: 'dynamic-tools-only'
+  readonly environment: 'empty'
+  readonly approvalPolicy: 'on-request'
+  readonly approvalsReviewer: 'user'
+  readonly loginShell: false
+  readonly environmentSelections: readonly []
+  readonly instructionSources: readonly []
+}
+
+/** Text result for one suspended Codex dynamic-tool call. */
+export interface DynamicToolResponse {
+  readonly sessionId: string
+  readonly callId: string
+  readonly success: boolean
+  readonly text: string
+}
+
 export interface KernelBuildInfo {
   readonly interfaceVersion: number
   readonly codexTag: string
@@ -182,6 +234,7 @@ export interface KernelBuildInfo {
 export interface SessionInfo {
   readonly sessionId: string
   readonly rolloutPath?: string
+  readonly effectivePolicy?: GovernedSessionEffectivePolicy
 }
 
 export type SubmissionStatus = 'started' | 'steered' | 'not_submitted'
@@ -227,6 +280,7 @@ interface NativeSessionOptions {
   cwd: string
   provider: string
   model: string
+  governedAuthorityJson?: string
 }
 
 interface NativeResumeOptions extends NativeSessionOptions {
@@ -255,6 +309,13 @@ interface NativeApprovalResponse {
   rejection?: string
 }
 
+interface NativeDynamicToolResponse {
+  sessionId: string
+  callId: string
+  success: boolean
+  text: string
+}
+
 interface NativeBuildInfo {
   interfaceVersion: number
   codexTag: string
@@ -266,6 +327,7 @@ interface NativeBuildInfo {
 interface NativeSessionInfo {
   sessionId: string
   rolloutPath?: string | null
+  effectivePolicyJson?: string | null
 }
 
 interface NativeSubmissionInfo {
@@ -300,6 +362,7 @@ interface NativeKernelBinding {
   steer(options: NativeSteerOptions): Promise<NativeSubmissionInfo>
   interrupt(sessionId: string): Promise<string>
   resolveApproval(response: NativeApprovalResponse): Promise<string>
+  resolveDynamicTool(response: NativeDynamicToolResponse): Promise<string>
   nextEvent(sessionId: string, timeoutMillis?: number): Promise<NativeEventPoll>
   listSessions(): Promise<string[]>
   closeSession(sessionId: string): Promise<void>
@@ -448,6 +511,7 @@ function loadBinding(path: string): NativeBindingModule {
     'steer',
     'interrupt',
     'resolveApproval',
+    'resolveDynamicTool',
     'nextEvent',
     'listSessions',
     'closeSession',
@@ -493,11 +557,152 @@ function optionalString(value: string | null | undefined): string | undefined {
   return value === null ? undefined : value
 }
 
+function exactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string,
+): void {
+  const allowed = new Set([...required, ...optional])
+  if (
+    required.some(key => !Object.hasOwn(value, key))
+    || Object.keys(value).some(key => !allowed.has(key))
+  ) throw new KernelError('INVALID_ARGUMENT', `${label} has an unexpected shape`)
+}
+
+function governedAuthorityJson(
+  authority: GovernedSessionAuthority,
+  cwd: string,
+): string {
+  if (!isRecord(authority) || Array.isArray(authority)) {
+    throw new KernelError('INVALID_ARGUMENT', 'governed session authority must be an object')
+  }
+  exactKeys(authority, [
+    'schemaVersion',
+    'roleId',
+    'permissionPreset',
+    'workspaceMode',
+    'workspaceRoot',
+    'systemInstructions',
+    'reasoningEffort',
+    'visibleTools',
+  ], [], 'governed session authority')
+  if (
+    authority.schemaVersion !== GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
+    || !STRONGFLOW_ROLE_IDS.includes(authority.roleId)
+    || !STRONGFLOW_PERMISSION_PRESET_IDS.includes(authority.permissionPreset)
+    || !['source-read-only', 'candidate-read-only', 'candidate-write'].includes(
+      authority.workspaceMode,
+    )
+    || typeof authority.workspaceRoot !== 'string'
+    || !isAbsolute(authority.workspaceRoot)
+    || resolve(authority.workspaceRoot) !== resolve(cwd)
+    || typeof authority.systemInstructions !== 'string'
+    || authority.systemInstructions.trim().length === 0
+    || (
+      authority.reasoningEffort !== null
+      && (
+        typeof authority.reasoningEffort !== 'string'
+        || authority.reasoningEffort.trim().length === 0
+      )
+    )
+    || !Array.isArray(authority.visibleTools)
+    || new Set(authority.visibleTools).size !== authority.visibleTools.length
+    || authority.visibleTools.some(tool => !STRONGFLOW_ROLE_TOOLS.includes(tool))
+  ) throw new KernelError('INVALID_ARGUMENT', 'governed session authority is invalid')
+  return JSON.stringify(authority)
+}
+
+function effectivePolicy(value: string): GovernedSessionEffectivePolicy {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value) as unknown
+  } catch (error) {
+    throw new KernelError(
+      'NATIVE_PROTOCOL_INVALID',
+      'native kernel returned invalid effective-policy JSON',
+      error,
+    )
+  }
+  if (!isRecord(parsed) || Array.isArray(parsed)) {
+    throw new KernelError('NATIVE_PROTOCOL_INVALID', 'native effective policy is not an object')
+  }
+  try {
+    exactKeys(parsed, [
+      'schemaVersion',
+      'authority',
+      'roleId',
+      'permissionPreset',
+      'workspaceMode',
+      'workspaceRoot',
+      'visibleTools',
+      'filesystem',
+      'network',
+      'process',
+      'environment',
+      'approvalPolicy',
+      'approvalsReviewer',
+      'loginShell',
+      'environmentSelections',
+      'instructionSources',
+    ], [], 'native effective policy')
+  } catch (error) {
+    throw new KernelError(
+      'NATIVE_PROTOCOL_INVALID',
+      'native effective policy has an unexpected shape',
+      error,
+    )
+  }
+  if (
+    parsed.schemaVersion !== GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
+    || parsed.authority !== 'codex-core'
+    || typeof parsed.roleId !== 'string'
+    || !STRONGFLOW_ROLE_IDS.includes(parsed.roleId as StrongFlowRoleId)
+    || typeof parsed.permissionPreset !== 'string'
+    || !STRONGFLOW_PERMISSION_PRESET_IDS.includes(
+      parsed.permissionPreset as StrongFlowPermissionPresetId,
+    )
+    || !['source-read-only', 'candidate-read-only', 'candidate-write'].includes(
+      String(parsed.workspaceMode),
+    )
+    || typeof parsed.workspaceRoot !== 'string'
+    || !isAbsolute(parsed.workspaceRoot)
+    || !Array.isArray(parsed.visibleTools)
+    || new Set(parsed.visibleTools).size !== parsed.visibleTools.length
+    || parsed.visibleTools.some(tool => (
+      typeof tool !== 'string'
+      || !STRONGFLOW_ROLE_TOOLS.includes(tool as StrongFlowRoleTool)
+    ))
+    || !['managed-read-only', 'managed-workspace-write'].includes(String(parsed.filesystem))
+    || parsed.network !== 'restricted'
+    || parsed.process !== 'dynamic-tools-only'
+    || parsed.environment !== 'empty'
+    || parsed.approvalPolicy !== 'on-request'
+    || parsed.approvalsReviewer !== 'user'
+    || parsed.loginShell !== false
+    || !Array.isArray(parsed.environmentSelections)
+    || parsed.environmentSelections.length !== 0
+    || !Array.isArray(parsed.instructionSources)
+    || parsed.instructionSources.length !== 0
+  ) throw new KernelError('NATIVE_PROTOCOL_INVALID', 'native effective policy is invalid')
+  return Object.freeze({
+    ...parsed,
+    visibleTools: Object.freeze([...parsed.visibleTools] as StrongFlowRoleTool[]),
+    environmentSelections: Object.freeze([]),
+    instructionSources: Object.freeze([]),
+  }) as GovernedSessionEffectivePolicy
+}
+
 function sessionInfo(info: NativeSessionInfo): SessionInfo {
   const rolloutPath = optionalString(info.rolloutPath)
-  return rolloutPath === undefined
-    ? { sessionId: info.sessionId }
-    : { sessionId: info.sessionId, rolloutPath }
+  const effectivePolicyJson = optionalString(info.effectivePolicyJson)
+  return Object.freeze({
+    sessionId: info.sessionId,
+    ...(rolloutPath === undefined ? {} : { rolloutPath }),
+    ...(effectivePolicyJson === undefined
+      ? {}
+      : { effectivePolicy: effectivePolicy(effectivePolicyJson) }),
+  })
 }
 
 function submissionInfo(info: NativeSubmissionInfo): SubmissionInfo {
@@ -561,7 +766,30 @@ function nativeSessionOptions(options: SessionOptions): NativeSessionOptions {
     cwd: options.cwd,
     provider: options.provider,
     model: options.model,
+    ...(options.governedAuthority === undefined
+      ? {}
+      : { governedAuthorityJson: governedAuthorityJson(options.governedAuthority, options.cwd) }),
   }
+}
+
+function nativeDynamicToolResponse(response: DynamicToolResponse): NativeDynamicToolResponse {
+  if (
+    !isRecord(response)
+    || Array.isArray(response)
+    || typeof response.sessionId !== 'string'
+    || response.sessionId.trim().length === 0
+    || typeof response.callId !== 'string'
+    || response.callId.trim().length === 0
+    || typeof response.success !== 'boolean'
+    || typeof response.text !== 'string'
+  ) throw new KernelError('INVALID_DYNAMIC_TOOL_RESPONSE', 'dynamic-tool response is invalid')
+  exactKeys(
+    response,
+    ['sessionId', 'callId', 'success', 'text'],
+    [],
+    'dynamic-tool response',
+  )
+  return { ...response }
 }
 
 function nativeApprovalResponse(response: ApprovalResponse): NativeApprovalResponse {
@@ -707,6 +935,14 @@ export class WinWinCodeKernel {
   async resolveApproval(response: ApprovalResponse): Promise<string> {
     try {
       return await this.#binding.resolveApproval(nativeApprovalResponse(response))
+    } catch (error) {
+      throw translateError(error)
+    }
+  }
+
+  async resolveDynamicTool(response: DynamicToolResponse): Promise<string> {
+    try {
+      return await this.#binding.resolveDynamicTool(nativeDynamicToolResponse(response))
     } catch (error) {
       throw translateError(error)
     }

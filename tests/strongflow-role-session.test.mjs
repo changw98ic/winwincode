@@ -88,6 +88,31 @@ function waitForStop(signal, close) {
   return Promise.race([close.promise, aborted])
 }
 
+function effectivePolicyFor(options) {
+  const authority = options.governedAuthority
+  assert.ok(authority, 'StrongFlow must provide native authority before session creation')
+  return Object.freeze({
+    schemaVersion: 1,
+    authority: 'codex-core',
+    roleId: authority.roleId,
+    permissionPreset: authority.permissionPreset,
+    workspaceMode: authority.workspaceMode,
+    workspaceRoot: authority.workspaceRoot,
+    visibleTools: Object.freeze([...authority.visibleTools]),
+    filesystem: authority.workspaceMode === 'candidate-write'
+      ? 'managed-workspace-write'
+      : 'managed-read-only',
+    network: 'restricted',
+    process: 'dynamic-tools-only',
+    environment: 'empty',
+    approvalPolicy: 'on-request',
+    approvalsReviewer: 'user',
+    loginShell: false,
+    environmentSelections: Object.freeze([]),
+    instructionSources: Object.freeze([]),
+  })
+}
+
 class FakeKernel {
   constructor(home, sequences = [1n]) {
     this.home = home
@@ -105,12 +130,12 @@ class FakeKernel {
 
   async createSession(options) {
     this.creates.push(structuredClone(options))
-    return this.#newSession('created')
+    return this.#newSession('created', options)
   }
 
   async resumeSession(options) {
     this.resumes.push(structuredClone(options))
-    return this.#newSession('resumed')
+    return this.#newSession('resumed', options)
   }
 
   async submitTurn(sessionId, text) {
@@ -121,6 +146,14 @@ class FakeKernel {
   async interrupt(sessionId) {
     this.interrupts.push(sessionId)
     return `interrupt-${sessionId}`
+  }
+
+  async resolveApproval() {
+    return 'approval-resolved'
+  }
+
+  async resolveDynamicTool() {
+    return 'dynamic-tool-resolved'
   }
 
   async closeSession(sessionId) {
@@ -147,13 +180,14 @@ class FakeKernel {
     this.sessions.get(sessionId)?.close.resolve()
   }
 
-  #newSession(source) {
+  #newSession(source, options) {
     const ordinal = this.nextSession++
     const sessionId = `${source}-kernel-${ordinal}`
     this.sessions.set(sessionId, { close: deferred() })
     return Object.freeze({
       sessionId,
       rolloutPath: join(this.home, `${source}-rollout-${ordinal}.jsonl`),
+      effectivePolicy: effectivePolicyFor(options),
     })
   }
 }
@@ -161,13 +195,39 @@ class FakeKernel {
 class MissingRolloutKernel extends FakeKernel {
   async createSession(options) {
     this.creates.push(structuredClone(options))
-    return Object.freeze({ sessionId: 'missing-rollout-kernel' })
+    return Object.freeze({
+      sessionId: 'missing-rollout-kernel',
+      effectivePolicy: effectivePolicyFor(options),
+    })
   }
 }
 
 class BrokenEventsKernel extends FakeKernel {
   events() {
     throw new Error('fixture event subscription failed')
+  }
+}
+
+class AlteredEvidenceKernel extends FakeKernel {
+  async createSession(options) {
+    const info = await super.createSession(options)
+    return Object.freeze({
+      ...info,
+      effectivePolicy: Object.freeze({
+        ...info.effectivePolicy,
+        network: 'enabled',
+      }),
+    })
+  }
+}
+
+class MissingEvidenceKernel extends FakeKernel {
+  async createSession(options) {
+    const info = await super.createSession(options)
+    return Object.freeze({
+      sessionId: info.sessionId,
+      rolloutPath: info.rolloutPath,
+    })
   }
 }
 
@@ -185,6 +245,7 @@ class RecordingInstaller {
     if (this.options.failure !== undefined) throw this.options.failure
     return Object.freeze({
       contextId: this.options.contextId ?? request.context.contextId,
+      handleEvent: event => this.options.onEvent?.(event),
       dispose: async disposal => {
         this.disposals.push(disposal)
         await this.options.onDispose?.(disposal)
@@ -341,11 +402,15 @@ test('publishes a role session only after its full context is installed and stor
   assert.ok(Object.isFrozen(strongFlowPermissionPolicyForRole('requirements')))
   assert.ok(Object.isFrozen(session.context.roleSpec.budget))
   assert.ok(Object.isFrozen(session.context.workspace))
-  assert.deepEqual(kernel.creates, [{
-    cwd: value.source,
-    provider: 'fixture-provider',
-    model: 'fixture-model',
-  }])
+  assert.equal(kernel.creates.length, 1)
+  assert.equal(kernel.creates[0].cwd, value.source)
+  assert.equal(kernel.creates[0].provider, 'fixture-provider')
+  assert.equal(kernel.creates[0].model, 'fixture-model')
+  assert.equal(kernel.creates[0].governedAuthority.roleId, 'requirements')
+  assert.deepEqual(
+    kernel.creates[0].governedAuthority.visibleTools,
+    strongFlowPermissionPolicyForRole('requirements').tools.allowed,
+  )
 
   const event = await session.events()[Symbol.asyncIterator]().next()
   assert.equal(event.done, false)
@@ -434,6 +499,31 @@ test('closes a native session that returns an invalid setup identity', async t =
   assert.equal(rootEntries.some(entry => /^[a-f0-9]{64}$/u.test(entry)), false)
 })
 
+test('rejects missing or partial kernel enforcement before publication', async t => {
+  for (const [name, Kernel] of [
+    ['missing-enforcement', MissingEvidenceKernel],
+    ['altered-enforcement', AlteredEvidenceKernel],
+  ]) {
+    await t.test(name, async t => {
+      const value = await fixture(t)
+      const kernel = new Kernel(value.home)
+      const installer = new RecordingInstaller()
+      const manager = new StrongFlowRoleSessionManager(managerOptions(value, kernel, installer))
+      const assignment = assignmentFor(value, 'executor', name)
+
+      await assert.rejects(
+        manager.create(assignment),
+        expectSessionError('ENFORCEMENT_UNAVAILABLE'),
+      )
+      assert.deepEqual(kernel.closes, ['created-kernel-1'])
+      assert.equal(installer.requests.length, 0)
+      assert.equal(manager.listSessions().length, 0)
+      const rootEntries = await readdir(join(value.home, 'strongflow-role-sessions'))
+      assert.equal(rootEntries.some(entry => /^[a-f0-9]{64}$/u.test(entry)), false)
+    })
+  }
+})
+
 test('does not publish a session whose ordered event subscription fails', async t => {
   const value = await fixture(t)
   const kernel = new BrokenEventsKernel(value.home)
@@ -478,12 +568,12 @@ test('resumes an abandoned generation with the exact stored role and workspace s
   assert.equal(resumed.context.contextId, first.context.contextId)
   assert.deepEqual(resumed.context.roleSpec, first.context.roleSpec)
   assert.deepEqual(resumed.context.workspace, first.context.workspace)
-  assert.deepEqual(secondKernel.resumes, [{
-    rolloutPath: first.kernel.rolloutPath,
-    cwd: value.verification.verifier,
-    provider: 'fixture-provider',
-    model: 'fixture-model',
-  }])
+  assert.equal(secondKernel.resumes.length, 1)
+  assert.equal(secondKernel.resumes[0].rolloutPath, first.kernel.rolloutPath)
+  assert.equal(secondKernel.resumes[0].cwd, value.verification.verifier)
+  assert.equal(secondKernel.resumes[0].provider, 'fixture-provider')
+  assert.equal(secondKernel.resumes[0].model, 'fixture-model')
+  assert.equal(secondKernel.resumes[0].governedAuthority.roleId, 'verifier')
   assert.equal(secondInstaller.requests[0].source, 'resume')
   assert.equal(secondInstaller.requests[0].context.contextId, first.context.contextId)
   const event = await resumed.events()[Symbol.asyncIterator]().next()

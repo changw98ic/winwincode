@@ -283,7 +283,7 @@ const buildInfo = {
   },
   target,
   profile,
-  nativeInterfaceVersion: 2,
+  nativeInterfaceVersion: 3,
   source: {
     winwincode: {
       repository: workspaceManifest.repository

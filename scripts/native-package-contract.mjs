@@ -218,8 +218,8 @@ export function verifyNativePrebuild({
   }
   if (buildInfo.schemaVersion !== 2) errors.push('build-info schemaVersion is not 2')
   if (buildInfo.target !== target) errors.push('build-info target does not match package')
-  if (buildInfo.nativeInterfaceVersion !== 2) {
-    errors.push('build-info native interface version is not 2')
+  if (buildInfo.nativeInterfaceVersion !== 3) {
+    errors.push('build-info native interface version is not 3')
   }
   if (buildInfo.package?.name !== configuration.packageName) {
     errors.push('build-info package name does not match')

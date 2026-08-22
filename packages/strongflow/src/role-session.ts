@@ -33,7 +33,10 @@ import {
   type StrongFlowRoleWorkspaceAssignment,
 } from '@winwincode/contracts'
 import type {
+  ApprovalResponse,
+  DynamicToolResponse,
   EventStreamOptions,
+  GovernedSessionEffectivePolicy,
   KernelEvent,
   ResumeOptions,
   SessionInfo,
@@ -41,7 +44,13 @@ import type {
   SubmissionInfo,
 } from '@winwincode/native'
 
-export const STRONGFLOW_ROLE_SESSION_SCHEMA_VERSION = 1 as const
+import {
+  StrongFlowRoleAuthorityError,
+  createStrongFlowRoleKernelAuthority,
+  verifyStrongFlowRoleKernelEvidence,
+} from './role-authority.js'
+
+export const STRONGFLOW_ROLE_SESSION_SCHEMA_VERSION = 2 as const
 
 const LINEAGE_PREFIX = 'kernel-lineage-sha256-'
 const CONTEXT_PREFIX = 'role-context-sha256-'
@@ -75,6 +84,7 @@ export type StrongFlowRoleSessionErrorCode =
   | 'ROLE_SNAPSHOT_MISMATCH'
   | 'CONTEXT_SNAPSHOT_MISMATCH'
   | 'CONTEXT_INSTALLATION_MISMATCH'
+  | 'ENFORCEMENT_UNAVAILABLE'
   | 'SESSION_SETUP_FAILED'
   | 'SESSION_SETUP_ROLLBACK_FAILED'
   | 'SESSION_STORE_CORRUPT'
@@ -129,6 +139,7 @@ export interface StrongFlowRoleKernelLifecycle {
   readonly kernelStreamId: string
   readonly rolloutPath: string
   readonly acceptedAtMillis: number
+  readonly effectivePolicy: GovernedSessionEffectivePolicy
 }
 
 export interface StrongFlowRoleKernelEvent {
@@ -154,6 +165,7 @@ export interface StrongFlowRoleContextInstallationDisposal {
 
 export interface StrongFlowRoleContextInstallation {
   readonly contextId: StrongFlowRoleContextId
+  handleEvent(event: StrongFlowRoleKernelEvent): Promise<void> | void
   dispose(disposal: StrongFlowRoleContextInstallationDisposal): Promise<void> | void
 }
 
@@ -170,6 +182,8 @@ export interface StrongFlowRoleKernelPort {
   resumeSession(options: ResumeOptions): Promise<SessionInfo>
   submitTurn(sessionId: string, text: string): Promise<SubmissionInfo>
   interrupt(sessionId: string): Promise<string>
+  resolveApproval(response: ApprovalResponse): Promise<string>
+  resolveDynamicTool(response: DynamicToolResponse): Promise<string>
   closeSession(sessionId: string): Promise<void>
   events(sessionId: string, options?: EventStreamOptions): AsyncIterable<KernelEvent>
 }
@@ -666,6 +680,7 @@ function parseAcceptedRecord(value: Record<string, unknown>): AcceptedLifecycleR
     'kernelStreamId',
     'rolloutPath',
     'acceptedAtMillis',
+    'effectivePolicy',
   ], [], 'accepted lifecycle record')
   if (value.schemaVersion !== STRONGFLOW_ROLE_SESSION_SCHEMA_VERSION) {
     throw new Error('accepted lifecycle schema version is unsupported')
@@ -687,6 +702,9 @@ function parseAcceptedRecord(value: Record<string, unknown>): AcceptedLifecycleR
   if (!Number.isSafeInteger(value.acceptedAtMillis) || Number(value.acceptedAtMillis) < 0) {
     throw new Error('accepted lifecycle time is invalid')
   }
+  if (!isRecord(value.effectivePolicy)) {
+    throw new Error('accepted lifecycle effective policy is invalid')
+  }
   return Object.freeze({
     schemaVersion: STRONGFLOW_ROLE_SESSION_SCHEMA_VERSION,
     recordType: 'kernel.accepted',
@@ -696,6 +714,9 @@ function parseAcceptedRecord(value: Record<string, unknown>): AcceptedLifecycleR
     kernelStreamId: value.kernelStreamId,
     rolloutPath: resolve(value.rolloutPath),
     acceptedAtMillis: Number(value.acceptedAtMillis),
+    effectivePolicy: immutableJson(
+      structuredClone(value.effectivePolicy),
+    ) as unknown as GovernedSessionEffectivePolicy,
   })
 }
 
@@ -880,6 +901,9 @@ async function loadStoredSession(
           record.kernelSessionId,
         )
       ) throw new Error('stored kernel stream identity is inconsistent')
+      if (record.recordType === 'kernel.accepted') {
+        verifyStrongFlowRoleKernelEvidence(context, record.effectivePolicy)
+      }
     }
     const latestAccepted = records.findLast(
       (record): record is AcceptedLifecycleRecord => record.recordType === 'kernel.accepted',
@@ -1048,11 +1072,18 @@ function acceptedLifecycle(
 ): AcceptedLifecycleRecord {
   try {
     if (!isRecord(info)) throw new Error('native session info must be an object')
-    exactKeys(info, ['sessionId'], ['rolloutPath'], 'native session info')
+    if (!Object.hasOwn(info, 'effectivePolicy')) {
+      throw new StrongFlowRoleSessionError(
+        'ENFORCEMENT_UNAVAILABLE',
+        `native kernel returned no effective policy for role ${context.roleSpec.id}`,
+      )
+    }
+    exactKeys(info, ['sessionId', 'effectivePolicy'], ['rolloutPath'], 'native session info')
     const kernelSessionId = KernelSessionId(info.sessionId)
     if (typeof info.rolloutPath !== 'string' || !isAbsolute(info.rolloutPath)) {
       throw new Error('native session has no absolute rollout path')
     }
+    const effectivePolicy = verifyStrongFlowRoleKernelEvidence(context, info.effectivePolicy)
     return Object.freeze({
       schemaVersion: STRONGFLOW_ROLE_SESSION_SCHEMA_VERSION,
       recordType: 'kernel.accepted',
@@ -1066,9 +1097,20 @@ function acceptedLifecycle(
       ),
       rolloutPath: resolve(info.rolloutPath),
       acceptedAtMillis: Math.max(safeNow(now), notBeforeMillis),
+      effectivePolicy,
     })
   } catch (error) {
     if (error instanceof StrongFlowRoleSessionError) throw error
+    if (
+      error instanceof StrongFlowRoleAuthorityError
+      && error.code === 'ENFORCEMENT_UNAVAILABLE'
+    ) {
+      throw new StrongFlowRoleSessionError(
+        'ENFORCEMENT_UNAVAILABLE',
+        `native kernel enforcement is incomplete for role ${context.roleSpec.id}`,
+        { cause: error },
+      )
+    }
     throw new StrongFlowRoleSessionError(
       'SESSION_SETUP_FAILED',
       'native kernel returned invalid role-session identity',
@@ -1085,6 +1127,7 @@ function publicKernelLifecycle(record: AcceptedLifecycleRecord): StrongFlowRoleK
     kernelStreamId: record.kernelStreamId,
     rolloutPath: record.rolloutPath,
     acceptedAtMillis: record.acceptedAtMillis,
+    effectivePolicy: record.effectivePolicy,
   })
 }
 
@@ -1099,7 +1142,11 @@ function validateInstallation(
     )
   }
   try {
-    if (value.contextId !== context.contextId || typeof value.dispose !== 'function') {
+    if (
+      value.contextId !== context.contextId
+      || typeof value.handleEvent !== 'function'
+      || typeof value.dispose !== 'function'
+    ) {
       throw new Error('installed context identity or disposer is invalid')
     }
     return value as unknown as StrongFlowRoleContextInstallation
@@ -1410,14 +1457,18 @@ class ManagedStrongFlowRoleSession implements StrongFlowRoleSession {
           )
         }
         previousSequence = event.sequence
-        await this.#eventQueue.push(Object.freeze({
+        const governedEvent = Object.freeze({
           kernelSessionLineageId: this.context.kernelSessionLineageId,
           contextId: this.context.contextId,
           generation: this.kernel.generation,
           kernelSessionId: this.kernel.kernelSessionId,
           kernelStreamId: this.kernel.kernelStreamId,
           event,
-        }))
+        })
+        if (this.#installation !== undefined) {
+          await this.#installation.handleEvent(governedEvent)
+        }
+        await this.#eventQueue.push(governedEvent)
         result = await iterator.next()
       }
       if (!this.#eventAbort.signal.aborted) {
@@ -1547,6 +1598,8 @@ export class StrongFlowRoleSessionManager {
       || typeof options.kernel.resumeSession !== 'function'
       || typeof options.kernel.submitTurn !== 'function'
       || typeof options.kernel.interrupt !== 'function'
+      || typeof options.kernel.resolveApproval !== 'function'
+      || typeof options.kernel.resolveDynamicTool !== 'function'
       || typeof options.kernel.closeSession !== 'function'
       || typeof options.kernel.events !== 'function'
     ) {
@@ -1606,6 +1659,7 @@ export class StrongFlowRoleSessionManager {
         cwd: context.workspace.path,
         provider: context.roleSpec.modelRoute.provider,
         model: context.roleSpec.modelRoute.model,
+        governedAuthority: createStrongFlowRoleKernelAuthority(context),
       })
       const accepted = await this.#acceptNativeSession(context, info, 1, 'create')
       const prepared = await this.#prepare(context, accepted)
@@ -1695,6 +1749,7 @@ export class StrongFlowRoleSessionManager {
         cwd: stored.context.workspace.path,
         provider: stored.context.roleSpec.modelRoute.provider,
         model: stored.context.roleSpec.modelRoute.model,
+        governedAuthority: createStrongFlowRoleKernelAuthority(stored.context),
       })
       const accepted = await this.#acceptNativeSession(
         stored.context,

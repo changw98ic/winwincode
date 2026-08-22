@@ -132,8 +132,8 @@ try {
   if (JSON.stringify(report.packageBuildInfo) !== JSON.stringify(expectedBuild)) {
     failures.push('installed package reported a different build identity')
   }
-  if (report.kernelBuildInfo?.interfaceVersion !== 2) {
-    failures.push('installed native interface version is not 2')
+  if (report.kernelBuildInfo?.interfaceVersion !== 3) {
+    failures.push('installed native interface version is not 3')
   }
   if (report.kernelBuildInfo?.codexCommit !== expectedBuild.source.codex.commit) {
     failures.push('installed kernel Codex commit does not match package source identity')

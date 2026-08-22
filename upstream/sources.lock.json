@@ -608,6 +608,14 @@
       ]
     },
     {
+      "id": "codex-resume-with-caller-options",
+      "file": "upstream/patches/codex/0004-resume-with-caller-options.patch",
+      "planned": false,
+      "targets": [
+        "codex-rs/core/src/thread_manager.rs"
+      ]
+    },
+    {
       "id": "dsh-winwincode-profile",
       "file": "packages/dsh-profile/cordis.patch.yml",
       "planned": false,

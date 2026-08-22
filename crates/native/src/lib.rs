@@ -26,6 +26,7 @@ use tokio::runtime::Builder;
 use winwincode_kernel::ApprovalDecision as KernelApprovalDecision;
 use winwincode_kernel::ApprovalKind as KernelApprovalKind;
 use winwincode_kernel::ApprovalResponse as KernelApprovalResponse;
+use winwincode_kernel::DynamicToolCallResponse as KernelDynamicToolCallResponse;
 use winwincode_kernel::EventPoll;
 use winwincode_kernel::ForkOptions as KernelForkOptions;
 use winwincode_kernel::Kernel;
@@ -190,6 +191,8 @@ pub struct NativeSessionOptions {
     pub provider: String,
     /// Exact model identifier within the provider route.
     pub model: String,
+    /// Strict `StrongFlow` role authority JSON. Omitted for ordinary DSH chat sessions.
+    pub governed_authority_json: Option<String>,
 }
 
 /// JavaScript resume options.
@@ -203,6 +206,8 @@ pub struct NativeResumeOptions {
     pub provider: String,
     /// Exact model identifier within the provider route.
     pub model: String,
+    /// Strict `StrongFlow` role authority JSON. Omitted for ordinary DSH chat sessions.
+    pub governed_authority_json: Option<String>,
 }
 
 /// JavaScript fork options.
@@ -246,6 +251,15 @@ pub struct NativeApprovalResponse {
     pub rejection: Option<String>,
 }
 
+/// JavaScript response for one suspended `StrongFlow` dynamic-tool call.
+#[napi(object)]
+pub struct NativeDynamicToolResponse {
+    pub session_id: String,
+    pub call_id: String,
+    pub success: bool,
+    pub text: String,
+}
+
 /// Build identity returned to the host.
 #[napi(object)]
 pub struct NativeBuildInfo {
@@ -261,6 +275,7 @@ pub struct NativeBuildInfo {
 pub struct NativeSessionInfo {
     pub session_id: String,
     pub rollout_path: Option<String>,
+    pub effective_policy_json: Option<String>,
 }
 
 /// Ordered event returned to the host.
@@ -364,8 +379,14 @@ impl NativeKernel {
     /// Returns a typed native error when the kernel cannot create the session.
     #[napi]
     pub async fn create_session(&self, options: NativeSessionOptions) -> Result<NativeSessionInfo> {
+        let options = kernel_session_options(
+            options.cwd,
+            options.provider,
+            options.model,
+            options.governed_authority_json,
+        )?;
         self.kernel
-            .create_session(options.into())
+            .create_session(options)
             .await
             .map(Into::into)
             .map_err(|error| to_napi_error(&error))
@@ -379,15 +400,14 @@ impl NativeKernel {
     #[napi]
     pub async fn resume_session(&self, options: NativeResumeOptions) -> Result<NativeSessionInfo> {
         let rollout_path = PathBuf::from(options.rollout_path);
+        let session_options = kernel_session_options(
+            options.cwd,
+            options.provider,
+            options.model,
+            options.governed_authority_json,
+        )?;
         self.kernel
-            .resume_session(
-                rollout_path,
-                SessionOptions {
-                    cwd: PathBuf::from(options.cwd),
-                    provider: options.provider,
-                    model: options.model,
-                },
-            )
+            .resume_session(rollout_path, session_options)
             .await
             .map(Into::into)
             .map_err(|error| to_napi_error(&error))
@@ -471,6 +491,27 @@ impl NativeKernel {
             .map_err(|error| to_napi_error(&error))
     }
 
+    /// Resolve one pending `StrongFlow` dynamic-tool call by its source identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed native error for invalid identities or a rejected Codex submission.
+    #[napi]
+    pub async fn resolve_dynamic_tool(
+        &self,
+        response: NativeDynamicToolResponse,
+    ) -> Result<String> {
+        self.kernel
+            .resolve_dynamic_tool(KernelDynamicToolCallResponse {
+                session_id: response.session_id,
+                call_id: response.call_id,
+                success: response.success,
+                text: response.text,
+            })
+            .await
+            .map_err(|error| to_napi_error(&error))
+    }
+
     /// Read one ordered event and distinguish timeout from stream closure.
     ///
     /// # Errors
@@ -547,16 +588,6 @@ impl Drop for NativeKernel {
     }
 }
 
-impl From<NativeSessionOptions> for SessionOptions {
-    fn from(options: NativeSessionOptions) -> Self {
-        Self {
-            cwd: PathBuf::from(options.cwd),
-            provider: options.provider,
-            model: options.model,
-        }
-    }
-}
-
 impl From<KernelBuildInfo> for NativeBuildInfo {
     fn from(info: KernelBuildInfo) -> Self {
         Self {
@@ -574,6 +605,7 @@ impl From<SessionInfo> for NativeSessionInfo {
         Self {
             session_id: info.session_id,
             rollout_path: info.rollout_path,
+            effective_policy_json: info.effective_policy_json,
         }
     }
 }
@@ -632,6 +664,24 @@ fn to_napi_error(error: &KernelFailure) -> Error {
         Status::GenericFailure,
         format!("{ERROR_PREFIX}|{}|{}", error.code(), error.message()),
     )
+}
+
+fn kernel_session_options(
+    cwd: String,
+    provider: String,
+    model: String,
+    governed_authority_json: Option<String>,
+) -> Result<SessionOptions> {
+    let governed_authority = governed_authority_json
+        .map(|value| winwincode_kernel::GovernedSessionAuthority::from_json(&value))
+        .transpose()
+        .map_err(|error| to_napi_error(&error))?;
+    Ok(SessionOptions {
+        cwd: PathBuf::from(cwd),
+        provider,
+        model,
+        governed_authority,
+    })
 }
 
 fn kernel_approval_response(response: NativeApprovalResponse) -> Result<KernelApprovalResponse> {

@@ -1,0 +1,39 @@
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 27c3dfb..856a7c0 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1005,0 +1006,34 @@ impl ThreadManager {
++    /// Resume a rollout while preserving caller-owned tools, environments, and extensions.
++    ///
++    /// Product hosts that enforce a fixed per-thread tool surface must use this entry point
++    /// instead of restoring tool choices from persisted history or thread defaults.
++    pub async fn resume_thread_from_rollout_with_options(
++        &self,
++        mut options: StartThreadOptions,
++        rollout_path: PathBuf,
++        auth_manager: Arc<AuthManager>,
++    ) -> CodexResult<NewThread> {
++        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
++        let agent_control = self.agent_control_for_config(&options.config);
++        let (session_source, thread_source) = initial_history
++            .get_resumed_session_sources()
++            .unwrap_or_else(|| (self.state.session_source.clone(), None));
++        if let InitialHistory::Resumed(resumed) = &initial_history
++            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
++            && !session_source.is_non_root_agent()
++        {
++            agent_control
++                .restore_v2_agent_metadata(&options.config, resumed.conversation_id)
++                .await;
++        }
++        options.initial_history = initial_history;
++        options.session_source = Some(session_source);
++        options.thread_source = thread_source;
++        Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
++            options,
++            auth_manager,
++            agent_control,
++        )))
++        .await
++    }
++

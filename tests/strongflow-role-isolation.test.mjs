@@ -147,6 +147,31 @@ function kernelEvent(sequence, type, data, turnId) {
   })
 }
 
+function effectivePolicyFor(options) {
+  const authority = options.governedAuthority
+  assert.ok(authority, 'role sessions must pass native authority before startup')
+  return Object.freeze({
+    schemaVersion: 1,
+    authority: 'codex-core',
+    roleId: authority.roleId,
+    permissionPreset: authority.permissionPreset,
+    workspaceMode: authority.workspaceMode,
+    workspaceRoot: authority.workspaceRoot,
+    visibleTools: Object.freeze([...authority.visibleTools]),
+    filesystem: authority.workspaceMode === 'candidate-write'
+      ? 'managed-workspace-write'
+      : 'managed-read-only',
+    network: 'restricted',
+    process: 'dynamic-tools-only',
+    environment: 'empty',
+    approvalPolicy: 'on-request',
+    approvalsReviewer: 'user',
+    loginShell: false,
+    environmentSelections: Object.freeze([]),
+    instructionSources: Object.freeze([]),
+  })
+}
+
 class InstrumentedRoleKernel {
   constructor(home, options = {}) {
     this.home = home
@@ -163,12 +188,12 @@ class InstrumentedRoleKernel {
 
   async createSession(options) {
     this.creates.push(structuredClone(options))
-    return this.#newSession('created')
+    return this.#newSession('created', options)
   }
 
   async resumeSession(options) {
     this.resumes.push(structuredClone(options))
-    return this.#newSession('resumed')
+    return this.#newSession('resumed', options)
   }
 
   bindContext(kernelSessionId, context) {
@@ -235,6 +260,14 @@ class InstrumentedRoleKernel {
     return `interrupt-${kernelSessionId}`
   }
 
+  async resolveApproval() {
+    return 'approval-resolved'
+  }
+
+  async resolveDynamicTool() {
+    return 'dynamic-tool-resolved'
+  }
+
   async closeSession(kernelSessionId) {
     this.closes.push(kernelSessionId)
     this.sessions.get(kernelSessionId)?.channel.close()
@@ -250,7 +283,7 @@ class InstrumentedRoleKernel {
     }
   }
 
-  #newSession(source) {
+  #newSession(source, options) {
     const ordinal = this.nextSession++
     const sessionId = `${source}-role-kernel-${ordinal}`
     this.sessions.set(sessionId, {
@@ -260,6 +293,7 @@ class InstrumentedRoleKernel {
     return Object.freeze({
       sessionId,
       rolloutPath: join(this.home, `${sessionId}.jsonl`),
+      effectivePolicy: effectivePolicyFor(options),
     })
   }
 }
@@ -279,6 +313,7 @@ class InstrumentedContextInstaller {
     this.kernel.bindContext(request.kernel.kernelSessionId, request.context)
     return Object.freeze({
       contextId: request.context.contextId,
+      handleEvent: () => {},
       dispose: disposal => {
         this.disposals.push({
           roleId: request.context.roleSpec.id,
@@ -313,6 +348,7 @@ class RecordingNativeContextInstaller {
     this.requests.push(request)
     return Object.freeze({
       contextId: request.context.contextId,
+      handleEvent: () => {},
       dispose: disposal => {
         this.disposals.push({
           roleId: request.context.roleSpec.id,
@@ -540,8 +576,11 @@ test('all eight roles keep separate model, prompt, tool, workspace, and artifact
       call.provider === spec.modelRoute.provider
       && call.model === spec.modelRoute.model
       && call.cwd === session.context.workspace.path
+      && call.governedAuthority.roleId === spec.id
     ))
     assert.ok(expectedCreate, spec.id)
+    assert.equal(expectedCreate.governedAuthority.roleId, spec.id)
+    assert.deepEqual(expectedCreate.governedAuthority.visibleTools, permission.tools.allowed)
     const recorder = recorders.get(spec.id)
     assert.equal(recorder.events.length, 3)
     assert.equal(recorder.results.length, 1)
@@ -585,6 +624,7 @@ test('scripted DSH model streams drive all eight roles through the embedded Code
             model: options.model,
             roleId: assignment.roleId,
             contextId: assignment.contextId,
+            toolNames: options.tools?.map(tool => tool.name) ?? [],
             privateMarkers: assignment.inputs.map(input => input.value.privateMarker),
             signalMatches: options.signal === signal,
           })
@@ -642,6 +682,12 @@ test('scripted DSH model streams drive all eight roles through the embedded Code
       assert.ok(spec)
       assert.equal(call.provider, spec.modelRoute.provider)
       assert.equal(call.model, spec.modelRoute.model)
+      assert.deepEqual(
+        [...call.toolNames].sort(),
+        strongFlowPermissionPolicyForRole(call.roleId).tools.allowed.map(tool => (
+          tool.replace('.', '__')
+        )).sort(),
+      )
       assert.ok(call.privateMarkers.every(marker => (
         marker === `NATIVE_DSH_PRIVATE_${call.roleId}`
       )))
