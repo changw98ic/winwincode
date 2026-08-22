@@ -81,6 +81,7 @@ export type WinWinCodeAgentFactoryErrorCode =
   | 'INVALID_FACTORY_CONFIG'
   | 'MODEL_ROUTE_MISSING'
   | 'ROLLOUT_PATH_MISSING'
+  | 'ROLE_ID_MISMATCH'
   | 'PROJECTION_HISTORY_DIVERGED'
   | 'MESSAGE_CONTENT_UNSUPPORTED'
   | 'KERNEL_TURN_NOT_STARTED'
@@ -157,6 +158,27 @@ function sessionCwd(session: Session): string {
     )
   }
   return cwd
+}
+
+function sessionRoleId(session: Session, defaultRoleId: string): string {
+  const roleId = session.header.agentPreset ?? defaultRoleId
+  if (roleId.length === 0) {
+    throw new WinWinCodeAgentFactoryError(
+      'INVALID_FACTORY_CONFIG',
+      `DSH session ${session.id} resolved an empty WinWinCode role id`,
+    )
+  }
+  return roleId
+}
+
+function assertPersistedRole(session: Session, persistedRoleId: string): void {
+  const requestedRoleId = session.header.agentPreset
+  if (requestedRoleId !== undefined && requestedRoleId !== persistedRoleId) {
+    throw new WinWinCodeAgentFactoryError(
+      'ROLE_ID_MISMATCH',
+      `DSH session ${session.id} requests role ${requestedRoleId} but its runtime ledger records ${persistedRoleId}`,
+    )
+  }
 }
 
 function initialRoute(options: AgentOptions): ModelRoute {
@@ -826,6 +848,7 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
       ...(options.seed === undefined ? {} : { seed: options.seed }),
       ...(options.meta === undefined ? {} : { meta: options.meta }),
     })
+    const roleId = sessionRoleId(session, this.config.roleId)
     const route = initialRoute(options.agentOptions ?? {})
     let info: SessionInfo
     if (options.meta?.parentSession === undefined) {
@@ -857,12 +880,12 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
     const ledger = await RuntimeSessionLedger.create({
       home: this.config.home,
       dshSessionId: session.id,
-      roleId: this.config.roleId,
+      roleId,
       cwd: sessionCwd(session),
       ...native,
     })
     return this.setupAndPublish(ownerCtx, options, 'startup', {
-      agent: this.makeAgent(session, options.agentOptions ?? {}, ledger, native),
+      agent: this.makeAgent(session, options.agentOptions ?? {}, ledger, native, roleId),
       ledger,
       freshLedger: true,
     })
@@ -881,9 +904,10 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
       const session = preparation.session
       const ledger = await RuntimeSessionLedger.open(this.config.home, session.id)
       const snapshot = await ledger.read()
+      assertPersistedRole(session, snapshot.manifest.roleId)
       const projection = new DshRuntimeProjection({
         sessionId: session.id,
-        roleId: this.config.roleId,
+        roleId: snapshot.manifest.roleId,
         provider: snapshot.manifest.provider,
         model: snapshot.manifest.model,
       })
@@ -912,6 +936,7 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
           options.agentOptions ?? {},
           ledger,
           native,
+          snapshot.manifest.roleId,
           projection,
         ),
         ledger,
@@ -927,9 +952,10 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
     options: AgentOptions,
     ledger: RuntimeSessionLedger,
     native: NativeRuntimeState,
+    roleId: string,
     projection = new DshRuntimeProjection({
       sessionId: session.id,
-      roleId: this.config.roleId,
+      roleId,
       provider: native.provider,
       model: native.model,
     }),
@@ -941,7 +967,7 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
       projection,
       session,
       options,
-      roleId: this.config.roleId,
+      roleId,
       native,
     })
   }

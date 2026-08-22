@@ -1,5 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
+import { mountStrongFlowOperatorRemote } from './operator-remote-client.js'
+
 interface ConversationViewRegistration {
   readonly name: 'conversation.view'
   readonly id: 'strongflow'
@@ -24,7 +26,7 @@ export interface StrongFlowViewProps {
 }
 
 /** Client services required before the advanced conversation view is mounted. */
-export const inject = ['slots'] as const
+export const inject = ['slots', 'remote'] as const
 
 /**
  * Stable first StrongFlow seat. Later workbench slices replace this body on
@@ -36,12 +38,14 @@ export function StrongFlowView({ sessionId }: StrongFlowViewProps): string {
 }
 
 /** Adds StrongFlow as an opt-in tab while DSH's built-in Chat tab stays default. */
-export function apply(ctx: Context): void {
+export async function apply(ctx: Context): Promise<() => Promise<void>> {
   const { slots } = ctx as StrongFlowClientContext
+  const disposeRemote = await mountStrongFlowOperatorRemote(ctx)
   slots.inject('conversation.view', () => slots.register({
     name: 'conversation.view',
     id: 'strongflow',
     order: 100,
     label: () => 'StrongFlow',
   }, StrongFlowView))
+  return disposeRemote
 }

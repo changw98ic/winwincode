@@ -21,3 +21,9 @@ export interface WorkspaceComponentDescriptor {
 }
 
 export * from './runtime-events.js'
+export * from './strongflow-artifact.js'
+export * from './strongflow-handoff.js'
+export * from './strongflow-job.js'
+export * from './strongflow-operator.js'
+export * from './strongflow-role.js'
+export * from './strongflow-workspace.js'

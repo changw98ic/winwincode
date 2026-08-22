@@ -208,12 +208,65 @@ test('DSH AgentFactory runs a stock chat turn through one embedded kernel sessio
   const ledger = await RuntimeSessionLedger.open(home, 'dsh-chat-1')
   const snapshot = await ledger.read()
   assert.equal(snapshot.manifest.kernelSessionId, 'kernel-1')
+  assert.equal(snapshot.manifest.roleId, 'chat')
   assert.equal(snapshot.events.at(-1).kind, 'turn.completed')
   assert.equal(snapshot.records.filter(record => record.recordType === 'runtime.event').length, 5)
 
   await handle.dispose()
   assert.equal(ctx.agents.get(SessionId('dsh-chat-1')), undefined)
   assert.equal(ctx.sessions.get(SessionId('dsh-chat-1')), undefined)
+})
+
+test('stock Chat and a StrongFlow role share one embedded kernel with distinct identities', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'winwincode-agent-roles-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const kernel = new FixtureKernel()
+  const ctx = await mount(home, kernel)
+  t.after(() => ctx.fiber.dispose())
+
+  const chat = await ctx.agents.create({
+    sessionId: SessionId('dsh-shared-chat'),
+    meta: { cwd: home },
+    agentOptions: { provider: 'fixture', model: 'fixture-coder' },
+  })
+  const requirements = await ctx.agents.create({
+    sessionId: SessionId('dsh-shared-requirements'),
+    meta: { cwd: home, agentPreset: 'requirements' },
+    agentOptions: { provider: 'fixture', model: 'fixture-coder' },
+  })
+
+  chat.agent.followup(createUserMessage({
+    content: [{ type: 'text', text: 'chat turn' }],
+    source: { kind: 'user' },
+  }))
+  requirements.agent.followup(createUserMessage({
+    content: [{ type: 'text', text: 'requirements turn' }],
+    source: { kind: 'user' },
+  }))
+  await Promise.all([chat.agent.whenIdle(), requirements.agent.whenIdle()])
+
+  assert.equal(kernel.nextSession, 2)
+  assert.deepEqual(kernel.submissions.map(call => call.text).sort(), [
+    'chat turn',
+    'requirements turn',
+  ])
+  const chatLedger = await RuntimeSessionLedger.open(home, 'dsh-shared-chat')
+  const requirementsLedger = await RuntimeSessionLedger.open(
+    home,
+    'dsh-shared-requirements',
+  )
+  const [chatSnapshot, requirementsSnapshot] = await Promise.all([
+    chatLedger.read(),
+    requirementsLedger.read(),
+  ])
+  assert.equal(chatSnapshot.manifest.roleId, 'chat')
+  assert.equal(requirementsSnapshot.manifest.roleId, 'requirements')
+  assert.ok(chatSnapshot.events.every(event => event.source.roleId === 'chat'))
+  assert.ok(requirementsSnapshot.events.every(event => (
+    event.source.roleId === 'requirements'
+  )))
+
+  await Promise.all([chat.dispose(), requirements.dispose()])
 })
 
 test('the DSH model selector reopens Codex on the selected provider without a second loop', async t => {

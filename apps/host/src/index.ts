@@ -21,3 +21,5 @@ export function describeHost(
     components: Object.freeze([dshProfileComponent, strongFlowComponent, nativeComponent]),
   })
 }
+
+export * from './strongflow-cli.js'

@@ -59,6 +59,8 @@ async function* toolCall(options) {
   }
   const argumentsJson = JSON.stringify({
     cmd: 'printf native-model-port-tool-output',
+    // This fixture verifies tool events, not the user's interactive shell startup files.
+    login: false,
     sandbox_permissions: 'require_escalated',
     justification: 'Exercise the WinWinCode approval callback fixture.',
   })

@@ -125,6 +125,9 @@ test('WinWinCode composes as the final layer of a fresh DSH Web profile', () => 
     assert.deepEqual(byId.get('winwincode-strongflow'), {
       id: 'winwincode-strongflow',
       name: '@winwincode/strongflow',
+      config: {
+        home: { __jsExpr: "dshHomePath('winwincode')" },
+      },
     })
     assert.equal(byId.get('agent-presets')?.disabled, true)
     assert.equal(byId.get('ui-agent-preset')?.disabled, true)
@@ -159,7 +162,7 @@ test('WinWinCode composes as the final layer of a fresh DSH Web profile', () => 
   }
 })
 
-test('DSH chat stays default and the StrongFlow client contributes one opt-in tab', () => {
+test('DSH chat stays default and the StrongFlow client contributes one opt-in tab', async () => {
   assert.equal(chatSurface.default, true)
   assert.equal(strongFlowSurface.default, false)
 
@@ -181,12 +184,22 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
   const client = clientRegistration.factory(() => {
     throw new Error('StrongFlow requested an undeclared client module')
   })
-  assert.deepEqual([...client.inject], ['slots'])
+  assert.deepEqual([...client.inject], ['slots', 'remote'])
 
   let slotName
   let slotOptions
   let slotComponent
-  client.apply({
+  let remoteContribution
+  let remoteDisposed = false
+  const dispose = await client.apply({
+    remote: {
+      async $mount(contribution) {
+        remoteContribution = contribution
+        return async () => {
+          remoteDisposed = true
+        }
+      },
+    },
     slots: {
       inject(name, register) {
         slotName = name
@@ -198,6 +211,13 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
       },
     },
   })
+  assert.equal(remoteContribution.package, '@winwincode/strongflow')
+  assert.deepEqual(
+    [...remoteContribution.descriptors].map(descriptor => (
+      `${descriptor.namespace}/${descriptor.method}`
+    )),
+    ['strongflow/invoke'],
+  )
   assert.equal(slotName, 'conversation.view')
   assert.deepEqual(
     {
@@ -214,6 +234,8 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
     },
   )
   assert.match(slotComponent({ sessionId: 'session-fixture' }), /人工审核/u)
+  await dispose()
+  assert.equal(remoteDisposed, true)
 })
 
 test('the real DSH Web tree serves stock Chat and the StrongFlow client without a credential', {

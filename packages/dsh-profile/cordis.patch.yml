@@ -173,3 +173,5 @@
 
     - id: winwincode-strongflow
       name: '@winwincode/strongflow'
+      config:
+        home: !!js dshHomePath('winwincode')
