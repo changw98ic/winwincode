@@ -80,7 +80,13 @@ const packages = [
       `${nativePrebuild}/rust-dependencies.json`,
       `${nativePrebuild}/winwincode-kernel-helper`,
       `${nativePrebuild}/winwincode_native.node`,
-      ...(process.platform === 'linux' ? [`${nativePrebuild}/codex-linux-sandbox`] : []),
+      ...(process.platform === 'linux'
+        ? [
+            `${nativePrebuild}/codex-linux-sandbox`,
+            `${nativePrebuild}/codex-resources/bwrap`,
+            `${nativePrebuild}/codex-resources/bwrap.LICENSE`,
+          ]
+        : []),
     ],
   },
   {

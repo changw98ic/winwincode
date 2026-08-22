@@ -22,8 +22,11 @@ corepack pnpm build:native
 - `winwincode_native.node`：Node 原生模块；
 - `winwincode-kernel-helper`：Codex 文件系统和子进程内部入口；
 - `codex-linux-sandbox`：仅 Linux 提供，与 helper 是同一程序的固定名称入口；
+- `codex-resources/bwrap`：仅 Linux 提供，作为系统 bubblewrap 不可用时的后备程序；
 - `build-info.json`：源码身份、工具链、补丁列表、文件大小和 SHA-256；
 - `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`、`rust-dependencies.json` 和 `licenses/`：项目许可、第三方归属、目标专属依赖及其原始许可文件。
+
+Linux 构建机需要 `binutils`、`pkg-config` 和 `libcap` 开发文件。Ubuntu 24.04 默认用 AppArmor 限制用户命名空间，运行前还需要管理员允许实际使用的 `bwrap` 创建用户命名空间；其他没有这项限制的系统可以直接使用包内版本。GitHub 托管的 Linux 运行器会安装系统 `bubblewrap`，并只在这台临时机器上关闭该项 AppArmor 限制，再同时验证文件边界和网络隔离。原生发布 CI 不随提交自动运行；手动选择 `linux` 时只跑两个 Linux 目标，确认全绿后再手动选择 `macos` 做一次回归检查。
 
 `@winwincode/native` 是小型加载器。安装时只会选择当前主机对应的平台包；Windows 或其他处理器会明确报错，不会选择相近产物，也不会回退到外部 Codex CLI。
 
@@ -64,7 +67,7 @@ await kernel.shutdown()
 
 `events()` 每个会话只允许一个活动订阅者。事件序号使用 `bigint`，不会把 Rust 的 64 位序号截短。`resolveApproval()` 使用事件里的会话、审批和 turn 身份，把人工决定交回同一个 Codex 回调。原生错误会转换为带稳定 `code` 的 `KernelError`。调用方在进程退出前应显式执行 `shutdown()`。
 
-受管 StrongFlow 会话还提供 `executeGovernedCommand()`。调用方必须先在 StrongFlow 宿主层核对准确命令授权，再提交同一个会话、工具、参数和工作目录。原生内核从会话中取回角色和工作区，macOS 强制使用 Seatbelt，Linux 强制使用打包的 seccomp/Landlock helper。命令环境从空白开始，只生成隔离的 HOME/TMP 和固定基础变量；调用方只能增加 `LANG`、`LC_ALL`。网络、凭据敏感文件、工作区外写入和只读角色写入都会被操作系统拒绝。普通聊天会话调用该方法会返回 `GOVERNED_COMMAND_POLICY_DENIED`，缺少平台沙箱时不会普通运行。
+受管 StrongFlow 会话还提供 `executeGovernedCommand()`。调用方必须先在 StrongFlow 宿主层核对准确命令授权，再提交同一个会话、工具、参数和工作目录。原生内核从会话中取回角色和工作区，macOS 强制使用 Seatbelt，Linux 强制使用打包的 bubblewrap/seccomp helper。命令环境从空白开始，只生成隔离的 HOME/TMP 和固定基础变量；调用方只能增加 `LANG`、`LC_ALL`。网络、凭据敏感文件、工作区外写入和只读角色写入都会被操作系统拒绝。普通聊天会话调用该方法会返回 `GOVERNED_COMMAND_POLICY_DENIED`，缺少平台沙箱时不会普通运行。
 
 ```ts
 const result = await kernel.executeGovernedCommand({

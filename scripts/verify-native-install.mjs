@@ -145,6 +145,9 @@ try {
     failures.push('installed-kernel sandbox did not enforce the workspace boundary')
   }
   if (report.sandboxHelperBundled !== true) failures.push('Linux sandbox helper is missing')
+  if (report.bubblewrapBundled !== true) {
+    failures.push('bundled bubblewrap is missing or not executable')
+  }
   const expectedSandbox = process.platform === 'darwin' ? 'macos-seatbelt' : 'linux-seccomp'
   if (
     report.governed?.sandbox !== expectedSandbox
