@@ -157,7 +157,7 @@ function terminalStatus(reason: RuntimeTerminalReason | undefined): DshRuntimeRo
 }
 
 function rowStatus(event: RuntimeEvent): DshRuntimeRowStatus {
-  if (event.kind === 'approval.requested') return 'waiting'
+  if (event.kind === 'approval.requested' || event.kind === 'input.requested') return 'waiting'
   if (event.kind.endsWith('.started')) return 'active'
   if (event.kind === 'failure') return 'failed'
   if (event.kind.endsWith('.completed') || event.kind === 'turn.aborted') {
@@ -175,6 +175,10 @@ function entityId(event: RuntimeEvent): string {
   if (event.kind === 'approval.requested') {
     return `approval:${source.approvalId ?? event.id}`
   }
+  if (event.kind === 'input.requested') {
+    return `input:${source.approvalId ?? source.toolCallId ?? event.id}`
+  }
+  if (event.kind === 'plan.updated') return `plan:${source.itemId ?? source.turnId ?? event.id}`
   if (event.kind.startsWith('subagent.')) {
     return `subagent:${source.agentThreadId ?? source.agentPath ?? source.toolCallId ?? event.id}`
   }
@@ -472,7 +476,7 @@ export class DshRuntimeProjection {
       this.#turnNumber(this.#activeTurnId)
       return
     }
-    if (event.kind === 'approval.requested') {
+    if (event.kind === 'approval.requested' || event.kind === 'input.requested') {
       this.#status = 'awaiting_approval'
       return
     }
@@ -492,7 +496,7 @@ export class DshRuntimeProjection {
   }
 
   #updateApprovals(event: RuntimeEvent): void {
-    if (event.kind === 'approval.requested') {
+    if (event.kind === 'approval.requested' || event.kind === 'input.requested') {
       const id = event.source.approvalId ?? event.id
       this.#pendingApprovals.set(id, Object.freeze({
         id,

@@ -2,7 +2,6 @@
 
 #![recursion_limit = "256"]
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -27,11 +26,8 @@ use tokio::runtime::Builder;
 use winwincode_kernel::ApprovalDecision as KernelApprovalDecision;
 use winwincode_kernel::ApprovalKind as KernelApprovalKind;
 use winwincode_kernel::ApprovalResponse as KernelApprovalResponse;
-use winwincode_kernel::DynamicToolCallResponse as KernelDynamicToolCallResponse;
 use winwincode_kernel::EventPoll;
 use winwincode_kernel::ForkOptions as KernelForkOptions;
-use winwincode_kernel::GovernedCommandRequest as KernelGovernedCommandRequest;
-use winwincode_kernel::GovernedCommandResult as KernelGovernedCommandResult;
 use winwincode_kernel::Kernel;
 use winwincode_kernel::KernelBuildInfo;
 use winwincode_kernel::KernelEvent;
@@ -194,8 +190,8 @@ pub struct NativeSessionOptions {
     pub provider: String,
     /// Exact model identifier within the provider route.
     pub model: String,
-    /// Strict `StrongFlow` role authority JSON. Omitted for ordinary DSH chat sessions.
-    pub governed_authority_json: Option<String>,
+    /// Minimal `StrongFlow` role policy JSON. Omitted for ordinary DSH chat sessions.
+    pub role_policy_json: Option<String>,
 }
 
 /// JavaScript resume options.
@@ -209,8 +205,8 @@ pub struct NativeResumeOptions {
     pub provider: String,
     /// Exact model identifier within the provider route.
     pub model: String,
-    /// Strict `StrongFlow` role authority JSON. Omitted for ordinary DSH chat sessions.
-    pub governed_authority_json: Option<String>,
+    /// Minimal `StrongFlow` role policy JSON. Omitted for ordinary DSH chat sessions.
+    pub role_policy_json: Option<String>,
 }
 
 /// JavaScript fork options.
@@ -254,44 +250,6 @@ pub struct NativeApprovalResponse {
     pub rejection: Option<String>,
 }
 
-/// JavaScript response for one suspended `StrongFlow` dynamic-tool call.
-#[napi(object)]
-pub struct NativeDynamicToolResponse {
-    pub session_id: String,
-    pub call_id: String,
-    pub success: bool,
-    pub text: String,
-}
-
-/// One trusted command grant submitted to the stored governed role authority.
-#[napi(object)]
-pub struct NativeGovernedCommandRequest {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub command_id: String,
-    pub tool: String,
-    pub argv: Vec<String>,
-    pub cwd: String,
-    pub environment_json: String,
-    pub timeout_millis: u32,
-    pub output_limit_bytes: u32,
-}
-
-/// Bounded output and enforcement facts from one sandboxed governed command.
-#[napi(object)]
-pub struct NativeGovernedCommandResult {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub command_id: String,
-    pub status: String,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub sandbox: String,
-    pub network: String,
-    pub environment_names: Vec<String>,
-}
-
 /// Build identity returned to the host.
 #[napi(object)]
 pub struct NativeBuildInfo {
@@ -307,7 +265,6 @@ pub struct NativeBuildInfo {
 pub struct NativeSessionInfo {
     pub session_id: String,
     pub rollout_path: Option<String>,
-    pub effective_policy_json: Option<String>,
 }
 
 /// Ordered event returned to the host.
@@ -415,7 +372,7 @@ impl NativeKernel {
             options.cwd,
             options.provider,
             options.model,
-            options.governed_authority_json,
+            options.role_policy_json,
         )?;
         self.kernel
             .create_session(options)
@@ -436,7 +393,7 @@ impl NativeKernel {
             options.cwd,
             options.provider,
             options.model,
-            options.governed_authority_json,
+            options.role_policy_json,
         )?;
         self.kernel
             .resume_session(rollout_path, session_options)
@@ -519,82 +476,6 @@ impl NativeKernel {
         let response = kernel_approval_response(response)?;
         self.kernel
             .resolve_approval(response)
-            .await
-            .map_err(|error| to_napi_error(&error))
-    }
-
-    /// Resolve one pending `StrongFlow` dynamic-tool call by its source identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed native error for invalid identities or a rejected Codex submission.
-    #[napi]
-    pub async fn resolve_dynamic_tool(
-        &self,
-        response: NativeDynamicToolResponse,
-    ) -> Result<String> {
-        self.kernel
-            .resolve_dynamic_tool(KernelDynamicToolCallResponse {
-                session_id: response.session_id,
-                call_id: response.call_id,
-                success: response.success,
-                text: response.text,
-            })
-            .await
-            .map_err(|error| to_napi_error(&error))
-    }
-
-    /// Execute one trusted `StrongFlow` command through the native platform sandbox.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed policy or enforcement failure before unsandboxed execution is possible.
-    #[napi]
-    pub async fn execute_governed_command(
-        &self,
-        request: NativeGovernedCommandRequest,
-    ) -> Result<NativeGovernedCommandResult> {
-        let environment = serde_json::from_str::<HashMap<String, String>>(
-            &request.environment_json,
-        )
-        .map_err(|error| {
-            Error::new(
-                Status::InvalidArg,
-                format!("governed command environment is invalid: {error}"),
-            )
-        })?;
-        let output_limit_bytes = usize::try_from(request.output_limit_bytes)
-            .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
-        self.kernel
-            .execute_governed_command(KernelGovernedCommandRequest {
-                schema_version: request.schema_version,
-                session_id: request.session_id,
-                command_id: request.command_id,
-                tool: request.tool,
-                argv: request.argv,
-                cwd: PathBuf::from(request.cwd),
-                environment,
-                timeout: Duration::from_millis(u64::from(request.timeout_millis)),
-                output_limit_bytes,
-            })
-            .await
-            .map(Into::into)
-            .map_err(|error| to_napi_error(&error))
-    }
-
-    /// Cancel one active sandboxed `StrongFlow` command.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the session or command is no longer active.
-    #[napi]
-    pub async fn cancel_governed_command(
-        &self,
-        session_id: String,
-        command_id: String,
-    ) -> Result<()> {
-        self.kernel
-            .cancel_governed_command(&session_id, &command_id)
             .await
             .map_err(|error| to_napi_error(&error))
     }
@@ -692,7 +573,6 @@ impl From<SessionInfo> for NativeSessionInfo {
         Self {
             session_id: info.session_id,
             rollout_path: info.rollout_path,
-            effective_policy_json: info.effective_policy_json,
         }
     }
 }
@@ -746,23 +626,6 @@ impl From<ShutdownInfo> for NativeShutdownInfo {
     }
 }
 
-impl From<KernelGovernedCommandResult> for NativeGovernedCommandResult {
-    fn from(result: KernelGovernedCommandResult) -> Self {
-        Self {
-            schema_version: result.schema_version,
-            session_id: result.session_id,
-            command_id: result.command_id,
-            status: result.status.to_string(),
-            exit_code: result.exit_code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            sandbox: result.sandbox.to_string(),
-            network: result.network.to_string(),
-            environment_names: result.environment_names,
-        }
-    }
-}
-
 fn to_napi_error(error: &KernelFailure) -> Error {
     Error::new(
         Status::GenericFailure,
@@ -774,17 +637,17 @@ fn kernel_session_options(
     cwd: String,
     provider: String,
     model: String,
-    governed_authority_json: Option<String>,
+    role_policy_json: Option<String>,
 ) -> Result<SessionOptions> {
-    let governed_authority = governed_authority_json
-        .map(|value| winwincode_kernel::GovernedSessionAuthority::from_json(&value))
+    let role_policy = role_policy_json
+        .map(|value| winwincode_kernel::RoleSessionPolicy::from_json(&value))
         .transpose()
         .map_err(|error| to_napi_error(&error))?;
     Ok(SessionOptions {
         cwd: PathBuf::from(cwd),
         provider,
         model,
-        governed_authority,
+        role_policy,
     })
 }
 

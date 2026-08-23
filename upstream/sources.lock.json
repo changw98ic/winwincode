@@ -608,14 +608,6 @@
       ]
     },
     {
-      "id": "codex-resume-with-caller-options",
-      "file": "upstream/patches/codex/0004-resume-with-caller-options.patch",
-      "planned": false,
-      "targets": [
-        "codex-rs/core/src/thread_manager.rs"
-      ]
-    },
-    {
       "id": "codex-remount-split-bwrap-root-read-only",
       "file": "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
       "planned": false,

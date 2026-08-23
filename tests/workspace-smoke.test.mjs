@@ -78,24 +78,39 @@ test('native release workflow exposes separate manual Linux and macOS lanes', ()
     )
   }
   assert.equal(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '24.19.0')
+  assert.ok(workflow.includes('node scripts/run-native-release-gate.mjs'))
+  assert.ok(workflow.includes('--source-commit "${GITHUB_SHA}"'))
+  assert.ok(workflow.includes('--output release-artifacts'))
+  const releaseRunner = readFileSync(
+    resolve(root, 'scripts/run-native-release-gate.mjs'),
+    'utf8',
+  )
   for (const command of [
-    'corepack pnpm build:native --release --target ${{ matrix.target }}',
-    'node scripts/verify-native-package.mjs --target ${{ matrix.target }} --require-release',
-    'node scripts/verify-native-install.mjs --target ${{ matrix.target }} --require-release',
-    'node scripts/pack-native-release.mjs --target ${{ matrix.target }} --output release-artifacts',
+    "['pnpm', 'format:check']",
+    "['pnpm', 'lint']",
+    "['pnpm', 'test']",
+    "['scripts/verify-cpb-boundary.mjs']",
+    "['scripts/verify-upstream-lock.mjs']",
+    "['scripts/verify-native-package.mjs', '--target', options.target, '--require-release']",
+    "['scripts/verify-native-install.mjs', '--target', options.target, '--require-release']",
+    "['scripts/verify-installed-host.mjs', '--target', options.target, '--require-release']",
+    "['scripts/pack-native-release.mjs', '--target', options.target, '--output', options.output]",
   ]) {
-    assert.ok(workflow.includes(command), `native release workflow is missing ${command}`)
+    assert.ok(releaseRunner.includes(command), `native release runner is missing ${command}`)
   }
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
 })
 
 test('CLI package smoke exposes version and scaffold descriptor', () => {
+  const hostManifest = JSON.parse(
+    readFileSync(resolve(root, 'apps/host/package.json'), 'utf8'),
+  )
   const version = spawnSync(process.execPath, ['apps/host/dist/cli.js', '--version'], {
     cwd: root,
     encoding: 'utf8',
   })
   assert.equal(version.status, 0, version.stderr)
-  assert.equal(version.stdout.trim(), '0.0.0-dev.0')
+  assert.equal(version.stdout.trim(), hostManifest.version)
 
   const descriptor = spawnSync(process.execPath, ['apps/host/dist/cli.js', '--print-scaffold'], {
     cwd: root,

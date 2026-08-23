@@ -1,103 +1,14 @@
-import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
+import { strongFlowRoleSessionPolicy } from '@winwincode/contracts'
 import {
-  GOVERNED_COMMAND_SCHEMA_VERSION,
-  GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION,
-  KernelError,
   WinWinCodeKernel,
   nativePackageName,
   resolveReleaseTarget,
 } from '@winwincode/native'
-
-function governedAuthority(workspaceRoot, overrides = {}) {
-  return Object.freeze({
-    schemaVersion: GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION,
-    roleId: 'executor',
-    permissionPreset: 'candidate-write',
-    workspaceMode: 'candidate-write',
-    workspaceRoot,
-    systemInstructions: 'Execute only the installed-package governed smoke grant.',
-    reasoningEffort: 'medium',
-    visibleTools: Object.freeze([
-      'artifact.read',
-      'artifact.write',
-      'workspace.read',
-      'code.search',
-      'candidate.diff',
-      'command.run',
-      'test.run',
-      'candidate.patch',
-    ]),
-    ...overrides,
-  })
-}
-
-function governedCommand(sessionId, commandId, argv, cwd, overrides = {}) {
-  return Object.freeze({
-    schemaVersion: GOVERNED_COMMAND_SCHEMA_VERSION,
-    sessionId,
-    commandId,
-    tool: 'command.run',
-    argv: Object.freeze(argv),
-    cwd,
-    environment: Object.freeze({ LANG: 'C.UTF-8' }),
-    timeoutMillis: 10_000,
-    outputLimitBytes: 1_048_576,
-    ...overrides,
-  })
-}
-
-function outputSummary(output) {
-  return Object.freeze({
-    bytes: Buffer.byteLength(output, 'utf8'),
-    sha256: createHash('sha256').update(output, 'utf8').digest('hex'),
-  })
-}
-
-function governedDiagnostic(result) {
-  let category
-  switch (result.status) {
-    case 'exited':
-      category = result.exitCode === 0 ? 'exited-zero' : 'exited-nonzero'
-      break
-    case 'sandbox-denied':
-      category = 'sandbox-policy-denial'
-      break
-    case 'timed-out':
-      category = 'deadline-enforced'
-      break
-    case 'cancelled':
-      category = 'cancelled'
-      break
-    case 'output-limit':
-      category = 'output-limit-enforced'
-      break
-    default:
-      category = 'unknown-status'
-  }
-  return Object.freeze({
-    status: result.status,
-    exitCode: result.exitCode ?? null,
-    category,
-    stdout: outputSummary(result.stdout),
-    stderr: outputSummary(result.stderr),
-  })
-}
-
-async function listen(server) {
-  await new Promise((resolvePromise, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolvePromise)
-  })
-  const address = server.address()
-  if (address === null || typeof address !== 'object') throw new Error('network fixture has no port')
-  return address.port
-}
 
 function findTool(tools, name, namespace) {
   for (const tool of tools ?? []) {
@@ -138,6 +49,64 @@ function approvalFromEvent(sessionId, event) {
     }
   }
   return undefined
+}
+
+async function drain(kernel, sessionId, eventKinds, timeoutMillis = 20) {
+  const events = []
+  while (true) {
+    const poll = await kernel.pollEvent(sessionId, timeoutMillis)
+    if (poll.status !== 'event') return events
+    events.push(poll.event)
+    eventKinds.push(poll.event.kind)
+  }
+}
+
+async function runTurn(kernel, sessionId, text, eventKinds, errors) {
+  await kernel.submitTurn(sessionId, text)
+  const events = []
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const poll = await kernel.pollEvent(sessionId, 1_000)
+    if (poll.status !== 'event') continue
+    events.push(poll.event)
+    eventKinds.push(poll.event.kind)
+    const approval = approvalFromEvent(sessionId, poll.event)
+    if (approval !== undefined) await kernel.resolveApproval(approval)
+    if (poll.event.kind === 'error') {
+      errors.push(poll.event.payload?.msg?.message ?? 'kernel error')
+    }
+    if (poll.event.kind === 'turn_complete') return events
+  }
+  throw new Error(`installed native session ${sessionId} did not complete`)
+}
+
+function configuredMessage(events) {
+  return events.find(event => event.payload?.msg?.type === 'session_configured')?.payload?.msg
+}
+
+function isReadOnlyProfile(message) {
+  const profile = message?.permission_profile
+  const entries = profile?.file_system?.entries
+  return message?.approval_policy === 'on-request'
+    && message?.approvals_reviewer === 'user'
+    && profile?.type === 'managed'
+    && profile?.network === 'restricted'
+    && profile?.file_system?.type === 'restricted'
+    && Array.isArray(entries)
+    && entries.some(entry => entry?.access === 'read')
+    && entries.every(entry => entry?.access !== 'write')
+}
+
+function isWorkspaceWriteProfile(message) {
+  const profile = message?.permission_profile
+  const entries = profile?.file_system?.entries
+  return message?.approval_policy === 'on-request'
+    && message?.approvals_reviewer === 'user'
+    && profile?.type === 'managed'
+    && profile?.network === 'restricted'
+    && profile?.file_system?.type === 'restricted'
+    && Array.isArray(entries)
+    && entries.some(entry => entry?.access === 'write')
 }
 
 const root = resolve(import.meta.dirname, '..')
@@ -187,20 +156,18 @@ const modelPort = {
       }
       yield { type: 'output_item_added', item: { ...item, arguments: '' } }
       yield { type: 'output_item_done', item }
-      yield {
-        type: 'completed',
-        responseId: request.requestId,
-        endTurn: false,
-      }
+      yield { type: 'completed', responseId: request.requestId, endTurn: false }
       return
     }
 
     const outputs = toolOutputs(request)
-    receivedToolOutputs = outputs
-    toolResultSeen = outputs.some(output => JSON.stringify(output).includes(marker))
+    if (requests.length === 2) {
+      receivedToolOutputs = outputs
+      toolResultSeen = outputs.some(output => JSON.stringify(output).includes(marker))
+    }
     const item = {
       type: 'message',
-      id: 'installed-smoke-message',
+      id: `installed-smoke-message-${requests.length}`,
       role: 'assistant',
       content: [{ type: 'output_text', text: 'installed native smoke complete' }],
       phase: 'final_answer',
@@ -208,11 +175,7 @@ const modelPort = {
     yield { type: 'output_item_added', item: { ...item, content: [] } }
     yield { type: 'output_text_delta', delta: 'installed native smoke complete' }
     yield { type: 'output_item_done', item }
-    yield {
-      type: 'completed',
-      responseId: request.requestId,
-      endTurn: true,
-    }
+    yield { type: 'completed', responseId: request.requestId, endTurn: true }
   },
 }
 
@@ -224,21 +187,7 @@ const nativePrebuildRoot = dirname(packageBuildInfoPath)
 const packageBuildInfo = JSON.parse(readFileSync(packageBuildInfoPath, 'utf8'))
 const kernel = new WinWinCodeKernel({ home, modelPort })
 const eventKinds = []
-const diagnosticEvents = []
 const errors = []
-const governedSecret = 'TOKEN-installed-governed-secret'
-const governedCredentialPath = join(workspace, '.env')
-const governedInsidePath = join(workspace, 'governed-inside.txt')
-const governedOutsidePath = join(root, 'governed-outside.txt')
-const governedRemotePath = join(workspace, 'governed-remote.txt')
-writeFileSync(governedCredentialPath, `${governedSecret}\n`)
-process.env.WINWINCODE_INSTALLED_UNRELATED_SECRET = governedSecret
-let networkConnections = 0
-const networkServer = createServer(socket => {
-  networkConnections += 1
-  socket.end()
-})
-const networkPort = await listen(networkServer)
 
 try {
   const session = await kernel.createSession({
@@ -246,127 +195,44 @@ try {
     provider: 'keyless-fixture',
     model: 'keyless-fixture-model',
   })
-  while (true) {
-    const startup = await kernel.pollEvent(session.sessionId, 20)
-    if (startup.status !== 'event') break
-    eventKinds.push(startup.event.kind)
-  }
-  await kernel.submitTurn(session.sessionId, 'Run the installed native sandbox smoke.')
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    const poll = await kernel.pollEvent(session.sessionId, 1_000)
-    if (poll.status !== 'event') continue
-    eventKinds.push(poll.event.kind)
-    if (['warning', 'exec_command_begin', 'exec_command_end'].includes(poll.event.kind)) {
-      diagnosticEvents.push({ kind: poll.event.kind, payload: poll.event.payload })
-    }
-    const approval = approvalFromEvent(session.sessionId, poll.event)
-    if (approval !== undefined) await kernel.resolveApproval(approval)
-    if (poll.event.kind === 'error') errors.push(poll.event.payload?.msg?.message ?? 'kernel error')
-    if (poll.event.kind === 'turn_complete') break
-  }
+  await drain(kernel, session.sessionId, eventKinds)
+  await runTurn(
+    kernel,
+    session.sessionId,
+    'Run the installed native sandbox smoke.',
+    eventKinds,
+    errors,
+  )
   await kernel.closeSession(session.sessionId)
-
-  const governedSession = await kernel.createSession({
-    cwd: workspace,
-    provider: 'keyless-fixture',
-    model: 'keyless-fixture-model',
-    governedAuthority: governedAuthority(workspace),
-  })
-  const governedEnvironment = await kernel.executeGovernedCommand(governedCommand(
-    governedSession.sessionId,
-    'installed-environment',
-    ['/usr/bin/env'],
-    workspace,
-  ))
-  const governedWrite = await kernel.executeGovernedCommand(governedCommand(
-    governedSession.sessionId,
-    'installed-write',
-    ['/bin/bash', '-c', `printf governed > ${JSON.stringify(governedInsidePath)}`],
-    workspace,
-  ))
-  const governedOutside = await kernel.executeGovernedCommand(governedCommand(
-    governedSession.sessionId,
-    'installed-outside',
-    ['/bin/bash', '-c', `printf escaped > ${JSON.stringify(governedOutsidePath)}`],
-    workspace,
-  ))
-  const governedCredential = await kernel.executeGovernedCommand(governedCommand(
-    governedSession.sessionId,
-    'installed-credential',
-    [
-      '/bin/bash',
-      '-c',
-      `while IFS= read -r line; do printf '%s' "$line"; done < ${JSON.stringify(governedCredentialPath)}`,
-    ],
-    workspace,
-  ))
-  const governedNetwork = await kernel.executeGovernedCommand(governedCommand(
-    governedSession.sessionId,
-    'installed-network',
-    [
-      '/bin/bash',
-      '-c',
-      `printf x > /dev/tcp/127.0.0.1/${networkPort} && printf remote > ${JSON.stringify(governedRemotePath)}`,
-    ],
-    workspace,
-  ))
-  const governedTimeout = await kernel.executeGovernedCommand(governedCommand(
-    governedSession.sessionId,
-    'installed-timeout',
-    ['/bin/bash', '-c', 'while :; do :; done'],
-    workspace,
-    { timeoutMillis: 50 },
-  ))
-  await kernel.closeSession(governedSession.sessionId)
 
   const readOnlySession = await kernel.createSession({
     cwd: workspace,
     provider: 'keyless-fixture',
     model: 'keyless-fixture-model',
-    governedAuthority: governedAuthority(workspace, {
-      roleId: 'verifier',
-      permissionPreset: 'snapshot-verify',
-      workspaceMode: 'candidate-read-only',
-      visibleTools: Object.freeze([
-        'artifact.read',
-        'artifact.write',
-        'workspace.read',
-        'code.search',
-        'candidate.diff',
-        'command.run',
-        'test.run',
-      ]),
-    }),
+    rolePolicy: strongFlowRoleSessionPolicy('requirements'),
   })
-  const readOnlyTarget = join(workspace, 'read-only-write.txt')
-  const readOnlyWrite = await kernel.executeGovernedCommand(governedCommand(
+  const readOnlyEvents = await drain(kernel, readOnlySession.sessionId, eventKinds)
+  readOnlyEvents.push(...await runTurn(
+    kernel,
     readOnlySession.sessionId,
-    'installed-read-only',
-    ['/bin/bash', '-c', `printf denied > ${JSON.stringify(readOnlyTarget)}`],
-    workspace,
-    { tool: 'test.run' },
+    'Summarize the delivery requirements.',
+    eventKinds,
+    errors,
   ))
+  const readOnlyConfigured = configuredMessage(readOnlyEvents)
+  const roleRequestText = JSON.stringify(requests.at(-1)?.request)
   await kernel.closeSession(readOnlySession.sessionId)
 
-  const ordinarySession = await kernel.createSession({
+  const writerSession = await kernel.createSession({
     cwd: workspace,
     provider: 'keyless-fixture',
     model: 'keyless-fixture-model',
+    rolePolicy: strongFlowRoleSessionPolicy('executor'),
   })
-  let ordinaryDenied = false
-  try {
-    await kernel.executeGovernedCommand(governedCommand(
-      ordinarySession.sessionId,
-      'installed-ordinary',
-      ['/usr/bin/true'],
-      workspace,
-    ))
-  } catch (error) {
-    ordinaryDenied = error instanceof KernelError
-      && error.code === 'GOVERNED_COMMAND_POLICY_DENIED'
-  }
-  await kernel.closeSession(ordinarySession.sessionId)
+  const writerEvents = await drain(kernel, writerSession.sessionId, eventKinds)
+  const writerConfigured = configuredMessage(writerEvents)
+  await kernel.closeSession(writerSession.sessionId)
+
   const report = {
     target,
     packageName,
@@ -385,44 +251,18 @@ try {
         existsSync(join(nativePrebuildRoot, 'codex-resources', 'bwrap'))
         && (statSync(join(nativePrebuildRoot, 'codex-resources', 'bwrap')).mode & 0o111) !== 0
       ),
-    governed: {
-      sandbox: governedEnvironment.sandbox,
-      network: governedEnvironment.network,
-      environmentSecretExcluded: !governedEnvironment.stdout.includes(governedSecret)
-        && !governedEnvironment.stdout.includes('WINWINCODE_INSTALLED_UNRELATED_SECRET'),
-      environmentNames: governedEnvironment.environmentNames,
-      workspaceWriteSucceeded: governedWrite.status === 'exited'
-        && governedWrite.exitCode === 0
-        && readFileSync(governedInsidePath, 'utf8') === 'governed',
-      outsideWriteBlocked: governedOutside.status === 'sandbox-denied'
-        && !existsSync(governedOutsidePath),
-      credentialReadBlocked: governedCredential.status === 'sandbox-denied'
-        && !`${governedCredential.stdout}${governedCredential.stderr}`.includes(governedSecret),
-      networkBlocked: governedNetwork.status === 'sandbox-denied'
-        && networkConnections === 0
-        && !existsSync(governedRemotePath),
-      timeoutStopped: governedTimeout.status === 'timed-out',
-      readOnlyWriteBlocked: readOnlyWrite.status === 'sandbox-denied'
-        && !existsSync(readOnlyTarget),
-      ordinaryDenied,
-      diagnostics: {
-        environment: governedDiagnostic(governedEnvironment),
-        workspaceWrite: governedDiagnostic(governedWrite),
-        outsideWrite: governedDiagnostic(governedOutside),
-        credentialRead: governedDiagnostic(governedCredential),
-        network: governedDiagnostic(governedNetwork),
-        timeout: governedDiagnostic(governedTimeout),
-        readOnlyWrite: governedDiagnostic(readOnlyWrite),
-      },
+    rolePolicy: {
+      readOnlyObserved: isReadOnlyProfile(readOnlyConfigured),
+      workspaceWriteObserved: isWorkspaceWriteProfile(writerConfigured),
+      codexCapabilitiesPresent: ['exec_command', 'update_plan', 'spawn_agent'].every(
+        name => roleRequestText.includes(name),
+      ),
     },
     eventKinds,
-    diagnosticEvents,
     errors,
   }
   process.stdout.write(`${JSON.stringify(report)}\n`)
 } finally {
-  delete process.env.WINWINCODE_INSTALLED_UNRELATED_SECRET
-  await new Promise(resolvePromise => networkServer.close(resolvePromise))
   await kernel.shutdown()
   rmSync(blockedPath, { force: true })
 }

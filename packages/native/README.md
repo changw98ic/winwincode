@@ -67,22 +67,19 @@ await kernel.shutdown()
 
 `events()` 每个会话只允许一个活动订阅者。事件序号使用 `bigint`，不会把 Rust 的 64 位序号截短。`resolveApproval()` 使用事件里的会话、审批和 turn 身份，把人工决定交回同一个 Codex 回调。原生错误会转换为带稳定 `code` 的 `KernelError`。调用方在进程退出前应显式执行 `shutdown()`。
 
-受管 StrongFlow 会话还提供 `executeGovernedCommand()`。调用方必须先在 StrongFlow 宿主层核对准确命令授权，再提交同一个会话、工具、参数和工作目录。原生内核从会话中取回角色和工作区，macOS 强制使用 Seatbelt，Linux 强制使用打包的 bubblewrap/seccomp helper。命令环境从空白开始，只生成隔离的 HOME/TMP 和固定基础变量；调用方只能增加 `LANG`、`LC_ALL`。网络、凭据敏感文件、工作区外写入和只读角色写入都会被操作系统拒绝。普通聊天会话调用该方法会返回 `GOVERNED_COMMAND_POLICY_DENIED`，缺少平台沙箱时不会普通运行。
+StrongFlow 角色会话通过 `rolePolicy` 选择 Codex Core 的原生权限配置。只读角色使用受限文件系统和受限网络；执行与返工角色使用工作区写入权限。角色策略不会替换 Codex 的工具、Plan、MCP、审批或多 Agent 能力，所有命令和测试仍由 Codex 自己执行并产生标准事件。
 
 ```ts
-const result = await kernel.executeGovernedCommand({
-  schemaVersion: 1,
-  sessionId: governedSession.sessionId,
-  commandId: 'command-<trusted-id>',
-  tool: 'test.run',
-  argv: ['/absolute/path/to/test-runner', '--run'],
-  cwd: '/absolute/path/to/assigned-workspace',
-  environment: { LANG: 'C.UTF-8' },
-  timeoutMillis: 60_000,
-  outputLimitBytes: 1_048_576,
+import { strongFlowRoleSessionPolicy } from '@winwincode/contracts'
+
+const verifier = await kernel.createSession({
+  cwd: '/absolute/path/to/frozen-candidate',
+  provider: 'deepseek',
+  model: 'deepseek-chat',
+  rolePolicy: strongFlowRoleSessionPolicy('verifier'),
 })
 ```
 
-返回值明确区分 `exited`、`sandbox-denied`、`timed-out`、`cancelled` 和 `output-limit`，并报告实际沙箱、网络状态和环境变量名称，不报告额外权限。`cancelGovernedCommand()`、`closeSession()` 和 `shutdown()` 都会停止活动受管命令。
+审核端应从该会话的 `session_configured` 事件读取 `permission_profile`、`approval_policy` 和 `approvals_reviewer`，再把后续 Diff、命令、测试、失败和最终结论绑定到同一个 Codex 会话。这样权限证据和执行事实来自同一权威。
 
 `@winwincode/dsh-profile` 提供 `CodexRuntimeProjector`、`DshRuntimeProjection` 和 `RuntimeApprovalRouter`。同一批原始事件无论实时送入还是从持久化记录重放，都会得到相同的聊天记录和界面状态。投影只保存展示副本，不会成为第二个执行内核。

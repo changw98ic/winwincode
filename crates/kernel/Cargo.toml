@@ -11,12 +11,9 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-anyhow.workspace = true
 codex-api.workspace = true
 codex-core-api.workspace = true
 codex-protocol.workspace = true
-codex-sandboxing.workspace = true
-codex-utils-path-uri.workspace = true
 codex-model-provider-info.workspace = true
 futures.workspace = true
 serde.workspace = true

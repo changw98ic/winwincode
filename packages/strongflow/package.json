@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/strongflow",
-  "version": "0.0.0-dev.0",
+  "version": "0.1.0-alpha.1",
   "description": "StrongFlow advanced-mode host and DSH conversation-view boundary",
   "license": "Apache-2.0",
   "type": "module",
@@ -48,6 +48,10 @@
     "@deepseek-ai/dsh-api-gateway": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-typert-protocol": "0.1.0-rc.8"
+    "@deepseek-ai/dsh-typert-protocol": "0.1.0-rc.8",
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "react": "catalog:"
   }
 }

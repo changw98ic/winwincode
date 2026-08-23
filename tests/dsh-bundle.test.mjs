@@ -3,9 +3,11 @@ import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import {
   cpSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -22,6 +24,8 @@ import {
   initProfile,
   loadProfile,
 } from '@deepseek-ai/dsh-app-boot'
+import * as React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { chatSurface } from '../packages/dsh-profile/dist/index.js'
 import { strongFlowSurface } from '../packages/strongflow/dist/index.js'
 
@@ -29,6 +33,7 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const require = createRequire(import.meta.url)
 const dshPackage = require.resolve('@deepseek-ai/dsh/package.json')
 const dshRequire = createRequire(dshPackage)
+const dshWebAppPackage = dshRequire.resolve('@deepseek-ai/dsh-web-app/package.json')
 
 function copyPublishedPackage(name, destination) {
   const source = join(root, 'packages', name)
@@ -48,6 +53,18 @@ function copyInstalledBundle(packageName, destination) {
 }
 
 function installWorkspacePackages(profileDirectory) {
+  const deepseekDestination = join(profileDirectory, 'node_modules', '@deepseek-ai')
+  mkdirSync(deepseekDestination, { recursive: true })
+  const deepseekSources = [
+    join(root, 'node_modules', '.pnpm', 'node_modules', '@deepseek-ai'),
+    dirname(dirname(dshWebAppPackage)),
+  ]
+  for (const source of deepseekSources) {
+    for (const name of readdirSync(source)) {
+      const destination = join(deepseekDestination, name)
+      if (!existsSync(destination)) symlinkSync(join(source, name), destination, 'junction')
+    }
+  }
   const namespace = join(profileDirectory, 'node_modules', '@winwincode')
   mkdirSync(namespace, { recursive: true })
   for (const name of ['contracts', 'native', 'strongflow', 'dsh-profile']) {
@@ -181,22 +198,71 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
     },
   )
   assert.equal(clientRegistration?.id, '@winwincode/strongflow')
-  const client = clientRegistration.factory(() => {
-    throw new Error('StrongFlow requested an undeclared client module')
+  const client = clientRegistration.factory(id => {
+    if (id === 'react') return React
+    throw new Error(`StrongFlow requested an undeclared client module: ${id}`)
   })
-  assert.deepEqual([...client.inject], ['slots', 'remote'])
+  assert.deepEqual([...client.inject], ['slots', 'remote', 'sessions'])
 
   let slotName
   let slotOptions
   let slotComponent
   let remoteContribution
   let remoteDisposed = false
-  const dispose = await client.apply({
-    remote: {
-      async $mount(contribution) {
-        remoteContribution = contribution
-        return async () => {
-          remoteDisposed = true
+  let remoteScopeDisposed = false
+  let remoteScopeDependencies
+  let slotDisposed = false
+  let openedSessionId
+  const scopedRemote = {
+    strongflow: {
+      async invoke() {
+        throw new Error('scoped StrongFlow Remote reached')
+      },
+    },
+  }
+  const rootRemote = {
+    async $mount(contribution) {
+      remoteContribution = contribution
+      return async () => {
+        remoteDisposed = true
+      }
+    },
+    get strongflow() {
+      throw new Error('remote.strongflow was read outside its injected Cordis scope')
+    },
+  }
+  const clientContext = {
+    remote: rootRemote,
+    inject(dependencies, callback) {
+      remoteScopeDependencies = dependencies
+      const disposeScope = callback({
+        ...clientContext,
+        remote: scopedRemote,
+      })
+      return {
+        async await() {},
+        async dispose() {
+          disposeScope()
+          remoteScopeDisposed = true
+        },
+      }
+    },
+    sessions: {
+      list: {
+        getSnapshot() {
+          return { byId: { 'session-fixture': { cwd: '/workspace/fixture' } } }
+        },
+      },
+      open(sessionId) {
+        openedSessionId = sessionId
+      },
+      scope(sessionId) {
+        assert.equal(sessionId, 'session-fixture')
+        return {
+          get(service) {
+            assert.equal(service, 'remote.strongflow')
+            return scopedRemote.strongflow
+          },
         }
       },
     },
@@ -204,13 +270,16 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
       inject(name, register) {
         slotName = name
         register()
+        return () => { slotDisposed = true }
       },
       register(options, component) {
         slotOptions = options
         slotComponent = component
       },
     },
-  })
+  }
+  const dispose = await client.apply(clientContext)
+  assert.deepEqual([...remoteScopeDependencies], ['remote.strongflow'])
   assert.equal(remoteContribution.package, '@winwincode/strongflow')
   assert.deepEqual(
     [...remoteContribution.descriptors].map(descriptor => (
@@ -233,8 +302,22 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
       label: 'StrongFlow',
     },
   )
-  assert.match(slotComponent({ sessionId: 'session-fixture' }), /人工审核/u)
+  const injected = slotOptions.inject('session-fixture')
+  assert.equal(injected.defaultRepository, '/workspace/fixture')
+  const markup = renderToStaticMarkup(React.createElement(slotComponent, {
+    sessionId: 'session-fixture',
+    ...injected,
+  }))
+  assert.match(markup, /创建 Delivery/u)
+  assert.match(markup, /验收条件/u)
+  await assert.rejects(
+    injected.invokeDelivery({}),
+    /scoped StrongFlow Remote reached/u,
+  )
+  assert.equal(openedSessionId, undefined)
   await dispose()
+  assert.equal(remoteScopeDisposed, true)
+  assert.equal(slotDisposed, true)
   assert.equal(remoteDisposed, true)
 })
 

@@ -1,13 +1,7 @@
-/** Canonical role roster and validated runtime configuration for StrongFlow. */
+/** Canonical StrongFlow roles and the minimal policy applied by Codex Core. */
 
-import {
-  STRONGFLOW_PERMISSION_PRESET_IDS,
-  strongFlowPermissionPolicyForPreset,
-  type StrongFlowPermissionPolicy,
-  type StrongFlowPermissionPresetId,
-} from './strongflow-permission.js'
-
-export const STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION = 2 as const
+export const STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION = 3 as const
+export const STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION = 1 as const
 
 export const STRONGFLOW_ROLE_IDS = Object.freeze([
   'requirements',
@@ -22,23 +16,13 @@ export const STRONGFLOW_ROLE_IDS = Object.freeze([
 
 export type StrongFlowRoleId = typeof STRONGFLOW_ROLE_IDS[number]
 
-export const STRONGFLOW_ROLE_ARTIFACT_KINDS = Object.freeze([
-  'USER_REQUEST',
-  'REQUIREMENT_SPEC',
-  'SOLUTION_DESIGN',
-  'SYSTEM_ARCHITECTURE_DIAGRAM',
-  'PROCESS_FLOW_DIAGRAM',
-  'HUMAN_REVIEW_RECORD',
-  'EXECUTION_PLAN',
-  'PATCH_MANIFEST',
-  'REVIEW_REPORT',
-  'VERIFICATION_REPORT',
-  'REMEDIATION_REQUEST',
-  'REMEDIATION_REPORT',
-  'DELIVERY_RECEIPT',
+export const STRONGFLOW_VERIFICATION_ROLE_IDS = Object.freeze([
+  'reviewer',
+  'verifier',
+  'adversarial-verifier',
 ] as const)
 
-export type StrongFlowRoleArtifactKind = typeof STRONGFLOW_ROLE_ARTIFACT_KINDS[number]
+export type StrongFlowVerificationRoleId = typeof STRONGFLOW_VERIFICATION_ROLE_IDS[number]
 
 export type StrongFlowRoleWorkspaceMode =
   | 'source-read-only'
@@ -63,16 +47,21 @@ export interface StrongFlowRoleSpec {
   readonly modelRoute: StrongFlowRoleModelRoute
   readonly reasoningEffort: string | null
   readonly budget: StrongFlowRoleBudget
-  readonly systemInstructions: string
-  readonly permissionPreset: StrongFlowPermissionPresetId
+  readonly developerInstructions: string
   readonly workspaceMode: StrongFlowRoleWorkspaceMode
-  readonly acceptedInputArtifacts: readonly StrongFlowRoleArtifactKind[]
-  readonly requiredOutputArtifacts: readonly StrongFlowRoleArtifactKind[]
 }
 
 export interface StrongFlowRoleConfiguration {
   readonly schemaVersion: typeof STRONGFLOW_ROLE_CONFIGURATION_SCHEMA_VERSION
   readonly roles: readonly StrongFlowRoleSpec[]
+}
+
+/** Minimal host input that configures Codex Core without replacing its runtime or tools. */
+export interface StrongFlowRoleSessionPolicy {
+  readonly schemaVersion: typeof STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION
+  readonly roleId: StrongFlowRoleId
+  readonly workspaceMode: StrongFlowRoleWorkspaceMode
+  readonly developerInstructions: string
 }
 
 export interface StrongFlowRoleModelCatalogEntry {
@@ -98,7 +87,6 @@ export type StrongFlowRoleConfigurationErrorCode =
   | 'DUPLICATE_ROLE'
   | 'UNKNOWN_MODEL_ROUTE'
   | 'UNKNOWN_REASONING_EFFORT'
-  | 'UNKNOWN_ARTIFACT'
   | 'POLICY_MISMATCH'
 
 export class StrongFlowRoleConfigurationError extends Error {
@@ -113,127 +101,71 @@ export class StrongFlowRoleConfigurationError extends Error {
 
 interface CanonicalRolePolicy {
   readonly displayName: string
-  readonly systemInstructions: string
-  readonly permissionPreset: StrongFlowPermissionPresetId
+  readonly developerInstructions: string
   readonly workspaceMode: StrongFlowRoleWorkspaceMode
-  readonly acceptedInputArtifacts: readonly StrongFlowRoleArtifactKind[]
-  readonly requiredOutputArtifacts: readonly StrongFlowRoleArtifactKind[]
 }
-
-function frozenList<Value extends string>(...values: readonly Value[]): readonly Value[] {
-  return Object.freeze([...values])
-}
-
-const DEFINITION_INPUTS = frozenList<StrongFlowRoleArtifactKind>(
-  'REQUIREMENT_SPEC',
-  'SOLUTION_DESIGN',
-  'SYSTEM_ARCHITECTURE_DIAGRAM',
-  'PROCESS_FLOW_DIAGRAM',
-)
-
-const APPROVED_DEFINITION_INPUTS = frozenList<StrongFlowRoleArtifactKind>(
-  ...DEFINITION_INPUTS,
-  'HUMAN_REVIEW_RECORD',
-)
-
-const CANDIDATE_INPUTS = frozenList<StrongFlowRoleArtifactKind>(
-  ...APPROVED_DEFINITION_INPUTS,
-  'EXECUTION_PLAN',
-  'PATCH_MANIFEST',
-)
 
 const ROLE_POLICIES: Readonly<Record<StrongFlowRoleId, CanonicalRolePolicy>> = Object.freeze({
   requirements: Object.freeze({
     displayName: 'Requirements Analyst',
-    systemInstructions: 'Produce only a RequirementSpec from the user request and verified repository facts. Record goals, constraints, acceptance checks, risks, and unresolved questions. Do not choose architecture, implementation, files, commands, patches, model routes, or an approval outcome.',
-    permissionPreset: 'definition-read',
+    developerInstructions: 'Turn the user request and verified repository facts into a proposed DeliverySpec with explicit scope, constraints, acceptance criteria, risks, and unresolved questions. Keep requirements separate from solution choices. Do not approve the proposal or start implementation.',
     workspaceMode: 'source-read-only',
-    acceptedInputArtifacts: frozenList('USER_REQUEST'),
-    requiredOutputArtifacts: frozenList('REQUIREMENT_SPEC'),
   }),
   solution: Object.freeze({
     displayName: 'Solution Architect',
-    systemInstructions: 'Produce a structured SolutionDesign and the two required diagram payloads for exactly one RequirementSpec. Record components, connections, trust boundaries, external systems, and unresolved facts; preserve the built-in process stages and stable node identities. Never emit Mermaid, SVG, HTML, scripts, external resources, or links. Do not approve the definition, plan execution, or modify the candidate workspace.',
-    permissionPreset: 'solution-read',
+    developerInstructions: 'Prepare a solution proposal for the exact approved DeliverySpec. Include structured system architecture and process-flow diagram data with stable node identities, components, connections, trust boundaries, external systems, and unresolved facts. Do not approve the proposal or modify the candidate.',
     workspaceMode: 'source-read-only',
-    acceptedInputArtifacts: frozenList('REQUIREMENT_SPEC'),
-    requiredOutputArtifacts: frozenList(
-      'SOLUTION_DESIGN',
-      'SYSTEM_ARCHITECTURE_DIAGRAM',
-      'PROCESS_FLOW_DIAGRAM',
-    ),
   }),
   planner: Object.freeze({
     displayName: 'Planner',
-    systemInstructions: 'Produce an ExecutionPlan only from the exact requirement, solution, diagrams, and authenticated human approval supplied to this run. Keep work bounded and verifiable. Do not change the approved definition, write candidate files, or declare completion.',
-    permissionPreset: 'source-read',
+    developerInstructions: 'Plan the approved delivery with Codex plan and multi-agent capabilities. Keep the work bounded by the approved DeliverySpec and solution, make verification explicit, and do not create a second task graph, modify candidate files, or declare delivery complete.',
     workspaceMode: 'source-read-only',
-    acceptedInputArtifacts: APPROVED_DEFINITION_INPUTS,
-    requiredOutputArtifacts: frozenList('EXECUTION_PLAN'),
   }),
   executor: Object.freeze({
     displayName: 'Executor',
-    systemInstructions: 'Implement only the approved ExecutionPlan in the assigned candidate workspace. Record the exact changed files, commands, tests, and evidence in a PatchManifest. Do not alter definition artifacts, approve work, or declare verification success.',
-    permissionPreset: 'candidate-write',
+    developerInstructions: 'Implement only the approved delivery plan in the assigned candidate workspace. Use Codex tools, sandbox, approvals, plan, and subagents as needed. Preserve exact changed-file, command, test, diff, failure, recovery, and usage events. Do not approve or verify your own work.',
     workspaceMode: 'candidate-write',
-    acceptedInputArtifacts: frozenList('EXECUTION_PLAN'),
-    requiredOutputArtifacts: frozenList('PATCH_MANIFEST'),
   }),
   reviewer: Object.freeze({
     displayName: 'Reviewer',
-    systemInstructions: 'Inspect the frozen candidate against the approved definition and ExecutionPlan. Produce a ReviewReport with exact findings and evidence. Do not modify candidate files, approve the definition, or convert review findings into a completion decision.',
-    permissionPreset: 'snapshot-verify',
+    developerInstructions: 'Independently review the exact frozen candidate against the approved DeliverySpec and plan from a read-only workspace. Cite only observed Codex event evidence. The final response must follow the supplied winwincode.independent-verification-result.v1 JSON protocol. Do not modify the candidate or decide final delivery.',
     workspaceMode: 'candidate-read-only',
-    acceptedInputArtifacts: CANDIDATE_INPUTS,
-    requiredOutputArtifacts: frozenList('REVIEW_REPORT'),
   }),
   verifier: Object.freeze({
     displayName: 'Verifier',
-    systemInstructions: 'Run the frozen acceptance checks against the read-only candidate and produce a VerificationReport from observed evidence. Do not change candidate files, weaken checks, approve the definition, or declare final delivery.',
-    permissionPreset: 'snapshot-verify',
+    developerInstructions: 'Independently verify every assigned acceptance criterion against the exact frozen candidate from a read-only workspace. Run checks through Codex Core, cite only observed Codex event evidence, and return the supplied winwincode.independent-verification-result.v1 JSON protocol. Do not modify the candidate or decide final delivery.',
     workspaceMode: 'candidate-read-only',
-    acceptedInputArtifacts: frozenList(...CANDIDATE_INPUTS, 'REVIEW_REPORT'),
-    requiredOutputArtifacts: frozenList('VERIFICATION_REPORT'),
   }),
   'adversarial-verifier': Object.freeze({
     displayName: 'Adversarial Verifier',
-    systemInstructions: 'Challenge the frozen candidate, approved assumptions, trust boundaries, failure handling, and negative cases from a read-only workspace. Produce an independent VerificationReport with reproducible evidence. Do not modify files or approve delivery.',
-    permissionPreset: 'snapshot-verify',
+    developerInstructions: 'Challenge the exact frozen candidate, approved assumptions, trust boundaries, failure handling, and negative cases from a read-only workspace. Cite reproducible Codex event evidence and return the supplied winwincode.independent-verification-result.v1 JSON protocol. Do not modify the candidate or decide final delivery.',
     workspaceMode: 'candidate-read-only',
-    acceptedInputArtifacts: frozenList(
-      ...CANDIDATE_INPUTS,
-      'REVIEW_REPORT',
-      'VERIFICATION_REPORT',
-    ),
-    requiredOutputArtifacts: frozenList('VERIFICATION_REPORT'),
   }),
   remediator: Object.freeze({
     displayName: 'Remediator',
-    systemInstructions: 'Apply only the bounded RemediationRequest to the assigned candidate workspace. Preserve unrelated accepted work and record changes and evidence in a new PatchManifest and RemediationReport. Do not broaden scope, approve work, or declare verification success.',
-    permissionPreset: 'remediation-write',
+    developerInstructions: 'Apply only the bounded rework requested from reviewed findings in the assigned candidate workspace. Use Codex tools, sandbox, approvals, plan, and subagents as needed, preserve unrelated accepted work, and produce fresh runtime evidence. Do not broaden scope, approve, or verify your own work.',
     workspaceMode: 'candidate-write',
-    acceptedInputArtifacts: frozenList(
-      ...CANDIDATE_INPUTS,
-      'REVIEW_REPORT',
-      'VERIFICATION_REPORT',
-      'REMEDIATION_REQUEST',
-    ),
-    requiredOutputArtifacts: frozenList('PATCH_MANIFEST', 'REMEDIATION_REPORT'),
   }),
 })
 
-/** Resolve the complete immutable permission policy selected by one canonical model role. */
-export function strongFlowPermissionPolicyForRole(
+/** Return the canonical workspace intent for one StrongFlow role. */
+export function strongFlowRoleWorkspaceMode(
   roleId: StrongFlowRoleId,
-): StrongFlowPermissionPolicy {
-  return strongFlowPermissionPolicyForPreset(ROLE_POLICIES[roleId].permissionPreset)
+): StrongFlowRoleWorkspaceMode {
+  return ROLE_POLICIES[roleId].workspaceMode
 }
 
-/** Returns the one ordered model-visible input contract for a canonical role. */
-export function strongFlowRoleAcceptedInputArtifacts(
+/** Return the minimal immutable policy passed to Codex Core for one role-scoped session. */
+export function strongFlowRoleSessionPolicy(
   roleId: StrongFlowRoleId,
-): readonly StrongFlowRoleArtifactKind[] {
-  return ROLE_POLICIES[roleId].acceptedInputArtifacts
+): StrongFlowRoleSessionPolicy {
+  const policy = ROLE_POLICIES[roleId]
+  return Object.freeze({
+    schemaVersion: STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION,
+    roleId,
+    workspaceMode: policy.workspaceMode,
+    developerInstructions: policy.developerInstructions,
+  })
 }
 
 function configurationError(
@@ -277,32 +209,6 @@ function positiveInteger(value: unknown, label: string): number {
     configurationError('INVALID_CONFIGURATION', `${label} must be a positive safe integer`)
   }
   return Number(value)
-}
-
-function stringArray<Value extends string>(
-  value: unknown,
-  allowed: readonly Value[],
-  label: string,
-  unknownCode: 'UNKNOWN_ARTIFACT',
-): readonly Value[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    configurationError('INVALID_CONFIGURATION', `${label} must be a non-empty array`)
-  }
-  const result: Value[] = []
-  for (const entry of value) {
-    if (typeof entry !== 'string' || !allowed.includes(entry as Value)) {
-      configurationError(unknownCode, `${label} contains an unknown value`)
-    }
-    if (result.includes(entry as Value)) {
-      configurationError('INVALID_CONFIGURATION', `${label} contains a duplicate value`)
-    }
-    result.push(entry as Value)
-  }
-  return Object.freeze(result)
-}
-
-function sameList<Value>(left: readonly Value[], right: readonly Value[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function requirePolicy(condition: boolean, roleId: StrongFlowRoleId, field: string): void {
@@ -396,11 +302,8 @@ function parseRole(
     'modelRoute',
     'reasoningEffort',
     'budget',
-    'systemInstructions',
-    'permissionPreset',
+    'developerInstructions',
     'workspaceMode',
-    'acceptedInputArtifacts',
-    'requiredOutputArtifacts',
   ], 'role specification')
   if (
     typeof value.id !== 'string'
@@ -468,37 +371,12 @@ function parseRole(
   })
 
   const displayName = portableText(value.displayName, `role ${id} displayName`)
-  if (typeof value.systemInstructions !== 'string') {
+  if (typeof value.developerInstructions !== 'string') {
     return configurationError(
       'INVALID_CONFIGURATION',
-      `role ${id} systemInstructions must be a string`,
+      `role ${id} developerInstructions must be a string`,
     )
   }
-  if (
-    typeof value.permissionPreset !== 'string'
-    || !STRONGFLOW_PERMISSION_PRESET_IDS.includes(
-      value.permissionPreset as StrongFlowPermissionPresetId,
-    )
-  ) {
-    return configurationError(
-      'INVALID_CONFIGURATION',
-      `role ${id} permissionPreset is unknown`,
-    )
-  }
-  const permissionPreset = value.permissionPreset as StrongFlowPermissionPresetId
-  const acceptedInputs = stringArray(
-    value.acceptedInputArtifacts,
-    STRONGFLOW_ROLE_ARTIFACT_KINDS,
-    `role ${id} acceptedInputArtifacts`,
-    'UNKNOWN_ARTIFACT',
-  )
-  const requiredOutputs = stringArray(
-    value.requiredOutputArtifacts,
-    STRONGFLOW_ROLE_ARTIFACT_KINDS,
-    `role ${id} requiredOutputArtifacts`,
-    'UNKNOWN_ARTIFACT',
-  )
-
   if (
     value.workspaceMode !== 'source-read-only'
     && value.workspaceMode !== 'candidate-read-only'
@@ -511,19 +389,12 @@ function parseRole(
   }
 
   requirePolicy(displayName === policy.displayName, id, 'displayName')
-  requirePolicy(value.systemInstructions === policy.systemInstructions, id, 'systemInstructions')
-  requirePolicy(permissionPreset === policy.permissionPreset, id, 'permissionPreset')
+  requirePolicy(
+    value.developerInstructions === policy.developerInstructions,
+    id,
+    'developerInstructions',
+  )
   requirePolicy(value.workspaceMode === policy.workspaceMode, id, 'workspaceMode')
-  requirePolicy(
-    sameList(acceptedInputs, policy.acceptedInputArtifacts),
-    id,
-    'acceptedInputArtifacts',
-  )
-  requirePolicy(
-    sameList(requiredOutputs, policy.requiredOutputArtifacts),
-    id,
-    'requiredOutputArtifacts',
-  )
 
   return Object.freeze({
     id,
@@ -531,11 +402,8 @@ function parseRole(
     modelRoute: Object.freeze({ provider, model }),
     reasoningEffort: reasoningEffort as string | null,
     budget,
-    systemInstructions: value.systemInstructions,
-    permissionPreset,
+    developerInstructions: value.developerInstructions,
     workspaceMode: value.workspaceMode as StrongFlowRoleWorkspaceMode,
-    acceptedInputArtifacts: acceptedInputs,
-    requiredOutputArtifacts: requiredOutputs,
   })
 }
 
@@ -625,11 +493,8 @@ export function createStrongFlowRoleConfiguration(
       modelRoute: assignment.modelRoute,
       reasoningEffort: assignment.reasoningEffort,
       budget: assignment.budget,
-      systemInstructions: policy.systemInstructions,
-      permissionPreset: policy.permissionPreset,
+      developerInstructions: policy.developerInstructions,
       workspaceMode: policy.workspaceMode,
-      acceptedInputArtifacts: policy.acceptedInputArtifacts,
-      requiredOutputArtifacts: policy.requiredOutputArtifacts,
     }
   })
   return parseStrongFlowRoleConfiguration({

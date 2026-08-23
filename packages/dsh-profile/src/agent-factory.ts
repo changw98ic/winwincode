@@ -38,7 +38,13 @@ import {
 } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import z from '@deepseek-ai/schemastery'
-import type { RuntimeEvent } from '@winwincode/contracts'
+import {
+  STRONGFLOW_ROLE_IDS,
+  strongFlowRoleSessionPolicy,
+  type RuntimeEvent,
+  type StrongFlowRoleId,
+  type StrongFlowRoleSessionPolicy,
+} from '@winwincode/contracts'
 import {
   WinWinCodeKernel,
   type ApprovalResponse,
@@ -169,6 +175,12 @@ function sessionRoleId(session: Session, defaultRoleId: string): string {
     )
   }
   return roleId
+}
+
+function roleSessionPolicy(roleId: string): StrongFlowRoleSessionPolicy | undefined {
+  return STRONGFLOW_ROLE_IDS.includes(roleId as StrongFlowRoleId)
+    ? strongFlowRoleSessionPolicy(roleId as StrongFlowRoleId)
+    : undefined
 }
 
 function assertPersistedRole(session: Session, persistedRoleId: string): void {
@@ -640,11 +652,13 @@ export class EmbeddedCodexAgent implements Agent {
     this.#closingStreams.add(oldStream)
     await this.#kernel.closeSession(this.#native.kernelSessionId)
     await this.#pump
+    const rolePolicy = roleSessionPolicy(this.#roleId)
     const resumed = await this.#kernel.resumeSession({
       rolloutPath: this.#native.rolloutPath,
       cwd: sessionCwd(this.session),
       provider: route.provider,
       model: route.model,
+      ...(rolePolicy === undefined ? {} : { rolePolicy }),
     })
     const lifecycle: RuntimeKernelLifecycle = {
       kernelSessionId: resumed.sessionId,
@@ -843,6 +857,13 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
     ctx.effect(() => ctx.agents.setFactory(this), 'winwincodeAgentFactory.setFactory()')
   }
 
+  /** Read the DSH-owned append-only facts used by StrongFlow projections. */
+  async readRuntimeSessionEvents(dshSessionId: string): Promise<readonly RuntimeEvent[]> {
+    return (await RuntimeSessionLedger.open(this.config.home, dshSessionId).then(
+      ledger => ledger.read(),
+    )).events
+  }
+
   async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     const session = this.ctx.sessions.prepare(options.sessionId, {
       ...(options.seed === undefined ? {} : { seed: options.seed }),
@@ -850,18 +871,26 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
     })
     const roleId = sessionRoleId(session, this.config.roleId)
     const route = initialRoute(options.agentOptions ?? {})
+    const rolePolicy = roleSessionPolicy(roleId)
     let info: SessionInfo
     if (options.meta?.parentSession === undefined) {
       info = await this.kernel.createSession({
         cwd: sessionCwd(session),
         provider: route.provider,
         model: route.model,
+        ...(rolePolicy === undefined ? {} : { rolePolicy }),
       })
     } else {
       const parent = await RuntimeSessionLedger.open(
         this.config.home,
         options.meta.parentSession,
       )
+      if (parent.manifest.roleId !== roleId) {
+        throw new WinWinCodeAgentFactoryError(
+          'ROLE_ID_MISMATCH',
+          `DSH fork ${session.id} requests role ${roleId} but parent ${parent.manifest.dshSessionId} records ${parent.manifest.roleId}`,
+        )
+      }
       info = await this.kernel.forkSession({
         sourceSessionId: parent.manifest.kernelSessionId,
         cwd: sessionCwd(session),
@@ -912,11 +941,13 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
         model: snapshot.manifest.model,
       })
       repairProjection(session, projection, snapshot.events)
+      const rolePolicy = roleSessionPolicy(snapshot.manifest.roleId)
       const resumed = await this.kernel.resumeSession({
         rolloutPath: snapshot.manifest.rolloutPath,
         cwd: sessionCwd(session),
         provider: snapshot.manifest.provider,
         model: snapshot.manifest.model,
+        ...(rolePolicy === undefined ? {} : { rolePolicy }),
       })
       const lifecycle: RuntimeKernelLifecycle = {
         kernelSessionId: resumed.sessionId,

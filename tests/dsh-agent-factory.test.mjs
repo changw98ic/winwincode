@@ -12,6 +12,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 
+import { strongFlowRoleSessionPolicy } from '../packages/contracts/dist/index.js'
 import {
   RuntimeSessionLedger,
   WinWinCodeAgentFactory,
@@ -261,6 +262,15 @@ test('stock Chat and a StrongFlow role share one embedded kernel with distinct i
   ])
   assert.equal(chatSnapshot.manifest.roleId, 'chat')
   assert.equal(requirementsSnapshot.manifest.roleId, 'requirements')
+  assert.equal(kernel.sessions.get('kernel-1').options.rolePolicy, undefined)
+  assert.deepEqual(
+    kernel.sessions.get('kernel-2').options.rolePolicy,
+    strongFlowRoleSessionPolicy('requirements'),
+  )
+  assert.match(
+    kernel.sessions.get('kernel-2').options.rolePolicy.developerInstructions,
+    /DeliverySpec/u,
+  )
   assert.ok(chatSnapshot.events.every(event => event.source.roleId === 'chat'))
   assert.ok(requirementsSnapshot.events.every(event => (
     event.source.roleId === 'requirements'

@@ -1,18 +1,16 @@
 import type {
-  StrongFlowPermissionPresetId,
   StrongFlowRoleId,
-  StrongFlowRoleTool,
-  StrongFlowRoleWorkspaceMode,
+  StrongFlowRoleSessionPolicy,
   SupportedReleaseTarget,
   WorkspaceComponentDescriptor,
 } from '@winwincode/contracts'
 import {
-  STRONGFLOW_PERMISSION_PRESET_IDS,
   STRONGFLOW_ROLE_IDS,
-  STRONGFLOW_ROLE_TOOLS,
+  STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION,
+  strongFlowRoleSessionPolicy,
 } from '@winwincode/contracts'
 import { createRequire } from 'node:module'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const RELEASE_TARGET_BY_HOST = new Map<string, SupportedReleaseTarget>([
   ['darwin/arm64', 'aarch64-apple-darwin'],
@@ -147,7 +145,7 @@ export interface SessionOptions {
   readonly cwd: string
   readonly provider: string
   readonly model: string
-  readonly governedAuthority?: GovernedSessionAuthority
+  readonly rolePolicy?: StrongFlowRoleSessionPolicy
 }
 
 export interface ResumeOptions extends SessionOptions {
@@ -181,88 +179,6 @@ export interface ApprovalResponse {
   readonly decision: ApprovalDecision
 }
 
-export const GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION = 1 as const
-
-/** Immutable StrongFlow authority that must be applied before Codex starts a thread. */
-export interface GovernedSessionAuthority {
-  readonly schemaVersion: typeof GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
-  readonly roleId: StrongFlowRoleId
-  readonly permissionPreset: StrongFlowPermissionPresetId
-  readonly workspaceMode: StrongFlowRoleWorkspaceMode
-  readonly workspaceRoot: string
-  readonly systemInstructions: string
-  readonly reasoningEffort: string | null
-  readonly visibleTools: readonly StrongFlowRoleTool[]
-}
-
-/** Actual Codex thread settings observed after startup and before host publication. */
-export interface GovernedSessionEffectivePolicy {
-  readonly schemaVersion: typeof GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
-  readonly authority: 'codex-core'
-  readonly roleId: StrongFlowRoleId
-  readonly permissionPreset: StrongFlowPermissionPresetId
-  readonly workspaceMode: StrongFlowRoleWorkspaceMode
-  readonly workspaceRoot: string
-  readonly visibleTools: readonly StrongFlowRoleTool[]
-  readonly filesystem: 'managed-read-only' | 'managed-workspace-write'
-  readonly network: 'restricted'
-  readonly process: 'dynamic-tools-with-governed-command-api'
-  readonly environment: 'empty'
-  readonly governedProcess: 'platform-sandbox-required'
-  readonly governedProcessNetwork: 'restricted'
-  readonly governedProcessEnvironment: 'explicit-allowlist'
-  readonly credentials: 'dsh-reference-only'
-  readonly approvalPolicy: 'on-request'
-  readonly approvalsReviewer: 'user'
-  readonly loginShell: false
-  readonly environmentSelections: readonly []
-  readonly instructionSources: readonly []
-}
-
-/** Text result for one suspended Codex dynamic-tool call. */
-export interface DynamicToolResponse {
-  readonly sessionId: string
-  readonly callId: string
-  readonly success: boolean
-  readonly text: string
-}
-
-export const GOVERNED_COMMAND_SCHEMA_VERSION = 1 as const
-
-export type GovernedCommandStatus =
-  | 'exited'
-  | 'sandbox-denied'
-  | 'timed-out'
-  | 'cancelled'
-  | 'output-limit'
-
-/** Trusted command grant. The native kernel derives workspace and role authority from sessionId. */
-export interface GovernedCommandRequest {
-  readonly schemaVersion: typeof GOVERNED_COMMAND_SCHEMA_VERSION
-  readonly sessionId: string
-  readonly commandId: string
-  readonly tool: 'command.run' | 'test.run'
-  readonly argv: readonly string[]
-  readonly cwd: string
-  readonly environment: Readonly<Record<string, string>>
-  readonly timeoutMillis: number
-  readonly outputLimitBytes: number
-}
-
-/** Bounded output plus the concrete host enforcement used for one governed command. */
-export interface GovernedCommandResult {
-  readonly schemaVersion: typeof GOVERNED_COMMAND_SCHEMA_VERSION
-  readonly sessionId: string
-  readonly commandId: string
-  readonly status: GovernedCommandStatus
-  readonly exitCode?: number
-  readonly stdout: string
-  readonly stderr: string
-  readonly sandbox: 'macos-seatbelt' | 'linux-seccomp'
-  readonly network: 'restricted'
-  readonly environmentNames: readonly string[]
-}
-
 export interface KernelBuildInfo {
   readonly interfaceVersion: number
   readonly codexTag: string
@@ -274,7 +190,6 @@ export interface KernelBuildInfo {
 export interface SessionInfo {
   readonly sessionId: string
   readonly rolloutPath?: string
-  readonly effectivePolicy?: GovernedSessionEffectivePolicy
 }
 
 export type SubmissionStatus = 'started' | 'steered' | 'not_submitted'
@@ -320,7 +235,7 @@ interface NativeSessionOptions {
   cwd: string
   provider: string
   model: string
-  governedAuthorityJson?: string
+  rolePolicyJson?: string
 }
 
 interface NativeResumeOptions extends NativeSessionOptions {
@@ -349,38 +264,6 @@ interface NativeApprovalResponse {
   rejection?: string
 }
 
-interface NativeDynamicToolResponse {
-  sessionId: string
-  callId: string
-  success: boolean
-  text: string
-}
-
-interface NativeGovernedCommandRequest {
-  schemaVersion: number
-  sessionId: string
-  commandId: string
-  tool: string
-  argv: string[]
-  cwd: string
-  environmentJson: string
-  timeoutMillis: number
-  outputLimitBytes: number
-}
-
-interface NativeGovernedCommandResult {
-  schemaVersion: number
-  sessionId: string
-  commandId: string
-  status: string
-  exitCode?: number | null
-  stdout: string
-  stderr: string
-  sandbox: string
-  network: string
-  environmentNames: string[]
-}
-
 interface NativeBuildInfo {
   interfaceVersion: number
   codexTag: string
@@ -392,7 +275,6 @@ interface NativeBuildInfo {
 interface NativeSessionInfo {
   sessionId: string
   rolloutPath?: string | null
-  effectivePolicyJson?: string | null
 }
 
 interface NativeSubmissionInfo {
@@ -427,11 +309,6 @@ interface NativeKernelBinding {
   steer(options: NativeSteerOptions): Promise<NativeSubmissionInfo>
   interrupt(sessionId: string): Promise<string>
   resolveApproval(response: NativeApprovalResponse): Promise<string>
-  resolveDynamicTool(response: NativeDynamicToolResponse): Promise<string>
-  executeGovernedCommand(
-    request: NativeGovernedCommandRequest,
-  ): Promise<NativeGovernedCommandResult>
-  cancelGovernedCommand(sessionId: string, commandId: string): Promise<void>
   nextEvent(sessionId: string, timeoutMillis?: number): Promise<NativeEventPoll>
   listSessions(): Promise<string[]>
   closeSession(sessionId: string): Promise<void>
@@ -580,9 +457,6 @@ function loadBinding(path: string): NativeBindingModule {
     'steer',
     'interrupt',
     'resolveApproval',
-    'resolveDynamicTool',
-    'executeGovernedCommand',
-    'cancelGovernedCommand',
     'nextEvent',
     'listSessions',
     'closeSession',
@@ -641,146 +515,34 @@ function exactKeys(
   ) throw new KernelError('INVALID_ARGUMENT', `${label} has an unexpected shape`)
 }
 
-function governedAuthorityJson(
-  authority: GovernedSessionAuthority,
-  cwd: string,
-): string {
-  if (!isRecord(authority) || Array.isArray(authority)) {
-    throw new KernelError('INVALID_ARGUMENT', 'governed session authority must be an object')
+function rolePolicyJson(policy: StrongFlowRoleSessionPolicy): string {
+  if (!isRecord(policy) || Array.isArray(policy)) {
+    throw new KernelError('INVALID_ARGUMENT', 'StrongFlow role policy must be an object')
   }
-  exactKeys(authority, [
+  exactKeys(policy, [
     'schemaVersion',
     'roleId',
-    'permissionPreset',
     'workspaceMode',
-    'workspaceRoot',
-    'systemInstructions',
-    'reasoningEffort',
-    'visibleTools',
-  ], [], 'governed session authority')
+    'developerInstructions',
+  ], [], 'StrongFlow role policy')
   if (
-    authority.schemaVersion !== GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
-    || !STRONGFLOW_ROLE_IDS.includes(authority.roleId)
-    || !STRONGFLOW_PERMISSION_PRESET_IDS.includes(authority.permissionPreset)
-    || !['source-read-only', 'candidate-read-only', 'candidate-write'].includes(
-      authority.workspaceMode,
-    )
-    || typeof authority.workspaceRoot !== 'string'
-    || !isAbsolute(authority.workspaceRoot)
-    || resolve(authority.workspaceRoot) !== resolve(cwd)
-    || typeof authority.systemInstructions !== 'string'
-    || authority.systemInstructions.trim().length === 0
-    || (
-      authority.reasoningEffort !== null
-      && (
-        typeof authority.reasoningEffort !== 'string'
-        || authority.reasoningEffort.trim().length === 0
-      )
-    )
-    || !Array.isArray(authority.visibleTools)
-    || new Set(authority.visibleTools).size !== authority.visibleTools.length
-    || authority.visibleTools.some(tool => !STRONGFLOW_ROLE_TOOLS.includes(tool))
-  ) throw new KernelError('INVALID_ARGUMENT', 'governed session authority is invalid')
-  return JSON.stringify(authority)
-}
-
-function effectivePolicy(value: string): GovernedSessionEffectivePolicy {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(value) as unknown
-  } catch (error) {
-    throw new KernelError(
-      'NATIVE_PROTOCOL_INVALID',
-      'native kernel returned invalid effective-policy JSON',
-      error,
-    )
-  }
-  if (!isRecord(parsed) || Array.isArray(parsed)) {
-    throw new KernelError('NATIVE_PROTOCOL_INVALID', 'native effective policy is not an object')
-  }
-  try {
-    exactKeys(parsed, [
-      'schemaVersion',
-      'authority',
-      'roleId',
-      'permissionPreset',
-      'workspaceMode',
-      'workspaceRoot',
-      'visibleTools',
-      'filesystem',
-      'network',
-      'process',
-      'environment',
-      'governedProcess',
-      'governedProcessNetwork',
-      'governedProcessEnvironment',
-      'credentials',
-      'approvalPolicy',
-      'approvalsReviewer',
-      'loginShell',
-      'environmentSelections',
-      'instructionSources',
-    ], [], 'native effective policy')
-  } catch (error) {
-    throw new KernelError(
-      'NATIVE_PROTOCOL_INVALID',
-      'native effective policy has an unexpected shape',
-      error,
-    )
-  }
+    policy.schemaVersion !== STRONGFLOW_ROLE_SESSION_POLICY_SCHEMA_VERSION
+    || typeof policy.roleId !== 'string'
+    || !STRONGFLOW_ROLE_IDS.includes(policy.roleId as StrongFlowRoleId)
+  ) throw new KernelError('INVALID_ARGUMENT', 'StrongFlow role policy is invalid')
+  const canonical = strongFlowRoleSessionPolicy(policy.roleId as StrongFlowRoleId)
   if (
-    parsed.schemaVersion !== GOVERNED_SESSION_AUTHORITY_SCHEMA_VERSION
-    || parsed.authority !== 'codex-core'
-    || typeof parsed.roleId !== 'string'
-    || !STRONGFLOW_ROLE_IDS.includes(parsed.roleId as StrongFlowRoleId)
-    || typeof parsed.permissionPreset !== 'string'
-    || !STRONGFLOW_PERMISSION_PRESET_IDS.includes(
-      parsed.permissionPreset as StrongFlowPermissionPresetId,
-    )
-    || !['source-read-only', 'candidate-read-only', 'candidate-write'].includes(
-      String(parsed.workspaceMode),
-    )
-    || typeof parsed.workspaceRoot !== 'string'
-    || !isAbsolute(parsed.workspaceRoot)
-    || !Array.isArray(parsed.visibleTools)
-    || new Set(parsed.visibleTools).size !== parsed.visibleTools.length
-    || parsed.visibleTools.some(tool => (
-      typeof tool !== 'string'
-      || !STRONGFLOW_ROLE_TOOLS.includes(tool as StrongFlowRoleTool)
-    ))
-    || !['managed-read-only', 'managed-workspace-write'].includes(String(parsed.filesystem))
-    || parsed.network !== 'restricted'
-    || parsed.process !== 'dynamic-tools-with-governed-command-api'
-    || parsed.environment !== 'empty'
-    || parsed.governedProcess !== 'platform-sandbox-required'
-    || parsed.governedProcessNetwork !== 'restricted'
-    || parsed.governedProcessEnvironment !== 'explicit-allowlist'
-    || parsed.credentials !== 'dsh-reference-only'
-    || parsed.approvalPolicy !== 'on-request'
-    || parsed.approvalsReviewer !== 'user'
-    || parsed.loginShell !== false
-    || !Array.isArray(parsed.environmentSelections)
-    || parsed.environmentSelections.length !== 0
-    || !Array.isArray(parsed.instructionSources)
-    || parsed.instructionSources.length !== 0
-  ) throw new KernelError('NATIVE_PROTOCOL_INVALID', 'native effective policy is invalid')
-  return Object.freeze({
-    ...parsed,
-    visibleTools: Object.freeze([...parsed.visibleTools] as StrongFlowRoleTool[]),
-    environmentSelections: Object.freeze([]),
-    instructionSources: Object.freeze([]),
-  }) as GovernedSessionEffectivePolicy
+    policy.workspaceMode !== canonical.workspaceMode
+    || policy.developerInstructions !== canonical.developerInstructions
+  ) throw new KernelError('INVALID_ARGUMENT', 'StrongFlow role policy changes canonical fields')
+  return JSON.stringify(canonical)
 }
 
 function sessionInfo(info: NativeSessionInfo): SessionInfo {
   const rolloutPath = optionalString(info.rolloutPath)
-  const effectivePolicyJson = optionalString(info.effectivePolicyJson)
   return Object.freeze({
     sessionId: info.sessionId,
     ...(rolloutPath === undefined ? {} : { rolloutPath }),
-    ...(effectivePolicyJson === undefined
-      ? {}
-      : { effectivePolicy: effectivePolicy(effectivePolicyJson) }),
   })
 }
 
@@ -845,119 +607,10 @@ function nativeSessionOptions(options: SessionOptions): NativeSessionOptions {
     cwd: options.cwd,
     provider: options.provider,
     model: options.model,
-    ...(options.governedAuthority === undefined
+    ...(options.rolePolicy === undefined
       ? {}
-      : { governedAuthorityJson: governedAuthorityJson(options.governedAuthority, options.cwd) }),
+      : { rolePolicyJson: rolePolicyJson(options.rolePolicy) }),
   }
-}
-
-function nativeDynamicToolResponse(response: DynamicToolResponse): NativeDynamicToolResponse {
-  if (
-    !isRecord(response)
-    || Array.isArray(response)
-    || typeof response.sessionId !== 'string'
-    || response.sessionId.trim().length === 0
-    || typeof response.callId !== 'string'
-    || response.callId.trim().length === 0
-    || typeof response.success !== 'boolean'
-    || typeof response.text !== 'string'
-  ) throw new KernelError('INVALID_DYNAMIC_TOOL_RESPONSE', 'dynamic-tool response is invalid')
-  exactKeys(
-    response,
-    ['sessionId', 'callId', 'success', 'text'],
-    [],
-    'dynamic-tool response',
-  )
-  return { ...response }
-}
-
-function nativeGovernedCommandRequest(
-  request: GovernedCommandRequest,
-): NativeGovernedCommandRequest {
-  if (!isRecord(request) || Array.isArray(request)) {
-    throw new KernelError('INVALID_GOVERNED_COMMAND', 'governed command must be an object')
-  }
-  exactKeys(request, [
-    'schemaVersion',
-    'sessionId',
-    'commandId',
-    'tool',
-    'argv',
-    'cwd',
-    'environment',
-    'timeoutMillis',
-    'outputLimitBytes',
-  ], [], 'governed command')
-  if (
-    request.schemaVersion !== GOVERNED_COMMAND_SCHEMA_VERSION
-    || typeof request.sessionId !== 'string'
-    || request.sessionId.length === 0
-    || typeof request.commandId !== 'string'
-    || request.commandId.length === 0
-    || !['command.run', 'test.run'].includes(request.tool)
-    || !Array.isArray(request.argv)
-    || request.argv.length === 0
-    || request.argv.some(argument => typeof argument !== 'string' || argument.length === 0)
-    || typeof request.cwd !== 'string'
-    || !isAbsolute(request.cwd)
-    || !isRecord(request.environment)
-    || Array.isArray(request.environment)
-    || Object.values(request.environment).some(value => typeof value !== 'string')
-  ) throw new KernelError('INVALID_GOVERNED_COMMAND', 'governed command is invalid')
-  validateUint32(request.timeoutMillis, 'governed command timeoutMillis')
-  validateUint32(request.outputLimitBytes, 'governed command outputLimitBytes')
-  return {
-    schemaVersion: request.schemaVersion,
-    sessionId: request.sessionId,
-    commandId: request.commandId,
-    tool: request.tool,
-    argv: [...request.argv],
-    cwd: request.cwd,
-    environmentJson: JSON.stringify(request.environment),
-    timeoutMillis: request.timeoutMillis,
-    outputLimitBytes: request.outputLimitBytes,
-  }
-}
-
-function governedCommandResult(result: NativeGovernedCommandResult): GovernedCommandResult {
-  const statuses: readonly GovernedCommandStatus[] = [
-    'exited',
-    'sandbox-denied',
-    'timed-out',
-    'cancelled',
-    'output-limit',
-  ]
-  if (
-    result.schemaVersion !== GOVERNED_COMMAND_SCHEMA_VERSION
-    || typeof result.sessionId !== 'string'
-    || typeof result.commandId !== 'string'
-    || !statuses.includes(result.status as GovernedCommandStatus)
-    || (result.exitCode !== undefined && result.exitCode !== null
-      && !Number.isInteger(result.exitCode))
-    || typeof result.stdout !== 'string'
-    || typeof result.stderr !== 'string'
-    || !['macos-seatbelt', 'linux-seccomp'].includes(result.sandbox)
-    || result.network !== 'restricted'
-    || !Array.isArray(result.environmentNames)
-    || result.environmentNames.some(name => typeof name !== 'string')
-  ) throw new KernelError(
-    'NATIVE_PROTOCOL_INVALID',
-    'native kernel returned an invalid governed command result',
-  )
-  return Object.freeze({
-    schemaVersion: GOVERNED_COMMAND_SCHEMA_VERSION,
-    sessionId: result.sessionId,
-    commandId: result.commandId,
-    status: result.status as GovernedCommandStatus,
-    ...(result.exitCode === undefined || result.exitCode === null
-      ? {}
-      : { exitCode: result.exitCode }),
-    stdout: result.stdout,
-    stderr: result.stderr,
-    sandbox: result.sandbox as GovernedCommandResult['sandbox'],
-    network: 'restricted',
-    environmentNames: Object.freeze([...result.environmentNames]),
-  })
 }
 
 function nativeApprovalResponse(response: ApprovalResponse): NativeApprovalResponse {
@@ -1103,32 +756,6 @@ export class WinWinCodeKernel {
   async resolveApproval(response: ApprovalResponse): Promise<string> {
     try {
       return await this.#binding.resolveApproval(nativeApprovalResponse(response))
-    } catch (error) {
-      throw translateError(error)
-    }
-  }
-
-  async resolveDynamicTool(response: DynamicToolResponse): Promise<string> {
-    try {
-      return await this.#binding.resolveDynamicTool(nativeDynamicToolResponse(response))
-    } catch (error) {
-      throw translateError(error)
-    }
-  }
-
-  async executeGovernedCommand(request: GovernedCommandRequest): Promise<GovernedCommandResult> {
-    try {
-      return governedCommandResult(
-        await this.#binding.executeGovernedCommand(nativeGovernedCommandRequest(request)),
-      )
-    } catch (error) {
-      throw translateError(error)
-    }
-  }
-
-  async cancelGovernedCommand(sessionId: string, commandId: string): Promise<void> {
-    try {
-      await this.#binding.cancelGovernedCommand(sessionId, commandId)
     } catch (error) {
       throw translateError(error)
     }

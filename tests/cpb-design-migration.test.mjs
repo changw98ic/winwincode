@@ -47,8 +47,9 @@ test('CPB design inventory is pinned, classified, and linked from the README', (
   assert.match(decision, /不提供 CPB 数据迁移器/u)
   assert.match(decision, /未提交内容；这些文件以及它们表达的新增方案都没有进入本次迁移/u)
   assert.match(decision, /docs\/product\/evidence\/\*\*/u)
-  assert.match(decision, /winwincode-9c4\.9\.5/u)
-  assert.match(decision, /winwincode-9c4\.9\.6/u)
+  assert.match(decision, /ADR-0023/u)
+  assert.equal(decision.includes('StrongFlowLocalJobService'), false)
+  assert.equal(decision.includes('固定为需求分析、方案设计'), false)
   assert.match(readme, /0022-cpb-design-knowledge-migration\.md/u)
 })
 

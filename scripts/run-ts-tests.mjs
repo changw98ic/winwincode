@@ -6,10 +6,7 @@ import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const testsDirectory = join(root, 'tests')
-const serialProcessTests = Object.freeze([
-  'tests/strongflow-git-workspace.test.mjs',
-  'tests/strongflow-recovery.test.mjs',
-])
+const serialProcessTests = Object.freeze([])
 const testFiles = readdirSync(testsDirectory, { withFileTypes: true })
   .filter(entry => entry.isFile() && entry.name.endsWith('.test.mjs'))
   .map(entry => `tests/${entry.name}`)
@@ -36,6 +33,5 @@ function runTests(arguments_) {
 const parallelTests = testFiles.filter(path => !serialProcessTests.includes(path))
 runTests(['--test', '--test-concurrency=4', ...parallelTests])
 
-// These tests start real Git and Node child processes. Run each file alone so
-// other file-level workers cannot starve those process boundaries.
+// Any future process-boundary test can opt into this serial list.
 for (const path of serialProcessTests) runTests(['--test', path])

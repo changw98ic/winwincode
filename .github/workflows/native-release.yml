@@ -69,20 +69,14 @@ jobs:
           corepack enable
           corepack pnpm install --frozen-lockfile
 
-      - name: Build TypeScript packages
-        run: corepack pnpm build:ts
-
-      - name: Build native release package
-        run: corepack pnpm build:native --release --target ${{ matrix.target }}
-
-      - name: Verify package identity, checksums, and notices
-        run: node scripts/verify-native-package.mjs --target ${{ matrix.target }} --require-release
-
-      - name: Verify clean install, keyless kernel, and sandbox
-        run: node scripts/verify-native-install.mjs --target ${{ matrix.target }} --require-release
-
-      - name: Pack release artifacts
-        run: node scripts/pack-native-release.mjs --target ${{ matrix.target }} --output release-artifacts
+      - name: Run the complete native release lane and write evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-native-release-gate.mjs \
+            --target ${{ matrix.target }} \
+            --source-commit "${GITHUB_SHA}" \
+            --output release-artifacts
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7

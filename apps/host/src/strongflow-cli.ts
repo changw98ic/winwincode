@@ -2,24 +2,27 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 
 import {
-  STRONGFLOW_ARTIFACT_KINDS,
-  STRONGFLOW_CLI_COMMANDS,
-  STRONGFLOW_CLI_EXIT_CODES,
-  STRONGFLOW_OPERATOR_SCHEMA_VERSION,
-  materializeStrongFlowOperatorFailure,
-  parseStrongFlowOperatorRequest,
-  parseStrongFlowOperatorResponse,
-  parseStrongFlowOperatorResponseForRequest,
-  renderStrongFlowCliHelp,
-  strongFlowCliExitCode,
-  strongFlowCliSignalExitCode,
-  type DefinitionIdentity,
-  type StrongFlowCliSignal,
-  type StrongFlowOperatorInvoker,
-  type StrongFlowOperatorOperation,
-  type StrongFlowOperatorRequest,
-  type StrongFlowOperatorResponse,
+  STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
+  materializeStrongFlowDeliveryFailure,
+  parseStrongFlowDeliveryRequest,
+  parseStrongFlowDeliveryResponseForRequest,
+  type StrongFlowDeliveryInvoker,
+  type StrongFlowDeliveryOperation,
+  type StrongFlowDeliveryRequest,
+  type StrongFlowDeliveryResponse,
 } from '@winwincode/contracts'
+
+export type StrongFlowCliSignal = 'SIGINT' | 'SIGTERM'
+
+export const STRONGFLOW_DELIVERY_CLI_EXIT_CODES = Object.freeze({
+  success: 0,
+  usage: 2,
+  notFound: 3,
+  conflict: 4,
+  service: 5,
+  sigint: 130,
+  sigterm: 143,
+} as const)
 
 export interface StrongFlowCliIo {
   readonly stdout: (text: string) => void
@@ -36,13 +39,13 @@ interface ParsedArguments {
 }
 
 class CliUsageError extends Error {
-  readonly operation: StrongFlowOperatorOperation | null
+  readonly operation: StrongFlowDeliveryOperation | null
   readonly requestId: string | null
 
   constructor(
     message: string,
     options: {
-      readonly operation?: StrongFlowOperatorOperation | null
+      readonly operation?: StrongFlowDeliveryOperation | null
       readonly requestId?: string | null
     } = {},
   ) {
@@ -60,7 +63,33 @@ const DEFAULT_IO: StrongFlowCliIo = Object.freeze({
   requestId: () => `cli-${randomUUID()}`,
 })
 
-const BOOLEAN_FLAGS = new Set(['json', 'json-lines'])
+const BOOLEAN_FLAGS = new Set(['json'])
+
+const ACTION_OPERATIONS = Object.freeze({
+  create: 'createDelivery',
+  'update-spec': 'updateDeliverySpec',
+  'start-stage': 'startStage',
+  'bind-session': 'bindSession',
+  'resolve-attention': 'resolveAttention',
+  'submit-verdict': 'submitVerdict',
+  show: 'getDeliveryProjection',
+} as const satisfies Readonly<Record<string, StrongFlowDeliveryOperation>>)
+
+export function renderStrongFlowDeliveryCliHelp(): string {
+  return [
+    'WinWinCode Delivery commands:',
+    '  winwincode delivery create --spec FILE [--tasks FILE] --json',
+    '  winwincode delivery update-spec DELIVERY_ID --expected-revision N --spec FILE --json',
+    '  winwincode delivery start-stage DELIVERY_ID --expected-revision N --stage-run-id ID --stage STAGE --actor codex|human --role ROLE [--task-id ID] [--attention FILE] --json',
+    '  winwincode delivery bind-session DELIVERY_ID --expected-revision N --binding-id ID --stage-run-id ID [--dsh-session ID] [--codex-session ID] --json',
+    '  winwincode delivery resolve-attention DELIVERY_ID --expected-revision N --attention-id ID --decision resolved|dismissed --resolution TEXT [--remediation FILE] --auth PROOF --json',
+    '  winwincode delivery submit-verdict DELIVERY_ID --expected-revision N --candidate FILE --runtime-events FILE [--required-roles reviewer,verifier] --json',
+    '  winwincode delivery show DELIVERY_ID --json',
+    '',
+    'Every command accepts --request-id ID. FILE arguments contain canonical JSON values.',
+    '',
+  ].join('\n')
+}
 
 function parseArguments(tokens: readonly string[]): ParsedArguments {
   const positionals: string[] = []
@@ -94,10 +123,6 @@ function parseArguments(tokens: readonly string[]): ParsedArguments {
   return Object.freeze({ positionals: Object.freeze(positionals), flags })
 }
 
-function commandOperation(command: string): StrongFlowOperatorOperation | null {
-  return STRONGFLOW_CLI_COMMANDS.find(entry => entry.command === command)?.operation ?? null
-}
-
 function onlyFlag(
   parsed: ParsedArguments,
   name: string,
@@ -111,16 +136,14 @@ function onlyFlag(
   return values[0]
 }
 
-function requireOutputFlag(parsed: ParsedArguments, expected: 'json' | 'json-lines'): void {
-  if (onlyFlag(parsed, expected) !== 'true') {
-    throw new CliUsageError(`该命令要求 --${expected}。`)
+function requireJson(parsed: ParsedArguments): void {
+  if (onlyFlag(parsed, 'json') !== 'true') {
+    throw new CliUsageError('该命令要求 --json。')
   }
-  const other = expected === 'json' ? 'json-lines' : 'json'
-  if (parsed.flags.has(other)) throw new CliUsageError(`--${other} 不适用于该命令。`)
 }
 
 function rejectUnknownFlags(parsed: ParsedArguments, allowed: readonly string[]): void {
-  const accepted = new Set([...allowed, 'request-id'])
+  const accepted = new Set([...allowed, 'request-id', 'json'])
   const unknown = [...parsed.flags.keys()].find(name => !accepted.has(name))
   if (unknown !== undefined) throw new CliUsageError(`未知选项 --${unknown}。`)
 }
@@ -131,47 +154,30 @@ function exactPositionals(parsed: ParsedArguments, count: number): void {
   }
 }
 
-function positiveInteger(value: string | undefined, fallback: number, name: string): number {
-  if (value === undefined) return fallback
-  if (!/^[1-9][0-9]*$/u.test(value)) throw new CliUsageError(`--${name} 必须是正整数。`)
-  const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed)) throw new CliUsageError(`--${name} 数值过大。`)
-  return parsed
-}
-
-function nonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
-  if (value === undefined) return fallback
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
-    throw new CliUsageError(`--${name} 必须是非负整数。`)
+function positiveInteger(value: string | undefined, name: string): number {
+  if (value === undefined || !/^[1-9][0-9]*$/u.test(value)) {
+    throw new CliUsageError(`--${name} 必须是正整数。`)
   }
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed)) throw new CliUsageError(`--${name} 数值过大。`)
   return parsed
 }
 
-async function definitionFromFile(
-  path: string,
-  io: StrongFlowCliIo,
-): Promise<DefinitionIdentity> {
-  let value: unknown
+async function readJson(path: string, label: string, io: StrongFlowCliIo): Promise<unknown> {
   try {
-    value = JSON.parse(await io.readTextFile(path)) as unknown
+    return JSON.parse(await io.readTextFile(path)) as unknown
   } catch {
-    throw new CliUsageError('定义文件不是可读取的 JSON。')
+    throw new CliUsageError(`${label}不是可读取的 JSON。`)
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new CliUsageError('定义文件必须直接包含四个定义身份。')
-  }
-  return value as DefinitionIdentity
 }
 
-function operatorRequest(
-  operation: StrongFlowOperatorOperation,
+function request(
+  operation: StrongFlowDeliveryOperation,
   requestId: string,
   payload: unknown,
-): StrongFlowOperatorRequest {
-  return parseStrongFlowOperatorRequest({
-    schemaVersion: STRONGFLOW_OPERATOR_SCHEMA_VERSION,
+): StrongFlowDeliveryRequest {
+  return parseStrongFlowDeliveryRequest({
+    schemaVersion: STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
     requestId,
     operation,
     payload,
@@ -179,121 +185,150 @@ function operatorRequest(
 }
 
 async function buildRequest(
-  command: string,
+  action: string,
   parsed: ParsedArguments,
   io: StrongFlowCliIo,
-): Promise<StrongFlowOperatorRequest> {
-  const operation = commandOperation(command)
-  if (operation === null) throw new CliUsageError(`未知命令 ${command}。`)
+): Promise<StrongFlowDeliveryRequest> {
+  const operation = ACTION_OPERATIONS[action as keyof typeof ACTION_OPERATIONS] ?? null
+  if (operation === null) throw new CliUsageError(`未知 Delivery 命令 ${action}。`)
   const requestId = onlyFlag(parsed, 'request-id') ?? io.requestId()
   try {
+    requireJson(parsed)
     switch (operation) {
-      case 'job.create': {
-        rejectUnknownFlags(parsed, ['repo', 'request', 'base', 'title', 'json'])
-        requireOutputFlag(parsed, 'json')
+      case 'createDelivery': {
+        rejectUnknownFlags(parsed, ['spec', 'tasks'])
         exactPositionals(parsed, 0)
-        return operatorRequest(operation, requestId, {
-          repositoryPath: onlyFlag(parsed, 'repo', { required: true })!,
-          baseRevision: onlyFlag(parsed, 'base') ?? null,
-          title: onlyFlag(parsed, 'title') ?? null,
-          request: onlyFlag(parsed, 'request', { required: true })!,
-          submittedFrom: 'cli',
+        const tasksPath = onlyFlag(parsed, 'tasks')
+        return request(operation, requestId, {
+          spec: await readJson(onlyFlag(parsed, 'spec', { required: true })!, '规格文件', io),
+          tasks: tasksPath === undefined ? [] : await readJson(tasksPath, '任务文件', io),
         })
       }
-      case 'job.status':
-      case 'definition.requirement':
-      case 'definition.solution':
-      case 'definition.diagrams': {
-        rejectUnknownFlags(parsed, ['json'])
-        requireOutputFlag(parsed, 'json')
+      case 'updateDeliverySpec': {
+        rejectUnknownFlags(parsed, ['expected-revision', 'spec'])
         exactPositionals(parsed, 1)
-        return operatorRequest(operation, requestId, {
-          jobId: parsed.positionals[0]!,
+        return request(operation, requestId, {
+          deliveryId: parsed.positionals[0],
+          expectedRevision: positiveInteger(
+            onlyFlag(parsed, 'expected-revision', { required: true }),
+            'expected-revision',
+          ),
+          spec: await readJson(onlyFlag(parsed, 'spec', { required: true })!, '规格文件', io),
         })
       }
-      case 'job.follow': {
-        rejectUnknownFlags(parsed, ['after', 'limit', 'wait', 'json-lines'])
-        requireOutputFlag(parsed, 'json-lines')
+      case 'startStage': {
+        rejectUnknownFlags(parsed, [
+          'expected-revision',
+          'stage-run-id',
+          'task-id',
+          'stage',
+          'actor',
+          'role',
+          'attention',
+        ])
         exactPositionals(parsed, 1)
-        return operatorRequest(operation, requestId, {
-          jobId: parsed.positionals[0]!,
-          afterCursor: onlyFlag(parsed, 'after') ?? null,
-          limit: positiveInteger(onlyFlag(parsed, 'limit'), 100, 'limit'),
-          waitMillis: nonNegativeInteger(onlyFlag(parsed, 'wait'), 0, 'wait'),
+        const attentionPath = onlyFlag(parsed, 'attention')
+        return request(operation, requestId, {
+          deliveryId: parsed.positionals[0],
+          expectedRevision: positiveInteger(
+            onlyFlag(parsed, 'expected-revision', { required: true }),
+            'expected-revision',
+          ),
+          stageRunId: onlyFlag(parsed, 'stage-run-id', { required: true }),
+          deliveryTaskId: onlyFlag(parsed, 'task-id') ?? null,
+          stage: onlyFlag(parsed, 'stage', { required: true }),
+          actorType: onlyFlag(parsed, 'actor', { required: true }),
+          role: onlyFlag(parsed, 'role', { required: true }),
+          attention: attentionPath === undefined
+            ? null
+            : await readJson(attentionPath, '待处理事项文件', io),
         })
       }
-      case 'review.approve':
-      case 'review.reject':
-      case 'review.request-changes': {
-        const allowed = operation === 'review.request-changes'
-          ? ['definition', 'scope', 'auth', 'comment', 'json']
-          : ['definition', 'auth', 'comment', 'json']
-        rejectUnknownFlags(parsed, allowed)
-        requireOutputFlag(parsed, 'json')
+      case 'bindSession': {
+        rejectUnknownFlags(parsed, [
+          'expected-revision',
+          'binding-id',
+          'stage-run-id',
+          'dsh-session',
+          'codex-session',
+        ])
         exactPositionals(parsed, 1)
-        const definitionPath = onlyFlag(parsed, 'definition', { required: true })!
-        const common = {
-          jobId: parsed.positionals[0]!,
-          definition: await definitionFromFile(definitionPath, io),
-          channel: 'cli' as const,
+        return request(operation, requestId, {
+          deliveryId: parsed.positionals[0],
+          expectedRevision: positiveInteger(
+            onlyFlag(parsed, 'expected-revision', { required: true }),
+            'expected-revision',
+          ),
+          bindingId: onlyFlag(parsed, 'binding-id', { required: true }),
+          stageRunId: onlyFlag(parsed, 'stage-run-id', { required: true }),
+          dshSessionId: onlyFlag(parsed, 'dsh-session') ?? null,
+          codexSessionId: onlyFlag(parsed, 'codex-session') ?? null,
+        })
+      }
+      case 'resolveAttention': {
+        rejectUnknownFlags(parsed, [
+          'expected-revision',
+          'attention-id',
+          'decision',
+          'resolution',
+          'remediation',
+          'auth',
+        ])
+        exactPositionals(parsed, 1)
+        const remediationPath = onlyFlag(parsed, 'remediation')
+        return request(operation, requestId, {
+          deliveryId: parsed.positionals[0],
+          expectedRevision: positiveInteger(
+            onlyFlag(parsed, 'expected-revision', { required: true }),
+            'expected-revision',
+          ),
+          attentionItemId: onlyFlag(parsed, 'attention-id', { required: true }),
+          status: onlyFlag(parsed, 'decision', { required: true }),
+          resolution: onlyFlag(parsed, 'resolution', { required: true }),
+          remediation: remediationPath === undefined
+            ? null
+            : await readJson(remediationPath, '返工标注文件', io),
+          channel: 'cli',
           authentication: {
-            scheme: 'local-peer' as const,
-            proof: onlyFlag(parsed, 'auth', { required: true })!,
+            scheme: 'local-peer',
+            proof: onlyFlag(parsed, 'auth', { required: true }),
           },
-          comment: onlyFlag(parsed, 'comment') ?? null,
-        }
-        if (operation === 'review.request-changes') {
-          return operatorRequest(operation, requestId, {
-            ...common,
-            scope: onlyFlag(parsed, 'scope', { required: true }) as (
-              'requirements' | 'solution' | 'diagrams'
-            ),
-          })
-        }
-        return operatorRequest(operation, requestId, common)
-      }
-      case 'job.cancel': {
-        rejectUnknownFlags(parsed, ['reason', 'json'])
-        requireOutputFlag(parsed, 'json')
-        exactPositionals(parsed, 1)
-        return operatorRequest(operation, requestId, {
-          jobId: parsed.positionals[0]!,
-          reason: onlyFlag(parsed, 'reason', { required: true })!,
         })
       }
-      case 'job.resume': {
-        rejectUnknownFlags(parsed, ['interruption-sequence', 'json'])
-        requireOutputFlag(parsed, 'json')
+      case 'submitVerdict': {
+        rejectUnknownFlags(parsed, [
+          'expected-revision',
+          'candidate',
+          'runtime-events',
+          'required-roles',
+        ])
         exactPositionals(parsed, 1)
-        return operatorRequest(operation, requestId, {
-          jobId: parsed.positionals[0]!,
-          interruptionSequence: onlyFlag(
-            parsed,
-            'interruption-sequence',
-            { required: true },
-          )!,
+        return request(operation, requestId, {
+          deliveryId: parsed.positionals[0],
+          expectedRevision: positiveInteger(
+            onlyFlag(parsed, 'expected-revision', { required: true }),
+            'expected-revision',
+          ),
+          candidate: await readJson(
+            onlyFlag(parsed, 'candidate', { required: true })!,
+            '候选版本文件',
+            io,
+          ),
+          runtimeEvents: await readJson(
+            onlyFlag(parsed, 'runtime-events', { required: true })!,
+            '运行事件文件',
+            io,
+          ),
+          requiredRoles: (onlyFlag(parsed, 'required-roles') ?? 'reviewer,verifier')
+            .split(',')
+            .map(role => role.trim()),
         })
       }
-      case 'job.artifacts': {
-        rejectUnknownFlags(parsed, ['after-sequence', 'limit', 'kind', 'json'])
-        requireOutputFlag(parsed, 'json')
+      case 'getDeliveryProjection': {
+        rejectUnknownFlags(parsed, [])
         exactPositionals(parsed, 1)
-        const kinds = parsed.flags.get('kind') ?? []
-        return operatorRequest(operation, requestId, {
-          jobId: parsed.positionals[0]!,
-          afterSequence: onlyFlag(parsed, 'after-sequence') ?? null,
-          limit: positiveInteger(onlyFlag(parsed, 'limit'), 100, 'limit'),
-          artifactKinds: kinds.length === 0 ? STRONGFLOW_ARTIFACT_KINDS : kinds,
-        })
-      }
-      case 'job.export': {
-        rejectUnknownFlags(parsed, ['format', 'json'])
-        requireOutputFlag(parsed, 'json')
-        exactPositionals(parsed, 1)
-        const format = onlyFlag(parsed, 'format', { required: true })
-        return operatorRequest(operation, requestId, {
-          jobId: parsed.positionals[0]!,
-          format: format as 'manifest-json',
+        return request(operation, requestId, {
+          deliveryId: parsed.positionals[0],
         })
       }
     }
@@ -301,14 +336,14 @@ async function buildRequest(
     if (error instanceof CliUsageError) {
       throw new CliUsageError(error.message, { operation, requestId })
     }
-    throw new CliUsageError('命令参数不符合 StrongFlow 请求格式。', {
+    throw new CliUsageError('命令参数不符合 Delivery 请求格式。', {
       operation,
       requestId,
     })
   }
 }
 
-function writeResponse(io: StrongFlowCliIo, response: StrongFlowOperatorResponse): void {
+function writeResponse(io: StrongFlowCliIo, response: StrongFlowDeliveryResponse): void {
   const serialized = `${JSON.stringify(response)}\n`
   if (response.ok) io.stdout(serialized)
   else io.stderr(serialized)
@@ -320,51 +355,70 @@ function safeRequestId(value: string | null): string | null {
     : null
 }
 
-/** Run one StrongFlow CLI request through the same invoker used by the DSH workbench. */
+function responseExitCode(response: StrongFlowDeliveryResponse): number {
+  if (response.ok) return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.success
+  switch (response.error.code) {
+    case 'INVALID_REQUEST': return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.usage
+    case 'DELIVERY_NOT_FOUND': return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.notFound
+    case 'DELIVERY_CONFLICT':
+    case 'REVISION_CONFLICT':
+    case 'WRONG_DELIVERY_STATE':
+    case 'ATTENTION_REQUIRED': return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.conflict
+    default: return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.service
+  }
+}
+
+/** Run one Delivery request through the same invoker used by the DSH workbench. */
 export async function runStrongFlowCli(
   argv: readonly string[],
-  invoker: StrongFlowOperatorInvoker,
+  invoker: StrongFlowDeliveryInvoker,
   overrides: Partial<StrongFlowCliIo> = {},
 ): Promise<number> {
   const io: StrongFlowCliIo = { ...DEFAULT_IO, ...overrides }
-  const command = argv[0]
-  if (command === undefined || command === 'help' || command === '--help' || command === '-h') {
-    io.stdout(renderStrongFlowCliHelp())
-    return STRONGFLOW_CLI_EXIT_CODES.success
+  if (argv[0] === undefined
+    || argv[0] === 'help'
+    || argv[0] === '--help'
+    || argv[0] === '-h'
+    || (argv[0] === 'delivery' && (argv[1] === undefined || argv[1] === 'help'))) {
+    io.stdout(renderStrongFlowDeliveryCliHelp())
+    return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.success
   }
-  let request: StrongFlowOperatorRequest
+  let requestValue: StrongFlowDeliveryRequest
   try {
-    const parsed = parseArguments(argv.slice(1))
-    request = await buildRequest(command, parsed, io)
+    if (argv[0] !== 'delivery' || argv[1] === undefined) {
+      throw new CliUsageError('命令必须以 delivery 开头。')
+    }
+    requestValue = await buildRequest(argv[1], parseArguments(argv.slice(2)), io)
   } catch (error) {
     const usage = error instanceof CliUsageError
       ? error
       : new CliUsageError('命令参数无效。')
-    const response = materializeStrongFlowOperatorFailure({
+    const response = materializeStrongFlowDeliveryFailure({
       requestId: safeRequestId(usage.requestId),
       operation: usage.operation,
       code: 'INVALID_REQUEST',
       message: usage.message,
     })
     writeResponse(io, response)
-    return STRONGFLOW_CLI_EXIT_CODES.usage
+    return STRONGFLOW_DELIVERY_CLI_EXIT_CODES.usage
   }
-  let response: StrongFlowOperatorResponse
+  let response: StrongFlowDeliveryResponse
   try {
-    response = parseStrongFlowOperatorResponse(
-      parseStrongFlowOperatorResponseForRequest(
-        request,
-        await invoker.invoke(request, io.signal === undefined ? {} : { signal: io.signal }),
+    response = parseStrongFlowDeliveryResponseForRequest(
+      requestValue,
+      await invoker.invoke(
+        requestValue,
+        io.signal === undefined ? {} : { signal: io.signal },
       ),
     )
   } catch {
-    response = materializeStrongFlowOperatorFailure({
-      requestId: request.requestId,
-      operation: request.operation,
+    response = materializeStrongFlowDeliveryFailure({
+      requestId: requestValue.requestId,
+      operation: requestValue.operation,
       code: io.signal?.aborted === true ? 'OPERATION_ABORTED' : 'INTERNAL_ERROR',
       message: io.signal?.aborted === true
-        ? 'StrongFlow 操作请求已中止。'
-        : 'StrongFlow 本地调用失败。',
+        ? 'StrongFlow Delivery 请求已中止。'
+        : 'StrongFlow Delivery 本地调用失败。',
     })
   }
   writeResponse(io, response)
@@ -372,7 +426,9 @@ export async function runStrongFlowCli(
   if (!response.ok
     && response.error.code === 'OPERATION_ABORTED'
     && interruptedBy !== undefined) {
-    return strongFlowCliSignalExitCode(interruptedBy)
+    return interruptedBy === 'SIGINT'
+      ? STRONGFLOW_DELIVERY_CLI_EXIT_CODES.sigint
+      : STRONGFLOW_DELIVERY_CLI_EXIT_CODES.sigterm
   }
-  return strongFlowCliExitCode(response)
+  return responseExitCode(response)
 }

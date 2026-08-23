@@ -1,9 +1,20 @@
 import {
+  RUNTIME_VERIFICATION_RESULT_PROTOCOL,
   RUNTIME_EVENT_SCHEMA_VERSION,
   runtimeEventId,
   type RuntimeCursor,
   type RuntimeEvent,
   type RuntimeEventKind,
+  type RuntimeAgentGraphChange,
+  type RuntimeAgentGraphSemantic,
+  type RuntimeInputQuestion,
+  type RuntimeInputSemantic,
+  type RuntimePlanItem,
+  type RuntimePlanSemantic,
+  type RuntimeSemanticPayload,
+  type RuntimeVerificationEvidenceSource,
+  type RuntimeVerificationFinding,
+  type RuntimeVerificationResultSemantic,
   type RuntimeSourceIdentity,
   type RuntimeTerminalReason,
 } from '@winwincode/contracts'
@@ -161,12 +172,14 @@ function normalizedKind(type: string, message: Record<string, unknown>): Runtime
       return 'turn.aborted'
     case 'item_started': {
       const typeOfItem = itemType(message)
+      if (typeOfItem === 'Plan') return 'plan.updated'
       if (typeOfItem === 'SubAgentActivity') return 'subagent.started'
       if (isToolItem(typeOfItem)) return 'tool.started'
       return 'item.started'
     }
     case 'item_completed': {
       const typeOfItem = itemType(message)
+      if (typeOfItem === 'Plan') return 'plan.updated'
       if (typeOfItem === 'AgentMessage' || typeOfItem === 'UserMessage') {
         return 'message.completed'
       }
@@ -179,8 +192,10 @@ function normalizedKind(type: string, message: Record<string, unknown>): Runtime
     case 'agent_message':
       return 'message.completed'
     case 'agent_message_content_delta':
-    case 'plan_delta':
       return 'message.delta'
+    case 'plan_update':
+    case 'plan_delta':
+      return 'plan.updated'
     case 'agent_reasoning':
     case 'agent_reasoning_raw_content':
       return 'reasoning.completed'
@@ -209,9 +224,10 @@ function normalizedKind(type: string, message: Record<string, unknown>): Runtime
     case 'exec_approval_request':
     case 'apply_patch_approval_request':
     case 'request_permissions':
+      return 'approval.requested'
     case 'request_user_input':
     case 'elicitation_request':
-      return 'approval.requested'
+      return 'input.requested'
     case 'turn_diff':
       return 'diff.updated'
     case 'token_count':
@@ -282,6 +298,396 @@ function serializedAgentPath(value: unknown): string | undefined {
   return serialized === undefined ? undefined : serialized
 }
 
+function nullableString(value: unknown): string | null {
+  return nonEmptyString(value) ?? null
+}
+
+function planItems(value: unknown): readonly RuntimePlanItem[] {
+  if (!Array.isArray(value)) return Object.freeze([])
+  const items: RuntimePlanItem[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)
+      || typeof entry.step !== 'string'
+      || (entry.status !== 'pending'
+        && entry.status !== 'in_progress'
+        && entry.status !== 'completed')) continue
+    items.push(Object.freeze({ step: entry.step, status: entry.status }))
+  }
+  return Object.freeze(items)
+}
+
+function planSemantic(type: string, message: Record<string, unknown>): RuntimePlanSemantic | undefined {
+  if (type === 'plan_update') {
+    return Object.freeze({
+      kind: 'plan',
+      mode: 'snapshot',
+      itemId: nullableString(message.item_id),
+      explanation: nullableString(message.explanation),
+      items: planItems(message.plan),
+      text: null,
+    })
+  }
+  if (type === 'plan_delta') {
+    return Object.freeze({
+      kind: 'plan',
+      mode: 'delta',
+      itemId: nullableString(message.item_id),
+      explanation: null,
+      items: Object.freeze([]),
+      text: nullableString(message.delta),
+    })
+  }
+  if (type !== 'item_started' && type !== 'item_completed') return undefined
+  const item = nestedRecord(message, 'item')
+  if (item?.type !== 'Plan') return undefined
+  return Object.freeze({
+    kind: 'plan',
+    mode: type === 'item_started' ? 'started' : 'completed',
+    itemId: nullableString(item.id),
+    explanation: null,
+    items: Object.freeze([]),
+    text: nullableString(item.text),
+  })
+}
+
+function inputQuestions(value: unknown): readonly RuntimeInputQuestion[] {
+  if (!Array.isArray(value)) return Object.freeze([])
+  const questions: RuntimeInputQuestion[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)
+      || typeof entry.id !== 'string'
+      || typeof entry.header !== 'string'
+      || typeof entry.question !== 'string') continue
+    const options = Array.isArray(entry.options)
+      ? entry.options.flatMap((option) => {
+        if (!isRecord(option)
+          || typeof option.label !== 'string'
+          || typeof option.description !== 'string') return []
+        return [Object.freeze({ label: option.label, description: option.description })]
+      })
+      : []
+    questions.push(Object.freeze({
+      id: entry.id,
+      header: entry.header,
+      question: entry.question,
+      isOther: entry.isOther === true,
+      isSecret: entry.isSecret === true,
+      options: Object.freeze(options),
+    }))
+  }
+  return Object.freeze(questions)
+}
+
+function inputSemantic(type: string, message: Record<string, unknown>): RuntimeInputSemantic | undefined {
+  if (type !== 'request_user_input' && type !== 'elicitation_request') return undefined
+  const requestId = nonEmptyString(message.call_id) ?? nonEmptyString(message.id)
+  if (requestId === undefined) return undefined
+  return Object.freeze({
+    kind: 'input',
+    requestId,
+    blocking: message.isBlocking !== false,
+    questions: inputQuestions(message.questions),
+  })
+}
+
+function serializedAgentStatus(value: unknown): string {
+  if (typeof value === 'string' && value.length > 0) return value
+  if (isRecord(value)) {
+    if (Object.hasOwn(value, 'completed')) return 'completed'
+    if (Object.hasOwn(value, 'errored')) return 'failed'
+    const key = Object.keys(value)[0]
+    if (key !== undefined) return key
+  }
+  return 'unknown'
+}
+
+function graphStatus(value: unknown): string {
+  switch (serializedAgentStatus(value)) {
+    case 'pending_init': return 'waiting'
+    case 'running': return 'running'
+    case 'interrupted': return 'interrupted'
+    case 'completed': return 'completed'
+    case 'errored':
+    case 'failed':
+    case 'not_found': return 'failed'
+    case 'shutdown': return 'closed'
+    default: return 'unknown'
+  }
+}
+
+function graphAction(status: string): RuntimeAgentGraphChange['action'] {
+  switch (status) {
+    case 'waiting': return 'waiting'
+    case 'completed': return 'completed'
+    case 'interrupted': return 'interrupted'
+    case 'closed': return 'closed'
+    default: return 'updated'
+  }
+}
+
+function graphChange(input: {
+  readonly threadId: unknown
+  readonly path?: unknown
+  readonly parentThreadId?: unknown
+  readonly nickname?: unknown
+  readonly role?: unknown
+  readonly status?: unknown
+  readonly action?: RuntimeAgentGraphChange['action']
+}): RuntimeAgentGraphChange | undefined {
+  const threadId = nonEmptyString(input.threadId)
+  if (threadId === undefined) return undefined
+  const status = graphStatus(input.status)
+  return Object.freeze({
+    threadId,
+    path: serializedAgentPath(input.path) ?? null,
+    parentThreadId: nullableString(input.parentThreadId),
+    nickname: nullableString(input.nickname),
+    role: nullableString(input.role),
+    status,
+    action: input.action ?? graphAction(status),
+  })
+}
+
+function graphEntries(value: unknown): readonly Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : Object.freeze([])
+}
+
+function agentGraphSemantic(
+  type: string,
+  message: Record<string, unknown>,
+): RuntimeAgentGraphSemantic | undefined {
+  const changes: RuntimeAgentGraphChange[] = []
+  const push = (change: RuntimeAgentGraphChange | undefined): void => {
+    if (change !== undefined) changes.push(change)
+  }
+  switch (type) {
+    case 'collab_agent_spawn_end':
+      push(graphChange({
+        threadId: message.new_thread_id,
+        parentThreadId: message.sender_thread_id,
+        nickname: message.new_agent_nickname,
+        role: message.new_agent_role,
+        status: message.status,
+        action: 'started',
+      }))
+      break
+    case 'collab_agent_interaction_begin':
+    case 'collab_agent_interaction_end':
+      push(graphChange({
+        threadId: message.receiver_thread_id,
+        parentThreadId: message.sender_thread_id,
+        nickname: message.receiver_agent_nickname,
+        role: message.receiver_agent_role,
+        status: message.status ?? 'running',
+        action: 'updated',
+      }))
+      break
+    case 'collab_waiting_begin': {
+      const agents = graphEntries(message.receiver_agents)
+      if (agents.length > 0) {
+        for (const agent of agents) push(graphChange({
+          threadId: agent.thread_id,
+          parentThreadId: message.sender_thread_id,
+          nickname: agent.agent_nickname,
+          role: agent.agent_role,
+          status: 'pending_init',
+          action: 'waiting',
+        }))
+      } else if (Array.isArray(message.receiver_thread_ids)) {
+        for (const threadId of message.receiver_thread_ids) push(graphChange({
+          threadId,
+          parentThreadId: message.sender_thread_id,
+          status: 'pending_init',
+          action: 'waiting',
+        }))
+      }
+      break
+    }
+    case 'collab_waiting_end': {
+      const agents = graphEntries(message.agent_statuses)
+      if (agents.length > 0) {
+        for (const agent of agents) push(graphChange({
+          threadId: agent.thread_id,
+          parentThreadId: message.sender_thread_id,
+          nickname: agent.agent_nickname,
+          role: agent.agent_role,
+          status: agent.status,
+        }))
+      } else if (isRecord(message.statuses)) {
+        for (const [threadId, status] of Object.entries(message.statuses)) {
+          push(graphChange({ threadId, parentThreadId: message.sender_thread_id, status }))
+        }
+      }
+      break
+    }
+    case 'collab_close_begin':
+    case 'collab_close_end':
+      push(graphChange({
+        threadId: message.receiver_thread_id,
+        parentThreadId: message.sender_thread_id,
+        nickname: message.receiver_agent_nickname,
+        role: message.receiver_agent_role,
+        status: type === 'collab_close_end' ? 'shutdown' : message.status ?? 'running',
+        action: type === 'collab_close_end' ? 'closed' : 'updated',
+      }))
+      break
+    case 'collab_resume_begin':
+    case 'collab_resume_end':
+      push(graphChange({
+        threadId: message.receiver_thread_id,
+        parentThreadId: message.sender_thread_id,
+        nickname: message.receiver_agent_nickname,
+        role: message.receiver_agent_role,
+        status: message.status ?? 'running',
+        action: 'resumed',
+      }))
+      break
+    case 'sub_agent_activity': {
+      const activity = nonEmptyString(message.kind) ?? 'interacted'
+      push(graphChange({
+        threadId: message.agent_thread_id,
+        path: message.agent_path,
+        status: activity === 'interrupted' ? 'interrupted' : 'running',
+        action: activity === 'started'
+          ? 'started'
+          : activity === 'interrupted'
+            ? 'interrupted'
+            : 'updated',
+      }))
+      break
+    }
+    default:
+      return undefined
+  }
+  return changes.length === 0
+    ? undefined
+    : Object.freeze({ kind: 'agent-graph', changes: Object.freeze(changes) })
+}
+
+const VERIFICATION_EVIDENCE_TYPES = new Set<RuntimeVerificationEvidenceSource['type']>([
+  'test',
+  'command',
+  'diff',
+  'file',
+  'commit',
+  'runtime_event',
+])
+
+function verificationEvidenceSources(
+  value: unknown,
+): readonly RuntimeVerificationEvidenceSource[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const sources: RuntimeVerificationEvidenceSource[] = []
+  const identities = new Set<string>()
+  for (const entry of value) {
+    if (!isRecord(entry)
+      || Object.keys(entry).length !== 2
+      || typeof entry.type !== 'string'
+      || !VERIFICATION_EVIDENCE_TYPES.has(
+        entry.type as RuntimeVerificationEvidenceSource['type'],
+      )
+      || typeof entry.event_id !== 'string'
+      || entry.event_id.length === 0) return undefined
+    const identity = `${entry.type}\u0000${entry.event_id}`
+    if (identities.has(identity)) return undefined
+    identities.add(identity)
+    sources.push(Object.freeze({
+      type: entry.type as RuntimeVerificationEvidenceSource['type'],
+      eventId: entry.event_id,
+    }))
+  }
+  return Object.freeze(sources)
+}
+
+function verificationResultRecord(
+  type: string,
+  message: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (type !== 'agent_message' || typeof message.message !== 'string') return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(message.message) as unknown
+  } catch {
+    return undefined
+  }
+  return isRecord(parsed) ? parsed : undefined
+}
+
+function verificationFinding(value: unknown): RuntimeVerificationFinding | undefined {
+  if (!isRecord(value)) return undefined
+  const keys = [
+    'finding_id',
+    'criterion_id',
+    'verdict',
+    'explanation',
+    'evidence_sources',
+  ] as const
+  if (Object.keys(value).length !== keys.length
+    || keys.some(key => !Object.hasOwn(value, key))
+    || typeof value.finding_id !== 'string'
+    || value.finding_id.length === 0
+    || (value.criterion_id !== null && (
+      typeof value.criterion_id !== 'string' || value.criterion_id.length === 0
+    ))
+    || (value.verdict !== 'pass'
+      && value.verdict !== 'fail'
+      && value.verdict !== 'inconclusive'
+      && value.verdict !== 'infra_error')
+    || typeof value.explanation !== 'string'
+    || value.explanation.trim().length === 0) return undefined
+  const evidenceSources = verificationEvidenceSources(value.evidence_sources)
+  if (evidenceSources === undefined) return undefined
+  return Object.freeze({
+    findingId: value.finding_id,
+    criterionId: value.criterion_id as string | null,
+    verdict: value.verdict,
+    explanation: value.explanation,
+    evidenceSources,
+  })
+}
+
+function verificationResultSemantic(
+  type: string,
+  message: Record<string, unknown>,
+): RuntimeVerificationResultSemantic | undefined {
+  const result = verificationResultRecord(type, message)
+  if (result?.protocol !== RUNTIME_VERIFICATION_RESULT_PROTOCOL) return undefined
+  const keys = [
+    'protocol',
+    'delivery_spec_id',
+    'delivery_spec_revision',
+    'candidate_ref',
+    'findings',
+  ] as const
+  if (Object.keys(result).length !== keys.length
+    || keys.some(key => !Object.hasOwn(result, key))
+    || typeof result.delivery_spec_id !== 'string'
+    || result.delivery_spec_id.length === 0
+    || !Number.isSafeInteger(result.delivery_spec_revision)
+    || Number(result.delivery_spec_revision) < 1
+    || typeof result.candidate_ref !== 'string'
+    || result.candidate_ref.length === 0
+    || !Array.isArray(result.findings)
+    || result.findings.length === 0) return undefined
+  const findings = result.findings.map(verificationFinding)
+  if (findings.some(finding => finding === undefined)) return undefined
+  return Object.freeze({
+    kind: 'verification-result',
+    protocol: RUNTIME_VERIFICATION_RESULT_PROTOCOL,
+    deliverySpecId: result.delivery_spec_id,
+    deliverySpecRevision: Number(result.delivery_spec_revision),
+    candidateRef: result.candidate_ref,
+    findings: Object.freeze(findings as RuntimeVerificationFinding[]),
+  })
+}
+
+function semanticPayload(type: string, message: Record<string, unknown>): RuntimeSemanticPayload | undefined {
+  return planSemantic(type, message)
+    ?? inputSemantic(type, message)
+    ?? agentGraphSemantic(type, message)
+    ?? verificationResultSemantic(type, message)
+}
+
 function sourceIdentity(
   sessionId: string,
   kernelSessionId: string,
@@ -299,8 +705,9 @@ function sourceIdentity(
   const itemId = nonEmptyString(message.item_id) ?? nonEmptyString(item?.id)
   const toolCallId = nonEmptyString(message.call_id)
     ?? (isToolItem(nonEmptyString(item?.type)) ? nonEmptyString(item?.id) : undefined)
+  const kind = normalizedKind(nonEmptyString(message.type) ?? kernelKind, message)
   const approvalId = nonEmptyString(message.approval_id)
-    ?? (normalizedKind(nonEmptyString(message.type) ?? kernelKind, message) === 'approval.requested'
+    ?? (kind === 'approval.requested' || kind === 'input.requested'
       ? nonEmptyString(message.call_id) ?? nonEmptyString(message.id)
       : undefined)
   const agentThreadId = nonEmptyString(message.agent_thread_id)
@@ -455,6 +862,7 @@ export class CodexRuntimeProjector {
     )
     const occurredAtMillis = eventTimeMillis(message)
     const terminalReason = statusTerminalReason(kind, message)
+    const semantic = semanticPayload(type, message)
     const normalized: RuntimeEvent = Object.freeze({
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
       id: runtimeEventId(this.sessionId, sequence),
@@ -463,6 +871,7 @@ export class CodexRuntimeProjector {
       source,
       ...(occurredAtMillis === undefined ? {} : { occurredAtMillis }),
       ...(terminalReason === undefined ? {} : { terminalReason }),
+      ...(semantic === undefined ? {} : { semantic }),
       data: freezeRecord(message),
     })
     this.#sequence += 1n

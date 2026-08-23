@@ -253,6 +253,71 @@ test('live delivery and replay build the same normalized DSH state', async () =>
   })
 })
 
+test('plan and user-input events stay semantic instead of becoming chat text', () => {
+  const normalizer = new CodexRuntimeProjector({ sessionId, roleId, kernelStreamId })
+  const projection = new DshRuntimeProjection({ sessionId, roleId })
+  const rawEvents = [
+    kernelEvent(1, 'plan_update', {
+      explanation: 'Split the implementation into observable steps.',
+      plan: [
+        { step: 'Inspect the current boundary', status: 'completed' },
+        { step: 'Project the runtime facts', status: 'in_progress' },
+      ],
+    }),
+    kernelEvent(2, 'plan_delta', {
+      thread_id: kernelSessionId,
+      turn_id: 'turn-plan',
+      item_id: 'plan-item-1',
+      delta: '- verify the projection\n',
+    }),
+    kernelEvent(3, 'request_user_input', {
+      call_id: 'input-plan-1',
+      turn_id: 'turn-plan',
+      isBlocking: true,
+      questions: [{
+        id: 'review-scope',
+        header: 'Scope',
+        question: 'Approve the projected scope?',
+        isOther: false,
+        isSecret: false,
+        options: [{ label: 'Approve', description: 'Continue with this scope.' }],
+      }],
+    }),
+  ]
+  const events = normalizer.replay(rawEvents)
+  const appends = projection.replay(events)
+
+  assert.deepEqual(events.map(event => event.kind), [
+    'plan.updated',
+    'plan.updated',
+    'input.requested',
+  ])
+  assert.deepEqual(events[0].semantic, {
+    kind: 'plan',
+    mode: 'snapshot',
+    itemId: null,
+    explanation: 'Split the implementation into observable steps.',
+    items: [
+      { step: 'Inspect the current boundary', status: 'completed' },
+      { step: 'Project the runtime facts', status: 'in_progress' },
+    ],
+    text: null,
+  })
+  assert.deepEqual(events[1].semantic, {
+    kind: 'plan',
+    mode: 'delta',
+    itemId: 'plan-item-1',
+    explanation: null,
+    items: [],
+    text: '- verify the projection\n',
+  })
+  assert.equal(events[2].semantic.kind, 'input')
+  assert.equal(events[2].source.approvalId, 'input-plan-1')
+  assert.equal(appends.some(append => append.type === 'assistant/chunk'), false)
+  assert.equal(projection.snapshot.rows.some(row => row.id === 'plan:plan-item-1'), true)
+  assert.equal(projection.pendingApproval('input-plan-1').kind, 'interaction')
+})
+
 test('missing, conflicting, and old kernel events fail with stable codes', () => {
   const source = fixtureEvents()
   const missing = new CodexRuntimeProjector({ sessionId, roleId, kernelStreamId })

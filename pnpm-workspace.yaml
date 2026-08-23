@@ -19,3 +19,10 @@ allowBuilds:
   node-pty: true
   # The protobuf lifecycle hook is not needed here.
   protobufjs: false
+
+catalog:
+  '@deepseek-ai/dsh-launch-environment': 0.1.0-rc.8
+  '@deepseek-ai/dsh-llm-pi-ai': 0.1.0-rc.8
+  '@types/js-yaml': 4.0.9
+  '@types/react': 18.3.31
+  react: 18.3.1

@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/native-linux-x64",
-  "version": "0.0.0-dev.0",
+  "version": "0.1.0-alpha.1",
   "description": "WinWinCode embedded Codex kernel binary for GNU Linux x64",
   "license": "Apache-2.0",
   "type": "module",

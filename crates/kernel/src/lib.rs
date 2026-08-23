@@ -1,11 +1,7 @@
 //! Embedded Codex Core ownership boundary.
 
-mod governed_command;
 mod model_port;
 
-pub use governed_command::GOVERNED_COMMAND_SCHEMA_VERSION;
-pub use governed_command::GovernedCommandRequest;
-pub use governed_command::GovernedCommandResult;
 pub use model_port::ModelPort;
 pub use model_port::ModelPortFailure;
 pub use model_port::ModelPortRequest;
@@ -31,20 +27,14 @@ use codex_core_api::CodexThread;
 use codex_core_api::Config;
 use codex_core_api::ConfigBuilder;
 use codex_core_api::Constrained;
-use codex_core_api::DynamicToolFunctionSpec;
-use codex_core_api::DynamicToolNamespaceSpec;
-use codex_core_api::DynamicToolNamespaceTool;
-use codex_core_api::DynamicToolSpec;
 use codex_core_api::EnvironmentManager;
 use codex_core_api::ExecServerRuntimePaths;
-use codex_core_api::Features;
 use codex_core_api::ForkSnapshot;
 use codex_core_api::NewThread;
 use codex_core_api::Op;
 use codex_core_api::PermissionProfile;
 use codex_core_api::Permissions;
 use codex_core_api::SessionSource;
-use codex_core_api::ShellEnvironmentPolicy;
 use codex_core_api::StartThreadOptions;
 use codex_core_api::SteerSubmission;
 use codex_core_api::ThreadId;
@@ -59,17 +49,13 @@ use codex_core_api::local_agent_graph_store_from_state_db;
 use codex_core_api::resolve_installation_id;
 use codex_core_api::thread_store_from_config;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
 use codex_protocol::config_types::WebSearchMode;
-use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
-use codex_protocol::dynamic_tools::DynamicToolResponse;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::Event as CodexEvent;
+use codex_protocol::protocol::EventMsg as CodexEventMsg;
 use codex_protocol::protocol::ReviewDecision as CodexReviewDecision;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
@@ -85,18 +71,16 @@ pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 /// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
 /// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 4;
+pub const INTERFACE_VERSION: u32 = 5;
 /// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
     "upstream/patches/codex/0002-inject-model-stream-transport.patch",
     "upstream/patches/codex/0003-export-config-builder.patch",
-    "upstream/patches/codex/0004-resume-with-caller-options.patch",
     "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
 ];
 
-const GOVERNED_AUTHORITY_SCHEMA_VERSION: u32 = 1;
-const GOVERNED_DEVELOPER_INSTRUCTIONS: &str = "Operate only through the model-visible StrongFlow tools supplied for this role. The host owns authorization and human decisions. Do not request hidden tools, alternate execution paths, broader permissions, credentials, network access, or remote publication.";
+const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 1;
 
 const DEFAULT_EVENT_CAPACITY: usize = 256;
 const MIN_EVENT_CAPACITY: usize = 16;
@@ -165,26 +149,22 @@ pub struct SessionOptions {
     pub provider: String,
     /// Exact model identifier within the DSH provider route.
     pub model: String,
-    /// Optional immutable `StrongFlow` authority applied before thread startup.
-    pub governed_authority: Option<GovernedSessionAuthority>,
+    /// Optional `StrongFlow` role policy applied through Codex Core before thread startup.
+    pub role_policy: Option<RoleSessionPolicy>,
 }
 
-/// Immutable role authority accepted only when it matches the kernel's canonical role matrix.
+/// Minimal `StrongFlow` role policy accepted only when it matches the canonical workspace matrix.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GovernedSessionAuthority {
+pub struct RoleSessionPolicy {
     pub schema_version: u32,
     pub role_id: String,
-    pub permission_preset: String,
     pub workspace_mode: String,
-    pub workspace_root: String,
-    pub system_instructions: String,
-    pub reasoning_effort: Option<String>,
-    pub visible_tools: Vec<String>,
+    pub developer_instructions: String,
 }
 
-impl GovernedSessionAuthority {
-    /// Parse the strict host envelope without granting authority for missing or extra fields.
+impl RoleSessionPolicy {
+    /// Parse the strict role envelope without granting authority for missing or extra fields.
     ///
     /// # Errors
     ///
@@ -192,20 +172,11 @@ impl GovernedSessionAuthority {
     pub fn from_json(value: &str) -> KernelResult<Self> {
         serde_json::from_str(value).map_err(|error| {
             KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
-                format!("governed session authority is invalid: {error}"),
+                "INVALID_ROLE_POLICY",
+                format!("StrongFlow role policy is invalid: {error}"),
             )
         })
     }
-}
-
-/// Text result returned to one suspended dynamic-tool call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DynamicToolCallResponse {
-    pub session_id: String,
-    pub call_id: String,
-    pub success: bool,
-    pub text: String,
 }
 
 /// Optional configuration replacements applied while forking a live session.
@@ -266,33 +237,6 @@ pub struct SessionInfo {
     pub session_id: String,
     /// Durable rollout path when persistence is available.
     pub rollout_path: Option<String>,
-    /// Strict JSON evidence for governed sessions; absent for ordinary DSH chat sessions.
-    pub effective_policy_json: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GovernedSessionEffectivePolicy {
-    schema_version: u32,
-    authority: &'static str,
-    role_id: String,
-    permission_preset: String,
-    workspace_mode: String,
-    workspace_root: String,
-    visible_tools: Vec<String>,
-    filesystem: &'static str,
-    network: &'static str,
-    process: &'static str,
-    environment: &'static str,
-    governed_process: &'static str,
-    governed_process_network: &'static str,
-    governed_process_environment: &'static str,
-    credentials: &'static str,
-    approval_policy: &'static str,
-    approvals_reviewer: &'static str,
-    login_shell: bool,
-    environment_selections: Vec<String>,
-    instruction_sources: Vec<String>,
 }
 
 /// One bounded, ordered event returned to TypeScript.
@@ -381,8 +325,6 @@ pub type KernelResult<T> = Result<T, KernelFailure>;
 struct SessionRuntime {
     thread: Arc<CodexThread>,
     config: Config,
-    governed_authority: Option<GovernedSessionAuthority>,
-    governed_commands: governed_command::GovernedCommandController,
     events: Mutex<mpsc::Receiver<KernelEvent>>,
     stop: watch::Sender<bool>,
     event_task: Mutex<Option<JoinHandle<()>>>,
@@ -396,184 +338,27 @@ struct Runtime {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct GovernedRolePolicy {
-    permission_preset: &'static str,
+struct CanonicalRolePolicy {
     workspace_mode: &'static str,
-    visible_tools: &'static [&'static str],
-    filesystem: &'static str,
+    workspace_write: bool,
 }
 
-const DEFINITION_TOOLS: &[&str] = &[
-    "artifact.read",
-    "artifact.write",
-    "workspace.read",
-    "code.search",
-];
-const SNAPSHOT_TOOLS: &[&str] = &[
-    "artifact.read",
-    "artifact.write",
-    "workspace.read",
-    "code.search",
-    "candidate.diff",
-    "command.run",
-    "test.run",
-];
-const CANDIDATE_WRITE_TOOLS: &[&str] = &[
-    "artifact.read",
-    "artifact.write",
-    "workspace.read",
-    "code.search",
-    "candidate.diff",
-    "command.run",
-    "test.run",
-    "candidate.patch",
-];
-
-fn governed_role_policy(role_id: &str) -> Option<GovernedRolePolicy> {
+fn canonical_role_policy(role_id: &str) -> Option<CanonicalRolePolicy> {
     Some(match role_id {
-        "requirements" => GovernedRolePolicy {
-            permission_preset: "definition-read",
+        "requirements" | "solution" | "planner" => CanonicalRolePolicy {
             workspace_mode: "source-read-only",
-            visible_tools: DEFINITION_TOOLS,
-            filesystem: "managed-read-only",
+            workspace_write: false,
         },
-        "solution" => GovernedRolePolicy {
-            permission_preset: "solution-read",
-            workspace_mode: "source-read-only",
-            visible_tools: DEFINITION_TOOLS,
-            filesystem: "managed-read-only",
-        },
-        "planner" => GovernedRolePolicy {
-            permission_preset: "source-read",
-            workspace_mode: "source-read-only",
-            visible_tools: DEFINITION_TOOLS,
-            filesystem: "managed-read-only",
-        },
-        "executor" => GovernedRolePolicy {
-            permission_preset: "candidate-write",
+        "executor" | "remediator" => CanonicalRolePolicy {
             workspace_mode: "candidate-write",
-            visible_tools: CANDIDATE_WRITE_TOOLS,
-            filesystem: "managed-workspace-write",
+            workspace_write: true,
         },
-        "reviewer" | "verifier" | "adversarial-verifier" => GovernedRolePolicy {
-            permission_preset: "snapshot-verify",
+        "reviewer" | "verifier" | "adversarial-verifier" => CanonicalRolePolicy {
             workspace_mode: "candidate-read-only",
-            visible_tools: SNAPSHOT_TOOLS,
-            filesystem: "managed-read-only",
-        },
-        "remediator" => GovernedRolePolicy {
-            permission_preset: "remediation-write",
-            workspace_mode: "candidate-write",
-            visible_tools: CANDIDATE_WRITE_TOOLS,
-            filesystem: "managed-workspace-write",
+            workspace_write: false,
         },
         _ => return None,
     })
-}
-
-fn tool_schema(tool: &str) -> serde_json::Value {
-    let text = || json!({ "type": "string", "minLength": 1 });
-    match tool {
-        "artifact.read" => json!({
-            "type": "object",
-            "properties": { "artifactId": text() },
-            "required": ["artifactId"],
-            "additionalProperties": false
-        }),
-        "artifact.write" => json!({
-            "type": "object",
-            "properties": {
-                "kind": text(),
-                "artifact": { "type": "object" }
-            },
-            "required": ["kind", "artifact"],
-            "additionalProperties": false
-        }),
-        "workspace.read" => json!({
-            "type": "object",
-            "properties": { "path": text() },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
-        "code.search" => json!({
-            "type": "object",
-            "properties": {
-                "query": text(),
-                "paths": { "type": "array", "items": text() }
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        }),
-        "candidate.diff" => json!({
-            "type": "object",
-            "properties": { "path": text() },
-            "additionalProperties": false
-        }),
-        "command.run" | "test.run" => json!({
-            "type": "object",
-            "properties": {
-                "argv": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": { "type": "string" }
-                },
-                "cwd": text()
-            },
-            "required": ["argv"],
-            "additionalProperties": false
-        }),
-        "candidate.patch" => json!({
-            "type": "object",
-            "properties": {
-                "path": text(),
-                "patch": { "type": "string", "minLength": 1 }
-            },
-            "required": ["path", "patch"],
-            "additionalProperties": false
-        }),
-        _ => json!({ "type": "object", "additionalProperties": false }),
-    }
-}
-
-fn tool_description(tool: &str) -> &'static str {
-    match tool {
-        "artifact.read" => "Read one accepted StrongFlow artifact by exact identity.",
-        "artifact.write" => "Publish one role-authorized StrongFlow artifact.",
-        "workspace.read" => "Read one portable path inside the assigned workspace.",
-        "code.search" => "Search source text inside the assigned workspace.",
-        "candidate.diff" => "Read the candidate diff or one path-limited portion.",
-        "command.run" => "Run one approved plan command in the assigned sandbox.",
-        "test.run" => "Run one approved verification command in the assigned sandbox.",
-        "candidate.patch" => "Apply one bounded patch inside the assigned candidate workspace.",
-        _ => "Unknown StrongFlow tool.",
-    }
-}
-
-fn dynamic_tool_specs(tools: &[String]) -> Vec<DynamicToolSpec> {
-    let mut specs: Vec<DynamicToolSpec> = Vec::new();
-    for qualified in tools {
-        let (namespace_name, tool_name) = qualified
-            .split_once('.')
-            .expect("validated StrongFlow tool names always have a namespace");
-        let function = DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
-            name: tool_name.to_string(),
-            description: tool_description(qualified).to_string(),
-            input_schema: tool_schema(qualified),
-            defer_loading: false,
-        });
-        if let Some(DynamicToolSpec::Namespace(namespace)) = specs.iter_mut().find(|spec| {
-            matches!(spec, DynamicToolSpec::Namespace(namespace) if namespace.name == namespace_name)
-        }) {
-            namespace.tools.push(function);
-        } else {
-            specs.push(DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
-                name: namespace_name.to_string(),
-                description: format!("StrongFlow {namespace_name} operations."),
-                tools: vec![function],
-            }));
-        }
-    }
-    specs
 }
 
 /// Process-local embedded Codex kernel.
@@ -758,84 +543,51 @@ impl Kernel {
         config.model_provider = dsh_provider_info(&provider);
         config.model_provider_id = provider;
         config.model = Some(model);
-        if let Some(authority) = &options.governed_authority {
-            Self::apply_governed_authority(&mut config, authority)?;
+        if let Some(policy) = &options.role_policy {
+            Self::apply_role_session_policy(&mut config, policy)?;
         }
         Ok(config)
     }
 
-    fn validate_governed_authority(
-        config: &Config,
-        authority: &GovernedSessionAuthority,
-    ) -> KernelResult<(GovernedRolePolicy, Option<ReasoningEffort>)> {
-        if authority.schema_version != GOVERNED_AUTHORITY_SCHEMA_VERSION {
+    fn validate_role_session_policy(
+        policy: &RoleSessionPolicy,
+    ) -> KernelResult<CanonicalRolePolicy> {
+        if policy.schema_version != ROLE_SESSION_POLICY_SCHEMA_VERSION {
             return Err(KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
-                "governed session authority schema version is unsupported",
+                "INVALID_ROLE_POLICY",
+                "StrongFlow role policy schema version is unsupported",
             ));
         }
-        let policy = governed_role_policy(&authority.role_id).ok_or_else(|| {
+        let canonical = canonical_role_policy(&policy.role_id).ok_or_else(|| {
             KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
-                format!("unknown StrongFlow role {}", authority.role_id),
+                "INVALID_ROLE_POLICY",
+                format!("unknown StrongFlow role {}", policy.role_id),
             )
         })?;
-        let expected_tools = policy
-            .visible_tools
-            .iter()
-            .map(|tool| (*tool).to_string())
-            .collect::<Vec<_>>();
-        if authority.permission_preset != policy.permission_preset
-            || authority.workspace_mode != policy.workspace_mode
-            || authority.visible_tools != expected_tools
-        {
+        if policy.workspace_mode != canonical.workspace_mode {
             return Err(KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
+                "INVALID_ROLE_POLICY",
                 format!(
-                    "role {} does not match its canonical permission preset, workspace, or tool surface",
-                    authority.role_id
+                    "role {} does not match its canonical workspace mode",
+                    policy.role_id
                 ),
             ));
         }
-        if authority.system_instructions.trim().is_empty() {
+        if policy.developer_instructions.trim().is_empty() {
             return Err(KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
-                "governed role instructions must be non-empty",
+                "INVALID_ROLE_POLICY",
+                "StrongFlow role developer instructions must be non-empty",
             ));
         }
-        let authority_root = std::fs::canonicalize(&authority.workspace_root).map_err(|error| {
-            KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
-                format!("governed workspace root cannot be resolved: {error}"),
-            )
-        })?;
-        if authority_root != config.cwd.to_path_buf() {
-            return Err(KernelFailure::new(
-                "INVALID_GOVERNED_AUTHORITY",
-                "governed workspace root differs from the native session cwd",
-            ));
-        }
-        let reasoning_effort = authority
-            .reasoning_effort
-            .as_ref()
-            .map(|value| {
-                serde_json::from_value::<ReasoningEffort>(json!(value)).map_err(|error| {
-                    KernelFailure::new(
-                        "INVALID_GOVERNED_AUTHORITY",
-                        format!("unknown governed reasoning effort {value}: {error}"),
-                    )
-                })
-            })
-            .transpose()?;
-        Ok((policy, reasoning_effort))
+        Ok(canonical)
     }
 
-    fn apply_governed_authority(
+    fn apply_role_session_policy(
         config: &mut Config,
-        authority: &GovernedSessionAuthority,
+        policy: &RoleSessionPolicy,
     ) -> KernelResult<()> {
-        let (policy, reasoning_effort) = Self::validate_governed_authority(config, authority)?;
-        let permission_profile = if policy.filesystem == "managed-workspace-write" {
+        let canonical = Self::validate_role_session_policy(policy)?;
+        let permission_profile = if canonical.workspace_write {
             PermissionProfile::workspace_write()
         } else {
             PermissionProfile::read_only()
@@ -844,227 +596,13 @@ impl Kernel {
             Constrained::allow_only(AskForApproval::OnRequest),
             Constrained::allow_only(permission_profile),
         )
-        .map_err(|error| KernelFailure::new("ENFORCEMENT_UNAVAILABLE", error.to_string()))?;
+        .map_err(|error| KernelFailure::new("ROLE_POLICY_UNAVAILABLE", error.to_string()))?;
         permissions.set_workspace_roots(vec![config.cwd.clone()]);
-        permissions.allow_login_shell = false;
-        permissions.shell_environment_policy = ShellEnvironmentPolicy {
-            inherit: ShellEnvironmentPolicyInherit::None,
-            ignore_default_excludes: false,
-            exclude: Vec::new(),
-            r#set: HashMap::new(),
-            include_only: Vec::new(),
-            use_profile: false,
-        };
-        permissions.network = None;
         config.permissions = permissions;
         config.explicit_permission_profile_mode = true;
         config.approvals_reviewer = ApprovalsReviewer::User;
-        config.base_instructions = Some(authority.system_instructions.clone());
-        config.developer_instructions = Some(GOVERNED_DEVELOPER_INSTRUCTIONS.to_string());
-        config.include_permissions_instructions = false;
-        config.include_apps_instructions = false;
-        config.include_collaboration_mode_instructions = false;
-        config.include_skill_instructions = false;
-        config.orchestrator_skills_enabled = false;
-        config.orchestrator_mcp_enabled = false;
-        config.include_environment_context = false;
-        config.notify = None;
-        config.mcp_servers = Constrained::allow_only(HashMap::new());
-        config.non_prefixed_mcp_tool_servers = None;
-        config.project_doc_max_bytes = 0;
-        config.project_doc_fallback_filenames.clear();
-        config.agents_enabled = false;
-        config.agent_roles.clear();
-        config.experimental_request_user_input_enabled = false;
-        config.update_plan_enabled = false;
-        config.web_search_mode = Constrained::allow_only(WebSearchMode::Disabled);
-        config.web_search_config = None;
-        config.respect_system_proxy = false;
-        config.model_reasoning_effort = reasoning_effort;
-        config.features.set(Features::default()).map_err(|error| {
-            KernelFailure::new(
-                "ENFORCEMENT_UNAVAILABLE",
-                format!("governed feature set could not be disabled: {error}"),
-            )
-        })?;
+        config.developer_instructions = Some(policy.developer_instructions.clone());
         Ok(())
-    }
-
-    fn start_thread_options(
-        config: Config,
-        authority: Option<&GovernedSessionAuthority>,
-    ) -> StartThreadOptions {
-        let mut options = StartThreadOptions::new(config);
-        if let Some(authority) = authority {
-            options.dynamic_tools = dynamic_tool_specs(&authority.visible_tools);
-            options.environments = Some(Vec::new());
-        }
-        options
-    }
-
-    fn governed_config_is_preserved(
-        config: &Config,
-        authority: &GovernedSessionAuthority,
-        policy: GovernedRolePolicy,
-        expected_reasoning_effort: Option<&ReasoningEffort>,
-    ) -> bool {
-        let expected_permission_profile = if policy.filesystem == "managed-workspace-write" {
-            PermissionProfile::workspace_write()
-        } else {
-            PermissionProfile::read_only()
-        };
-        config.model_reasoning_effort.as_ref() == expected_reasoning_effort
-            && config.permissions.permission_profile() == &expected_permission_profile
-            && !config.permissions.network_sandbox_policy().is_enabled()
-            && config.permissions.network.is_none()
-            && !config.permissions.allow_login_shell
-            && config.permissions.shell_environment_policy.inherit
-                == ShellEnvironmentPolicyInherit::None
-            && !config
-                .permissions
-                .shell_environment_policy
-                .ignore_default_excludes
-            && config
-                .permissions
-                .shell_environment_policy
-                .exclude
-                .is_empty()
-            && !config.permissions.shell_environment_policy.use_profile
-            && config.permissions.shell_environment_policy.r#set.is_empty()
-            && config
-                .permissions
-                .shell_environment_policy
-                .include_only
-                .is_empty()
-            && config.workspace_roots == vec![config.cwd.clone()]
-            && config.permissions.workspace_roots() == [config.cwd.clone()]
-            && config.explicit_permission_profile_mode
-            && config.base_instructions.as_deref() == Some(authority.system_instructions.as_str())
-            && config.developer_instructions.as_deref() == Some(GOVERNED_DEVELOPER_INSTRUCTIONS)
-            && !config.include_permissions_instructions
-            && !config.include_apps_instructions
-            && !config.include_collaboration_mode_instructions
-            && !config.include_skill_instructions
-            && !config.orchestrator_skills_enabled
-            && !config.orchestrator_mcp_enabled
-            && !config.include_environment_context
-            && config.notify.is_none()
-            && config.mcp_servers.is_empty()
-            && config.non_prefixed_mcp_tool_servers.is_none()
-            && config.project_doc_max_bytes == 0
-            && config.project_doc_fallback_filenames.is_empty()
-            && !config.agents_enabled
-            && config.agent_roles.is_empty()
-            && !config.experimental_request_user_input_enabled
-            && !config.update_plan_enabled
-            && config.web_search_mode.value() == WebSearchMode::Disabled
-            && config.web_search_config.is_none()
-            && !config.respect_system_proxy
-            && config.features.get() == &Features::default()
-    }
-
-    async fn effective_governed_policy(
-        thread: &CodexThread,
-        authority: &GovernedSessionAuthority,
-    ) -> KernelResult<String> {
-        let snapshot = thread.config_snapshot().await;
-        let config = thread.config().await;
-        let (policy, expected_reasoning_effort) =
-            Self::validate_governed_authority(&config, authority).map_err(|error| {
-                KernelFailure::new("ENFORCEMENT_UNAVAILABLE", error.message().to_string())
-            })?;
-        let workspace_root = config.cwd.to_path_buf().to_string_lossy().into_owned();
-        let sources = thread.instruction_sources().await;
-        let expected_thread_permission_profile = config
-            .permissions
-            .permission_profile()
-            .clone()
-            .materialize_project_roots_with_workspace_roots(&snapshot.workspace_roots);
-        let mismatch = [
-            (
-                "model provider",
-                snapshot.model_provider_id != config.model_provider_id,
-            ),
-            (
-                "model identity",
-                snapshot.model != config.model.as_deref().unwrap_or_default(),
-            ),
-            (
-                "approval policy",
-                snapshot.approval_policy != AskForApproval::OnRequest,
-            ),
-            (
-                "approval reviewer",
-                snapshot.approvals_reviewer != ApprovalsReviewer::User,
-            ),
-            (
-                "thread permission profile",
-                snapshot.permission_profile != expected_thread_permission_profile,
-            ),
-            ("workspace", snapshot.cwd() != &config.cwd),
-            (
-                "reasoning effort",
-                snapshot.reasoning_effort != expected_reasoning_effort,
-            ),
-            (
-                "environment selections",
-                !snapshot.environment_selections().is_empty(),
-            ),
-            (
-                "kernel configuration",
-                !Self::governed_config_is_preserved(
-                    &config,
-                    authority,
-                    policy,
-                    expected_reasoning_effort.as_ref(),
-                ),
-            ),
-            ("instruction sources", !sources.is_empty()),
-        ]
-        .into_iter()
-        .find_map(|(name, changed)| changed.then_some(name));
-        if let Some(mismatch) = mismatch {
-            return Err(KernelFailure::new(
-                "ENFORCEMENT_UNAVAILABLE",
-                format!(
-                    "Codex did not preserve governed {mismatch} for role {}",
-                    authority.role_id,
-                ),
-            ));
-        }
-        let evidence = GovernedSessionEffectivePolicy {
-            schema_version: GOVERNED_AUTHORITY_SCHEMA_VERSION,
-            authority: "codex-core",
-            role_id: authority.role_id.clone(),
-            permission_preset: authority.permission_preset.clone(),
-            workspace_mode: authority.workspace_mode.clone(),
-            workspace_root,
-            visible_tools: authority.visible_tools.clone(),
-            filesystem: policy.filesystem,
-            network: "restricted",
-            process: "dynamic-tools-with-governed-command-api",
-            environment: "empty",
-            governed_process: "platform-sandbox-required",
-            governed_process_network: "restricted",
-            governed_process_environment: "explicit-allowlist",
-            credentials: "dsh-reference-only",
-            approval_policy: "on-request",
-            approvals_reviewer: "user",
-            login_shell: false,
-            environment_selections: Vec::new(),
-            instruction_sources: Vec::new(),
-        };
-        serde_json::to_string(&evidence).map_err(|error| {
-            KernelFailure::new(
-                "ENFORCEMENT_UNAVAILABLE",
-                format!("effective governed policy could not be serialized: {error}"),
-            )
-        })
-    }
-
-    async fn discard_unaccepted_thread(runtime: &Runtime, thread: &NewThread) {
-        let _ = thread.thread.shutdown_and_wait().await;
-        let _ = runtime.manager.remove_thread(&thread.thread_id).await;
     }
 
     /// Create and register a fresh Codex session.
@@ -1077,33 +615,12 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let config = Self::session_config(&runtime, &options)?;
-            let governed_authority = options.governed_authority.clone();
-            let authority = governed_authority.as_ref();
             let thread = runtime
                 .manager
-                .start_thread(Self::start_thread_options(config.clone(), authority))
+                .start_thread(StartThreadOptions::new(config.clone()))
                 .await
                 .map_err(|error| KernelFailure::new("SESSION_CREATE_FAILED", error.to_string()))?;
-            let effective_policy_json = match authority {
-                Some(authority) => {
-                    match Self::effective_governed_policy(&thread.thread, authority).await {
-                        Ok(evidence) => Some(evidence),
-                        Err(error) => {
-                            Self::discard_unaccepted_thread(&runtime, &thread).await;
-                            return Err(error);
-                        }
-                    }
-                }
-                None => None,
-            };
-            self.register_session(
-                &runtime,
-                thread,
-                config,
-                governed_authority,
-                effective_policy_json,
-            )
-            .await
+            Box::pin(self.register_session(&runtime, thread, config)).await
         })
         .await
     }
@@ -1128,49 +645,16 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let config = Self::session_config(&runtime, &options)?;
-            let governed_authority = options.governed_authority.clone();
-            let authority = governed_authority.as_ref();
-            let thread = match authority {
-                Some(authority) => {
-                    Box::pin(runtime.manager.resume_thread_from_rollout_with_options(
-                        Self::start_thread_options(config.clone(), Some(authority)),
-                        rollout_path,
-                        Arc::clone(&runtime.auth_manager),
-                    ))
-                    .await
-                }
-                None => {
-                    Box::pin(runtime.manager.resume_thread_from_rollout(
-                        config.clone(),
-                        rollout_path,
-                        Arc::clone(&runtime.auth_manager),
-                        /* parent_trace */ None,
-                        ClientMcpExtensions::default(),
-                    ))
-                    .await
-                }
-            }
-            .map_err(|error| KernelFailure::new("SESSION_RESUME_FAILED", error.to_string()))?;
-            let effective_policy_json = match authority {
-                Some(authority) => {
-                    match Self::effective_governed_policy(&thread.thread, authority).await {
-                        Ok(evidence) => Some(evidence),
-                        Err(error) => {
-                            Self::discard_unaccepted_thread(&runtime, &thread).await;
-                            return Err(error);
-                        }
-                    }
-                }
-                None => None,
-            };
-            self.register_session(
-                &runtime,
-                thread,
-                config,
-                governed_authority,
-                effective_policy_json,
-            )
+            let thread = Box::pin(runtime.manager.resume_thread_from_rollout(
+                config.clone(),
+                rollout_path,
+                Arc::clone(&runtime.auth_manager),
+                /* parent_trace */ None,
+                ClientMcpExtensions::default(),
+            ))
             .await
+            .map_err(|error| KernelFailure::new("SESSION_RESUME_FAILED", error.to_string()))?;
+            Box::pin(self.register_session(&runtime, thread, config)).await
         })
         .await
     }
@@ -1189,12 +673,6 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let source = self.session(&runtime, source_session_id).await?;
-            if source.governed_authority.is_some() {
-                return Err(KernelFailure::new(
-                    "GOVERNED_SESSION_FORK_DENIED",
-                    "governed StrongFlow sessions cannot fork outside their immutable authority",
-                ));
-            }
             source.thread.ensure_rollout_materialized().await;
             source
                 .thread
@@ -1235,8 +713,7 @@ impl Kernel {
             ))
             .await
             .map_err(|error| KernelFailure::new("SESSION_FORK_FAILED", error.to_string()))?;
-            self.register_session(&runtime, thread, config, None, None)
-                .await
+            Box::pin(self.register_session(&runtime, thread, config)).await
         })
         .await
     }
@@ -1360,27 +837,6 @@ impl Kernel {
         .await
     }
 
-    /// Resolve one pending `StrongFlow` dynamic-tool request by its source call identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure for an unknown session, empty call identity, or rejected Codex
-    /// submission.
-    pub async fn resolve_dynamic_tool(
-        &self,
-        response: DynamicToolCallResponse,
-    ) -> KernelResult<String> {
-        Self::guard(async {
-            let operation = dynamic_tool_response_operation(&response)?;
-            let runtime = self.runtime().await?;
-            let session = self.session(&runtime, &response.session_id).await?;
-            session.thread.submit(operation).await.map_err(|error| {
-                KernelFailure::new("DYNAMIC_TOOL_SUBMIT_FAILED", error.to_string())
-            })
-        })
-        .await
-    }
-
     /// Read the next ordered event and distinguish timeout from stream closure.
     ///
     /// # Errors
@@ -1431,57 +887,6 @@ impl Kernel {
         .await
     }
 
-    /// Execute one already-authorized `StrongFlow` command under the stored native role authority.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed policy denial for an ordinary session, a role/tool mismatch, invalid
-    /// command facts, or an unavailable platform sandbox.
-    pub async fn execute_governed_command(
-        &self,
-        request: GovernedCommandRequest,
-    ) -> KernelResult<GovernedCommandResult> {
-        Self::guard(async {
-            let runtime = self.runtime().await?;
-            let session = self.session(&runtime, &request.session_id).await?;
-            let authority = session.governed_authority.as_ref().ok_or_else(|| {
-                KernelFailure::new(
-                    "GOVERNED_COMMAND_POLICY_DENIED",
-                    "ordinary DSH chat sessions cannot execute governed commands",
-                )
-            })?;
-            session
-                .governed_commands
-                .execute(&self.options, authority, &session.config, request)
-                .await
-        })
-        .await
-    }
-
-    /// Cancel one active governed command by its source identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure for an unknown session or command.
-    pub async fn cancel_governed_command(
-        &self,
-        session_id: &str,
-        command_id: &str,
-    ) -> KernelResult<()> {
-        Self::guard(async {
-            let runtime = self.runtime().await?;
-            let session = self.session(&runtime, session_id).await?;
-            if !session.governed_commands.cancel(command_id).await {
-                return Err(KernelFailure::new(
-                    "GOVERNED_COMMAND_NOT_FOUND",
-                    "governed command is not active in this session",
-                ));
-            }
-            Ok(())
-        })
-        .await
-    }
-
     /// Gracefully close and unregister one session.
     ///
     /// # Errors
@@ -1497,7 +902,6 @@ impl Kernel {
                 .await
                 .remove(session_id)
                 .ok_or_else(|| session_not_found(session_id))?;
-            session.governed_commands.cancel_all().await;
             let _ = session.stop.send(true);
             tokio::time::timeout(
                 self.options.shutdown_timeout,
@@ -1549,7 +953,6 @@ impl Kernel {
                 .map(|(_, session)| session)
                 .collect::<Vec<_>>();
             for session in &sessions {
-                session.governed_commands.cancel_all().await;
                 let _ = session.stop.send(true);
             }
             let report = runtime
@@ -1585,8 +988,6 @@ impl Kernel {
         runtime: &Runtime,
         new_thread: NewThread,
         config: Config,
-        governed_authority: Option<GovernedSessionAuthority>,
-        effective_policy_json: Option<String>,
     ) -> KernelResult<SessionInfo> {
         let session_id = new_thread.thread_id.to_string();
         let rollout_path = new_thread
@@ -1596,12 +997,23 @@ impl Kernel {
         let (event_tx, event_rx) = mpsc::channel(self.options.event_capacity);
         let (stop, stop_rx) = watch::channel(false);
         let thread = Arc::clone(&new_thread.thread);
-        let event_task = tokio::spawn(pump_events(thread, event_tx, stop_rx));
+        let configured = CodexEvent {
+            id: "winwincode-session-configured".to_string(),
+            msg: CodexEventMsg::SessionConfigured(thread.session_configured()),
+        };
+        event_tx
+            .send(serialize_codex_event(1, &configured))
+            .await
+            .map_err(|_| {
+                KernelFailure::new(
+                    "SESSION_EVENT_STREAM_FAILED",
+                    "session configuration event could not be queued",
+                )
+            })?;
+        let event_task = tokio::spawn(pump_events(thread, event_tx, stop_rx, 1));
         let session = Arc::new(SessionRuntime {
             thread: new_thread.thread,
             config,
-            governed_authority,
-            governed_commands: governed_command::GovernedCommandController::new(),
             events: Mutex::new(event_rx),
             stop,
             event_task: Mutex::new(Some(event_task)),
@@ -1620,7 +1032,6 @@ impl Kernel {
         Ok(SessionInfo {
             session_id,
             rollout_path,
-            effective_policy_json,
         })
     }
 
@@ -1676,7 +1087,6 @@ impl Kernel {
                 .map(|(_, session)| session)
                 .collect::<Vec<_>>();
             for session in &sessions {
-                session.governed_commands.cancel_all().await;
                 let _ = session.stop.send(true);
             }
             let _ = runtime.manager.shutdown_all_threads_bounded(timeout).await;
@@ -1805,24 +1215,6 @@ fn codex_review_decision(decision: ApprovalDecision) -> KernelResult<CodexReview
     }
 }
 
-fn dynamic_tool_response_operation(response: &DynamicToolCallResponse) -> KernelResult<Op> {
-    if response.call_id.trim().is_empty() {
-        return Err(KernelFailure::new(
-            "INVALID_DYNAMIC_TOOL_RESPONSE",
-            "dynamic-tool call id must be non-empty",
-        ));
-    }
-    Ok(Op::DynamicToolResponse {
-        id: response.call_id.clone(),
-        response: DynamicToolResponse {
-            content_items: vec![DynamicToolCallOutputContentItem::InputText {
-                text: response.text.clone(),
-            }],
-            success: response.success,
-        },
-    })
-}
-
 fn dsh_provider_info(provider: &str) -> ModelProviderInfo {
     ModelProviderInfo {
         name: format!("DSH route {provider}"),
@@ -1834,8 +1226,9 @@ async fn pump_events(
     thread: Arc<CodexThread>,
     sender: mpsc::Sender<KernelEvent>,
     mut stop: watch::Receiver<bool>,
+    initial_sequence: u64,
 ) {
-    let mut sequence = 0_u64;
+    let mut sequence = initial_sequence;
     loop {
         let next = tokio::select! {
             changed = stop.changed() => {
@@ -1928,9 +1321,6 @@ mod tests {
     use super::CODEX_COMMIT;
     use super::CodexReviewDecision;
     use super::ConfigBuilder;
-    use super::DynamicToolCallOutputContentItem;
-    use super::DynamicToolCallResponse;
-    use super::GovernedSessionAuthority;
     use super::INTERFACE_VERSION;
     use super::Kernel;
     use super::KernelOptions;
@@ -1938,106 +1328,24 @@ mod tests {
     use super::ModelPortFailure;
     use super::ModelPortRequest;
     use super::ModelPortStream;
-    use super::Op;
     use super::PermissionProfile;
+    use super::RoleSessionPolicy;
+    use super::canonical_role_policy;
     use super::codex_review_decision;
     use super::descriptor;
-    use super::dynamic_tool_response_operation;
-    use super::governed_role_policy;
     use super::model_route;
     use super::serialize_codex_event;
     use super::set_workspace;
 
-    type ExpectedRolePolicy = (
-        &'static str,
-        &'static str,
-        &'static str,
-        &'static str,
-        &'static [&'static str],
-    );
-
-    const EXPECTED_DEFINITION_TOOLS: &[&str] = &[
-        "artifact.read",
-        "artifact.write",
-        "workspace.read",
-        "code.search",
-    ];
-    const EXPECTED_SNAPSHOT_TOOLS: &[&str] = &[
-        "artifact.read",
-        "artifact.write",
-        "workspace.read",
-        "code.search",
-        "candidate.diff",
-        "command.run",
-        "test.run",
-    ];
-    const EXPECTED_CANDIDATE_WRITE_TOOLS: &[&str] = &[
-        "artifact.read",
-        "artifact.write",
-        "workspace.read",
-        "code.search",
-        "candidate.diff",
-        "command.run",
-        "test.run",
-        "candidate.patch",
-    ];
-    const EXPECTED_ROLE_POLICIES: &[ExpectedRolePolicy] = &[
-        (
-            "requirements",
-            "definition-read",
-            "source-read-only",
-            "managed-read-only",
-            EXPECTED_DEFINITION_TOOLS,
-        ),
-        (
-            "solution",
-            "solution-read",
-            "source-read-only",
-            "managed-read-only",
-            EXPECTED_DEFINITION_TOOLS,
-        ),
-        (
-            "planner",
-            "source-read",
-            "source-read-only",
-            "managed-read-only",
-            EXPECTED_DEFINITION_TOOLS,
-        ),
-        (
-            "executor",
-            "candidate-write",
-            "candidate-write",
-            "managed-workspace-write",
-            EXPECTED_CANDIDATE_WRITE_TOOLS,
-        ),
-        (
-            "reviewer",
-            "snapshot-verify",
-            "candidate-read-only",
-            "managed-read-only",
-            EXPECTED_SNAPSHOT_TOOLS,
-        ),
-        (
-            "verifier",
-            "snapshot-verify",
-            "candidate-read-only",
-            "managed-read-only",
-            EXPECTED_SNAPSHOT_TOOLS,
-        ),
-        (
-            "adversarial-verifier",
-            "snapshot-verify",
-            "candidate-read-only",
-            "managed-read-only",
-            EXPECTED_SNAPSHOT_TOOLS,
-        ),
-        (
-            "remediator",
-            "remediation-write",
-            "candidate-write",
-            "managed-workspace-write",
-            EXPECTED_CANDIDATE_WRITE_TOOLS,
-        ),
+    const EXPECTED_ROLE_POLICIES: &[(&str, &str, bool)] = &[
+        ("requirements", "source-read-only", false),
+        ("solution", "source-read-only", false),
+        ("planner", "source-read-only", false),
+        ("executor", "candidate-write", true),
+        ("reviewer", "candidate-read-only", false),
+        ("verifier", "candidate-read-only", false),
+        ("adversarial-verifier", "candidate-read-only", false),
+        ("remediator", "candidate-write", true),
     ];
 
     #[derive(Debug)]
@@ -2076,7 +1384,7 @@ mod tests {
         let kernel = Kernel::new(options, Arc::new(UnusedModelPort)).expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 4);
+        assert_eq!(build.interface_version, 5);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,
@@ -2084,7 +1392,6 @@ mod tests {
                 "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
                 "upstream/patches/codex/0002-inject-model-stream-transport.patch",
                 "upstream/patches/codex/0003-export-config-builder.patch",
-                "upstream/patches/codex/0004-resume-with-caller-options.patch",
                 "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
             ]
         );
@@ -2107,23 +1414,19 @@ mod tests {
     }
 
     #[test]
-    fn defines_the_exact_eight_role_authority_matrix() {
-        for &(role, preset, workspace, filesystem, tools) in EXPECTED_ROLE_POLICIES {
-            let policy = governed_role_policy(role).expect("known governed role");
-            assert_eq!(policy.permission_preset, preset, "{role}");
+    fn defines_the_exact_eight_role_workspace_matrix() {
+        for &(role, workspace, writer) in EXPECTED_ROLE_POLICIES {
+            let policy = canonical_role_policy(role).expect("known StrongFlow role");
             assert_eq!(policy.workspace_mode, workspace, "{role}");
-            assert_eq!(policy.filesystem, filesystem, "{role}");
-            assert_eq!(policy.visible_tools, tools, "{role}");
+            assert_eq!(policy.workspace_write, writer, "{role}");
         }
-        assert!(governed_role_policy("unknown").is_none());
+        assert!(canonical_role_policy("unknown").is_none());
     }
 
     #[tokio::test]
-    async fn rejects_role_preset_and_tool_drift_before_thread_start() {
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-governed-authority-{}",
-            std::process::id()
-        ));
+    async fn role_policy_uses_codex_permissions_without_disabling_codex_capabilities() {
+        let root =
+            std::env::temp_dir().join(format!("winwincode-role-policy-{}", std::process::id()));
         let workspace = root.join("workspace");
         let home = root.join("home");
         std::fs::create_dir_all(&workspace).expect("create workspace");
@@ -2135,42 +1438,24 @@ mod tests {
             .build()
             .await
             .expect("build fixture config");
-        set_workspace(&mut base, &workspace).expect("select governed workspace");
-        let workspace_root = workspace
-            .canonicalize()
-            .expect("canonical workspace")
-            .to_string_lossy()
-            .into_owned();
+        set_workspace(&mut base, &workspace).expect("select role workspace");
+        base.agents_enabled = true;
+        base.update_plan_enabled = true;
+        base.experimental_request_user_input_enabled = true;
+        base.orchestrator_mcp_enabled = true;
+        base.include_skill_instructions = true;
 
-        for role in [
-            "requirements",
-            "solution",
-            "planner",
-            "executor",
-            "reviewer",
-            "verifier",
-            "adversarial-verifier",
-            "remediator",
-        ] {
-            let policy = governed_role_policy(role).expect("known governed role");
-            let authority = GovernedSessionAuthority {
+        for &(role, workspace_mode, writer) in EXPECTED_ROLE_POLICIES {
+            let policy = RoleSessionPolicy {
                 schema_version: 1,
                 role_id: role.to_string(),
-                permission_preset: policy.permission_preset.to_string(),
-                workspace_mode: policy.workspace_mode.to_string(),
-                workspace_root: workspace_root.clone(),
-                system_instructions: format!("Act only as {role}."),
-                reasoning_effort: Some("medium".to_string()),
-                visible_tools: policy
-                    .visible_tools
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
+                workspace_mode: workspace_mode.to_string(),
+                developer_instructions: format!("Act only as the {role} role."),
             };
             let mut config = base.clone();
-            Kernel::apply_governed_authority(&mut config, &authority)
-                .expect("apply exact authority");
-            let expected_profile = if policy.filesystem == "managed-workspace-write" {
+            Kernel::apply_role_session_policy(&mut config, &policy)
+                .expect("apply exact role policy");
+            let expected_profile = if writer {
                 PermissionProfile::workspace_write()
             } else {
                 PermissionProfile::read_only()
@@ -2180,69 +1465,50 @@ mod tests {
                 &expected_profile,
                 "{role}"
             );
+            assert_eq!(
+                config.permissions.approval_policy.value(),
+                super::AskForApproval::OnRequest,
+                "{role}"
+            );
+            assert!(config.agents_enabled, "{role}");
+            assert!(config.update_plan_enabled, "{role}");
+            assert!(config.experimental_request_user_input_enabled, "{role}");
+            assert!(config.orchestrator_mcp_enabled, "{role}");
+            assert!(config.include_skill_instructions, "{role}");
+            assert_eq!(
+                config.developer_instructions.as_deref(),
+                Some(format!("Act only as the {role} role.").as_str()),
+                "{role}"
+            );
         }
 
-        let policy = governed_role_policy("requirements").expect("requirements policy");
-        let valid = GovernedSessionAuthority {
+        let valid = RoleSessionPolicy {
             schema_version: 1,
             role_id: "requirements".to_string(),
-            permission_preset: policy.permission_preset.to_string(),
-            workspace_mode: policy.workspace_mode.to_string(),
-            workspace_root,
-            system_instructions: "Gather requirements.".to_string(),
-            reasoning_effort: Some("medium".to_string()),
-            visible_tools: policy
-                .visible_tools
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
+            workspace_mode: "source-read-only".to_string(),
+            developer_instructions: "Gather requirements.".to_string(),
         };
         let mut unknown_role = valid.clone();
         unknown_role.role_id = "unknown".to_string();
-        let mut changed_preset = valid.clone();
-        changed_preset.permission_preset = "candidate-write".to_string();
-        let mut changed_tools = valid;
-        changed_tools.visible_tools.pop();
-        for authority in [unknown_role, changed_preset, changed_tools] {
-            let error = Kernel::apply_governed_authority(&mut base.clone(), &authority)
-                .expect_err("authority drift must fail");
-            assert_eq!(error.code(), "INVALID_GOVERNED_AUTHORITY");
+        let mut changed_workspace = valid.clone();
+        changed_workspace.workspace_mode = "candidate-write".to_string();
+        let mut empty_instructions = valid;
+        empty_instructions.developer_instructions = "  ".to_string();
+        for policy in [unknown_role, changed_workspace, empty_instructions] {
+            let error = Kernel::apply_role_session_policy(&mut base.clone(), &policy)
+                .expect_err("role policy drift must fail");
+            assert_eq!(error.code(), "INVALID_ROLE_POLICY");
         }
-        std::fs::remove_dir_all(root).expect("remove authority fixture");
+        std::fs::remove_dir_all(root).expect("remove role-policy fixture");
     }
 
     #[test]
-    fn maps_one_dynamic_tool_result_to_the_exact_codex_call_identity() {
-        let operation = dynamic_tool_response_operation(&DynamicToolCallResponse {
-            session_id: "session-1".to_string(),
-            call_id: "call-7".to_string(),
-            success: false,
-            text: "denied by the role policy".to_string(),
-        })
-        .expect("valid dynamic-tool response");
-        match operation {
-            Op::DynamicToolResponse { id, response } => {
-                assert_eq!(id, "call-7");
-                assert!(!response.success);
-                assert!(matches!(
-                    response.content_items.as_slice(),
-                    [DynamicToolCallOutputContentItem::InputText { text }]
-                        if text == "denied by the role policy"
-                ));
-            }
-            other => panic!("unexpected Codex operation: {other:?}"),
-        }
-        assert_eq!(
-            dynamic_tool_response_operation(&DynamicToolCallResponse {
-                session_id: "session-1".to_string(),
-                call_id: "  ".to_string(),
-                success: true,
-                text: String::new(),
-            })
-            .expect_err("blank call identity must fail")
-            .code(),
-            "INVALID_DYNAMIC_TOOL_RESPONSE"
-        );
+    fn rejects_extra_role_policy_fields_at_the_native_boundary() {
+        let error = RoleSessionPolicy::from_json(
+            r#"{"schemaVersion":1,"roleId":"verifier","workspaceMode":"candidate-read-only","developerInstructions":"Verify.","tool":"extra"}"#,
+        )
+        .expect_err("extra role policy fields must fail");
+        assert_eq!(error.code(), "INVALID_ROLE_POLICY");
     }
 
     #[cfg(unix)]

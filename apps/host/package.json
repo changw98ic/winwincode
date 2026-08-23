@@ -1,6 +1,6 @@
 {
   "name": "winwincode",
-  "version": "0.0.0-dev.0",
+  "version": "0.1.0-alpha.1",
   "description": "WinWinCode host for the default DSH chat surface and StrongFlow advanced mode",
   "license": "Apache-2.0",
   "type": "module",
@@ -33,6 +33,8 @@
     "access": "public"
   },
   "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-app-boot": "0.1.0-rc.8",
     "@winwincode/contracts": "workspace:*",
     "@winwincode/dsh-profile": "workspace:*",
     "@winwincode/native": "workspace:*",

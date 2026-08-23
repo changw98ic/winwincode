@@ -69,6 +69,8 @@ WinWinCode 自有的 `winwincode-native` `cdylib` 通过 N-API 嵌入 Node 进�
 4. 将 `block-start`、文本、推理、工具调用、`block-end`、用量和结束原因映射为 Codex `ResponseEvent`；
 5. 将取消、提供商错误、请求编号和重试信息映射回 Codex 的错误和事件语义。
 
+Codex 会把一次模型回复中的推理块和多个并行工具调用保存为相邻的 Responses item。回传给 DSH 时，桥接层必须把这些相邻 item 还原成同一条 assistant 消息，再附上全部工具结果；不能把每个工具调用伪装成一条独立 assistant 消息。这样 DSH 才能按目标提供商要求补齐 `reasoning_content` 等原生字段，并保持工具调用与结果一一对应。
+
 选择 `prepareCall` 而不是先查模型再单独调用 `ctx.llm.stream`，是为了把一次调用固定到同一个 DSH adapter 注册实例，避免热更新期间能力信息和实际 adapter 不一致。
 
 Codex `0.149.0` 的 `ModelClient` 会自行创建 `HttpClientFactory` 和 `ReqwestTransport`，公开的 `ModelProvider` 只管理模型元数据、认证和目录，并不接管推理流。因此需要一个很小的 Codex 补丁，在模型会话边界注入提供商无关的推理流接口；不使用本地 HTTP 回环服务伪装模型提供商。
@@ -108,7 +110,6 @@ Codex `0.149.0` 的 `ModelClient` 会自行创建 `HttpClientFactory` 和 `Reqwe
 | `codex/0001-export-client-mcp-extensions.patch` | `codex-rs/core-api/src/lib.rs` | 从既有公共协议模块重导出 `ClientMcpExtensions`，使只依赖 `codex-core-api` 的嵌入方能调用公开的 resume 方法 |
 | `codex/0002-inject-model-stream-transport.patch` | `codex-rs/core/src/client.rs`、会话/线程管理和 `codex-rs/core-api/src/lib.rs` | 注入一个窄的异步模型流接口，并让根线程、恢复会话、分叉和子 Agent 共用该接口；未注入时仍走上游原有 HTTP 路径 |
 | `codex/0003-export-config-builder.patch` | `codex-rs/core-api/src/lib.rs` | 重导出上游已有的 `ConfigBuilder`，让嵌入内核读取自己数据目录中的 `config.toml`，而不是退回到不读取配置文件的默认只读设置 |
-| `codex/0004-resume-with-caller-options.patch` | `codex-rs/core/src/thread_manager.rs` | 恢复 rollout 时保留调用方已经固定的动态工具、环境选择和扩展设置，使角色恢复不能重新获得默认工具或丢失原有权限边界 |
 | `codex/0005-remount-split-bwrap-root-read-only.patch` | `codex-rs/linux-sandbox/src/bwrap.rs` | 在完成批准挂载和 `/proc` 创建后把合成根目录重新挂为只读，阻止命令在明确可写根之外创建临时同级路径 |
 | `packages/dsh-profile/cordis.patch.yml` | 不修改 DSH 源文件；作为 WinWinCode 自有 bundle 的最终组合层 | 禁用 DSH 执行行并装载 Codex AgentFactory、模型桥和 StrongFlow UI/API |
 

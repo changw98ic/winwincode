@@ -23,3 +23,4 @@ export function describeHost(
 }
 
 export * from './strongflow-cli.js'
+export * from './web-host.js'

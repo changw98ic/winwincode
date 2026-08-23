@@ -1,66 +1,225 @@
 # WinWinCode
 
-WinWinCode 是一个面向 macOS 和 Linux 的开源 Agent 工作台。默认入口沿用 DeepSeek Harness 的原始聊天界面；StrongFlow 是高级模式。两种模式共用一个直接嵌入的 Codex Core 执行内核。
+WinWinCode 是建立在 Codex Core 执行内核和 DeepSeek Harness 产品外壳之上的交付控制层。它把自然语言需求保存为可审核的交付目标，用跨 Session 阶段控制方案、执行和返工，再用直接证据逐项形成交付结论。
 
-当前仓库处于基础内核和界面组合阶段。Codex Core 已作为 Rust 源码直接编入 Node 原生模块，TypeScript 可以创建、恢复、分叉、转向、打断和关闭会话，也可以读取有上限且有顺序的完整 Codex 事件。Codex 的模型流已经直接接到 DSH `ctx.llm`，密钥仍只由 DSH 管理。内核事件会生成可重放的 DSH 聊天和运行状态，人工审批会返回原始 Codex 回调。DSH 原始聊天入口、WinWinCode 内核工厂和 StrongFlow 高级入口已经组成一个可启动的 DSH Web profile。StrongFlow 已固定八个角色，并能在完整上下文安装、保存和事件订阅成功后发布各自的受管内核会话。角色启动前会把固定权限预设、工作区、系统指令和准确工具名单交给 Codex；启动后再核对 Codex 实际保留的文件模式、网络、环境、人工决定和指令来源，证据缺失或不同就关闭线程且不发布会话。模型只能看到自己角色的工具；宿主拒绝名单外调用、敏感凭据路径和越过分配根目录的读写。`command.run` 与 `test.run` 还必须匹配可信流程给出的准确授权，之后只通过 macOS Seatbelt 或 Linux seccomp/Landlock 运行；进程环境从空白开始，网络保持关闭，超时、取消和会话关闭会终止进程组。普通聊天会话不能调用这一入口。DSH 模型桥不读取原始密钥，并会拒绝带凭据字段的调用配置、隐藏提供商错误文字和请求编号原值。工具、审批、进程、会话与凭据边界现在写入按作业隔离的追加式安全记录；记录带连续摘要链，命令输出只保存摘要和字节数。四个平台的发布工作流会从空目录安装真实包，再验证文件、网络、环境、凭据、超时和只读边界。角色运行器可以提交一个准确的内核回合，限制回合、时间、Token、费用和输入字节数，并把流程权限拒绝、操作系统沙箱拒绝和普通任务失败分开记录。RequirementSpec、SolutionDesign、两张定义图、人工审核、执行计划、代码变更、审查、验证、修复、交付和图上变更标注已有唯一严格格式；模型只能填写内容，身份和内核证据由程序加入。方案可以确定生成系统架构图和固定流程图，以及不含脚本和外部资源的 Mermaid、SVG 和内容摘要；未确认信息会明确显示。通过校验的制品、命令证据和模型观察写入内容寻址存储，并按作业、来源、内核事件范围和候选版本重新核对；所有内容在创建记录和 blob 前还会拒绝原始认证头、密钥、私钥、JWT 和凭据字段值，避免凭据进入持久制品。人工审核和八个角色的输入由程序按当前流程状态选择，需求与方案分开，执行、审查、验证和修复始终绑定准确版本。DSH 高级工作台和 CLI 共用一个可重启的本地作业服务；同一变更请求重试会返回第一次结果，过期审核不能解锁执行，运行中的差异事件禁止读取细节。StrongFlow 完整工作台、图的三种执行状态和完整八角色交付流仍在后续任务中，当前还不是可交付的完整应用。
+当前仓库正在准备 `0.1.0-alpha.1` 首个公开预览版，支持 Apple Silicon / Intel macOS 和 arm64 / x64 GNU Linux。
 
-## 已确定的边界
+## 产品边界
 
-- 默认界面：DSH 原始聊天界面。
-- 高级界面：StrongFlow 工作台。
-- 执行内核：直接嵌入 Codex Core Rust 源码，不依赖外部编程 Agent 或 Codex CLI 进程。
-- 模型兼容：DSH `ctx.llm`、`llm-pi-ai`、设置和凭据服务。
-- 首发平台：Apple Silicon / Intel macOS，arm64 / x64 GNU Linux。
-- 项目许可证：Apache-2.0。上游 MIT 内容只作为第三方通知保留，不形成项目双许可证。
-- CPB：只迁移设计知识，不迁移运行数据、源码依赖或旧路径；来源清单、采用/重写/删除取舍和自动检查见 [`docs/decisions/0022-cpb-design-knowledge-migration.md`](docs/decisions/0022-cpb-design-knowledge-migration.md)。
+| 层 | 负责什么 |
+| --- | --- |
+| Codex Core | Plan、Agent Graph、多 Agent、工具、Shell、MCP、沙箱、权限、Diff、用量和执行恢复 |
+| DeepSeek Harness（DSH） | 默认 Chat、Session、模型与 Provider 设置、凭据、执行审批交互和 Web/Cordis 外壳 |
+| WinWinCode | `DeliverySpec`、验收条件、跨 Session 阶段、业务 Attention、Evidence 和 `DeliveryVerdict` |
 
-固定的上游版本、组件闭包、补丁边界与许可义务见 [`docs/decisions/0001-upstream-integration.md`](docs/decisions/0001-upstream-integration.md)。
+Codex Core 是唯一执行权威。StrongFlow 只把 Codex Plan、Agent Graph 和运行事件投影成交付视图；DSH 继续管理模型、凭据、普通会话和审批界面。
 
-## 开发环境
+详细的三层所有权、十个业务对象、状态流转、人工责任、执行图和安全边界见 [产品架构、交付流程与安全模型](docs/architecture.md)。
 
-- Node.js 24.x；可发布原生产物固定使用 `.node-version` 中的 24.19.0
-- pnpm 11.7.0
-- Rust 1.95.0，含 `rustfmt`、`clippy`、`rust-src`
+## 用户会看到什么
+
+- **默认入口：DSH Chat。** 启动后先进入原始聊天界面，沿用 DSH 的模型、Session 和审批体验。
+- **高级入口：StrongFlow。** 用户主动切换后，可以创建或跟踪 Delivery，分开查看需求和方案，审核系统架构图、流程图、Diff、验收依据和结论。
+- **执行图有三种状态。** 执行前节点为绿色；执行中受影响节点为浅蓝色，但不开放具体改动；候选冻结后节点为黄色，可以查看文件和 hunk，并提交精确返工标注。
+
+## 快速开始
+
+这是仓库唯一的首次运行路径。它先运行一个完全无密钥的 Delivery，再启动 DSH Chat。
+
+### 1. 准备环境
+
+需要：
+
+- Node.js 24.x；发布构建固定使用 [`.node-version`](.node-version) 中的 24.19.0；
+- Corepack 和 pnpm 11.7.0；
+- Rust 1.95.0，包含 `rustfmt`、`clippy` 和 `rust-src`；
+- macOS 的 Xcode Command Line Tools，或 Linux 上的 C/C++ 编译器、`pkg-config` 和 libcap 开发文件。
+
+Debian / Ubuntu 可以用以下系统包满足 Linux 原生构建要求：
 
 ```bash
+sudo apt-get install build-essential pkg-config libcap-dev
+```
+
+先确认工具版本：
+
+```bash
+node --version
+corepack pnpm --version
+rustc --version
+```
+
+### 2. 获取源码并构建
+
+```bash
+git clone https://github.com/changw98ic/winwincode.git
+cd winwincode
 corepack pnpm install --frozen-lockfile
+corepack pnpm build
+```
+
+`build` 会编译 TypeScript、当前主机的 Rust 原生模块、内嵌 Codex helper，以及当前平台需要的沙箱组件。安装边界会直接拒绝不受支持的 Node 版本或操作系统。
+
+### 3. 运行无密钥 Delivery
+
+```bash
+corepack pnpm fixture:delivery
+```
+
+这条命令不读取 API Key，也不访问模型网络。它使用脚本化 DSH 模型响应，但继续运行真实的 DSH Session、内嵌 Codex Core、StrongFlow 服务、本地 Git 候选、语义投影和验收计算。
+
+场景会依次证明：
+
+1. 方案审核开始时，Delivery 为 `needs-attention`，人工 StageRun 为 `waiting`，执行阶段数量为 `0`；
+2. 脚本化人工决定先要求修改方案，旧审核决定随后失效；
+3. 新方案获批后才进入执行；
+4. 第一个候选验证失败，人工确认有限返工；
+5. 新候选由独立 Reviewer 和 Verifier 再次验证；
+6. 输出逐项 `criterionResults` 和最终 `deliveryVerdict`。
+
+成功结果中的关键字段如下；身份摘要会由实际运行生成：
+
+```json
+{
+  "kind": "winwincode.keyless-delivery-fixture",
+  "finalStatus": "delivered",
+  "humanGate": {
+    "statusBeforeDecision": "needs-attention",
+    "reviewStageStatus": "waiting",
+    "executionStageCountBeforeDecision": 0
+  },
+  "criterionResults": [
+    {
+      "verdict": "pass"
+    }
+  ],
+  "deliveryVerdict": {
+    "status": "pass",
+    "unresolvedFindings": []
+  },
+  "credentialNames": []
+}
+```
+
+### 4. 启动产品界面
+
+```bash
+corepack pnpm start
+```
+
+命令会启动 DSH Web，并默认打开 Chat。需要真实模型时，在 DSH 原有设置中选择 Provider、模型和凭据；这些内容不会写入 Delivery。
+
+在会话界面主动切换到 **StrongFlow**，即可进入高级工作台。当前页面支持：
+
+- 创建或按 ID 跟踪 Delivery；
+- 查看 `DeliverySpec`、范围、约束和验收条件；
+- 在独立方案区查看系统架构图、流程图、风险和未决事项；
+- 只允许绑定的人工 DSH Session 提交方案或交付决定；
+- 查看执行前、执行中和执行结束图；
+- 在执行结束图上把返工意见绑定到当前黄色节点和 Diff hunk；
+- 跳回绑定的 DSH Session 查看 Codex Plan、Agent Graph 和工具活动。
+
+### 5. 检查发布包体验
+
+```bash
+corepack pnpm verify:installed-host
+```
+
+该检查会把当前包安装到空目录，启动真实 DSH Web，确认 Chat 默认入口和 StrongFlow 高级入口，运行无密钥角色 Session，并检查 CLI、人工 Attention、信号中断、重启恢复和临时目录清理。成功时会输出：
+
+```text
+installed host package passed DSH Web, keyless chat, CLI, signal, restart, Attention, and cleanup smokes for TARGET
+```
+
+### 常见问题
+
+- 安装时可能看到其他三个原生平台包的 `Unsupported platform` 警告。工作区同时声明四个平台包；只要当前主机属于支持矩阵且命令继续执行，这些跳过提示不表示当前平台构建失败。
+- Linux 原生构建如果报告找不到 `cc`、`pkg-config` 或 `libcap`，先安装本节列出的系统构建依赖，再重新运行构建命令。
+- Chat 页面可以无密钥启动；真实模型请求仍需要在 DSH 设置中选择可用 Provider、模型和凭据。
+- 端口或自动打开浏览器不符合当前环境时，可以把 DSH Web 参数传给同一个启动命令，例如 `corepack pnpm start web --no-open --port 3000`。
+
+## 当前已经具备的能力
+
+- 直接嵌入固定版本的 Codex Core Rust 源码，不依赖外部编程 Agent 或 Codex CLI 进程；
+- 通过 DSH `ctx.llm` 使用 DSH 的模型与 Provider 兼容层；
+- 保存 DSH Session 与 Codex Session 的精确绑定和可重放运行事件；
+- 保留结构化 Plan、Agent Graph、用户问题、命令、测试、Diff、失败恢复和用量；
+- 分开保存需求和方案，方案经过人工审核后才允许执行；
+- 支持独立 Reviewer、Verifier 和可选 Adversarial Verifier；
+- 从当前 Spec、候选和运行事实计算 Evidence、逐项结果与 Verdict；
+- 支持有限返工、旧候选失效、重启恢复和最终人工交付审核；
+- 生成确定性的 GitHub Review Package，并以 dry-run 作为默认发布模式；
+- 为四个 macOS/Linux 目标生成独立原生包和发布证据；
+- 从来源事实派生完整度、可信度、稳定性、人工依赖度和效率，不生成黑盒总分。
+
+## 当前限制
+
+- Windows 尚未进入首发平台。
+- 当前运行方式是本机单用户 Host；Organization、共享数据库、RBAC、SSO、多租户隔离和跨机器调度尚未进入这一版本。
+- StrongFlow 浏览器目前负责 Delivery 创建、跟踪和人工审核；完整的阶段驱动通过 Host API、CLI 和确定性 Delivery fixture 验证，浏览器还没有“一次点击后自动建立全部真实仓库阶段 Session”的入口。
+- 真实模型执行需要用户在 DSH 中配置可用 Provider。无密钥 fixture 证明流程和边界，不代表某个模型在真实项目中的质量。
+- GitHub 远端写入需要显式 live 模式、当前人工批准和提供商适配器；默认流程只生成本地审核包和 dry-run 记录。
+- Jira、Linear、Slack 和 Teams 仍是外部协作系统；当前仓库没有这些连接器。
+
+## 开发与验证
+
+贡献代码前先阅读 [参与指南](CONTRIBUTING.md)，用 Beads 领取工作，并按 [Pull Request 模板](.github/pull_request_template.md) 记录实际检查结果。
+
+最常用的完整检查：
+
+```bash
 corepack pnpm verify
 ```
 
-常用独立命令：
+独立检查：
 
 ```bash
+corepack pnpm format:check
+corepack pnpm lint
 corepack pnpm typecheck
 corepack pnpm test
-corepack pnpm lint
 corepack pnpm build
-corepack pnpm build:native
 corepack pnpm verify:packages
-node scripts/verify-upstream-lock.mjs
+corepack pnpm verify:installed-host
+corepack pnpm verify:upstream
 ```
 
-`build:native` 会编译当前主机对应的 Rust 原生库和内部 helper，并放到一个独立的平台包，例如 Apple Silicon 使用 `packages/native-darwin-arm64/prebuild/`。`@winwincode/native` 只负责按主机选择四个平台包之一，不会把四套大体积二进制塞进同一个下载。这个 helper 处理 Codex 和 StrongFlow 的沙箱、文件系统和子进程入口，不是外部 Codex CLI。
+真实模型评估必须显式加入，并使用固定仓库、模型路由和预算。配置与结果说明见 [真实模型与真实仓库评估](docs/live-evaluation.md)。
 
-每个平台包都带 `build-info.json`、SHA-256、固定源码身份、构建工具版本、`LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md` 和该目标实际 Cargo 依赖的许可清单。`verify:native-install` 会从打包文件安装到一个空目录，再运行不使用密钥的内核工具调用，并确认受管命令只使用目标平台沙箱、允许规定的工作区写入、阻止越界和只读写入、拒绝敏感文件与网络、排除宿主密钥环境并执行超时。
+Codex Core 或 DSH 升级按 [上游更新手册](docs/upstream-updates.md) 单独完成。版本、九个包的发布顺序和回滚见 [发布流程](docs/releasing.md)；四个平台原生产物和当前真实 Delivery 结果的证据细节见 [产品发布门禁](docs/release-gate.md)。该门禁生成审核报告，不执行 npm 发布、Git tag 或 GitHub Release。
 
-## 目录
+## 仓库结构
 
 ```text
-apps/host/             可发布的 ESM 主机和 CLI
-packages/contracts/    跨层 TypeScript 合同
-packages/dsh-profile/  DSH Web/Cordis 组合边界
-packages/strongflow/   StrongFlow 控制器边界
-packages/native/       TypeScript 内核接口、原生模块加载和平台选择
-packages/native-*/     四个只含单一操作系统和处理器产物的平台包
-crates/helper/         内嵌 Codex 子进程与沙箱 helper
-crates/kernel/         Codex 会话、事件、错误和关闭所有权边界
-crates/native/         Node 与 Rust 的原生库边界
-upstream/              固定上游清单和补丁记录
-tests/                 真实构建产物的 Node smoke 测试
+apps/host/             DSH Web 主机和 winwincode CLI
+packages/contracts/    Delivery、运行事件和 StrongFlow API 合同
+packages/dsh-profile/  DSH Session、模型回调和 Codex 事件接入
+packages/strongflow/   Delivery 服务、证据、Verdict、工作台和 GitHub 边界
+packages/native/       Node 到 Rust 的内核接口和平台选择
+packages/native-*/     四个平台的单目标原生包
+crates/helper/         Codex helper 与平台沙箱入口
+crates/kernel/         内嵌 Codex Thread、权限、事件和生命周期
+crates/native/         Node 原生模块边界
+upstream/              固定上游身份、补丁和许可记录
+tests/                 无密钥流程、产品界面、恢复、安全和发布检查
 ```
 
-不支持的平台或 Node 版本会在安装和启动边界给出明确错误，不会回退到另一套执行内核。
+## 设计与来源
+
+- [`0.1.0-alpha.1` 发布说明](docs/releases/0.1.0-alpha.1.md)
+- [产品架构、交付流程与安全模型](docs/architecture.md)
+- [参与指南](CONTRIBUTING.md)
+- [上游更新手册](docs/upstream-updates.md)
+- [发布流程](docs/releasing.md)
+- [安全报告](SECURITY.md)
+- [社区行为准则](CODE_OF_CONDUCT.md)
+- [固定 Codex Core 与 DSH 集成边界](docs/decisions/0001-upstream-integration.md)
+- [Canonical Delivery 所有权](docs/decisions/0023-canonical-delivery-ownership.md)
+- [确定性 Delivery fixture](docs/decisions/0024-deterministic-delivery-fixture.md)
+- [CPB 设计知识迁移记录](docs/decisions/0022-cpb-design-knowledge-migration.md)
+
+CPB 只作为已核对的设计来源；当前产品使用 WinWinCode 自己的合同、存储和运行路径。
 
 ## 许可证
 
-WinWinCode 自有代码以 [Apache License 2.0](LICENSE) 发布。Codex、DeepSeek Harness 和其他第三方组件的归属要求记录在 [NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 中；平台包还附带目标专属的 Rust 依赖与原始许可文件清单。
+WinWinCode 自有代码只使用 [Apache License 2.0](LICENSE)。Codex、DeepSeek Harness 和其他第三方组件的归属要求记录在 [NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 中。

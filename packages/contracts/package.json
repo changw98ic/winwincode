@@ -1,6 +1,6 @@
 {
   "name": "@winwincode/contracts",
-  "version": "0.0.0-dev.0",
+  "version": "0.1.0-alpha.1",
   "description": "Shared WinWinCode host and surface contracts",
   "license": "Apache-2.0",
   "type": "module",

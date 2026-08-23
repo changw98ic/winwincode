@@ -178,6 +178,60 @@ test('translates DSH function calls into Codex response items', async () => {
   assert.equal(messages.at(-1).endTurn, false)
 })
 
+test('replays reasoning and parallel Codex tool calls as one DSH assistant message', async () => {
+  const fixture = fixtureRuntime(streamedAnswer)
+  const request = modelRequest({
+    input: [{
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'inspect both paths' }],
+    }, {
+      type: 'reasoning',
+      id: 'reasoning-1',
+      summary: [{ type: 'summary_text', text: 'Inspect both paths together.' }],
+      content: [],
+    }, {
+      type: 'function_call',
+      id: 'function-call-1',
+      call_id: 'call-1',
+      name: 'inspect',
+      arguments: '{"path":"first"}',
+    }, {
+      type: 'function_call',
+      id: 'function-call-2',
+      call_id: 'call-2',
+      name: 'inspect',
+      arguments: '{"path":"second"}',
+    }, {
+      type: 'function_call_output',
+      call_id: 'call-1',
+      output: 'first result',
+    }, {
+      type: 'function_call_output',
+      call_id: 'call-2',
+      output: 'second result',
+    }],
+  })
+
+  await collect(new DshModelPort(fixture.runtime).stream(
+    request,
+    new AbortController().signal,
+  ))
+
+  const assistantMessages = fixture.generated[0].messages
+    .filter(message => message.role === 'assistant')
+  assert.equal(assistantMessages.length, 1)
+  assert.deepEqual(
+    assistantMessages[0].content.map(block => block.type),
+    ['reasoning', 'tool-call', 'tool-call'],
+  )
+  assert.deepEqual(
+    assistantMessages[0].content.filter(block => block.type === 'tool-call')
+      .map(block => block.id),
+    ['call-1', 'call-2'],
+  )
+})
+
 test('wraps Codex custom tools in DSH JSON-schema functions and restores freeform input', async () => {
   const fixture = fixtureRuntime(async function* customCall(options) {
     const tool = options.tools[0]

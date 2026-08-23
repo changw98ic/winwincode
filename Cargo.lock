@@ -12560,13 +12560,10 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 name = "winwincode-kernel"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "codex-api",
  "codex-core-api",
  "codex-model-provider-info",
  "codex-protocol",
- "codex-sandboxing",
- "codex-utils-path-uri",
  "futures",
  "serde",
  "serde_json",

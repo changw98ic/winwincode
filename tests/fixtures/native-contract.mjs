@@ -68,7 +68,20 @@ try {
   report.duplicateSubscriberCode = await captureKernelError(() => duplicateStream.next())
   await eventStream.return()
 
-  report.timeoutPoll = await kernel.pollEvent(source.sessionId, 20)
+  const startupEvents = []
+  while (true) {
+    const poll = await kernel.pollEvent(source.sessionId, 20)
+    if (poll.status !== 'event') {
+      report.timeoutPoll = poll
+      break
+    }
+    startupEvents.push({
+      sequence: poll.event.sequence.toString(),
+      kind: poll.event.kind,
+      payloadType: poll.event.payload?.msg?.type,
+    })
+  }
+  report.startupEvents = startupEvents
   report.sessionsAfterCreate = await kernel.listSessions()
   report.emptySubmitCode = await captureKernelError(
     () => kernel.submitTurn(source.sessionId, '   '),

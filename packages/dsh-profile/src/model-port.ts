@@ -413,6 +413,23 @@ function translateInput(
 ): { messages: DshMessage[]; systemFragments: string[] } {
   const messages: DshMessage[] = []
   const systemFragments: string[] = []
+  let pendingAssistant: { id: string; content: DshContentBlock[] } | null = null
+  const flushAssistant = (): void => {
+    if (pendingAssistant === null) return
+    if (pendingAssistant.content.length > 0) {
+      messages.push(message(
+        pendingAssistant.id,
+        'assistant',
+        pendingAssistant.content,
+        { kind: 'model', provider: request.provider, model },
+      ))
+    }
+    pendingAssistant = null
+  }
+  const appendAssistant = (id: string, blocks: DshContentBlock[]): void => {
+    pendingAssistant ??= { id, content: [] }
+    pendingAssistant.content.push(...blocks)
+  }
   let sequence = 0
   for (const raw of input) {
     sequence += 1
@@ -426,16 +443,13 @@ function translateInput(
         const role = requiredString(raw, 'role', 'message')
         const text = textContent(raw.content, 'message')
         if (role === 'developer' || role === 'system') {
+          flushAssistant()
           if (text !== '') systemFragments.push(text)
         } else if (role === 'user') {
+          flushAssistant()
           messages.push(message(id, 'user', [{ type: 'text', text }], { kind: 'user' }))
         } else if (role === 'assistant') {
-          messages.push(message(
-            id,
-            'assistant',
-            [{ type: 'text', text }],
-            { kind: 'model', provider: request.provider, model },
-          ))
+          if (text !== '') appendAssistant(id, [{ type: 'text', text }])
         } else {
           return bridgeError('UNSUPPORTED_CONTENT', `message role "${role}" is not supported`)
         }
@@ -457,12 +471,7 @@ function translateInput(
           }
         }
         if (fragments.length > 0) {
-          messages.push(message(
-            id,
-            'assistant',
-            [{ type: 'reasoning', text: fragments.join('\n') }],
-            { kind: 'model', provider: request.provider, model },
-          ))
+          appendAssistant(id, [{ type: 'reasoning', text: fragments.join('\n') }])
         }
         break
       }
@@ -470,38 +479,29 @@ function translateInput(
         const name = requiredString(raw, 'name', 'function call')
         const namespace = optionalString(raw, 'namespace')
         const binding = bindingForHistory(bindings, 'function', name, namespace)
-        messages.push(message(
-          id,
-          'assistant',
-          [{
+        appendAssistant(id, [{
             type: 'tool-call',
             id: requiredString(raw, 'call_id', 'function call'),
             name: binding.exposedName,
             arguments: requiredString(raw, 'arguments', 'function call'),
-          }],
-          { kind: 'model', provider: request.provider, model },
-        ))
+          }])
         break
       }
       case 'custom_tool_call': {
         const name = requiredString(raw, 'name', 'custom tool call')
         const namespace = optionalString(raw, 'namespace')
         const binding = bindingForHistory(bindings, 'custom', name, namespace)
-        messages.push(message(
-          id,
-          'assistant',
-          [{
+        appendAssistant(id, [{
             type: 'tool-call',
             id: requiredString(raw, 'call_id', 'custom tool call'),
             name: binding.exposedName,
             arguments: JSON.stringify({ input: requiredString(raw, 'input', 'custom tool call') }),
-          }],
-          { kind: 'model', provider: request.provider, model },
-        ))
+          }])
         break
       }
       case 'function_call_output':
       case 'custom_tool_call_output': {
+        flushAssistant()
         const callId = requiredString(raw, 'call_id', type)
         messages.push(message(
           id,
@@ -523,6 +523,7 @@ function translateInput(
         )
     }
   }
+  flushAssistant()
   return { messages, systemFragments }
 }
 
