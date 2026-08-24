@@ -1,0 +1,915 @@
+{
+  "schemaVersion": "winwincode.delivery-domain-rule-matrix.v1",
+  "issueId": "winwincode-9c4.16.2.2",
+  "purpose": "Freeze Delivery domain and append-only store behavior before the Rust implementation becomes canonical.",
+  "typescriptSourceOfTruth": "packages/contracts/src/delivery.ts",
+  "rustTarget": {
+    "crate": "crates/winwincode-delivery",
+    "scanWhenPresent": true,
+    "interface": "A small command/query module owns validation and persistence; callers do not manipulate stored records directly."
+  },
+  "coverageSummary": {
+    "covered": 20,
+    "partial": 2,
+    "implementation_only": 7
+  },
+  "rules": [
+    {
+      "id": "spec.required_acceptance_criterion",
+      "statement": "A DeliverySpec contains at least one acceptance criterion and at least one criterion is required.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDeliverySpec"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "DeliverySpec requires delivery boundaries and a bounded rework limit"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/spec.rs",
+        "testName": "delivery_spec_requires_at_least_one_required_acceptance_criterion"
+      }
+    },
+    {
+      "id": "task.acceptance_criteria_current",
+      "statement": "Every DeliveryTask names at least one acceptance criterion from the current DeliverySpec.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDeliveryTask"
+          },
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript validator implements the relationship check, but no public test supplies an empty or foreign acceptanceCriterionIds set."
+      },
+      "rust": {
+        "module": "domain/task.rs",
+        "testName": "delivery_task_requires_current_acceptance_criteria"
+      }
+    },
+    {
+      "id": "task.dependency_exists",
+      "statement": "Every blockedByTaskId resolves to another DeliveryTask in the same Delivery.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript validator rejects a missing dependency, but the existing task graph test only supplies a two-node cycle."
+      },
+      "rust": {
+        "module": "domain/task.rs",
+        "testName": "delivery_task_rejects_missing_dependency"
+      }
+    },
+    {
+      "id": "task.dependency_not_self",
+      "statement": "A DeliveryTask cannot depend on itself.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript validator rejects a self-reference, but no public TypeScript test isolates that case."
+      },
+      "rust": {
+        "module": "domain/task.rs",
+        "testName": "delivery_task_rejects_self_dependency"
+      }
+    },
+    {
+      "id": "task.dependency_acyclic",
+      "statement": "The DeliveryTask dependency graph is acyclic.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Delivery rejects duplicate and cyclic delivery-significant tasks"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/task.rs",
+        "testName": "delivery_task_rejects_dependency_cycle"
+      }
+    },
+    {
+      "id": "stage_run.status_finish_time",
+      "statement": "Running or waiting StageRuns have no finish time; settled StageRuns have a finish time at or after their start time.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseStageRun"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript parser implements all status/time branches, but the public tests only use valid StageRuns."
+      },
+      "rust": {
+        "module": "domain/stage_run.rs",
+        "testName": "stage_run_status_requires_consistent_finish_time"
+      }
+    },
+    {
+      "id": "stage_run.rework_requires_codex_remediator",
+      "statement": "A reworking StageRun uses actor type codex and role remediator.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Delivery accepts Delivery- or task-scoped Codex remediators within the approved limit"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/stage_run.rs",
+        "testName": "rework_stage_run_requires_codex_remediator"
+      }
+    },
+    {
+      "id": "stage_run.rework_attempt_limit",
+      "statement": "The number of reworking StageRuns does not exceed the current DeliverySpec maxReworkAttempts.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Delivery accepts Delivery- or task-scoped Codex remediators within the approved limit"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/stage_run.rs",
+        "testName": "rework_stage_runs_respect_approved_attempt_limit"
+      }
+    },
+    {
+      "id": "session_binding.has_session_identity",
+      "statement": "A SessionBinding contains at least one real session identity instead of an empty binding.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseSessionBinding"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript parser rejects both legacy session fields being null, but no public test isolates the empty binding."
+      },
+      "rust": {
+        "module": "domain/session_binding.rs",
+        "testName": "session_binding_requires_at_least_one_session_identity"
+      }
+    },
+    {
+      "id": "session_binding.matches_delivery_run_and_actor",
+      "statement": "A SessionBinding belongs to the same Delivery and an existing StageRun; a Codex StageRun carries its Codex execution identity.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/session_binding.rs",
+        "testName": "session_binding_matches_delivery_stage_run_and_actor"
+      }
+    },
+    {
+      "id": "attention.needs_attention_requires_open_blocker",
+      "statement": "Delivery status needs-attention requires at least one open blocking AttentionItem.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "needs-attention requires a durable open blocking item"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/attention.rs",
+        "testName": "needs_attention_requires_open_blocking_attention"
+      }
+    },
+    {
+      "id": "attention.pass_rejects_open_non_approval_blocker",
+      "statement": "A passing DeliveryVerdict cannot coexist with open blocking Attention except the final delivery approval.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "passing and delivered states fail closed on stale or failed evidence"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/attention.rs",
+        "testName": "passing_verdict_rejects_open_non_approval_blocker"
+      }
+    },
+    {
+      "id": "attention.delivered_rejects_open_blocker",
+      "statement": "A delivered Delivery has no open blocking AttentionItem, including delivery approval.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript validator contains this delivered-only check, but the existing blocking test is rejected earlier by the passing-verdict rule."
+      },
+      "rust": {
+        "module": "domain/attention.rs",
+        "testName": "delivered_delivery_rejects_open_blocking_attention"
+      }
+    },
+    {
+      "id": "status.ready_or_delivered_requires_pass",
+      "statement": "ready-to-deliver and delivered statuses require a passing DeliveryVerdict.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "passing and delivered states fail closed on stale or failed evidence"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "ready_or_delivered_requires_passing_verdict"
+      }
+    },
+    {
+      "id": "status.ready_or_delivered_requires_completed_tasks",
+      "statement": "ready-to-deliver and delivered statuses require every DeliveryTask to be completed.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "implementation_only",
+        "tests": [],
+        "gap": "The TypeScript validator implements this state rule, but no public test supplies an incomplete task with a delivery-ready status."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "ready_or_delivered_requires_completed_tasks"
+      }
+    },
+    {
+      "id": "evidence.current_spec_revision",
+      "statement": "Every EvidenceRef belongs to the current DeliverySpec identity and exact revision.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          },
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "assertFrozenDeliveryCandidateCurrent"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          },
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "invalidates prior acceptance and candidate identities after definition or writer changes"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "evidence_matches_current_spec_revision"
+      }
+    },
+    {
+      "id": "evidence.current_stage_run",
+      "statement": "Every EvidenceRef points to an existing StageRun in the same Delivery.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          },
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "resolveDeliveryEvidence"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "evidence_matches_existing_stage_run"
+      }
+    },
+    {
+      "id": "evidence.current_stage_run_session_binding",
+      "statement": "Every EvidenceRef points to an existing SessionBinding for the same Delivery and StageRun.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          },
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "resolveDeliveryEvidence"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          },
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "resolves runtime and Git facts to exact spec, candidate, stage, and session identities"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "evidence_matches_stage_run_session_binding"
+      }
+    },
+    {
+      "id": "evidence.not_before_run_or_binding",
+      "statement": "Evidence creation time is not earlier than its StageRun start or SessionBinding time.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "evidence_does_not_predate_run_or_binding"
+      }
+    },
+    {
+      "id": "evidence.current_candidate",
+      "statement": "CriterionResult evidence and frozen verification facts belong to the exact current candidate.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          },
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "assertFrozenDeliveryCandidateCurrent"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "passing and delivered states fail closed on stale or failed evidence"
+          },
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "rejects stale acceptance, stale candidate, and foreign result identities"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "criterion_evidence_matches_current_candidate"
+      }
+    },
+    {
+      "id": "verdict.pass_or_fail_requires_evidence",
+      "statement": "A pass or fail CriterionResult cites at least one EvidenceRef; inconclusive and infra_error may remain evidence-free.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseCriterionResult"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "fails closed for each non-passing verification condition"
+          }
+        ],
+        "gap": "The higher-level verdict test covers missing direct evidence, but no parser test submits an evidence-free pass or fail CriterionResult."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "pass_or_fail_criterion_requires_evidence"
+      }
+    },
+    {
+      "id": "verdict.all_criteria_exactly_once",
+      "statement": "A DeliveryVerdict evaluates every current acceptance criterion exactly once and no foreign criterion.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "computes one deterministic passing verdict from current direct evidence"
+          }
+        ],
+        "gap": "The computation test proves complete output, but no TypeScript parser test removes, duplicates, or adds one verdict criterion."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "delivery_verdict_covers_every_current_criterion_exactly_once"
+      }
+    },
+    {
+      "id": "verdict.required_result_fold",
+      "statement": "DeliveryVerdict status is derived from required CriterionResults and unresolved findings with fail, infra_error, inconclusive, then pass precedence.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "passing and delivered states fail closed on stale or failed evidence"
+          },
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "fails closed for each non-passing verification condition"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "delivery_verdict_status_folds_required_results_and_findings"
+      }
+    },
+    {
+      "id": "store.request_id_idempotency",
+      "statement": "Reusing requestId with the same request digest and operation replays the original snapshot; any conflicting reuse is rejected.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-store.test.mjs",
+            "name": "DeliveryStore replays one request and rejects conflicting reuse or revision"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "store.rs",
+        "testName": "request_id_replays_identical_mutation_and_rejects_conflict"
+      }
+    },
+    {
+      "id": "store.expected_revision",
+      "statement": "A mutation applies only when expectedRevision equals the stored revision and the new snapshot advances exactly one revision.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-store.test.mjs",
+            "name": "DeliveryStore replays one request and rejects conflicting reuse or revision"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "store.rs",
+        "testName": "expected_revision_and_next_revision_must_match"
+      }
+    },
+    {
+      "id": "store.digest_chain",
+      "statement": "Durable records have contiguous sequences and each previousDigest equals the prior record digest, beginning at the manifest firstRecordDigest.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-store.test.mjs",
+            "name": "DeliveryStore creates, reopens, and replays one exact snapshot chain"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "store.rs",
+        "testName": "delivery_records_form_contiguous_digest_chain"
+      }
+    },
+    {
+      "id": "store.corruption_rejected",
+      "statement": "A changed manifest, record, snapshot, sequence, relationship, request identity, or digest is rejected as store corruption.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-store.test.mjs",
+            "name": "DeliveryStore ignores pending files and rejects a changed durable record"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "store.rs",
+        "testName": "corrupt_delivery_store_is_rejected"
+      }
+    },
+    {
+      "id": "store.concurrent_revision_publish",
+      "statement": "Concurrent writers may publish only one record for the same next revision; the loser receives a revision conflict.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-store.test.mjs",
+            "name": "competing DeliveryStore instances publish one revision"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "store.rs",
+        "testName": "concurrent_append_publishes_one_revision"
+      }
+    },
+    {
+      "id": "store.pending_record_recovery",
+      "statement": "An unpublished pending record is ignored during recovery; only the atomically published record chain is authoritative.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/delivery-store.test.mjs",
+            "name": "DeliveryStore ignores pending files and rejects a changed durable record"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "store.rs",
+        "testName": "pending_record_is_ignored_during_recovery"
+      }
+    }
+  ],
+  "contractFindings": [
+    {
+      "id": "contract.schema_version",
+      "kind": "conflict",
+      "current": "The TypeScript Delivery domain exposes numeric DELIVERY_SCHEMA_VERSION 3.",
+      "target": "The accepted phase-one public schema exposes the string schemaVersion winwincode/v1.",
+      "action": "Keep numeric v3 only in the one-time legacy fixture importer; Rust public projections and commands use the generated winwincode/v1 type.",
+      "refs": [
+        "packages/contracts/src/delivery.ts",
+        "schema/winwincode/v1/domain.schema.json",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ]
+    },
+    {
+      "id": "contract.identifier_format",
+      "kind": "conflict",
+      "current": "The TypeScript Delivery domain accepts broad portable identifiers such as delivery-main.",
+      "target": "The phase-one schema requires typed prefixes and ULID-shaped payloads such as dlv_, dtk_, run_, att_, and evd_.",
+      "action": "Use generated phase-one ID types at the new Rust command/projection seam; legacy fixture IDs stay confined to migration input.",
+      "refs": [
+        "packages/contracts/src/delivery.ts",
+        "schema/winwincode/v1/domain.schema.json"
+      ]
+    },
+    {
+      "id": "contract.timestamp_format",
+      "kind": "mapping_required",
+      "current": "The TypeScript Delivery entities expose non-negative integer millisecond timestamps.",
+      "target": "The phase-one public schema exposes UTC date-time strings with exactly millisecond precision.",
+      "action": "Choose one internal Rust instant representation and convert exactly once in the public projection adapter; do not expose two timestamp formats.",
+      "refs": [
+        "packages/contracts/src/delivery.ts",
+        "schema/winwincode/v1/domain.schema.json"
+      ]
+    },
+    {
+      "id": "contract.session_identities",
+      "kind": "conflict",
+      "current": "TypeScript SessionBinding stores dshSessionId and codexSessionId, and codexSessionId is also used as a thread identity in fixtures.",
+      "target": "ADR-0028 and the phase-one schema keep ProductSessionId, WorkerSessionId, and CodexThreadId distinct and remove DSH from the final backend.",
+      "action": "Translate legacy fields only as internal migration identities; do not add them to the new public schema. Map the binding to the three accepted identities in the ProductSession and Worker migration phases.",
+      "refs": [
+        "packages/contracts/src/delivery.ts",
+        "schema/winwincode/v1/domain.schema.json",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ]
+    },
+    {
+      "id": "contract.missing_internal_ids",
+      "kind": "missing_definition",
+      "current": "The ten-object TypeScript model gives DeliverySpec, AcceptanceCriterion, SessionBinding, CriterionResult, and DeliveryVerdict their own IDs and calls the evidence identity EvidenceRefId.",
+      "target": "The phase-one public schema defines EvidenceId but does not define public IDs for those five internal Delivery objects.",
+      "action": "Define the five missing identities inside the Rust Delivery domain and use generated EvidenceId; any future wire exposure requires a separate canonical-schema decision.",
+      "refs": [
+        "packages/contracts/src/delivery.ts",
+        "schema/winwincode/v1/domain.schema.json",
+        "docs/decisions/0023-canonical-delivery-ownership.md"
+      ]
+    },
+    {
+      "id": "contract.error_code_mapping",
+      "kind": "mapping_required",
+      "current": "TypeScript validators and store expose detailed codes such as RELATIONSHIP_MISMATCH, INVALID_VERDICT, REQUEST_CONFLICT, and STORE_CORRUPT.",
+      "target": "The phase-one wire contract exposes stable public codes including INVALID_REQUEST, IDEMPOTENCY_CONFLICT, REVISION_CONFLICT, WRONG_STATE, and INTERNAL_ERROR.",
+      "action": "Keep precise Rust domain and store errors internal, then map them once at the Control Plane HTTP seam without leaking storage facts.",
+      "refs": [
+        "packages/contracts/src/delivery.ts",
+        "packages/strongflow/src/delivery-store.ts",
+        "schema/winwincode/v1/domain.schema.json"
+      ]
+    }
+  ]
+}
