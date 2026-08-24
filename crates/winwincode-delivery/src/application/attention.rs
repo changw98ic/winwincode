@@ -33,7 +33,7 @@ pub struct ResolveAttentionInput {
 ///
 /// # Errors
 ///
-/// Fails closed on stale revision, actor, item, StageRun, Spec, frozen context,
+/// Fails closed on stale revision, actor, item, `StageRun`, `Spec`, frozen context,
 /// time, or decision state. No snapshot is returned on error.
 pub fn resolve_attention(
     delivery: &Delivery,
@@ -92,8 +92,10 @@ pub fn resolve_attention(
         })?;
     let run = &delivery.snapshot().stage_runs[run_index];
     if run.actor_type == StageRunActorType::Human
-        && (!matches!(run.status, StageRunStatus::Waiting | StageRunStatus::Running)
-            || input.now_millis < run.started_at_millis)
+        && (!matches!(
+            run.status,
+            StageRunStatus::Waiting | StageRunStatus::Running
+        ) || input.now_millis < run.started_at_millis)
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::StaleAttention,

@@ -20,12 +20,12 @@ pub struct SessionBindingIdentity {
     pub execution_job_id: ExecutionJobId,
 }
 
-/// Records the WorkerSession returned by an accepted immutable dispatch.
+/// Records the `WorkerSession` returned by an accepted immutable dispatch.
 ///
 /// # Errors
 ///
 /// Fails closed on stale revision, a non-active run, any identity mismatch, or
-/// a WorkerSession already owned by another binding.
+/// a `WorkerSession` already owned by another binding.
 pub fn accept_worker_session(
     delivery: &Delivery,
     expected_revision: u64,
@@ -69,12 +69,12 @@ pub fn accept_worker_session(
     })
 }
 
-/// Records the CodexThread reported by the already accepted WorkerSession.
+/// Records the `CodexThread` reported by the already accepted `WorkerSession`.
 ///
 /// # Errors
 ///
 /// Fails closed on stale revision, any exact identity mismatch, a changed
-/// WorkerSession, or a CodexThread already owned by another binding.
+/// `WorkerSession`, or a `CodexThread` already owned by another binding.
 pub fn report_codex_thread(
     delivery: &Delivery,
     expected_revision: u64,
@@ -125,10 +125,7 @@ pub fn report_codex_thread(
     })
 }
 
-fn require_revision(
-    delivery: &Delivery,
-    expected_revision: u64,
-) -> Result<(), CoordinationError> {
+fn require_revision(delivery: &Delivery, expected_revision: u64) -> Result<(), CoordinationError> {
     if delivery.revision() == expected_revision {
         Ok(())
     } else {
@@ -187,7 +184,10 @@ fn require_active_run(
         })?;
     if run.delivery_id != identity.delivery_id
         || run.delivery_task_id != identity.delivery_task_id
-        || !matches!(run.status, StageRunStatus::Running | StageRunStatus::Waiting)
+        || !matches!(
+            run.status,
+            StageRunStatus::Running | StageRunStatus::Waiting
+        )
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Approved DeliveryTask graph transitions.
+//! Approved `DeliveryTask` graph transitions.
 
 use crate::domain::{
     AttentionItemStatus, AttentionItemType, Delivery, DeliveryStage, DeliveryStatus, DeliveryTask,
@@ -31,23 +31,18 @@ pub fn transition_task_status(
     fact: TaskFact,
 ) -> Result<DeliveryTaskStatus, CoordinationError> {
     let next = match (status, fact) {
-        (DeliveryTaskStatus::Pending, TaskFact::StartExecuting) => DeliveryTaskStatus::Active,
-        (DeliveryTaskStatus::Active, TaskFact::StartVerifying) => DeliveryTaskStatus::Verifying,
-        (DeliveryTaskStatus::Verifying, TaskFact::StartVerifying) => {
+        (DeliveryTaskStatus::Pending, TaskFact::StartExecuting)
+        | (DeliveryTaskStatus::Failed, TaskFact::StartReworking) => DeliveryTaskStatus::Active,
+        (DeliveryTaskStatus::Active | DeliveryTaskStatus::Verifying, TaskFact::StartVerifying)
+        | (DeliveryTaskStatus::Verifying, TaskFact::VerifyingCancelled) => {
             DeliveryTaskStatus::Verifying
         }
         (DeliveryTaskStatus::Verifying, TaskFact::VerificationPassed) => {
             DeliveryTaskStatus::Completed
         }
-        (DeliveryTaskStatus::Verifying, TaskFact::VerificationFailed) => {
-            DeliveryTaskStatus::Failed
-        }
-        (DeliveryTaskStatus::Failed, TaskFact::StartReworking) => DeliveryTaskStatus::Active,
+        (DeliveryTaskStatus::Verifying, TaskFact::VerificationFailed)
+        | (DeliveryTaskStatus::Active, TaskFact::ReworkingCancelled) => DeliveryTaskStatus::Failed,
         (DeliveryTaskStatus::Active, TaskFact::ExecutingCancelled) => DeliveryTaskStatus::Pending,
-        (DeliveryTaskStatus::Verifying, TaskFact::VerifyingCancelled) => {
-            DeliveryTaskStatus::Verifying
-        }
-        (DeliveryTaskStatus::Active, TaskFact::ReworkingCancelled) => DeliveryTaskStatus::Failed,
         _ => {
             return Err(CoordinationError::new(
                 CoordinationErrorCode::WrongState,
@@ -58,10 +53,10 @@ pub fn transition_task_status(
     Ok(next)
 }
 
-/// Approves one immutable DeliveryTask graph after the current plan review.
+/// Approves one immutable `DeliveryTask` graph after the current plan review.
 ///
 /// `delivery.create.tasks` remains empty. This command is the only normal path
-/// that writes the task graph, once per current Spec revision.
+/// that writes the task graph, once per current `Spec` revision.
 ///
 /// # Errors
 ///

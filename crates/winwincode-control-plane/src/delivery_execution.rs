@@ -11,16 +11,16 @@
 use std::{error::Error, fmt};
 
 use winwincode_api::generated::{
-    DeliveryStageExecutionScope, ExecutionJob, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, JobCancelAckMessage,
+    DeliveryStageExecutionScope, ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
+    JobCancelAckMessage,
 };
 use winwincode_delivery::{
     application::{
-        stage::{
-            acknowledge_cancel, ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent,
-            StageAdvanceEffect, StageAdvanceResult,
-        },
         CoordinationError,
+        stage::{
+            ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent, StageAdvanceEffect,
+            StageAdvanceResult, acknowledge_cancel,
+        },
     },
     domain::Delivery,
 };
@@ -92,11 +92,22 @@ pub trait DeliveryExecutionTransaction {
         &mut self,
         pending: &PendingDeliveryExecution,
     ) -> Result<DeliveryExecutionCommitReceipt, DeliveryExecutionPortError>;
+
+    /// Marks the exact durable outbox event published after dispatch succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Leaves the event pending for startup/outbox replay when acknowledgement
+    /// cannot be committed.
+    fn mark_job_dispatched(
+        &mut self,
+        outbox_event_id: &str,
+    ) -> Result<(), DeliveryExecutionPortError>;
 }
 
-/// ExecutionPort adapter called only after the outer transaction commits.
+/// `ExecutionPort` adapter called only after the outer transaction commits.
 pub trait ExecutionJobDispatcher {
-    /// Sends or offers one immutable generated ExecutionJob.
+    /// Sends or offers one immutable generated `ExecutionJob`.
     ///
     /// # Errors
     ///
@@ -104,33 +115,45 @@ pub trait ExecutionJobDispatcher {
     fn dispatch(&mut self, job: &ExecutionJob) -> Result<(), DeliveryExecutionPortError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryExecutionCommitReceipt {
     pub committed_revision: u64,
+    pub outbox_event_id: String,
+    pub job: ExecutionJob,
     pub replayed: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryExecutionDispatchReceipt {
     pub commit: DeliveryExecutionCommitReceipt,
     pub dispatched: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DeliveryExecutionError {
     InvalidEffect(String),
     Coordination(CoordinationError),
     Commit(DeliveryExecutionPortError),
+    CommittedPayloadInvalid {
+        commit: Box<DeliveryExecutionCommitReceipt>,
+        message: String,
+    },
     DispatchAfterCommit {
-        commit: DeliveryExecutionCommitReceipt,
+        commit: Box<DeliveryExecutionCommitReceipt>,
+        source: DeliveryExecutionPortError,
+    },
+    AcknowledgeAfterDispatch {
+        commit: Box<DeliveryExecutionCommitReceipt>,
         source: DeliveryExecutionPortError,
     },
 }
 
 impl DeliveryExecutionError {
-    pub const fn committed_receipt(&self) -> Option<&DeliveryExecutionCommitReceipt> {
+    pub fn committed_receipt(&self) -> Option<&DeliveryExecutionCommitReceipt> {
         match self {
-            Self::DispatchAfterCommit { commit, .. } => Some(commit),
+            Self::CommittedPayloadInvalid { commit, .. }
+            | Self::DispatchAfterCommit { commit, .. }
+            | Self::AcknowledgeAfterDispatch { commit, .. } => Some(commit.as_ref()),
             Self::InvalidEffect(_) | Self::Coordination(_) | Self::Commit(_) => None,
         }
     }
@@ -142,9 +165,17 @@ impl fmt::Display for DeliveryExecutionError {
             Self::InvalidEffect(message) => formatter.write_str(message),
             Self::Coordination(error) => write!(formatter, "Delivery coordination failed: {error}"),
             Self::Commit(error) => write!(formatter, "Delivery execution commit failed: {error}"),
+            Self::CommittedPayloadInvalid { message, .. } => write!(
+                formatter,
+                "Delivery and job intent committed, but durable payload is invalid: {message}"
+            ),
             Self::DispatchAfterCommit { source, .. } => write!(
                 formatter,
                 "Delivery and job intent committed, but dispatch remains pending: {source}"
+            ),
+            Self::AcknowledgeAfterDispatch { source, .. } => write!(
+                formatter,
+                "ExecutionJob dispatched, but its durable outbox acknowledgement remains pending: {source}"
             ),
         }
     }
@@ -152,7 +183,7 @@ impl fmt::Display for DeliveryExecutionError {
 
 impl Error for DeliveryExecutionError {}
 
-/// Converts one Delivery-owned dispatch effect to the generated ExecutionJob.
+/// Converts one Delivery-owned dispatch effect to the generated `ExecutionJob`.
 ///
 /// The result remains pending until [`commit_and_dispatch`] obtains a durable
 /// commit receipt.
@@ -216,15 +247,30 @@ pub fn commit_and_dispatch(
     let commit = transaction
         .commit_delivery_and_job_intent(pending)
         .map_err(DeliveryExecutionError::Commit)?;
+    if let Err(error) = validate_execution_job(&commit.job) {
+        return Err(DeliveryExecutionError::CommittedPayloadInvalid {
+            commit: Box::new(commit),
+            message: error.to_string(),
+        });
+    }
     if commit.replayed {
         return Ok(DeliveryExecutionDispatchReceipt {
             commit,
             dispatched: false,
         });
     }
-    dispatcher
-        .dispatch(pending.job())
-        .map_err(|source| DeliveryExecutionError::DispatchAfterCommit { commit, source })?;
+    dispatcher.dispatch(&commit.job).map_err(|source| {
+        DeliveryExecutionError::DispatchAfterCommit {
+            commit: Box::new(commit.clone()),
+            source,
+        }
+    })?;
+    transaction
+        .mark_job_dispatched(&commit.outbox_event_id)
+        .map_err(|source| DeliveryExecutionError::AcknowledgeAfterDispatch {
+            commit: Box::new(commit.clone()),
+            source,
+        })?;
     Ok(DeliveryExecutionDispatchReceipt {
         commit,
         dispatched: true,
@@ -235,7 +281,7 @@ pub fn commit_and_dispatch(
 ///
 /// The acknowledgement must match the exact cancellation request and current
 /// lease. The returned Delivery remains unchanged; only a separately verified
-/// terminal `job.outcome` may settle the StageRun.
+/// terminal `job.outcome` may settle the `StageRun`.
 ///
 /// # Errors
 ///
@@ -270,7 +316,7 @@ pub fn acknowledge_job_cancel(
     acknowledge_cancel(
         delivery,
         intent,
-        CancelAcknowledgement {
+        &CancelAcknowledgement {
             stage_run_id: intent.stage_run_id.clone(),
             execution_job_id: acknowledgement.lease.job_id.clone(),
             attempt: lease_attempt,
@@ -317,10 +363,9 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
     if valid {
         Ok(())
     } else {
-        return Err(DeliveryExecutionError::InvalidEffect(
-            "generated ExecutionJob is invalid under the canonical ExecutionPort schema"
-                .to_owned(),
-        ));
+        Err(DeliveryExecutionError::InvalidEffect(
+            "generated ExecutionJob is invalid under the canonical ExecutionPort schema".to_owned(),
+        ))
     }
 }
 
@@ -328,9 +373,10 @@ fn validate_cancel_ack(
     acknowledgement: &JobCancelAckMessage,
 ) -> Result<(), DeliveryExecutionError> {
     let lease = &acknowledgement.lease;
-    let error_valid = acknowledgement.error.as_ref().is_none_or(|error| {
-        bounded_length(&error.message, 1, 500)
-    });
+    let error_valid = acknowledgement
+        .error
+        .as_ref()
+        .is_none_or(|error| bounded_length(&error.message, 1, 500));
     let valid = acknowledgement.kind == "job.cancel_ack"
         && canonical_identifier(&acknowledgement.message_id.0, "xmsg")
         && instant(&acknowledgement.sent_at.0)
@@ -386,14 +432,20 @@ fn canonical_identifier(value: &str, prefix: &str) -> bool {
 }
 
 fn sha256_digest(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn fencing_token(value: &str) -> bool {
     (1..=20).contains(&value.len())
-        && value.as_bytes().first().is_some_and(|byte| matches!(byte, b'1'..=b'9'))
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| matches!(byte, b'1'..=b'9'))
         && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
@@ -407,10 +459,9 @@ fn instant(value: &str) -> bool {
         || bytes[16] != b':'
         || bytes[19] != b'.'
         || bytes[23] != b'Z'
-        || bytes
-            .iter()
-            .enumerate()
-            .any(|(index, byte)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) && !byte.is_ascii_digit())
+        || bytes.iter().enumerate().any(|(index, byte)| {
+            !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) && !byte.is_ascii_digit()
+        })
     {
         return false;
     }

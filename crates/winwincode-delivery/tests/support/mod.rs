@@ -72,10 +72,7 @@ pub fn migrate_legacy_typescript_snapshot(mut snapshot: Value) -> Result<Value, 
                 .ok_or_else(|| "legacy binding lacks schemaVersion".to_owned())?,
         );
         value.insert("id".to_owned(), Value::String(binding_id.to_owned()));
-        value.insert(
-            "deliveryId".to_owned(),
-            Value::String(delivery_id.clone()),
-        );
+        value.insert("deliveryId".to_owned(), Value::String(delivery_id.clone()));
         value.insert(
             "deliveryTaskId".to_owned(),
             run.get("deliveryTaskId").cloned().unwrap_or(Value::Null),
@@ -124,7 +121,9 @@ fn required_string<'value>(value: &'value Value, field: &str) -> Result<&'value 
 }
 
 fn migration_id(prefix: &str, input: &str) -> String {
-    let digest = format!("{:x}", Sha256::digest(input.as_bytes()));
+    // Uppercase hexadecimal is a deterministic subset of the canonical
+    // Crockford Base32 identifier alphabet.
+    let digest = format!("{:X}", Sha256::digest(input.as_bytes()));
     format!("{prefix}{}", &digest[..26])
 }
 
@@ -132,7 +131,21 @@ fn migration_id(prefix: &str, input: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::migrate_legacy_typescript_snapshot;
+    use super::{migrate_legacy_typescript_snapshot, migration_id};
+
+    #[test]
+    fn deterministic_migration_identity_uses_the_canonical_identifier_alphabet() {
+        let id = migration_id("job_", "legacy-delivery:run:binding");
+
+        assert_eq!(id.len(), 30);
+        assert!(id.starts_with("job_"));
+        assert!(
+            id[4..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+        );
+        assert_eq!(id, migration_id("job_", "legacy-delivery:run:binding"));
+    }
 
     #[test]
     fn mixed_binding_shape_fails_closed() {

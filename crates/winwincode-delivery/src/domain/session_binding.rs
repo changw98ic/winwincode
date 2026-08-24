@@ -13,8 +13,8 @@ use super::{
 
 /// Exact link between a Codex-backed Delivery stage and separately owned sessions.
 ///
-/// Product, Delivery, task, StageRun, and ExecutionJob identities are immutable.
-/// WorkerSession and CodexThread are filled only when their respective owners
+/// Product, Delivery, task, `StageRun`, and `ExecutionJob` identities are immutable.
+/// `WorkerSession` and `CodexThread` are filled only when their respective owners
 /// report them. There is deliberately no generic `sessionId` or legacy DSH
 /// session field in the canonical Rust model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,8 +72,7 @@ mod tests {
     #[test]
     fn session_binding_matches_delivery_stage_run_and_task() {
         let mut fixture = test_fixture();
-        fixture.session_bindings[0].delivery_task_id =
-            Some(DeliveryTaskId("foreign-task".into()));
+        fixture.session_bindings[0].delivery_task_id = Some(DeliveryTaskId("foreign-task".into()));
         assert!(Delivery::try_from_snapshot(fixture).is_err());
 
         let mut fixture = test_fixture();
