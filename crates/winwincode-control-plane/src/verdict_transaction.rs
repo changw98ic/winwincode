@@ -42,6 +42,9 @@ pub(crate) fn execute(
     let (receipt_identity, command_digest) =
         command_receipt(command).map_err(DeliveryVerdictCommitError::Storage)?;
     let delivery_id = payload.delivery_id.clone();
+    let prior_receipt = storage
+        .load_receipt(&receipt_identity, &command_digest)
+        .map_err(DeliveryVerdictCommitError::Storage)?;
     let journal_key =
         delivery_journal_key(&delivery_id).map_err(DeliveryVerdictCommitError::Storage)?;
     let loaded = storage
@@ -49,10 +52,7 @@ pub(crate) fn execute(
         .map_err(DeliveryVerdictCommitError::Storage)?;
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
 
-    if let Some(receipt) = storage
-        .load_receipt(&receipt_identity, &command_digest)
-        .map_err(DeliveryVerdictCommitError::Storage)?
-    {
+    if let Some(receipt) = prior_receipt {
         let source = DeliveryStore::borrowed(&journal)
             .query(DeliveryQuery::GetRevision {
                 delivery_id: delivery_id.clone(),
