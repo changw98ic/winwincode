@@ -9,12 +9,14 @@
 
 mod attention;
 pub mod candidate;
-mod evidence;
+pub mod evidence;
+pub mod rework;
 mod session_binding;
 mod spec;
 mod stage_run;
 mod task;
-mod verdict;
+pub mod verdict;
+pub mod verification;
 
 use std::{
     collections::{HashMap, HashSet},
