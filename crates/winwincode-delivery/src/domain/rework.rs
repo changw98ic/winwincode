@@ -719,6 +719,12 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::{
+        CoordinationErrorCode,
+        stage::{
+            AdvanceStageInput, NewStageIdentities, StageAdvanceEffect, advance, resume_active,
+        },
+    };
     use crate::domain::candidate::CandidateHunkFact;
     use crate::domain::candidate::test_support::{
         freeze_facts, validated_git_snapshot, validated_git_snapshot_between, with_changed_hunks,
@@ -730,7 +736,8 @@ mod tests {
         SessionBindingId, StageRun, test_fixture,
     };
     use winwincode_domain::{
-        CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
+        AttentionItemId, CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId,
+        WorkerSessionId,
     };
 
     #[allow(clippy::too_many_lines)]
@@ -826,7 +833,7 @@ mod tests {
         });
         snapshot.attention_items.push(crate::domain::AttentionItem {
             schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: winwincode_domain::AttentionItemId("rework-attention".into()),
+            id: AttentionItemId("rework-attention".into()),
             delivery_id: snapshot.id.clone(),
             delivery_spec_id: snapshot.spec.id.clone(),
             stage_run_id: Some(StageRunId("writer".into())),
@@ -903,6 +910,46 @@ mod tests {
             panic!("expected rework authorization")
         };
         *authorization
+    }
+
+    fn dispatchable_rework() -> (Delivery, ReworkAuthorization) {
+        let (delivery, candidate, scope, annotation) = current_failure();
+        let authorization = authorization(&delivery, &candidate, &scope, annotation);
+        let mut snapshot = delivery.into_snapshot();
+        snapshot.status = DeliveryStatus::Reworking;
+        snapshot.tasks[0].status = DeliveryTaskStatus::Failed;
+        let attention = snapshot
+            .attention_items
+            .last_mut()
+            .expect("rework Attention");
+        attention.status = crate::domain::AttentionItemStatus::Dismissed;
+        attention.resolution = Some("start exact remediation".into());
+        attention.resolved_by = Some("owner".into());
+        attention.resolved_at_millis = Some(snapshot.updated_at_millis + 1);
+        snapshot.revision += 1;
+        snapshot.updated_at_millis += 1;
+        (
+            Delivery::try_from_snapshot(snapshot).expect("dispatchable rework Delivery"),
+            authorization,
+        )
+    }
+
+    fn rework_advance_input(delivery: &Delivery) -> AdvanceStageInput {
+        AdvanceStageInput {
+            expected_revision: delivery.revision(),
+            product_session_id: ProductSessionId("product-remediator-dispatch".into()),
+            identities: NewStageIdentities {
+                stage_run_id: StageRunId("stage-remediator-dispatch".into()),
+                execution_job_id: ExecutionJobId("job-remediator-dispatch".into()),
+                session_binding_id: SessionBindingId("binding-remediator-dispatch".into()),
+                attention_item_id: AttentionItemId("attention-remediator-dispatch".into()),
+            },
+            review: None,
+            previous_outcome: None,
+            current_lease: None,
+            rework_authorization: None,
+            now_millis: delivery.snapshot().updated_at_millis + 1,
+        }
     }
 
     fn append_remediator(
@@ -1003,6 +1050,89 @@ mod tests {
         assert_eq!(authorization.writer_actor(), StageRunActorType::Codex);
         assert_eq!(authorization.writer_role(), "remediator");
         assert_eq!(authorization.next_attempt(), 1);
+    }
+
+    #[test]
+    fn reworking_advance_requires_and_preserves_the_exact_authorization() {
+        let (delivery, authorization) = dispatchable_rework();
+
+        let missing = advance(&delivery, rework_advance_input(&delivery))
+            .expect_err("Reworking cannot choose a runnable task without authorization");
+        assert_eq!(missing.code(), CoordinationErrorCode::AttentionRequired);
+
+        let mut input = rework_advance_input(&delivery);
+        input.rework_authorization = Some(Box::new(authorization.clone()));
+        let result = advance(&delivery, input).expect("authorized rework starts");
+        let run = result
+            .delivery
+            .snapshot()
+            .stage_runs
+            .last()
+            .expect("remediator run");
+        assert_eq!(
+            run.delivery_task_id.as_ref(),
+            Some(authorization.delivery_task_id())
+        );
+        assert_eq!(run.attempt, authorization.next_attempt());
+        assert!(result.delivery.snapshot().evidence.is_empty());
+        assert!(result.delivery.snapshot().verdict.is_none());
+        let StageAdvanceEffect::Dispatch(intent) = result.effect else {
+            panic!("authorized rework must dispatch")
+        };
+        assert_eq!(
+            intent.delivery_task_id.as_ref(),
+            Some(authorization.delivery_task_id())
+        );
+        assert_eq!(intent.attempt, authorization.next_attempt());
+        assert_eq!(intent.rework_authorization.as_deref(), Some(&authorization));
+        assert!(resume_active(&result.delivery, result.delivery.revision()).is_err());
+    }
+
+    #[test]
+    fn reworking_advance_rejects_stale_authorization_and_never_selects_another_failed_task() {
+        let (delivery, mut authorization) = dispatchable_rework();
+        let mut snapshot = delivery.into_snapshot();
+        snapshot.tasks.insert(
+            0,
+            DeliveryTask {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: DeliveryTaskId("delivery-task-other-failure".into()),
+                delivery_id: snapshot.id.clone(),
+                title: "Other failure".into(),
+                goal: "Must not be selected by runnable-task fallback".into(),
+                acceptance_criterion_ids: vec![snapshot.spec.acceptance_criteria[0].id.clone()],
+                blocked_by_task_ids: vec![],
+                owner: None,
+                status: DeliveryTaskStatus::Failed,
+            },
+        );
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("two failed tasks");
+
+        let mut input = rework_advance_input(&delivery);
+        input.rework_authorization = Some(Box::new(authorization.clone()));
+        let result = advance(&delivery, input).expect("exact authorized task starts");
+        let run = result
+            .delivery
+            .snapshot()
+            .stage_runs
+            .last()
+            .expect("rework run");
+        assert_eq!(
+            run.delivery_task_id.as_ref(),
+            Some(authorization.delivery_task_id())
+        );
+        assert_eq!(
+            result.delivery.snapshot().tasks[0].status,
+            DeliveryTaskStatus::Failed
+        );
+
+        authorization.next_attempt += 1;
+        let mut stale_input = rework_advance_input(&delivery);
+        stale_input.identities.stage_run_id = StageRunId("stage-remediator-stale".into());
+        stale_input.rework_authorization = Some(Box::new(authorization));
+        let stale = advance(&delivery, stale_input)
+            .expect_err("caller cannot raise the Delivery-wide attempt");
+        assert_eq!(stale.code(), CoordinationErrorCode::Conflict);
     }
 
     #[test]

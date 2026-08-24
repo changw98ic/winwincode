@@ -87,6 +87,7 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
         &delivery,
         AdvanceStageInput {
             current_lease: None,
+            rework_authorization: None,
             expected_revision: 1,
             product_session_id: ProductSessionId(canonical_id("psn", seed)),
             identities: NewStageIdentities {

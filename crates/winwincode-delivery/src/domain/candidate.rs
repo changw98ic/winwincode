@@ -197,7 +197,7 @@ impl ValidatedGitSnapshotFact {
             && self.candidate_commit_id == other.candidate_commit_id
             && self.candidate_tree_id == other.candidate_tree_id
             && self.artifact_ref == other.artifact_ref
-            && self.artifact_sha256 == other.artifact_sha256
+            && self.artifact_digest == other.artifact_digest
             && self.last_event_sequence == other.last_event_sequence
             && self.finished_at_millis == other.finished_at_millis
     }
@@ -987,7 +987,7 @@ pub(crate) mod test_support {
         fact.worker_id = WorkerId("worker-foreign".into());
         fact.worker_instance_id = WorkerInstanceId("worker-instance-foreign".into());
         fact.artifact_ref = "artifact:job:foreign".into();
-        fact.artifact_sha256 = "8".repeat(64);
+        fact.artifact_digest = Sha256Digest(format!("sha256:{}", "8".repeat(64)));
         fact.last_event_sequence += 1;
         fact.finished_at_millis += 1;
         fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
