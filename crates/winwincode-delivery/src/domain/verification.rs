@@ -38,6 +38,7 @@ struct FencedExecutionIdentity<'fact> {
     worker_session_id: &'fact WorkerSessionId,
 }
 
+#[allow(dead_code)]
 impl<'fact> FencedExecutionIdentity<'fact> {
     fn verified(outcome: &'fact VerifiedTerminalOutcome) -> Self {
         Self {
@@ -110,6 +111,7 @@ impl VerificationRole {
 /// Workspace policy observed for one verification Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub(crate) enum VerificationWorkspaceMode {
     CandidateReadOnly,
     CandidateWrite,
@@ -119,6 +121,7 @@ pub(crate) enum VerificationWorkspaceMode {
 /// Restricted permission profile accepted for an independent verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub(crate) enum VerificationPermissionProfile {
     CandidateReadOnlyRestricted,
     Unrestricted,
@@ -127,6 +130,7 @@ pub(crate) enum VerificationPermissionProfile {
 /// Candidate mutation category emitted by the Worker runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub(crate) enum VerificationMutationKind {
     FileWrite,
     PatchApply,
@@ -149,6 +153,7 @@ pub(crate) struct VerificationWorkerMutationRecord {
 }
 
 impl VerificationWorkerMutationRecord {
+    #[allow(dead_code)]
     pub(crate) fn from_terminal_outcome(
         outcome: &AcceptedVerificationJobOutcomeFact,
         sequence: ExecutionSequence,
@@ -172,7 +177,7 @@ impl VerificationWorkerMutationRecord {
     }
 }
 
-/// Terminal status from one Control-Plane-accepted Worker JobOutcome.
+/// Terminal status from one Control-Plane-accepted Worker `JobOutcome`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationJobOutcomeStatus {
@@ -325,6 +330,7 @@ pub struct AcceptedVerificationJobOutcomeFact {
     terminal_candidate_tree_id: String,
 }
 
+#[allow(dead_code)]
 impl AcceptedVerificationJobOutcomeFact {
     /// Joins the stage coordinator's sealed outcome to one adapter-sealed Job
     /// snapshot. No caller-supplied identity or terminal timestamp is copied.
@@ -472,10 +478,12 @@ impl VerificationFinding {
         &self.source_refs
     }
 
+    #[allow(dead_code)]
     pub(crate) fn result_sequence(&self) -> &ExecutionSequence {
         &self.result_sequence
     }
 
+    #[allow(dead_code)]
     pub(crate) fn source_sequences(&self) -> &[ExecutionSequence] {
         &self.source_sequences
     }
@@ -1240,9 +1248,9 @@ fn derive_session_state(
             &format!("{path}.acceptedJobOutcome"),
             "an active StageRun cannot have an accepted terminal JobOutcome",
         )),
-        (StageRunStatus::Succeeded, None)
-        | (StageRunStatus::Failed, None)
-        | (StageRunStatus::Cancelled, None) => Ok((VerificationSessionState::Incomplete, None)),
+        (StageRunStatus::Succeeded | StageRunStatus::Failed | StageRunStatus::Cancelled, None) => {
+            Ok((VerificationSessionState::Incomplete, None))
+        }
         (StageRunStatus::Succeeded, Some(VerificationJobOutcomeStatus::Succeeded))
             if assignment.is_some() && !findings.is_empty() =>
         {
@@ -1362,6 +1370,7 @@ pub(crate) mod test_support {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn fixture_settlement(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
@@ -2076,6 +2085,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn requires_succeeded_stage_and_sealed_matching_terminal_outcome() {
         let (delivery, candidate, facts) = fixture(false);
         let verification = validate_independent_verification(&delivery, &candidate, &facts)
