@@ -1,6 +1,7 @@
-# Control Plane HTTP v1
+# WinWinCode 公开合同 v1
 
-这一目录冻结浏览器和外部客户端访问 Rust Control Plane 的第一版 HTTP 合同。
+这一目录冻结 TypeScript Web、Rust Control Plane 与 Rust Execution Worker 共用的第一版
+公开合同。
 
 ## 唯一入口
 
@@ -18,6 +19,12 @@ WebSocket 只推送投影、运行事件、审批请求和通知。业务变更�
   revision、Command 包络和错误包络，由阶段 1.2 提供。
 - [`control-plane-http.schema.json`](./control-plane-http.schema.json) 定义 HTTP
   command、query、分页和响应。
+- [`control-plane-events.schema.json`](./control-plane-events.schema.json) 定义 WebSocket
+  订阅、续传、投影事件和传输控制帧；状态语义见
+  [`Control Plane WebSocket v1`](../../../docs/contracts/control-plane-websocket.md)。
+- [`execution-port.schema.json`](./execution-port.schema.json) 定义 Control Plane 与 Worker
+  之间唯一的消息边界；状态语义见
+  [`ExecutionPort v1`](../../../docs/contracts/execution-port-v1.md)。
 - [`control-plane-http.schema.json`](./control-plane-http.schema.json) 根部的
   `x-winwincode-openapi.paths` 是可合成的 OpenAPI 3.1 路由片段；阶段 1.6
   从它生成唯一的 `openapi.generated.json`，供服务端路由、文档和客户端使用。
