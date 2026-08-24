@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 3,
+  "id": "delivery-no-required",
+  "revision": 1,
+  "status": "draft",
+  "spec": {
+    "schemaVersion": 3,
+    "id": "delivery-spec-v1",
+    "deliveryId": "delivery-no-required",
+    "revision": 1,
+    "title": "No required criterion",
+    "goal": "This must be rejected.",
+    "scope": [
+      "Delivery state"
+    ],
+    "outOfScope": [],
+    "constraints": [],
+    "acceptanceCriteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-optional",
+        "description": "Only optional.",
+        "verificationMethod": null,
+        "required": false
+      }
+    ],
+    "sourceRef": null,
+    "publicationTarget": null,
+    "repository": {
+      "schemaVersion": 3,
+      "kind": "local-git",
+      "locator": "/workspace"
+    },
+    "baseRevision": "base",
+    "maxReworkAttempts": 0,
+    "createdAtMillis": 1800000000000
+  },
+  "tasks": [],
+  "stageRuns": [],
+  "sessionBindings": [],
+  "attentionItems": [],
+  "evidence": [],
+  "verdict": null,
+  "createdAtMillis": 1800000000000,
+  "updatedAtMillis": 1800000000000
+}

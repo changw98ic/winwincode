@@ -38,6 +38,7 @@ function generatedPaths(outputRoot) {
     join(outputRoot, 'typescript', 'generated.ts'),
     join(outputRoot, 'schema-collection.generated.json'),
     join(outputRoot, 'openapi.generated.json'),
+    join(outputRoot, 'rust-domain', 'generated.rs'),
   ]
 }
 
@@ -99,8 +100,22 @@ test('one canonical schema generation is deterministic and compiles for Rust and
 
   const rustFixture = join(temporaryRoot, 'rust-fixture')
   mkdirSync(join(rustFixture, 'src'), { recursive: true })
+  mkdirSync(join(rustFixture, 'domain', 'src'), { recursive: true })
   cpSync(paths[0], join(rustFixture, 'src', 'generated.rs'))
+  cpSync(paths[4], join(rustFixture, 'domain', 'src', 'generated.rs'))
   writeFileSync(join(rustFixture, 'src', 'lib.rs'), 'pub mod generated;\n')
+  writeFileSync(join(rustFixture, 'domain', 'src', 'lib.rs'), 'mod generated;\npub use generated::*;\n')
+  writeFileSync(join(rustFixture, 'domain', 'Cargo.toml'), [
+    '[package]',
+    'name = "winwincode-domain"',
+    'version = "0.0.0"',
+    'edition = "2024"',
+    'publish = false',
+    '',
+    '[dependencies]',
+    'serde = { version = "=1.0.228", features = ["derive"] }',
+    '',
+  ].join('\n'))
   writeFileSync(join(rustFixture, 'Cargo.toml'), [
     '[package]',
     'name = "winwincode-contract-codegen-fixture"',
@@ -109,10 +124,12 @@ test('one canonical schema generation is deterministic and compiles for Rust and
     'publish = false',
     '',
     '[workspace]',
+    'members = ["domain"]',
     '',
     '[dependencies]',
     'serde = { version = "=1.0.228", features = ["derive"] }',
     'serde_json = "=1.0.149"',
+    'winwincode-domain = { path = "domain" }',
     '',
   ].join('\n'))
   const cargo = spawnSync('cargo', [
@@ -127,6 +144,7 @@ test('one canonical schema generation is deterministic and compiles for Rust and
   assert.equal(cargo.status, 0, commandFailure(cargo))
   const rustfmt = spawnSync('cargo', [
     'fmt',
+    '--all',
     '--manifest-path',
     join(rustFixture, 'Cargo.toml'),
     '--',
@@ -188,6 +206,7 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
 
   const rustPath = join(root, 'crates', 'winwincode-api', 'src', 'generated.rs')
   const typescriptPath = join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts')
+  const domainRustPath = join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs')
   const schemaCollectionPath = join(
     root,
     'schema',
@@ -197,6 +216,7 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
   )
   const openapiPath = join(root, 'schema', 'winwincode', 'v1', 'openapi.generated.json')
   assert.match(readFileSync(rustPath, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
+  assert.match(readFileSync(domainRustPath, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
   assert.match(readFileSync(typescriptPath, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
 
   const schemaCollection = JSON.parse(readFileSync(schemaCollectionPath, 'utf8'))

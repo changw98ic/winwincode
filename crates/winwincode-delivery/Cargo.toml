@@ -1,18 +1,18 @@
 [package]
-name = "winwincode-api"
-description = "Generated public transport types for the WinWinCode Control Plane and Execution Port"
+name = "winwincode-delivery"
+description = "Canonical Delivery domain and append-only journal for the WinWinCode Control Plane"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
-winwincode-domain.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+winwincode-domain.workspace = true
 
 [lints]
 workspace = true
