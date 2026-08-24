@@ -1,0 +1,586 @@
+{
+  "schemaVersion": 1,
+  "status": "required-contract-not-implementation-proof",
+  "phaseTask": "winwincode-9c4.16.2.5.1.1",
+  "documentation": "docs/contracts/delivery-solution-review-authority.md",
+  "sourceTrace": {
+    "typescriptPublicSymbols": [
+      {
+        "path": "packages/contracts/src/strongflow-plan-review.ts",
+        "name": "parseStrongFlowPlanReviewContext"
+      },
+      {
+        "path": "packages/contracts/src/strongflow-plan-review.ts",
+        "name": "parseStrongFlowPlanReviewDecision"
+      },
+      {
+        "path": "packages/strongflow/src/plan-review.ts",
+        "name": "createStrongFlowPlanReviewAttention"
+      },
+      {
+        "path": "packages/strongflow/src/plan-review.ts",
+        "name": "assertStrongFlowPlanReviewCurrent"
+      }
+    ],
+    "canonicalRustSources": [
+      "crates/winwincode-delivery/src/application/stage.rs",
+      "crates/winwincode-delivery/src/application/attention.rs",
+      "crates/winwincode-delivery/src/application/task.rs",
+      "crates/winwincode-delivery/src/domain/session_binding.rs"
+    ],
+    "corrections": {
+      "reviewSessionBinding": "rejected-not-migrated",
+      "legacyV2Encoding": "rejected-not-aliased",
+      "rawContextParser": "source-trace-not-production-authority",
+      "humanPlanReviewExecutionJob": "forbidden"
+    }
+  },
+  "authority": {
+    "type": "ValidatedSolutionReviewSet",
+    "owner": "winwincode-delivery",
+    "identityFields": [
+      "deliveryId",
+      "deliverySpecId",
+      "deliverySpecRevision",
+      "planningStageRunId",
+      "planningSessionBindingId",
+      "reviewStageRunId",
+      "attentionItemId",
+      "reviewSetSha256",
+      "reviewStatus",
+      "decision",
+      "reviewerId",
+      "reviewedAt"
+    ],
+    "cardinality": "exactly-one-current-review-set",
+    "reviewStatuses": [
+      "pending",
+      "approved",
+      "changes_requested",
+      "rejected"
+    ],
+    "decisions": [
+      null,
+      "approve",
+      "request_changes",
+      "reject"
+    ]
+  },
+  "encoding": {
+    "schemaVersion": 1,
+    "contextProtocol": "winwincode.solution-review-context.v1",
+    "decisionProtocol": "winwincode.solution-review-decision.v1",
+    "exactKeys": true,
+    "legacyAliasesAllowed": false,
+    "dualReadAllowed": false
+  },
+  "context": {
+    "exactFields": [
+      "schemaVersion",
+      "protocol",
+      "deliveryId",
+      "deliverySpecId",
+      "deliverySpecRevision",
+      "planningStageRunId",
+      "planningSessionBindingId",
+      "reviewStageRunId",
+      "attentionItemId",
+      "solution",
+      "architectureDiagram",
+      "processDiagram",
+      "risks",
+      "unresolvedItems",
+      "taskProposals",
+      "preparedAt",
+      "reviewSetSha256"
+    ],
+    "storedIn": "AttentionItem.context",
+    "authority": "current-canonical-delivery-only"
+  },
+  "decision": {
+    "exactFields": [
+      "schemaVersion",
+      "protocol",
+      "deliveryId",
+      "deliverySpecId",
+      "deliverySpecRevision",
+      "reviewStageRunId",
+      "attentionItemId",
+      "reviewSetSha256",
+      "action",
+      "comments",
+      "requestedChanges"
+    ],
+    "storedIn": "AttentionItem.resolution",
+    "publicProjection": "action-only",
+    "approveRequestedChangesMustBeEmpty": true,
+    "requestChangesRequiresRequestedChanges": true,
+    "rejectRequiresComments": true
+  },
+  "digest": {
+    "field": "reviewSetSha256",
+    "algorithm": "sha256",
+    "encoding": "serde-json-struct-order-utf8-no-whitespace",
+    "format": "lowercase-hex-64",
+    "inputFields": [
+      "schemaVersion",
+      "protocol",
+      "deliveryId",
+      "deliverySpecId",
+      "deliverySpecRevision",
+      "planningStageRunId",
+      "planningSessionBindingId",
+      "reviewStageRunId",
+      "attentionItemId",
+      "solution",
+      "architectureDiagram",
+      "processDiagram",
+      "risks",
+      "unresolvedItems",
+      "taskProposals",
+      "preparedAt"
+    ],
+    "orderedTaskProposalsIncluded": true,
+    "excludedFields": [
+      "reviewSetSha256",
+      "reviewStatus",
+      "decision",
+      "reviewerId",
+      "reviewedAt"
+    ],
+    "restartPolicy": "decode-validate-reencode-preserves-identical-bytes-and-digest"
+  },
+  "taskProposal": {
+    "type": "DeliveryTaskProposal",
+    "fields": [
+      "id",
+      "title",
+      "goal",
+      "acceptanceCriterionIds",
+      "blockedByTaskIds"
+    ],
+    "minimumCount": 1,
+    "maximumCount": 200,
+    "orderIsAuthority": true,
+    "ownerSuppliedByPlanner": false,
+    "initialStatusSuppliedByPlanner": false,
+    "promotionOwner": null,
+    "promotionInitialStatus": "pending",
+    "graphPolicy": "unique-current-criteria-complete-acyclic-dag"
+  },
+  "settlement": {
+    "pending": {
+      "decision": null,
+      "reviewerId": null,
+      "reviewedAt": null,
+      "attentionStatus": "open",
+      "reviewStageRunStatuses": [
+        "waiting",
+        "running"
+      ],
+      "authorizesTaskPromotion": false
+    },
+    "approved": {
+      "decision": "approve",
+      "reviewerId": "authenticated-actor",
+      "reviewedAt": "resolvedAt-and-stage-finishedAt",
+      "attentionStatus": "resolved",
+      "reviewStageRunStatus": "succeeded",
+      "authorizesTaskPromotion": true
+    },
+    "changes_requested": {
+      "decision": "request_changes",
+      "reviewerId": "authenticated-actor",
+      "reviewedAt": "resolvedAt-and-stage-finishedAt",
+      "attentionStatus": "dismissed",
+      "reviewStageRunStatus": "failed",
+      "authorizesTaskPromotion": false
+    },
+    "rejected": {
+      "decision": "reject",
+      "reviewerId": "authenticated-actor",
+      "reviewedAt": "resolvedAt-and-stage-finishedAt",
+      "attentionStatus": "dismissed",
+      "reviewStageRunStatus": "failed",
+      "authorizesTaskPromotion": false
+    }
+  },
+  "reviewerAuthority": {
+    "source": "authenticated-attention-resolution-actor",
+    "mustEqual": "AttentionItem.resolvedBy",
+    "assignedReviewerPolicy": "when AttentionItem.assignedTo exists it must equal reviewerId",
+    "pendingValue": null,
+    "settledValue": "bounded-portable-reviewer-id"
+  },
+  "stageAuthority": {
+    "planning": {
+      "actorType": "codex",
+      "role": "planner",
+      "status": "succeeded",
+      "exactSessionBindingRequired": true,
+      "deliveryTaskId": null
+    },
+    "planReview": {
+      "actorType": "human",
+      "role": "reviewer",
+      "pendingStatuses": [
+        "waiting",
+        "running"
+      ],
+      "settledStatuses": [
+        "succeeded",
+        "failed"
+      ],
+      "exactAttentionRequired": true,
+      "sessionBindingAllowed": false,
+      "executionJobAllowed": false
+    }
+  },
+  "bounds": {
+    "maximumTextCodeUnits": 65536,
+    "maximumTitleCodeUnits": 256,
+    "maximumCollectionItems": 200,
+    "maximumIdentifierCharacters": 200
+  },
+  "safeProjection": {
+    "wireField": "solutionReview",
+    "type": "SolutionReviewProjection",
+    "solutionAliasAllowed": false,
+    "fields": [
+      "deliveryId",
+      "deliverySpecId",
+      "deliverySpecRevision",
+      "planningStageRunId",
+      "planningSessionBindingId",
+      "reviewStageRunId",
+      "attentionItemId",
+      "reviewSetSha256",
+      "solutionId",
+      "summary",
+      "approach",
+      "components",
+      "connections",
+      "architectureDiagram",
+      "processDiagram",
+      "risks",
+      "unresolvedItems",
+      "taskProposals",
+      "reviewStatus",
+      "decision",
+      "reviewerId",
+      "reviewedAt"
+    ],
+    "pendingVisibility": "safe-context-and-task-proposals-visible-before-decision",
+    "rawAttentionContextAllowed": false,
+    "rawAttentionResolutionAllowed": false,
+    "forbiddenFields": [
+      "apiKey",
+      "assignedTo",
+      "authorization",
+      "codexSessionId",
+      "credential",
+      "dshSessionId",
+      "executionJobId",
+      "providerRequest",
+      "providerResponse",
+      "rawAttentionContext",
+      "rawAttentionResolution",
+      "rawRuntimeLog",
+      "reviewSessionBinding",
+      "reviewSessionBindingId",
+      "stderr",
+      "stdout",
+      "toolOutput",
+      "toolPayload"
+    ]
+  },
+  "productionConstruction": {
+    "factDeserializeAllowed": false,
+    "publicRawConstructorAllowed": false,
+    "callerSubmittedFactAllowed": false,
+    "httpRawFactConstructorAllowed": false,
+    "resolver": "winwincode-delivery::resolve_current_solution_review",
+    "resolverSource": "current-canonical-delivery-attention",
+    "testSupport": "module-local-cfg-test-only"
+  },
+  "currentFindings": [
+    {
+      "id": "approved-only-authority",
+      "status": "present",
+      "meaning": "The current fact exists only after approval, so an open human review has no typed safe solution projection.",
+      "evidence": {
+        "path": "crates/winwincode-delivery/src/projection/solution.rs",
+        "presentPatterns": [
+          "pub\\s+struct\\s+ApprovedSolutionReviewSet\\b"
+        ],
+        "absentPatterns": [
+          "pub\\s+struct\\s+ValidatedSolutionReviewSet\\b"
+        ]
+      },
+      "closeCondition": "ValidatedSolutionReviewSet represents pending and all settled states."
+    },
+    {
+      "id": "caller-injected-review-fact",
+      "status": "present",
+      "meaning": "ProjectionInput currently accepts a caller-supplied review fact instead of rebuilding current canonical Attention authority.",
+      "evidence": {
+        "path": "crates/winwincode-delivery/src/projection/mod.rs",
+        "presentPatterns": [
+          "with_approved_solution"
+        ],
+        "absentPatterns": [
+          "resolve_current_solution_review"
+        ]
+      },
+      "closeCondition": "The Delivery application resolver is the only production construction path and caller injection is removed."
+    },
+    {
+      "id": "pending-task-proposals-missing",
+      "status": "present",
+      "meaning": "The current approved fact and digest do not contain the ordered DeliveryTaskProposal graph needed for human review and later promotion.",
+      "evidence": {
+        "path": "crates/winwincode-delivery/src/projection/solution.rs",
+        "presentPatterns": [
+          "pub\\s+struct\\s+ApprovedSolutionReviewSet\\b"
+        ],
+        "absentPatterns": [
+          "task_proposals\\s*:"
+        ]
+      },
+      "closeCondition": "A non-empty ordered task proposal graph is parsed, validated, hashed, projected, and retained in every state."
+    },
+    {
+      "id": "legacy-solution-wire",
+      "status": "present",
+      "meaning": "The current detail wire uses solution and SolutionProjection instead of the single solutionReview field and SolutionReviewProjection type.",
+      "evidence": {
+        "path": "crates/winwincode-delivery/src/projection/mod.rs",
+        "presentPatterns": [
+          "solution\\s*:\\s*Option<SolutionProjection>"
+        ],
+        "absentPatterns": [
+          "solution_review\\s*:\\s*Option<SolutionReviewProjection>"
+        ]
+      },
+      "closeCondition": "Only solutionReview and SolutionReviewProjection remain."
+    }
+  ],
+  "implementationPlan": [
+    {
+      "order": 1,
+      "action": "Add crates/winwincode-delivery/src/application/solution_review.rs and register it in the application module.",
+      "proof": "The planned trigger exists and owns typed v1 parsing plus production resolution."
+    },
+    {
+      "order": 2,
+      "action": "Define strict exact-key v1 context and decision decoders with no legacy aliases or dual reads.",
+      "proof": "Unknown fields and both TypeScript v2 protocol markers fail in executable Rust tests."
+    },
+    {
+      "order": 3,
+      "action": "Resolve one opaque ValidatedSolutionReviewSet from current Delivery, StageRun, planning SessionBinding, and Attention facts.",
+      "proof": "Missing, duplicate, stale, foreign, and human SessionBinding cases fail before projection."
+    },
+    {
+      "order": 4,
+      "action": "Validate the non-empty ordered DeliveryTaskProposal DAG and include it in reviewSetSha256.",
+      "proof": "Changing task content or order changes the digest and invalid graphs fail."
+    },
+    {
+      "order": 5,
+      "action": "Replace approved-only projection input with automatic pending-or-settled resolution from canonical Delivery.",
+      "proof": "Pending review is visible without a caller-supplied fact and caller injection no longer compiles."
+    },
+    {
+      "order": 6,
+      "action": "Replace solution and SolutionProjection with solutionReview and SolutionReviewProjection.",
+      "proof": "The public JSON has one canonical field, all four statuses, and no alias."
+    },
+    {
+      "order": 7,
+      "action": "Expose reviewerId and reviewedAt for every settled action and authorize task promotion only for approved.",
+      "proof": "All settlement mappings and four promotion decisions are tested."
+    },
+    {
+      "order": 8,
+      "action": "Prove restart stability and safe redaction while keeping the production fact opaque.",
+      "proof": "Byte-stable reparse, compile-fail deserialization, and raw secret/tool/log exclusion tests pass."
+    }
+  ],
+  "rustGate": {
+    "activation": {
+      "trigger": "crates/winwincode-delivery/src/application/solution_review.rs",
+      "whenMissing": "planned-gate-with-four-present-findings",
+      "whenPresent": "require-typed-v1-resolver-and-adversarial-tests"
+    },
+    "factTypeName": "ValidatedSolutionReviewSet",
+    "factVisibility": "pub(crate)",
+    "projectionTypeName": "SolutionReviewProjection",
+    "taskProposalTypeName": "DeliveryTaskProposal",
+    "resolver": "resolve_current_solution_review",
+    "consumer": "project_current_solution_review",
+    "applicationPath": "crates/winwincode-delivery/src/application/solution_review.rs",
+    "projectionPath": "crates/winwincode-delivery/src/projection/solution.rs",
+    "deliveryProjectionPath": "crates/winwincode-delivery/src/projection/mod.rs",
+    "requiredFactPrivateFields": [
+      "delivery_id",
+      "delivery_spec_id",
+      "delivery_spec_revision",
+      "planning_stage_run_id",
+      "planning_session_binding_id",
+      "review_stage_run_id",
+      "attention_item_id",
+      "review_set_sha256",
+      "solution_id",
+      "summary",
+      "approach",
+      "components",
+      "connections",
+      "architecture_diagram",
+      "process_diagram",
+      "risks",
+      "unresolved_items",
+      "task_proposals",
+      "prepared_at",
+      "review_status",
+      "decision",
+      "reviewer_id",
+      "reviewed_at"
+    ],
+    "requiredProjectionPrivateFields": [
+      "delivery_id",
+      "delivery_spec_id",
+      "delivery_spec_revision",
+      "planning_stage_run_id",
+      "planning_session_binding_id",
+      "review_stage_run_id",
+      "attention_item_id",
+      "review_set_sha256",
+      "solution_id",
+      "summary",
+      "approach",
+      "components",
+      "connections",
+      "architecture_diagram",
+      "process_diagram",
+      "risks",
+      "unresolved_items",
+      "task_proposals",
+      "review_status",
+      "decision",
+      "reviewer_id",
+      "reviewed_at"
+    ],
+    "requiredTaskProposalPrivateFields": [
+      "id",
+      "title",
+      "goal",
+      "acceptance_criterion_ids",
+      "blocked_by_task_ids"
+    ],
+    "prohibitedFields": [
+      "review_session_binding",
+      "review_session_binding_id"
+    ],
+    "prohibitedLegacyWireMarkers": [
+      "winwincode.plan-review-context.v2",
+      "winwincode.plan-review-decision.v2"
+    ],
+    "requiredTests": [
+      "pending_solution_review_projects_safe_solution_and_non_empty_ordered_task_proposals",
+      "settled_solution_review_projects_exact_decision_reviewer_and_time",
+      "only_approved_solution_review_authorizes_task_promotion",
+      "solution_review_v1_rejects_unknown_keys_and_legacy_v2",
+      "solution_review_resolver_rejects_stale_or_foreign_authority",
+      "solution_review_digest_covers_ordered_task_proposals",
+      "human_solution_review_rejects_execution_session_binding",
+      "solution_review_projection_excludes_raw_context_resolution_secrets_tools_and_logs",
+      "solution_review_resolver_rejects_duplicate_current_review",
+      "solution_review_v1_restart_parse_is_byte_stable"
+    ],
+    "testSupportFixture": "validated_solution_review_set",
+    "compileFailProof": "serde_json raw input cannot construct ValidatedSolutionReviewSet"
+  },
+  "rules": [
+    {
+      "id": "authority.current_exact_review_set",
+      "statement": "The resolver accepts exactly one current review context whose Delivery, Spec revision, planning StageRun and binding, human review StageRun, Attention item, and digest all match the canonical Delivery.",
+      "sources": [
+        "packages/strongflow/src/plan-review.ts",
+        "crates/winwincode-delivery/src/application/attention.rs"
+      ]
+    },
+    {
+      "id": "authority.pending_and_settled_are_one_type",
+      "statement": "ValidatedSolutionReviewSet represents pending, approved, changes_requested, and rejected states so the same safe review content remains visible before and after a decision.",
+      "sources": [
+        "packages/contracts/src/strongflow-plan-review.ts",
+        "crates/winwincode-delivery/src/projection/solution.rs"
+      ]
+    },
+    {
+      "id": "authority.production_resolver_only",
+      "statement": "Only the Delivery-crate resolver rebuilds the opaque fact from current canonical Attention data; HTTP, callers, deserialization, and public raw constructors cannot supply it.",
+      "sources": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "crates/winwincode-delivery/src/projection/solution.rs"
+      ]
+    },
+    {
+      "id": "decision.exact_settlement",
+      "statement": "Pending has no decision, reviewer, or review time; every settled action binds the authenticated resolvedBy reviewer and exact resolvedAt and review StageRun finish time.",
+      "sources": [
+        "packages/strongflow/src/plan-review.ts",
+        "crates/winwincode-delivery/src/application/attention.rs"
+      ]
+    },
+    {
+      "id": "digest.covers_ordered_task_proposals",
+      "statement": "reviewSetSha256 covers the strict v1 context, safe solution content, and every DeliveryTaskProposal in approved product order, so changing or reordering a task changes the digest.",
+      "sources": [
+        "packages/strongflow/src/plan-review.ts",
+        "crates/winwincode-delivery/src/application/task.rs"
+      ]
+    },
+    {
+      "id": "encoding.one_strict_v1",
+      "statement": "Context and decision use one exact-key v1 family with deterministic encoding; unknown keys and the old TypeScript v2 protocols are rejected without aliases or dual reads.",
+      "sources": [
+        "packages/contracts/src/strongflow-plan-review.ts",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ]
+    },
+    {
+      "id": "legacy.human_review_binding_is_rejected",
+      "statement": "The old TypeScript reviewSessionBinding is source evidence only and never enters the v1 context, validated fact, public projection, or human review lifecycle.",
+      "sources": [
+        "packages/strongflow/src/plan-review.ts",
+        "crates/winwincode-delivery/src/application/stage.rs"
+      ]
+    },
+    {
+      "id": "projection.pending_review_is_visible",
+      "statement": "An open current plan review projects its bounded solution and non-empty ordered task proposals with pending status and null decision, reviewerId, and reviewedAt.",
+      "sources": [
+        "crates/winwincode-delivery/src/application/stage.rs",
+        "crates/winwincode-delivery/src/projection/solution.rs"
+      ]
+    },
+    {
+      "id": "projection.safe_fields_only",
+      "statement": "The solutionReview projection exposes typed bounded data, status, decision, reviewer, and time but never raw Attention context or resolution, credentials, tool data, or logs.",
+      "sources": [
+        "packages/contracts/src/strongflow-plan-review.ts",
+        "crates/winwincode-delivery/src/projection/solution.rs"
+      ]
+    },
+    {
+      "id": "promotion.approved_only",
+      "statement": "Only approved authorizes atomic promotion of the exact ordered task proposals and execution; pending, changes_requested, and rejected never authorize either action.",
+      "sources": [
+        "crates/winwincode-delivery/src/application/task.rs",
+        "crates/winwincode-delivery/src/application/stage.rs"
+      ]
+    }
+  ]
+}
