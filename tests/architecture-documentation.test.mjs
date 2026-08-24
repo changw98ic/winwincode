@@ -65,6 +65,41 @@ test('architecture guide keeps diagrams, approval boundaries, and evidence sourc
   ]) assert.equal(documentText.includes(statement), true)
 })
 
+test('architecture guide fixes the accepted Control Plane and Worker target', () => {
+  for (const boundary of [
+    'TypeScript Presentation Layer',
+    'Rust Control Plane',
+    'ExecutionPort',
+    'Rust Execution Worker',
+    'Codex Core',
+  ]) assert.equal(documentText.includes(boundary), true)
+
+  for (const sessionKind of [
+    'ProductSession',
+    'WorkerSession',
+    'CodexThread',
+    'StageRun',
+  ]) assert.equal(documentText.includes(sessionKind), true)
+
+  for (const rule of [
+    'Web 不直接连接 Worker',
+    '本地部署',
+    '企业部署',
+    'requestId',
+    'expectedRevision',
+    'WebSocket',
+  ]) assert.equal(documentText.includes(rule), true)
+
+  assert.equal(
+    documentText.includes('0028-control-plane-worker-migration.md'),
+    true,
+  )
+  assert.equal(
+    documentText.includes('0028-control-plane-worker-migration.inventory.json'),
+    true,
+  )
+})
+
 test('every repository-local link in the architecture guide resolves', () => {
   const links = relativeMarkdownLinks(documentText)
   assert.ok(links.length >= 40)

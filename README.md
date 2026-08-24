@@ -218,6 +218,7 @@ tests/                 无密钥流程、产品界面、恢复、安全和发布
 - [安全报告](SECURITY.md)
 - [社区行为准则](CODE_OF_CONDUCT.md)
 - [固定 Codex Core 与 DSH 集成边界](docs/decisions/0001-upstream-integration.md)
+- [TypeScript 表现层、Rust Control Plane 与 Rust Execution Worker](docs/decisions/0028-control-plane-worker-migration.md)
 - [Canonical Delivery 所有权](docs/decisions/0023-canonical-delivery-ownership.md)
 - [确定性 Delivery fixture](docs/decisions/0024-deterministic-delivery-fixture.md)
 - [CPB 设计知识迁移记录](docs/decisions/0022-cpb-design-knowledge-migration.md)

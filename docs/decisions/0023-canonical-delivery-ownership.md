@@ -2,6 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-08-23
+- 演进说明：十对象 Delivery 模型和 Codex 唯一执行权威保持有效；DSH 后端职责正按 [ADR-0028](0028-control-plane-worker-migration.md) 迁入 Rust Control Plane 与 Rust Execution Worker。
 - 对应任务：`winwincode-9c4.13.1`、`winwincode-9c4.13.2`、`winwincode-9c4.13.3`、`winwincode-9c4.7.1`、`winwincode-9c4.7.2`、`winwincode-9c4.7.3`、`winwincode-9c4.7.4`、`winwincode-9c4.8.1`、`winwincode-9c4.8.2`、`winwincode-9c4.8.3`、`winwincode-9c4.8.4`、`winwincode-9c4.9.6`、`winwincode-9c4.10.1`、`winwincode-9c4.10.2`、`winwincode-9c4.10.3`、`winwincode-9c4.11.1`、`winwincode-9c4.11.2`
 - 合同实现：[`packages/contracts/src/delivery.ts`](../../packages/contracts/src/delivery.ts)
 - 调用格式：[`packages/contracts/src/strongflow-delivery-api.ts`](../../packages/contracts/src/strongflow-delivery-api.ts)

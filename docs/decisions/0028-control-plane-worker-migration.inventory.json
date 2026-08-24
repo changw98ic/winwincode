@@ -1,0 +1,1029 @@
+{
+  "schemaVersion": 1,
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "architecture": {
+    "presentation": "typescript-web",
+    "businessAuthority": "control-plane",
+    "executionCoordinator": "execution-worker",
+    "executionAuthority": "codex-core",
+    "executionSeam": "execution-port",
+    "localDeployment": "same-process-modules",
+    "enterpriseDeployment": "separate-processes"
+  },
+  "sourceRoots": [
+    "apps/host/src",
+    "packages/contracts/src",
+    "packages/dsh-profile/src",
+    "packages/native/src",
+    "packages/strongflow/src",
+    "crates/kernel/src",
+    "crates/native/src"
+  ],
+  "callers": [
+    {
+      "id": "default-chat-surface",
+      "kind": "chat",
+      "sourcePaths": [
+        "apps/host/src/web-host.ts",
+        "packages/dsh-profile/src/agent-factory.ts",
+        "packages/dsh-profile/src/model-port.ts"
+      ],
+      "currentEntryPoints": [
+        "runWinWinCodeWeb",
+        "WinWinCodeAgentFactory",
+        "DshModelPort"
+      ],
+      "surfaceIds": [
+        "host-bootstrap-cli",
+        "dsh-agent-session-bridge",
+        "dsh-provider-model-port"
+      ],
+      "targetOwners": [
+        "typescript-web",
+        "control-plane",
+        "execution-worker"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure",
+        "native-close"
+      ]
+    },
+    {
+      "id": "strongflow-browser-surface",
+      "kind": "strongflow",
+      "sourcePaths": [
+        "packages/strongflow/src/client.ts",
+        "packages/strongflow/src/index.ts",
+        "packages/strongflow/src/delivery-stage-coordinator.ts"
+      ],
+      "currentEntryPoints": [
+        "strongFlowSurface",
+        "StrongFlowDeliveryStageCoordinator"
+      ],
+      "surfaceIds": [
+        "strongflow-typescript-web",
+        "strongflow-cordis-remote",
+        "strongflow-dsh-stage-runtime",
+        "strongflow-delivery-domain"
+      ],
+      "targetOwners": [
+        "typescript-web",
+        "control-plane",
+        "execution-worker"
+      ],
+      "behaviorBaselineIds": [
+        "stage-cancel",
+        "restart-recovery",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "installed-cli",
+      "kind": "cli",
+      "sourcePaths": [
+        "apps/host/src/cli.ts",
+        "apps/host/src/strongflow-cli.ts"
+      ],
+      "currentEntryPoints": [
+        "runWinWinCodeWeb",
+        "runStrongFlowCli",
+        "renderStrongFlowDeliveryCliHelp"
+      ],
+      "surfaceIds": [
+        "host-bootstrap-cli",
+        "strongflow-cli"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "typescript-web"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure"
+      ]
+    },
+    {
+      "id": "behavior-and-integration-tests",
+      "kind": "test",
+      "sourcePaths": [
+        "tests/dsh-agent-factory.test.mjs",
+        "tests/dsh-model-port.test.mjs",
+        "tests/delivery-recovery.test.mjs",
+        "tests/native-lifecycle.test.mjs",
+        "tests/fixtures/delivery-service-testkit.mjs"
+      ],
+      "currentEntryPoints": [
+        "WinWinCodeAgentFactory",
+        "DshModelPort",
+        "reconcileDeliveryAfterRestart",
+        "WinWinCodeKernel"
+      ],
+      "surfaceIds": [
+        "dsh-agent-session-bridge",
+        "dsh-provider-model-port",
+        "strongflow-delivery-domain",
+        "node-native-selector",
+        "embedded-codex-kernel"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "execution-worker"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure",
+        "stage-cancel",
+        "restart-recovery",
+        "approval-block",
+        "native-close"
+      ]
+    },
+    {
+      "id": "evaluation-and-release-gates",
+      "kind": "release",
+      "sourcePaths": [
+        "scripts/live-evaluation.mjs",
+        "scripts/verify-runtime-cleanup.mjs",
+        "scripts/verify-installed-host.mjs",
+        "scripts/verify-upstream-lock.mjs",
+        "scripts/verify-packages.mjs"
+      ],
+      "currentEntryPoints": [
+        "WinWinCodeAgentFactory",
+        "WinWinCodeKernel",
+        "loadOverlayPatches",
+        "@deepseek-ai/dsh"
+      ],
+      "surfaceIds": [
+        "host-bootstrap-cli",
+        "dsh-agent-session-bridge",
+        "dsh-provider-model-port",
+        "dsh-profile-composition",
+        "strongflow-delivery-domain",
+        "node-native-selector",
+        "embedded-codex-kernel"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "execution-worker"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure",
+        "stage-cancel",
+        "restart-recovery",
+        "approval-block",
+        "native-close"
+      ]
+    }
+  ],
+  "observableBehaviors": [
+    {
+      "id": "session-delivery-and-runtime-recovery",
+      "kind": "persistence",
+      "currentFacts": [
+        "DSH Session persistence, RuntimeSessionLedger, DeliveryStore, and native lifecycle records survive process restart",
+        "a resumed stage retains distinct DSH Session and Codex session identities",
+        "request replay does not repeat a settled Delivery mutation"
+      ],
+      "targetFacts": [
+        "Control Plane persists ProductSession, Delivery, SessionBinding, runtime projections, and requestId results",
+        "Worker persists only the bounded WorkerSession and workspace recovery state it owns",
+        "restart rebuilds projections without replaying code mutation"
+      ],
+      "behaviorBaselineIds": [
+        "stage-cancel",
+        "restart-recovery",
+        "approval-block",
+        "native-close"
+      ]
+    },
+    {
+      "id": "ordered-runtime-and-approval-events",
+      "kind": "event",
+      "currentFacts": [
+        "Codex runtime events remain monotonic inside one exact DSH and Codex session binding",
+        "model stream, command approval, business Attention, cancellation, and terminal outcome stay distinct",
+        "events from unrelated sessions do not enter a Delivery projection"
+      ],
+      "targetFacts": [
+        "Worker emits ordered ExecutionPort envelopes bound to Job, Lease, WorkerSession, and CodexThread",
+        "Control Plane validates fencing, persists the event, projects business state, and then broadcasts WebSocket updates",
+        "WebSocket projection does not become a business command path"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "stage-cancel",
+        "restart-recovery",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "stable-redacted-public-errors",
+      "kind": "error",
+      "currentFacts": [
+        "provider failures keep stable category and retry facts while diagnostics and credentials are redacted",
+        "cancellation remains AbortError rather than a provider or task failure",
+        "closing an already-ended native session releases resources without crashing the host"
+      ],
+      "targetFacts": [
+        "Control Plane exposes stable generated error codes and bounded public details",
+        "Worker reports cancellation, policy denial, task failure, infrastructure failure, and close as separate outcomes",
+        "unknown provider text and credential material never enter events, audit records, or API responses"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure",
+        "stage-cancel",
+        "native-close"
+      ]
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "host-bootstrap-cli",
+      "sourcePaths": [
+        "apps/host/src/cli.ts",
+        "apps/host/src/index.ts",
+        "apps/host/src/web-host.ts"
+      ],
+      "entrySymbols": [
+        "installedVersion",
+        "describeHost",
+        "runWinWinCodeWeb"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "typescript-web"
+      ],
+      "targetModules": [
+        "crates/winwincode-local",
+        "crates/winwincode-control-plane",
+        "apps/web"
+      ],
+      "phase": "6",
+      "disposition": "split",
+      "observableContracts": [
+        "installed CLI version and help",
+        "local profile initialization",
+        "Web host startup and shutdown"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "native-close"
+      ]
+    },
+    {
+      "id": "strongflow-cli",
+      "sourcePaths": [
+        "apps/host/src/strongflow-cli.ts"
+      ],
+      "entrySymbols": [
+        "runStrongFlowCli",
+        "renderStrongFlowDeliveryCliHelp"
+      ],
+      "targetOwners": [
+        "control-plane"
+      ],
+      "targetModules": [
+        "crates/winwincode-api",
+        "crates/winwincode-local"
+      ],
+      "phase": "6",
+      "disposition": "translate",
+      "observableContracts": [
+        "typed Delivery commands",
+        "requestId and expectedRevision",
+        "stable exit status and public errors"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure"
+      ]
+    },
+    {
+      "id": "canonical-typescript-contracts",
+      "sourcePaths": [
+        "packages/contracts/src/delivery-candidate.ts",
+        "packages/contracts/src/delivery.ts",
+        "packages/contracts/src/index.ts",
+        "packages/contracts/src/runtime-events.ts",
+        "packages/contracts/src/strongflow-delivery-advance.ts",
+        "packages/contracts/src/strongflow-delivery-api.ts",
+        "packages/contracts/src/strongflow-diagram-execution.ts",
+        "packages/contracts/src/strongflow-github-publication.ts",
+        "packages/contracts/src/strongflow-github-review-package.ts",
+        "packages/contracts/src/strongflow-plan-review.ts",
+        "packages/contracts/src/strongflow-role.ts",
+        "packages/contracts/src/strongflow-runtime-execution.ts"
+      ],
+      "entrySymbols": [
+        "parseDelivery",
+        "runtimeEventId",
+        "parseStrongFlowDeliveryRequest",
+        "parseStrongFlowRoleConfiguration"
+      ],
+      "targetOwners": [
+        "canonical-schema"
+      ],
+      "targetModules": [
+        "schema/winwincode",
+        "crates/winwincode-api",
+        "crates/winwincode-domain",
+        "apps/web/src/generated"
+      ],
+      "phase": "1",
+      "disposition": "translate",
+      "observableContracts": [
+        "strict identifiers and enums",
+        "HTTP command and query DTOs",
+        "WebSocket event projections",
+        "stable machine-readable error codes"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "dsh-agent-session-bridge",
+      "sourcePaths": [
+        "packages/dsh-profile/src/agent-factory.ts",
+        "packages/dsh-profile/src/delivery-recovery.ts",
+        "packages/dsh-profile/src/runtime-events.ts",
+        "packages/dsh-profile/src/runtime-projection.ts",
+        "packages/dsh-profile/src/session-ledger.ts"
+      ],
+      "entrySymbols": [
+        "WinWinCodeAgentFactory",
+        "reconcileDeliveryAfterRestart",
+        "CodexRuntimeProjector",
+        "DshRuntimeProjection",
+        "RuntimeSessionLedger"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-session",
+        "crates/winwincode-events",
+        "crates/winwincode-scheduler",
+        "crates/winwincode-worker"
+      ],
+      "phase": "4",
+      "disposition": "split",
+      "observableContracts": [
+        "ProductSession lifecycle",
+        "WorkerSession and CodexThread binding",
+        "monotonic runtime event projection",
+        "approval routing and restart recovery"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure",
+        "stage-cancel",
+        "restart-recovery",
+        "approval-block",
+        "native-close"
+      ]
+    },
+    {
+      "id": "dsh-provider-model-port",
+      "sourcePaths": [
+        "packages/dsh-profile/src/model-port.ts"
+      ],
+      "entrySymbols": [
+        "DshModelPort"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-provider",
+        "crates/winwincode-credential",
+        "crates/winwincode-worker"
+      ],
+      "phase": "5",
+      "disposition": "split",
+      "observableContracts": [
+        "model request translation",
+        "reasoning and parallel tool-call streaming",
+        "usage and terminal reason",
+        "redacted provider failure and cancellation"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure",
+        "stage-cancel"
+      ]
+    },
+    {
+      "id": "dsh-github-provider",
+      "sourcePaths": [
+        "packages/dsh-profile/src/github-publication-provider.ts"
+      ],
+      "entrySymbols": [
+        "DshGitHubPublicationProvider"
+      ],
+      "targetOwners": [
+        "control-plane"
+      ],
+      "targetModules": [
+        "crates/winwincode-publication",
+        "crates/winwincode-github",
+        "crates/winwincode-credential"
+      ],
+      "phase": "3",
+      "disposition": "translate",
+      "observableContracts": [
+        "credential reference resolution",
+        "lookup-before-apply idempotency",
+        "bounded GitHub failures without response-body persistence"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "dsh-profile-composition",
+      "sourcePaths": [
+        "packages/dsh-profile/src/index.ts"
+      ],
+      "entrySymbols": [
+        "./agent-factory.js"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-local"
+      ],
+      "phase": "6",
+      "disposition": "delete",
+      "observableContracts": [
+        "installed DSH profile composition"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success"
+      ]
+    },
+    {
+      "id": "strongflow-delivery-domain",
+      "sourcePaths": [
+        "packages/strongflow/src/acceptance-verification.ts",
+        "packages/strongflow/src/candidate-evidence.ts",
+        "packages/strongflow/src/delivery-attention.ts",
+        "packages/strongflow/src/delivery-authenticator.ts",
+        "packages/strongflow/src/delivery-runtime-projection.ts",
+        "packages/strongflow/src/delivery-service.ts",
+        "packages/strongflow/src/delivery-stage-coordinator.ts",
+        "packages/strongflow/src/delivery-store.ts",
+        "packages/strongflow/src/delivery-verdict.ts",
+        "packages/strongflow/src/diagram-execution-projection.ts",
+        "packages/strongflow/src/evaluation-measures.ts",
+        "packages/strongflow/src/execution-source.ts",
+        "packages/strongflow/src/independent-verification.ts",
+        "packages/strongflow/src/plan-review.ts",
+        "packages/strongflow/src/runtime-execution-projection.ts"
+      ],
+      "entrySymbols": [
+        "StrongFlowService",
+        "StrongFlowDeliveryStageCoordinator",
+        "DeliveryStore",
+        "projectIndependentVerification",
+        "projectStrongFlowDiagramExecution",
+        "createDeliveryMeasuresProjection"
+      ],
+      "targetOwners": [
+        "control-plane"
+      ],
+      "targetModules": [
+        "crates/winwincode-delivery",
+        "crates/winwincode-approval",
+        "crates/winwincode-events"
+      ],
+      "phase": "2",
+      "disposition": "translate",
+      "observableContracts": [
+        "ten-object Delivery state and append-only persistence",
+        "human plan review and bounded remediation",
+        "candidate-bound Evidence and fail-closed Verdict",
+        "rebuildable runtime and diagram projections"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure",
+        "restart-recovery",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "strongflow-worker-workspace",
+      "sourcePaths": [
+        "packages/strongflow/src/local-git-delivery-workspace.ts"
+      ],
+      "entrySymbols": [
+        "LocalGitDeliveryWorkspace"
+      ],
+      "targetOwners": [
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-worker"
+      ],
+      "phase": "4",
+      "disposition": "translate",
+      "observableContracts": [
+        "isolated checkout and worktree",
+        "candidate commit, tree, diff digest, and changed paths"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure"
+      ]
+    },
+    {
+      "id": "strongflow-publication",
+      "sourcePaths": [
+        "packages/strongflow/src/github-publication-journal.ts",
+        "packages/strongflow/src/github-publication-provider.ts",
+        "packages/strongflow/src/github-publication-runner.ts",
+        "packages/strongflow/src/github-publication.ts",
+        "packages/strongflow/src/github-review-package.ts"
+      ],
+      "entrySymbols": [
+        "StrongFlowGitHubPublicationJournal",
+        "StrongFlowGitHubPublicationProvider",
+        "runStrongFlowGitHubPublication",
+        "createStrongFlowGitHubPublicationAttention",
+        "generateStrongFlowGitHubReviewPackage"
+      ],
+      "targetOwners": [
+        "control-plane"
+      ],
+      "targetModules": [
+        "crates/winwincode-publication",
+        "crates/winwincode-github",
+        "crates/winwincode-audit"
+      ],
+      "phase": "3",
+      "disposition": "translate",
+      "observableContracts": [
+        "candidate- and verdict-bound publication approval",
+        "deterministic review package",
+        "durable external-effect intent and reconciliation"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure",
+        "restart-recovery",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "strongflow-credential-boundary",
+      "sourcePaths": [
+        "packages/strongflow/src/credential-boundary.ts"
+      ],
+      "entrySymbols": [
+        "containsRawCredentialMaterial"
+      ],
+      "targetOwners": [
+        "control-plane"
+      ],
+      "targetModules": [
+        "crates/winwincode-credential"
+      ],
+      "phase": "5",
+      "disposition": "translate",
+      "observableContracts": [
+        "credential references only",
+        "secret rejection at command, event, error, and persistence seams"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure"
+      ]
+    },
+    {
+      "id": "strongflow-dsh-stage-runtime",
+      "sourcePaths": [
+        "packages/strongflow/src/dsh-stage-runtime.ts"
+      ],
+      "entrySymbols": [
+        "DshStrongFlowStageRuntime"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-session",
+        "crates/winwincode-scheduler",
+        "crates/winwincode-worker"
+      ],
+      "phase": "4",
+      "disposition": "split",
+      "observableContracts": [
+        "role session create, resume, turn, cancel, and dispose",
+        "runtime event replay"
+      ],
+      "behaviorBaselineIds": [
+        "stage-cancel",
+        "restart-recovery"
+      ]
+    },
+    {
+      "id": "strongflow-cordis-remote",
+      "sourcePaths": [
+        "packages/strongflow/src/delivery-invoker.ts",
+        "packages/strongflow/src/delivery-remote-client.ts",
+        "packages/strongflow/src/delivery-remote.ts",
+        "packages/strongflow/src/index.ts"
+      ],
+      "entrySymbols": [
+        "StrongFlowServiceInvoker",
+        "StrongFlowDeliveryRemoteService",
+        "mountStrongFlowDeliveryRemote",
+        "configuredProof"
+      ],
+      "targetOwners": [
+        "control-plane",
+        "typescript-web"
+      ],
+      "targetModules": [
+        "crates/winwincode-api",
+        "apps/web/src/generated"
+      ],
+      "phase": "6",
+      "disposition": "delete",
+      "observableContracts": [
+        "authenticated Delivery commands",
+        "typed success and failure responses"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "model-failure"
+      ]
+    },
+    {
+      "id": "strongflow-typescript-web",
+      "sourcePaths": [
+        "packages/strongflow/src/client.ts"
+      ],
+      "entrySymbols": [
+        "StrongFlowView",
+        "StrongFlowDeliveryProjection"
+      ],
+      "targetOwners": [
+        "typescript-web"
+      ],
+      "targetModules": [
+        "apps/web"
+      ],
+      "phase": "6",
+      "disposition": "presentation",
+      "observableContracts": [
+        "StrongFlow routing, forms, diagrams, and projections",
+        "HTTP command and WebSocket client behavior"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "approval-block"
+      ]
+    },
+    {
+      "id": "node-native-selector",
+      "sourcePaths": [
+        "packages/native/src/index.ts"
+      ],
+      "entrySymbols": [
+        "WinWinCodeKernel",
+        "nativePackageName"
+      ],
+      "targetOwners": [
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-worker",
+        "crates/winwincode-local"
+      ],
+      "phase": "6",
+      "disposition": "delete",
+      "observableContracts": [
+        "kernel lifecycle and typed errors exposed to the current Node host"
+      ],
+      "behaviorBaselineIds": [
+        "model-failure",
+        "native-close"
+      ]
+    },
+    {
+      "id": "napi-kernel-bridge",
+      "sourcePaths": [
+        "crates/native/src/lib.rs"
+      ],
+      "entrySymbols": [
+        "NativeKernel",
+        "NativeModelPort"
+      ],
+      "targetOwners": [
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-worker"
+      ],
+      "phase": "6",
+      "disposition": "delete",
+      "observableContracts": [
+        "N-API kernel and model-stream bridge"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "native-close"
+      ]
+    },
+    {
+      "id": "embedded-codex-kernel",
+      "sourcePaths": [
+        "crates/kernel/src/lib.rs",
+        "crates/kernel/src/model_port.rs"
+      ],
+      "entrySymbols": [
+        "Kernel",
+        "ModelPort"
+      ],
+      "targetOwners": [
+        "execution-worker"
+      ],
+      "targetModules": [
+        "crates/winwincode-codex",
+        "crates/winwincode-worker"
+      ],
+      "phase": "4",
+      "disposition": "retain",
+      "observableContracts": [
+        "Codex thread, turn, tool, shell, sandbox, permission, event, and recovery authority",
+        "ModelPort request and stream transport"
+      ],
+      "behaviorBaselineIds": [
+        "chat-turn-success",
+        "stage-cancel",
+        "approval-block",
+        "native-close"
+      ]
+    }
+  ],
+  "upstreamPackages": [
+    {
+      "name": "@deepseek-ai/cordis",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "Rust module lifecycle and generated TypeScript client"
+    },
+    {
+      "name": "@deepseek-ai/dsh",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "apps/web plus the local Rust launcher"
+    },
+    {
+      "name": "@deepseek-ai/dsh-agent",
+      "phase": "4",
+      "disposition": "translate",
+      "target": "ProductSession and Execution Worker"
+    },
+    {
+      "name": "@deepseek-ai/dsh-api-gateway",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "Control Plane HTTP and WebSocket"
+    },
+    {
+      "name": "@deepseek-ai/dsh-app-boot",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "local Rust launcher"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-runtime",
+      "phase": "6",
+      "disposition": "presentation",
+      "target": "apps/web presentation runtime"
+    },
+    {
+      "name": "@deepseek-ai/dsh-client-ui-conversation",
+      "phase": "6",
+      "disposition": "presentation",
+      "target": "apps/web Chat presentation"
+    },
+    {
+      "name": "@deepseek-ai/dsh-credentials",
+      "phase": "5",
+      "disposition": "translate",
+      "target": "Rust Credential Vault"
+    },
+    {
+      "name": "@deepseek-ai/dsh-launch-environment",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "local Rust launcher configuration"
+    },
+    {
+      "name": "@deepseek-ai/dsh-llm",
+      "phase": "5",
+      "disposition": "translate",
+      "target": "Rust Provider Gateway"
+    },
+    {
+      "name": "@deepseek-ai/dsh-llm-pi-ai",
+      "phase": "5",
+      "disposition": "translate",
+      "target": "Rust provider adapters"
+    },
+    {
+      "name": "@deepseek-ai/dsh-scope",
+      "phase": "4",
+      "disposition": "translate",
+      "target": "ProductSession and WorkerSession scopes"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session",
+      "phase": "4",
+      "disposition": "translate",
+      "target": "Rust ProductSession"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence",
+      "phase": "4",
+      "disposition": "translate",
+      "target": "Control Plane session storage"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence-jsonl",
+      "phase": "4",
+      "disposition": "translate",
+      "target": "one-time ProductSession migration reader"
+    },
+    {
+      "name": "@deepseek-ai/dsh-system-prompt",
+      "phase": "4",
+      "disposition": "split",
+      "target": "Control Plane role policy and Worker Codex configuration"
+    },
+    {
+      "name": "@deepseek-ai/dsh-typert-protocol",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "generated HTTP and WebSocket client"
+    },
+    {
+      "name": "@deepseek-ai/dsh-typert-registry",
+      "phase": "6",
+      "disposition": "delete",
+      "target": "canonical schema registry"
+    },
+    {
+      "name": "@deepseek-ai/dsh-user-approval",
+      "phase": "4",
+      "disposition": "translate",
+      "target": "Control Plane Approval module"
+    },
+    {
+      "name": "@deepseek-ai/schemastery",
+      "phase": "1",
+      "disposition": "translate",
+      "target": "canonical JSON Schema and generated validators"
+    }
+  ],
+  "behaviorBaselines": [
+    {
+      "id": "chat-turn-success",
+      "scenario": "success",
+      "testFile": "tests/dsh-agent-factory.test.mjs",
+      "testName": "DSH AgentFactory runs a stock chat turn through one embedded kernel session",
+      "expectedFacts": [
+        "one product session maps to one distinct kernel session",
+        "runtime events remain ordered",
+        "provider and model selection remain visible",
+        "dispose removes the product session"
+      ]
+    },
+    {
+      "id": "model-failure",
+      "scenario": "failure",
+      "testFile": "tests/dsh-model-port.test.mjs",
+      "testName": "retains safe DSH error facts while redacting provider diagnostics and cancellation",
+      "expectedFacts": [
+        "provider failure code and retry facts survive translation",
+        "provider diagnostics and credentials stay redacted",
+        "the model stream has one typed terminal failure"
+      ]
+    },
+    {
+      "id": "stage-cancel",
+      "scenario": "cancel",
+      "testFile": "tests/dsh-agent-factory.test.mjs",
+      "testName": "StrongFlow DSH runtime creates, persists, resumes, and cancels role Sessions",
+      "expectedFacts": [
+        "a cancellation reaches the active execution",
+        "the caller receives AbortError",
+        "session persistence remains readable after cancellation"
+      ]
+    },
+    {
+      "id": "restart-recovery",
+      "scenario": "recovery",
+      "testFile": "tests/delivery-recovery.test.mjs",
+      "testName": "restart recovery rebuilds the same DSH and StrongFlow views and continues a live stage",
+      "expectedFacts": [
+        "restart rebuilds equivalent projections",
+        "the same bound execution resumes",
+        "unrelated sessions are ignored"
+      ]
+    },
+    {
+      "id": "approval-block",
+      "scenario": "approval",
+      "testFile": "tests/delivery-recovery.test.mjs",
+      "testName": "unresolved Codex approval and business Attention remain the one blocking action",
+      "expectedFacts": [
+        "runtime approval and business Attention stay distinct",
+        "only the current blocking action is returned",
+        "approval identity stays bound to its session and stage"
+      ]
+    },
+    {
+      "id": "native-close",
+      "scenario": "close",
+      "testFile": "tests/native-lifecycle.test.mjs",
+      "testName": "a created native session closes without crashing its host process",
+      "expectedFacts": [
+        "close returns without process failure",
+        "owned native resources are released before fixture cleanup"
+      ]
+    }
+  ],
+  "temporaryAdapters": [
+    {
+      "id": "dsh-provider-model-port",
+      "allowedCallers": [
+        "crates/winwincode-worker"
+      ],
+      "removeInPhase": "5",
+      "removalTask": "winwincode-9c4.16.5.7"
+    },
+    {
+      "id": "dsh-product-session-shell",
+      "allowedCallers": [
+        "apps/web",
+        "crates/winwincode-local"
+      ],
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    },
+    {
+      "id": "dsh-typert-delivery-remote",
+      "allowedCallers": [
+        "apps/web"
+      ],
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    },
+    {
+      "id": "node-napi-kernel-bridge",
+      "allowedCallers": [
+        "crates/winwincode-local"
+      ],
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    }
+  ],
+  "removedCapabilities": [
+    {
+      "id": "dsh-backend-plugin-extension",
+      "reason": "WinWinCode ships fixed Rust modules rather than a second server plugin marketplace.",
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    },
+    {
+      "id": "dsh-agent-team-task-authority",
+      "reason": "Codex Core remains the Plan and Agent Graph authority; DeliveryTask remains the only delivery-significant task model.",
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    },
+    {
+      "id": "cordis-server-remote-routing",
+      "reason": "The generated Control Plane HTTP and WebSocket client becomes the only browser transport.",
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    },
+    {
+      "id": "native-platform-npm-selector",
+      "reason": "The Execution Worker links Codex Core directly and the release contains Rust role binaries.",
+      "removeInPhase": "6",
+      "removalTask": "winwincode-9c4.16.6.6"
+    }
+  ]
+}

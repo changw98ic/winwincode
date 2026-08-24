@@ -1,68 +1,111 @@
-# 产品边界、交付流程与安全模型
+# 产品边界、目标架构、交付流程与安全模型
 
-本文面向使用者、贡献者和集成方，说明 WinWinCode 中每类事实由谁负责、一个需求怎样成为可审核的交付结果，以及当前本机版采用哪些安全边界。
+本文面向使用者、贡献者和集成方，说明 WinWinCode 中每类事实由谁负责、一个需求怎样成为可审核的交付结果、当前迁移基线是什么，以及本地版和企业版采用哪些安全边界。
 
 ## 一句话架构
 
 ```text
-DSH 负责交互、模型、Session、凭据和执行审批界面
-Codex Core 负责 Plan、Agent、工具、Shell、MCP、沙箱和代码执行
-WinWinCode 负责交付目标、跨 Session 阶段、业务 Attention、Evidence 和 Verdict
+TypeScript Presentation Layer
+          ↓ HTTP / WebSocket
+Rust Control Plane
+          ↓ ExecutionPort
+Rust Execution Worker
+          ↓
+Codex Core
 ```
 
-一个事实只有一个写入方。其他层可以保存身份引用或生成只读视图，不能建立另一份可以独立修改的副本。
+目标边界由 [ADR-0028](decisions/0028-control-plane-worker-migration.md) 固定。一个事实只有一个写入方；其他层可以保存身份引用或生成只读视图，不能建立另一份可以独立修改的副本。当前源码到目标模块的逐项归属记录在[机器可检查的迁移清单](decisions/0028-control-plane-worker-migration.inventory.json)中。
 
-## 三层所有权
+## 目标所有权
 
-| 层 | 负责的事实 | 在本仓库中的接入点 |
+| 层 | 负责的事实 | 明确不负责的事实 |
 | --- | --- | --- |
-| Codex Core | Thread、Turn、Plan、Agent Graph、工具调用、Shell、MCP、沙箱、文件和网络权限、执行审批、Diff、用量、上下文与执行恢复 | [`crates/kernel/src/lib.rs`](../crates/kernel/src/lib.rs)、[`packages/native/src/index.ts`](../packages/native/src/index.ts) |
-| DSH | Chat、Session 日志、会话恢复、模型与 Provider 选择、凭据服务、执行审批交互、Web/Cordis 外壳和界面扩展槽位 | [`apps/host/src/web-host.ts`](../apps/host/src/web-host.ts)、[`packages/dsh-profile/src/agent-factory.ts`](../packages/dsh-profile/src/agent-factory.ts)、[`packages/dsh-profile/src/model-port.ts`](../packages/dsh-profile/src/model-port.ts)、[`packages/dsh-profile/src/github-publication-provider.ts`](../packages/dsh-profile/src/github-publication-provider.ts) |
-| WinWinCode | `DeliverySpec`、验收条件、`DeliveryTask`、跨 Session 阶段、业务 `AttentionItem`、`EvidenceRef`、逐项结果和最终 `DeliveryVerdict` | [`packages/contracts/src/delivery.ts`](../packages/contracts/src/delivery.ts)、[`packages/strongflow/src/delivery-service.ts`](../packages/strongflow/src/delivery-service.ts) |
-| GitHub 等外部系统 | Issue、Pull Request、评论、项目看板和团队讨论 | [`packages/contracts/src/strongflow-github-publication.ts`](../packages/contracts/src/strongflow-github-publication.ts)、[`packages/strongflow/src/github-publication-runner.ts`](../packages/strongflow/src/github-publication-runner.ts) |
+| TypeScript Presentation Layer | 页面、组件、路由、表单、图表、浏览器状态、HTTP/WebSocket 客户端 | 业务判定、领域持久化、Worker 调度和执行 |
+| Rust Control Plane | ProductSession、Delivery/StrongFlow、Identity、Organization、RBAC、Provider、Credential、Approval、Collaboration、Scheduler、Publication、Policy、Audit 和全部产品持久化 | Codex 内部 Plan、Agent、工具与代码执行 |
+| Rust Execution Worker | WorkerSession、工作区、worktree、候选、运行产物、Codex Adapter、运行事件和本机清理 | 组织、权限、Delivery 权威状态、长期 Provider 密钥 |
+| Codex Core | CodexThread、Turn、Plan、Agent Graph、工具调用、Shell、MCP、沙箱、文件和网络权限、Diff、用量、上下文与执行恢复 | 产品会话、交付状态、组织权限和发布决定 |
+| GitHub 等外部系统 | Issue、Pull Request、评论、项目看板和团队讨论 | WinWinCode 的 Delivery、审批、运行租约和审计事实 |
 
-因此，StrongFlow 看板是 Delivery 与 Codex 事件的视图。它不会调度 Agent，也不会把 Codex Plan 复制成另一套任务系统。模型提供商和凭据仍通过 DSH 配置；Delivery 只保存所选 Session、阶段和证据的引用。
+因此，StrongFlow 看板是 Delivery 与 Codex 事件的视图。它不会调度 Agent，也不会把 Codex Plan 复制成另一套任务系统。所有产品写入进入 Rust Control Plane；Web 不直接连接 Worker。Worker 通过 Control Plane 的 Provider Gateway 使用模型，不持有长期凭据。
 
-## 运行结构
+## 目标运行结构
 
 ```mermaid
-flowchart LR
+flowchart TB
   Human[使用者或审核人]
 
-  subgraph DSH[DeepSeek Harness 产品外壳]
+  subgraph Web[TypeScript Presentation Layer]
     Chat[默认 Chat]
     Workbench[StrongFlow 高级工作台]
-    Sessions[Session 与审批交互]
-    LLM[模型、Provider 与凭据服务]
+    Admin[设置、审批与组织管理]
   end
 
-  subgraph Host[WinWinCode TypeScript 主机]
-    Factory[DSH AgentFactory 适配]
-    Service[StrongFlowService]
-    Store[DeliveryStore]
-    Ledger[RuntimeSessionLedger]
-    Projection[执行与图表投影]
+  subgraph ControlPlane[Rust Control Plane]
+    API[HTTP Command / Query API]
+    Realtime[WebSocket Event Gateway]
+    Product[Session、Delivery、Approval、Collaboration]
+    Gateway[Provider、Credential、Publication、Audit]
+    Scheduler[Scheduler 与 Worker Registry]
   end
 
-  subgraph Native[本机原生边界]
-    NAPI[Node 原生模块]
-    Kernel[内嵌 Codex Core]
+  subgraph Worker[Rust Execution Worker]
+    Port[ExecutionPort]
+    Runtime[WorkerSession 与 Workspace]
+    Kernel[Embedded Codex Core]
   end
 
-  Human --> Chat
-  Human --> Workbench
-  Chat --> Sessions
-  Workbench --> Service
-  Sessions --> Factory
-  Factory --> NAPI --> Kernel
-  Kernel -->|模型请求| Factory --> LLM
-  Kernel -->|顺序运行事件| Factory --> Ledger
-  Ledger --> Projection --> Workbench
-  Service --> Store
-  Service -->|SessionBinding| Projection
+  Human --> Chat & Workbench & Admin
+  Chat & Workbench & Admin --> API
+  Web <--> Realtime
+  API --> Product & Gateway & Scheduler
+  Scheduler --> Port
+  Port --> Runtime --> Kernel
+  Kernel -->|ModelPort| Gateway
+  Kernel -->|运行事件| Runtime --> Port --> Realtime
 ```
 
-### Rust 与 TypeScript 的边界
+### HTTP、WebSocket 与 ExecutionPort
+
+- 主要业务写操作使用 HTTP Command，并携带 `requestId` 与 `expectedRevision`；HTTP 返回明确的成功结果或稳定错误码。
+- WebSocket 只推送 Projection、运行事件、审批请求、Attention、任务和在线状态，不作为主要业务写入通道。
+- Control Plane 与 Worker 只通过版本化 `ExecutionPort` 交换注册、能力、心跳、Job、Lease、Fencing、运行事件、模型流、输入、审批、取消、结果和产物引用。
+- Worker 不直接改写 Delivery 或 ProductSession，过期 Lease 对应的事件和结果会被 Fencing 校验拒绝。
+
+### Session 身份
+
+四个身份不能统一成一个 `session_id`：
+
+| 身份 | 所有者 | 作用 |
+| --- | --- | --- |
+| `ProductSession` | Rust Control Plane | 用户看到的产品会话 |
+| `WorkerSession` | Rust Execution Worker | 一次可租约、取消和恢复的执行上下文 |
+| `CodexThread` | Codex Core | Codex 上下文、Turn 和执行历史 |
+| `StageRun` | Delivery | 一个交付阶段的一次尝试 |
+
+`SessionBinding` 保存这些身份的关系。这样重启 ProductSession、迁移 Worker、恢复 CodexThread 或重试 StageRun 时，不会误改其他生命周期。
+
+### 本地部署与企业部署
+
+- **本地部署**：Control Plane 与 Embedded Local Worker 可以编译进一个二进制并在同一进程运行，但仍经过同一 `ExecutionPort`，使用相同 Job、Lease 和身份语义。
+- **企业部署**：Control Plane 与多个 Worker 可以分开部署。Worker 可按平台、容量、网络区、仓库和策略分配并独立扩缩容。
+
+## 当前实现与迁移基线
+
+迁移完成前，仓库中仍运行以下旧路径：
+
+```text
+DSH / TypeScript Host
+├─ Chat、Session、Provider、Credential 与 Approval
+├─ Delivery / StrongFlow
+└─ Node N-API Adapter
+       ↓
+Rust Codex Kernel
+```
+
+这条路径只作为迁移的可观察行为基线。成功、失败、取消、恢复、审批和关闭样本由
+[`scripts/run-dsh-migration-baseline.mjs`](../scripts/run-dsh-migration-baseline.mjs)重复执行；每个生产源码和 DeepSeek 依赖的目标归属由[迁移清单](decisions/0028-control-plane-worker-migration.inventory.json)检查。迁移采用“先结构翻译，再纠正行为差异”的顺序，并在最终门禁删除 DSH Node/Cordis/N-API 后端。
+
+当前路径的实际接点是：
 
 1. DSH Session 由 [`WinWinCodeAgentFactory`](../packages/dsh-profile/src/agent-factory.ts) 接到原生模块。
 2. [`@winwincode/native`](../packages/native/src/index.ts) 只负责 Node 与 Rust 的类型转换、平台包选择和内核生命周期。
@@ -70,9 +113,9 @@ flowchart LR
 4. Codex 发起模型请求时，[`DshModelPort`](../packages/dsh-profile/src/model-port.ts) 把请求转换为 DSH `ctx.llm` 调用。提供商路由、模型选择和凭据仍由 DSH 解析。
 5. Codex 事件按顺序返回 TypeScript，写入 [`RuntimeSessionLedger`](../packages/dsh-profile/src/session-ledger.ts)，再投影到 DSH Session 和 StrongFlow 工作台。
 
-这条路径保留 Codex 的 `update_plan`、多 Agent、工具和沙箱能力。TypeScript 主机只连接产品外壳、执行内核和交付协议。
+冻结样本保留 Codex 的 `update_plan`、多 Agent、工具和沙箱能力。新模块只有在相同行为样本通过后才替换对应旧路径。
 
-## 两个产品入口
+## 当前迁移基线中的两个产品入口
 
 发布包的 `winwincode` 命令按固定顺序加载 DSH base、DSH Web 和 WinWinCode profile。启动后：
 
