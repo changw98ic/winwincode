@@ -74,26 +74,33 @@
     {
       "id": "solution",
       "fields": [
-        "solution.reviewSetSha256",
-        "solution.summary",
-        "solution.approach",
-        "solution.components",
-        "solution.connections",
-        "solution.architectureDiagram",
-        "solution.processDiagram",
-        "solution.risks",
-        "solution.unresolvedItems",
-        "solution.humanDecision"
+        "solutionReview.reviewSetSha256",
+        "solutionReview.summary",
+        "solutionReview.approach",
+        "solutionReview.components",
+        "solutionReview.connections",
+        "solutionReview.architectureDiagram",
+        "solutionReview.processDiagram",
+        "solutionReview.risks",
+        "solutionReview.unresolvedItems",
+        "solutionReview.taskProposals",
+        "solutionReview.reviewStatus",
+        "solutionReview.decision",
+        "solutionReview.comments",
+        "solutionReview.requestedChanges",
+        "solutionReview.reviewerId",
+        "solutionReview.reviewedAt"
       ],
       "source": {
         "kind": "approved-plan-review",
         "refs": [
           "packages/contracts/src/strongflow-plan-review.ts",
           "packages/strongflow/src/plan-review.ts",
-          "docs/decisions/0023-canonical-delivery-ownership.md"
+          "docs/decisions/0023-canonical-delivery-ownership.md",
+          "docs/contracts/delivery-solution-review-authority.md"
         ]
       },
-      "scope": "One validated plan-review context and decision whose Delivery, Spec ID, Spec revision, planning StageRun, review StageRun, SessionBinding, AttentionItem, and review digest all match the current Delivery.",
+      "scope": "One validated pending or settled review whose Delivery, current Spec, planning StageRun and exact planning SessionBinding, human review StageRun without a SessionBinding, AttentionItem, digest, reviewer, and review time all match the current Delivery.",
       "transports": {
         "http": [
           "delivery.get"
@@ -124,7 +131,7 @@
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/solution.rs",
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
-        "testName": "solution_projection_requires_current_approved_review_set"
+        "testName": "pending_solution_review_projects_safe_solution_and_non_empty_ordered_task_proposals"
       }
     },
     {

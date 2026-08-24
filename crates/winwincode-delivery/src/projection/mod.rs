@@ -13,7 +13,10 @@ use std::{error::Error, fmt};
 
 use serde::Serialize;
 
-use crate::domain::{Delivery, DeliveryStatus, FrozenDeliveryCandidate};
+use crate::{
+    application::solution_review::{SolutionReviewErrorCode, resolve_current_solution_review},
+    domain::{Delivery, DeliveryStatus, FrozenDeliveryCandidate},
+};
 
 pub use delivery::{
     AcceptanceCriterionProjection, AttentionItemProjection, AttentionOptionProjection,
@@ -22,20 +25,21 @@ pub use delivery::{
     VerdictProjection,
 };
 pub use solution::{
-    ApprovedSolutionReviewSet, DiagramEdgeProjection, DiagramKind, DiagramNodeKind,
-    DiagramNodeProjection, DiagramProjection, HumanDecisionProjection, SolutionComponentKind,
-    SolutionComponentProjection, SolutionConnectionProjection, SolutionProjection,
+    DeliveryTaskProposalProjection, DiagramEdgeProjection, DiagramKind, DiagramNodeKind,
+    DiagramNodeProjection, DiagramProjection, SolutionComponentKind, SolutionComponentProjection,
+    SolutionConnectionProjection, SolutionReviewDecisionProjection, SolutionReviewProjection,
+    SolutionReviewStatusProjection,
 };
 
 /// The only caller-selected inputs to the Delivery detail read model.
 ///
-/// Candidate and solution values are sealed domain facts. Callers cannot
-/// replace them with DTOs, raw Attention JSON, or Worker messages.
+/// Candidate values are sealed domain facts. The current solution review is
+/// rebuilt internally from canonical Delivery Attention facts rather than
+/// accepted from a caller, DTO, or Worker message.
 #[derive(Clone, Copy)]
 pub struct ProjectionInput<'facts> {
     delivery: &'facts Delivery,
     candidate: Option<&'facts FrozenDeliveryCandidate>,
-    approved_solution: Option<&'facts ApprovedSolutionReviewSet>,
 }
 
 impl<'facts> ProjectionInput<'facts> {
@@ -44,22 +48,12 @@ impl<'facts> ProjectionInput<'facts> {
         Self {
             delivery,
             candidate: None,
-            approved_solution: None,
         }
     }
 
     #[must_use]
     pub const fn with_candidate(mut self, candidate: &'facts FrozenDeliveryCandidate) -> Self {
         self.candidate = Some(candidate);
-        self
-    }
-
-    #[must_use]
-    pub const fn with_approved_solution(
-        mut self,
-        approved_solution: &'facts ApprovedSolutionReviewSet,
-    ) -> Self {
-        self.approved_solution = Some(approved_solution);
         self
     }
 }
@@ -69,7 +63,7 @@ pub enum ProjectionErrorCode {
     MissingCurrentCandidate,
     StaleCandidate,
     AmbiguousSessionBinding,
-    StaleApprovedSolution,
+    StaleSolutionReview,
     InconsistentCurrentVerdict,
 }
 
@@ -107,12 +101,12 @@ impl Error for ProjectionError {}
 /// Complete Delivery-owned `StrongFlow` detail without the mutable Delivery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeliveryDetailProjection {
+pub struct DeliveryProjection {
     delivery_id: winwincode_domain::DeliveryId,
     delivery_revision: u64,
     status: DeliveryStatus,
     requirements: RequirementsProjection,
-    solution: Option<SolutionProjection>,
+    solution_review: Option<SolutionReviewProjection>,
     stages: Vec<StageProjection>,
     tasks: Vec<DeliveryTaskProjection>,
     attention: Vec<AttentionItemProjection>,
@@ -121,7 +115,7 @@ pub struct DeliveryDetailProjection {
     verdict: Option<VerdictProjection>,
 }
 
-impl DeliveryDetailProjection {
+impl DeliveryProjection {
     pub fn delivery_id(&self) -> &winwincode_domain::DeliveryId {
         &self.delivery_id
     }
@@ -138,8 +132,8 @@ impl DeliveryDetailProjection {
         &self.requirements
     }
 
-    pub const fn solution(&self) -> Option<&SolutionProjection> {
-        self.solution.as_ref()
+    pub const fn solution_review(&self) -> Option<&SolutionReviewProjection> {
+        self.solution_review.as_ref()
     }
 
     pub fn stages(&self) -> &[StageProjection] {
@@ -180,24 +174,34 @@ impl DeliveryDetailProjection {
 ///
 /// # Errors
 ///
-/// Rejects a stale candidate, an ambiguous `StageRun` binding, a stale approved
-/// solution set, or a canonical verdict that does not identify the supplied
+/// Rejects a stale candidate, an ambiguous `StageRun` binding, a stale solution
+/// review, or a canonical verdict that does not identify the supplied
 /// current candidate.
 pub fn project_delivery_detail(
     input: ProjectionInput<'_>,
-) -> Result<DeliveryDetailProjection, ProjectionError> {
+) -> Result<DeliveryProjection, ProjectionError> {
     let sections = delivery::project_delivery_sections(input.delivery, input.candidate)?;
-    let solution = input
-        .approved_solution
-        .map(|approved| solution::project_current_solution(input.delivery, approved))
-        .transpose()?;
+    let solution_review = resolve_current_solution_review(input.delivery)
+        .map_err(|error| {
+            let code = match error.code() {
+                SolutionReviewErrorCode::InvalidEncoding
+                | SolutionReviewErrorCode::InvalidContent
+                | SolutionReviewErrorCode::StaleAuthority
+                | SolutionReviewErrorCode::AmbiguousCurrentReview => {
+                    ProjectionErrorCode::StaleSolutionReview
+                }
+            };
+            ProjectionError::new(code, error.message())
+        })?
+        .as_ref()
+        .map(solution::project_current_solution_review);
 
-    Ok(DeliveryDetailProjection {
+    Ok(DeliveryProjection {
         delivery_id: input.delivery.id().clone(),
         delivery_revision: input.delivery.revision(),
         status: input.delivery.snapshot().status,
         requirements: sections.requirements,
-        solution,
+        solution_review,
         stages: sections.stages,
         tasks: sections.tasks,
         attention: sections.attention,
