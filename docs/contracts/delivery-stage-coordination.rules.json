@@ -1,0 +1,836 @@
+{
+  "schemaVersion": 1,
+  "status": "required-contract-not-implementation-proof",
+  "phaseTask": "winwincode-9c4.16.2.3",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "ownershipDecision": "docs/decisions/0023-canonical-delivery-ownership.md",
+  "documentation": "docs/contracts/delivery-stage-coordination.md",
+  "implementationCompletionSource": "rust-black-box-tests-and-beads",
+  "ownership": {
+    "canonicalDeliveryWriter": "winwincode-control-plane",
+    "deliveryStateMachineOwner": "winwincode-delivery",
+    "executionCommandBoundary": "ExecutionPort",
+    "executionCommandType": "ExecutionJob",
+    "executionFactOwner": "codex-core",
+    "workerMayWriteDeliveryState": false,
+    "controlPlaneMayOwnCodexPlanAgentOrToolState": false,
+    "websocketMaySubmitBusinessMutations": false
+  },
+  "stageProtocol": {
+    "activeStatuses": [
+      "running",
+      "waiting"
+    ],
+    "terminalStatuses": [
+      "succeeded",
+      "failed",
+      "cancelled"
+    ],
+    "maximumActiveStageRunsPerDelivery": 1,
+    "callerSuppliesAttempt": false,
+    "startTransitions": [
+      {
+        "deliveryStatus": "draft",
+        "activeStage": null,
+        "nextStage": "clarifying",
+        "nextDeliveryStatus": "clarifying"
+      },
+      {
+        "deliveryStatus": "clarifying",
+        "activeStage": null,
+        "nextStage": "clarifying",
+        "nextDeliveryStatus": "clarifying"
+      },
+      {
+        "deliveryStatus": "ready",
+        "activeStage": null,
+        "nextStage": "planning",
+        "nextDeliveryStatus": "planning"
+      },
+      {
+        "deliveryStatus": "planning",
+        "activeStage": null,
+        "nextStage": "planning",
+        "nextDeliveryStatus": "planning"
+      },
+      {
+        "deliveryStatus": "planning",
+        "activeStage": "planning",
+        "nextStage": "plan-review",
+        "nextDeliveryStatus": "needs-attention"
+      },
+      {
+        "deliveryStatus": "executing",
+        "activeStage": null,
+        "nextStage": "executing",
+        "nextDeliveryStatus": "executing"
+      },
+      {
+        "deliveryStatus": "executing",
+        "activeStage": "executing",
+        "nextStage": "verifying",
+        "nextDeliveryStatus": "verifying"
+      },
+      {
+        "deliveryStatus": "verifying",
+        "activeStage": null,
+        "nextStage": "verifying",
+        "nextDeliveryStatus": "verifying"
+      },
+      {
+        "deliveryStatus": "verifying",
+        "activeStage": "verifying",
+        "nextStage": "verifying",
+        "nextDeliveryStatus": "verifying"
+      },
+      {
+        "deliveryStatus": "reworking",
+        "activeStage": null,
+        "nextStage": "reworking",
+        "nextDeliveryStatus": "reworking"
+      },
+      {
+        "deliveryStatus": "reworking",
+        "activeStage": "reworking",
+        "nextStage": "verifying",
+        "nextDeliveryStatus": "verifying"
+      },
+      {
+        "deliveryStatus": "ready-to-deliver",
+        "activeStage": null,
+        "nextStage": "delivery-review",
+        "nextDeliveryStatus": "needs-attention"
+      }
+    ],
+    "actorRolePolicy": {
+      "clarifying": {
+        "actor": "codex",
+        "roles": [
+          "requirements"
+        ]
+      },
+      "planning": {
+        "actor": "codex",
+        "roles": [
+          "planner"
+        ]
+      },
+      "plan-review": {
+        "actor": "human",
+        "roles": [
+          "reviewer"
+        ]
+      },
+      "executing": {
+        "actor": "codex",
+        "roles": [
+          "executor"
+        ]
+      },
+      "verifying": {
+        "actor": "codex",
+        "roles": [
+          "reviewer",
+          "verifier",
+          "adversarial-verifier"
+        ]
+      },
+      "reworking": {
+        "actor": "codex",
+        "roles": [
+          "remediator"
+        ]
+      },
+      "delivery-review": {
+        "actor": "human",
+        "roles": [
+          "approver"
+        ]
+      }
+    },
+    "atomicStart": [
+      "validate-current-revision-and-request",
+      "validate-one-legal-next-stage",
+      "settle-bound-previous-stage-run-when-handing-off",
+      "append-new-stage-run",
+      "update-delivery-and-task-status",
+      "append-linked-review-attention-when-required",
+      "append-execution-job-intent-for-codex-stage",
+      "commit-state-and-outbox"
+    ]
+  },
+  "stageRunLifecycle": {
+    "resume": {
+      "reuseStageRunId": true,
+      "reuseAttempt": true,
+      "reuseExecutionJobId": true,
+      "reuseAcceptedSessionBinding": true,
+      "createSecondRunAllowed": false,
+      "finalModelOutputAcceptedWithoutOutcomeReview": false
+    },
+    "cancel": {
+      "appliesTo": "active-codex-stage-run",
+      "command": "job.cancel",
+      "acknowledgementIsTerminal": false,
+      "terminalFact": "leased-job.outcome.cancelled",
+      "onTerminalFact": [
+        "settle-same-stage-run-as-cancelled",
+        "set-finished-at",
+        "release-active-stage-slot",
+        "restore-task-to-stage-retry-status"
+      ],
+      "createReplacementRunAutomatically": false
+    }
+  },
+  "taskProtocol": {
+    "breakdownApproval": {
+      "command": "delivery.approve_task_breakdown",
+      "createCommandTaskListMustBeEmpty": true,
+      "requiresCurrentPlanApproval": true,
+      "writesGraphOncePerSpecRevision": true,
+      "laterReplacementRequiresNewSpecRevisionAndReview": true,
+      "codexPlanImportedAsDeliveryTasks": false
+    },
+    "graphRules": {
+      "minimumApprovedTasks": 1,
+      "acceptanceCriteriaMustBelongToCurrentSpec": true,
+      "dependenciesMustExistInSameDelivery": true,
+      "selfDependencyAllowed": false,
+      "cyclesAllowed": false
+    },
+    "runnableRule": {
+      "dependencyStatus": "completed",
+      "blockedTaskMayStart": false,
+      "schedulerChoosesAmongMultipleRunnableTasks": false
+    },
+    "statusTransitions": [
+      {
+        "from": "pending",
+        "event": "start-executing",
+        "to": "active"
+      },
+      {
+        "from": "active",
+        "event": "start-verifying",
+        "to": "verifying"
+      },
+      {
+        "from": "verifying",
+        "event": "verification-pass",
+        "to": "completed"
+      },
+      {
+        "from": "verifying",
+        "event": "verification-fail",
+        "to": "failed"
+      },
+      {
+        "from": "failed",
+        "event": "start-reworking",
+        "to": "active"
+      },
+      {
+        "from": "active",
+        "event": "executing-cancelled",
+        "to": "pending"
+      },
+      {
+        "from": "verifying",
+        "event": "verifying-cancelled",
+        "to": "verifying"
+      },
+      {
+        "from": "active",
+        "event": "reworking-cancelled",
+        "to": "failed"
+      }
+    ]
+  },
+  "sessionBinding": {
+    "exactIdentityFields": [
+      "deliveryId",
+      "deliveryTaskId",
+      "stageRunId",
+      "productSessionId",
+      "executionJobId",
+      "workerSessionId",
+      "codexThreadId"
+    ],
+    "deliveryTaskIdNullableOnlyForDeliveryLevelStage": true,
+    "workerSessionIdNullableUntilDispatchAccepted": true,
+    "codexThreadIdNullableUntilWorkerReportsThread": true,
+    "genericSessionIdAllowed": false,
+    "conflictingBindingResult": "fail-closed-without-selecting-next-action"
+  },
+  "attentionProtocol": {
+    "openBlockingItemStopsAdvanceAndDispatch": true,
+    "reviewStageCreatesLinkedOpenBlockerAtomically": true,
+    "resolutionRequiresCurrentRevisionActorItemAndStageRun": true,
+    "resolvingOneOfManyKeepsNeedsAttention": true,
+    "resolveCommandStartsExecutionDirectly": false,
+    "runtimeApprovalIsBusinessAttention": false
+  },
+  "idempotency": {
+    "key": "requestId",
+    "equality": [
+      "command",
+      "actor",
+      "scope",
+      "expectedRevision",
+      "payloadDigest"
+    ],
+    "identicalReplay": {
+      "returnOriginalCommandResult": true,
+      "appendStageRun": false,
+      "appendSessionBinding": false,
+      "appendExecutionJob": false,
+      "appendOutboxEvent": false,
+      "dispatchExecutionJob": false
+    },
+    "conflictingReuse": "IDEMPOTENCY_CONFLICT"
+  },
+  "rules": [
+    {
+      "id": "stage.legal_next",
+      "statement": "Delivery status, active StageRun, task state, review result, and verification progress determine one legal next delivery stage; callers cannot choose another stage.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts",
+        "packages/dsh-profile/src/delivery-recovery.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          },
+          {
+            "path": "packages/dsh-profile/src/delivery-recovery.ts",
+            "name": "reconcileDeliveryAfterRestart"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService completes the reviewed Delivery lifecycle through atomic stage handoffs"
+          },
+          {
+            "path": "tests/delivery-recovery.test.mjs",
+            "name": "recovery starts the next stored stage and never repeats a settled executor"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/stage.rs",
+        "testName": "advance_selects_only_the_legal_next_stage"
+      }
+    },
+    {
+      "id": "stage.single_active",
+      "statement": "A Delivery has at most one running or waiting StageRun, including when task work is available in more than one DAG branch.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts",
+        "packages/dsh-profile/src/delivery-recovery.ts"
+      ],
+      "typescript": {
+        "coverage": "partial",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          },
+          {
+            "path": "packages/dsh-profile/src/delivery-recovery.ts",
+            "name": "reconcileDeliveryAfterRestart"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-recovery.test.mjs",
+            "name": "conflicting SessionBindings fail visibly instead of selecting an action"
+          }
+        ],
+        "gap": "The TypeScript service and recovery code reject multiple active runs, but the old public tests reach the conflict through bindings instead of isolating two active StageRuns."
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/stage.rs",
+        "testName": "advance_rejects_when_more_than_one_stage_run_is_active"
+      }
+    },
+    {
+      "id": "stage.actor_role",
+      "statement": "Each delivery stage uses its fixed human or Codex actor type and one allowed StrongFlow role; rework always uses the Codex remediator role.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService completes the reviewed Delivery lifecycle through atomic stage handoffs"
+          },
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Delivery accepts Delivery- or task-scoped Codex remediators within the approved limit"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/stage.rs",
+        "testName": "stage_actor_and_role_policy_rejects_wrong_executor"
+      }
+    },
+    {
+      "id": "stage.atomic_handoff",
+      "statement": "Starting a legal next stage settles the bound previous StageRun and appends the next run, task state, review Attention, and execution intent in one command transaction.",
+      "refs": [
+        "docs/contracts/control-plane-storage-lifecycle.md",
+        "packages/strongflow/src/delivery-service.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService completes the reviewed Delivery lifecycle through atomic stage handoffs"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/stage.rs",
+        "testName": "starting_next_stage_settles_bound_previous_run_atomically"
+      }
+    },
+    {
+      "id": "stage.resume_identity",
+      "statement": "Restart recovery resumes the active StageRun, attempt, ExecutionJob, and accepted SessionBinding instead of creating a second attempt.",
+      "refs": [
+        "docs/contracts/execution-port-v1.md",
+        "packages/dsh-profile/src/delivery-recovery.ts",
+        "packages/strongflow/src/delivery-stage-coordinator.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/dsh-profile/src/delivery-recovery.ts",
+            "name": "reconcileDeliveryAfterRestart"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-stage-coordinator.ts",
+            "name": "StrongFlowDeliveryStageCoordinator"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-stage-coordinator.test.mjs",
+            "name": "an aborted role StageRun resumes after coordinator restart without a second binding"
+          },
+          {
+            "path": "tests/delivery-recovery.test.mjs",
+            "name": "restart recovery resumes an absent Codex thread but does not accept final model output"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/session_binding.rs",
+        "testName": "active_stage_run_resumes_without_new_run_or_attempt"
+      }
+    },
+    {
+      "id": "stage.cancel_terminal_outcome",
+      "statement": "A job.cancel acknowledgement does not settle a StageRun; only the current leased job.outcome cancelled result settles that exact run.",
+      "refs": [
+        "docs/decisions/0028-control-plane-worker-migration.md",
+        "docs/contracts/execution-port-v1.md",
+        "schema/winwincode/v1/execution-port.schema.json"
+      ],
+      "typescript": {
+        "coverage": "target_only",
+        "publicSymbols": [],
+        "tests": [],
+        "gap": "The TypeScript Delivery coordinator exposes abort and runtime cancellation observations but has no durable StageRun cancellation command; ExecutionPort v1 is the accepted target source."
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/stage.rs",
+        "testName": "cancel_request_waits_for_terminal_job_outcome"
+      }
+    },
+    {
+      "id": "task.breakdown_approval",
+      "statement": "Delivery creation begins with no task graph; one current human plan approval promotes a non-empty proposed graph once for that DeliverySpec revision.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "schema/winwincode/v1/control-plane-http.schema.json"
+      ],
+      "typescript": {
+        "coverage": "target_only",
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDeliveryTask"
+          }
+        ],
+        "tests": [],
+        "gap": "The old browser creates tasks as an empty static list and the old service can accept tasks at creation, so the approved one-time promotion command exists only in the new public HTTP contract."
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/task.rs",
+        "testName": "task_breakdown_approval_replaces_empty_graph_once"
+      }
+    },
+    {
+      "id": "task.dag",
+      "statement": "Every approved DeliveryTask cites current acceptance criteria and only same-Delivery dependencies; missing, self, and cyclic dependencies are rejected.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/contracts/src/delivery.ts",
+        "docs/contracts/delivery-domain-rules.v1.json"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Delivery rejects duplicate and cyclic delivery-significant tasks"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/task.rs",
+        "testName": "task_breakdown_rejects_missing_self_and_cyclic_dependencies"
+      }
+    },
+    {
+      "id": "task.blocked_dependency",
+      "statement": "A DeliveryTask is runnable only when every blockedByTaskId task is completed; selecting a blocked task changes no durable state.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService rejects a blocked DeliveryTask before changing durable state"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/task.rs",
+        "testName": "blocked_task_never_becomes_runnable"
+      }
+    },
+    {
+      "id": "task.status_transition",
+      "statement": "DeliveryTask status follows executing, verifying, verdict, rework, and cancellation facts and cannot be edited as a free-form board status.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts"
+      ],
+      "typescript": {
+        "coverage": "partial",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService can hand a failed verdict through rework into a new verification run"
+          }
+        ],
+        "gap": "The old path covers execution, verification, failure, and rework, but durable cancellation rollback is new in ExecutionPort v1."
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/task.rs",
+        "testName": "task_status_tracks_execution_verification_rework_and_cancel"
+      }
+    },
+    {
+      "id": "session.exact_binding",
+      "statement": "SessionBinding retains distinct Delivery, task, StageRun, ProductSession, ExecutionJob, WorkerSession, and CodexThread identities and recovery rejects any conflict.",
+      "refs": [
+        "docs/decisions/0028-control-plane-worker-migration.md",
+        "docs/contracts/execution-port-v1.md",
+        "packages/dsh-profile/src/delivery-recovery.ts"
+      ],
+      "typescript": {
+        "coverage": "partial",
+        "publicSymbols": [
+          {
+            "path": "packages/dsh-profile/src/delivery-recovery.ts",
+            "name": "reconcileDeliveryAfterRestart"
+          },
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseSessionBinding"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-recovery.test.mjs",
+            "name": "conflicting SessionBindings fail visibly instead of selecting an action"
+          },
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          }
+        ],
+        "gap": "The old binding uses DSH and Codex session fields. ADR-0028 requires distinct ProductSession, WorkerSession, CodexThread, ExecutionJob, and StageRun identities in the Rust path."
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/session_binding.rs",
+        "testName": "session_binding_matches_exact_delivery_task_stage_job_and_session_identities"
+      }
+    },
+    {
+      "id": "attention.blocks_advance",
+      "statement": "Any current open blocking business AttentionItem prevents stage advance and ExecutionJob dispatch until a valid resolution exists.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts",
+        "packages/dsh-profile/src/delivery-recovery.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          },
+          {
+            "path": "packages/dsh-profile/src/delivery-recovery.ts",
+            "name": "reconcileDeliveryAfterRestart"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-recovery.test.mjs",
+            "name": "unresolved Codex approval and business Attention remain the one blocking action"
+          },
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "needs-attention requires a durable open blocking item"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/attention.rs",
+        "testName": "open_blocking_attention_prevents_stage_advance"
+      }
+    },
+    {
+      "id": "attention.current_resolution",
+      "statement": "Attention resolution must name the current item, actor, Delivery revision, linked StageRun, and frozen context; one remaining blocker keeps the Delivery blocked.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/delivery-service.ts",
+        "packages/strongflow/src/delivery-attention.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-attention.ts",
+            "name": "assertDeliveryVerdictAttentionCurrent"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService resolves only current business Attention and settles its human StageRun"
+          },
+          {
+            "path": "tests/delivery-attention.test.mjs",
+            "name": "multiple failures remain blocking and resolve to the strongest current action"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/attention.rs",
+        "testName": "stale_attention_resolution_is_rejected_without_state_change"
+      }
+    },
+    {
+      "id": "idempotency.advance_replay",
+      "statement": "An identical delivery.advance requestId replays the original result and never appends or dispatches another StageRun, SessionBinding, ExecutionJob, or outbox event.",
+      "refs": [
+        "docs/contracts/control-plane-storage-lifecycle.md",
+        "packages/strongflow/src/delivery-store.ts",
+        "packages/strongflow/src/delivery-service.ts"
+      ],
+      "typescript": {
+        "coverage": "covered",
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-store.ts",
+            "name": "DeliveryStore"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService creates, revises, starts, binds, replays, and reopens Delivery"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "crates/winwincode-delivery/src/application/stage.rs",
+        "testName": "replayed_advance_returns_original_stage_run_without_new_state"
+      }
+    },
+    {
+      "id": "execution.execution_job_only",
+      "statement": "A Codex delivery stage produces one generated ExecutionJob and DeliveryStageExecutionScope; Control Plane stores references and projections but no Codex Plan, Agent Graph, Tool Call, or scheduler state.",
+      "refs": [
+        "docs/decisions/0028-control-plane-worker-migration.md",
+        "docs/contracts/execution-port-v1.md",
+        "schema/winwincode/v1/execution-port.schema.json",
+        "packages/contracts/src/delivery.ts"
+      ],
+      "typescript": {
+        "coverage": "partial",
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/delivery.ts",
+            "name": "parseDelivery"
+          }
+        ],
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "strict contracts reject extra execution-owned fields"
+          }
+        ],
+        "gap": "The old domain already rejects Codex-owned state, but generated ExecutionJob dispatch is part of the new Control Plane to Worker boundary."
+      },
+      "rust": {
+        "module": "crates/winwincode-control-plane/src/delivery_execution.rs",
+        "testName": "delivery_dispatch_does_not_persist_codex_plan_agent_or_tool_state"
+      }
+    }
+  ],
+  "rustGate": {
+    "activation": {
+      "condition": "any-required-phase-2.3-module-or-test-exists",
+      "effect": "require-all-modules-tests-dependency-boundary-and-generated-execution-types"
+    },
+    "requiredModules": [
+      "crates/winwincode-delivery/src/application/stage.rs",
+      "crates/winwincode-delivery/src/application/task.rs",
+      "crates/winwincode-delivery/src/application/session_binding.rs",
+      "crates/winwincode-delivery/src/application/attention.rs",
+      "crates/winwincode-control-plane/src/delivery_execution.rs"
+    ],
+    "integrationTests": [
+      {
+        "package": "winwincode-delivery",
+        "target": "stage_task_lifecycle",
+        "path": "crates/winwincode-delivery/tests/stage_task_lifecycle.rs",
+        "requiredTests": [
+          "advance_selects_only_the_legal_next_stage",
+          "advance_rejects_when_more_than_one_stage_run_is_active",
+          "stage_actor_and_role_policy_rejects_wrong_executor",
+          "starting_next_stage_settles_bound_previous_run_atomically",
+          "review_stage_opens_linked_blocking_attention_atomically",
+          "active_stage_run_resumes_without_new_run_or_attempt",
+          "cancel_request_waits_for_terminal_job_outcome",
+          "cancelled_outcome_settles_the_same_stage_run",
+          "task_breakdown_approval_replaces_empty_graph_once",
+          "task_breakdown_rejects_missing_self_and_cyclic_dependencies",
+          "blocked_task_never_becomes_runnable",
+          "task_status_tracks_execution_verification_rework_and_cancel",
+          "session_binding_matches_exact_delivery_task_stage_job_and_session_identities",
+          "conflicting_session_binding_stops_recovery",
+          "open_blocking_attention_prevents_stage_advance",
+          "stale_attention_resolution_is_rejected_without_state_change",
+          "resolving_one_of_multiple_blockers_keeps_delivery_blocked",
+          "replayed_advance_returns_original_stage_run_without_new_state"
+        ]
+      },
+      {
+        "package": "winwincode-control-plane",
+        "target": "delivery_execution_dispatch",
+        "path": "crates/winwincode-control-plane/tests/delivery_execution_dispatch.rs",
+        "requiredTests": [
+          "delivery_advance_dispatches_one_execution_job_after_commit",
+          "replayed_delivery_advance_does_not_dispatch_a_second_execution_job",
+          "delivery_stage_scope_carries_exact_product_delivery_task_and_run_identity",
+          "job_cancel_ack_does_not_settle_stage_before_terminal_outcome",
+          "delivery_dispatch_does_not_persist_codex_plan_agent_or_tool_state"
+        ]
+      }
+    ],
+    "requiredGeneratedExecutionSymbols": [
+      "winwincode_api::generated",
+      "ExecutionJob",
+      "DeliveryStageExecutionScope"
+    ],
+    "forbiddenDependencyPatterns": [
+      "codex-*",
+      "winwincode-codex",
+      "winwincode-kernel",
+      "winwincode-native",
+      "napi",
+      "napi-*"
+    ],
+    "forbiddenControlPlaneSourcePatterns": [
+      "\\bstruct\\s+ExecutionJob\\b",
+      "\\b(?:struct|enum)\\s+DeliveryStageExecutionScope\\b"
+    ],
+    "forbiddenApplicationSourcePatterns": [
+      "\\buse\\s+(?:codex_|winwincode_kernel|winwincode_native|napi)",
+      "\\b(?:struct|enum|trait)\\s+(?:CodexPlan|PlanItem|AgentGraph|ToolCall|CodexScheduler|Subagent)\\b",
+      "\\b(?:codex_plan|agent_graph|tool_calls|subagents)\\s*:"
+    ]
+  }
+}
