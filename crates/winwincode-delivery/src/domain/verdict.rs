@@ -140,12 +140,22 @@ struct CriterionResultIdentity<'result> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DeliveryVerdictCriterionIdentity<'criterion> {
+    id: &'criterion CriterionResultId,
+    criterion_id: &'criterion AcceptanceCriterionId,
+    verdict: CriterionVerdict,
+    evidence_refs: &'criterion [EvidenceId],
+    explanation: &'criterion str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DeliveryVerdictIdentity<'verdict> {
     delivery_spec_id: &'verdict DeliverySpecId,
     delivery_spec_revision: u64,
     candidate_ref: &'verdict str,
     status: DeliveryVerdictStatus,
-    criteria: &'verdict [CriterionResult],
+    criteria: &'verdict [DeliveryVerdictCriterionIdentity<'verdict>],
     unresolved_findings: &'verdict [String],
 }
 
@@ -254,6 +264,16 @@ pub fn compute_delivery_verdict(
         }
     }
 
+    let verdict_criterion_identities = criteria
+        .iter()
+        .map(|criterion| DeliveryVerdictCriterionIdentity {
+            id: &criterion.id,
+            criterion_id: &criterion.criterion_id,
+            verdict: criterion.verdict,
+            evidence_refs: &criterion.evidence_refs,
+            explanation: &criterion.explanation,
+        })
+        .collect::<Vec<_>>();
     let id = deterministic_id(
         "delivery-verdict:sha256",
         &DeliveryVerdictIdentity {
@@ -261,7 +281,7 @@ pub fn compute_delivery_verdict(
             delivery_spec_revision: delivery.snapshot().spec.revision,
             candidate_ref: candidate.candidate_ref(),
             status,
-            criteria: &criteria,
+            criteria: &verdict_criterion_identities,
             unresolved_findings: &unresolved_findings,
         },
     )?;
@@ -523,6 +543,15 @@ fn evaluate_settled_role(
             VerdictAttentionAction::RetryVerification,
         );
     };
+    let Some(terminal) = settlement.terminal_job_outcome() else {
+        return role_inconclusive(
+            role,
+            &criterion.id,
+            "settled verification has no accepted terminal Worker outcome",
+            "missing-terminal-outcome",
+            VerdictAttentionAction::RetryVerification,
+        );
+    };
     let findings = settlement
         .findings()
         .iter()
@@ -538,8 +567,19 @@ fn evaluate_settled_role(
         );
     }
     let finding = findings[0];
+    if finding.source_refs().len() != finding.source_sequences().len() {
+        return role_evidence_mismatch(
+            role,
+            &criterion.id,
+            finding.finding_ref(),
+            "finding source references and source positions differ in length",
+            vec![],
+        );
+    }
     let mut resolved_sources = Vec::with_capacity(finding.source_refs().len());
-    for source_ref in finding.source_refs() {
+    for (source_ref, source_sequence) in
+        finding.source_refs().iter().zip(finding.source_sequences())
+    {
         let matching = evidence
             .iter()
             .filter(|resolved| {
@@ -560,6 +600,24 @@ fn evaluate_settled_role(
             );
         }
         resolved_sources.push(matching[0]);
+        let Ok(source_sequence) = u64::try_from(source_sequence.0) else {
+            return role_evidence_mismatch(
+                role,
+                &criterion.id,
+                finding.finding_ref(),
+                "finding source position is outside the accepted runtime sequence range",
+                source_evidence_ids(&resolved_sources),
+            );
+        };
+        if !matching[0].matches_finding_source(terminal, source_sequence) {
+            return role_evidence_mismatch(
+                role,
+                &criterion.id,
+                finding.finding_ref(),
+                "Evidence source position or terminal Worker lease differs from the finding",
+                source_evidence_ids(&resolved_sources),
+            );
+        }
     }
     if resolved_sources.iter().any(|resolved| {
         matches!(
@@ -930,7 +988,8 @@ mod tests {
     use super::compute_delivery_verdict;
     use crate::domain::candidate::test_support::frozen_candidate;
     use crate::domain::evidence::{
-        EvidenceRefType, VerifiedEvidenceOutcome, test_support::resolved_role_evidence,
+        EvidenceRefType, VerifiedEvidenceOutcome,
+        test_support::{resolved_role_evidence, resolved_role_evidence_at_sequence},
     };
     use crate::domain::verification::{
         VerificationRole,
@@ -1082,8 +1141,25 @@ mod tests {
             PRODUCED_AT_MILLIS,
         )
         .expect("deterministic replay");
+        let later_materialization = compute_delivery_verdict(
+            &delivery,
+            &candidate,
+            &verification,
+            &evidence,
+            PRODUCED_AT_MILLIS + 1,
+        )
+        .expect("same semantic verdict materialized later");
 
         assert_eq!(first, replay);
+        assert_eq!(first.verdict().id, later_materialization.verdict().id);
+        assert_eq!(
+            first.verdict().criteria[0].id,
+            later_materialization.verdict().criteria[0].id
+        );
+        assert_ne!(
+            first.verdict().produced_at_millis,
+            later_materialization.verdict().produced_at_millis
+        );
         assert_eq!(first.verdict().status, CriterionVerdict::Pass);
         assert_eq!(first.verdict().criteria.len(), 2);
         assert_eq!(first.verdict().criteria[0].verdict, CriterionVerdict::Pass);
@@ -1093,6 +1169,55 @@ mod tests {
         );
         assert_eq!(first.evidence().len(), 2);
         assert_eq!(first.next_status(), DeliveryStatus::ReadyToDeliver);
+    }
+
+    #[test]
+    fn source_sequence_must_match_the_finding_and_its_terminal() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let verification = independent_verification(
+            &delivery,
+            &candidate,
+            VerificationFixtureState::SettledPass,
+            VerificationFixtureState::SettledPass,
+        );
+        let criterion_id = &delivery.snapshot().spec.acceptance_criteria[0].id;
+        let evidence = vec![
+            role_evidence(
+                &delivery,
+                &candidate,
+                VerificationRole::Reviewer,
+                EvidenceRefType::Test,
+                VerifiedEvidenceOutcome::Succeeded,
+            ),
+            resolved_role_evidence_at_sequence(
+                &delivery,
+                &candidate,
+                "verifier",
+                EvidenceRefType::Test,
+                VerifiedEvidenceOutcome::Succeeded,
+                fixture_evidence_id(VerificationRole::Verifier, criterion_id),
+                2,
+            ),
+        ];
+
+        let computed = compute_delivery_verdict(
+            &delivery,
+            &candidate,
+            &verification,
+            &evidence,
+            PRODUCED_AT_MILLIS,
+        )
+        .expect("sequence mismatch is classified");
+
+        assert_eq!(computed.verdict().status, CriterionVerdict::Inconclusive);
+        assert!(
+            computed
+                .verdict()
+                .unresolved_findings
+                .iter()
+                .any(|finding| finding.starts_with("evidence-mismatch:"))
+        );
     }
 
     #[test]

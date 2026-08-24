@@ -236,6 +236,25 @@ impl ResolvedDeliveryEvidence {
         self.outcome
     }
 
+    /// Confirms that this Evidence is the exact accepted runtime position a
+    /// structured verification finding cited, under the same terminal lease.
+    pub(crate) fn matches_finding_source(
+        &self,
+        terminal: &AcceptedVerificationJobOutcomeFact,
+        source_sequence: u64,
+    ) -> bool {
+        match &self.source_identity {
+            VerifiedEvidenceSourceIdentity::Runtime(identity) => {
+                identity.execution == terminal_identity(terminal)
+                    && identity.source_sequence == source_sequence
+                    && identity.terminal_last_event_sequence == accepted_terminal_sequence(terminal)
+            }
+            VerifiedEvidenceSourceIdentity::CandidateCommit { .. }
+            | VerifiedEvidenceSourceIdentity::CandidateDiff { .. }
+            | VerifiedEvidenceSourceIdentity::CandidateFile { .. } => false,
+        }
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -782,6 +801,22 @@ fn runtime_source_identity(fact: &AcceptedRuntimeSourceFact) -> FencedExecutionI
     }
 }
 
+fn terminal_identity(terminal: &AcceptedVerificationJobOutcomeFact) -> FencedExecutionIdentity {
+    FencedExecutionIdentity {
+        product_session_id: terminal.product_session_id().clone(),
+        execution_job_id: terminal.execution_job_id().clone(),
+        stage_run_id: terminal.stage_run_id().clone(),
+        role_id: terminal.role_id().into(),
+        attempt: terminal.attempt(),
+        lease_id: terminal.lease_id().clone(),
+        fencing_token: terminal.fencing_token().clone(),
+        worker_id: terminal.worker_id().clone(),
+        worker_instance_id: terminal.worker_instance_id().clone(),
+        worker_session_id: terminal.worker_session_id().clone(),
+        codex_thread_id: terminal.codex_thread_id().clone(),
+    }
+}
+
 fn checkout_identity(fact: &ValidatedCheckoutAttestationFact) -> FencedExecutionIdentity {
     FencedExecutionIdentity {
         product_session_id: fact.product_session_id.clone(),
@@ -878,6 +913,29 @@ pub(crate) mod test_support {
         outcome: VerifiedEvidenceOutcome,
         evidence_id: EvidenceId,
     ) -> ResolvedDeliveryEvidence {
+        resolved_role_evidence_at_sequence(
+            delivery,
+            candidate,
+            role_id,
+            evidence_type,
+            outcome,
+            evidence_id,
+            1,
+        )
+    }
+
+    /// Builds a sealed runtime source at a selected accepted-ledger position.
+    /// This narrow fixture lets verdict tests prove that a source reference
+    /// alone cannot substitute for the finding's exact source position.
+    pub(crate) fn resolved_role_evidence_at_sequence(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        role_id: &str,
+        evidence_type: EvidenceRefType,
+        outcome: VerifiedEvidenceOutcome,
+        evidence_id: EvidenceId,
+        source_sequence: u64,
+    ) -> ResolvedDeliveryEvidence {
         let stage_run = delivery
             .snapshot()
             .stage_runs
@@ -924,7 +982,7 @@ pub(crate) mod test_support {
             fencing_token: terminal.fencing_token().clone(),
             worker_id: terminal.worker_id().clone(),
             worker_instance_id: terminal.worker_instance_id().clone(),
-            source_sequence: 1,
+            source_sequence,
             candidate_ref: candidate.candidate_ref().into(),
             occurred_at_millis: finished_at_millis,
             outcome,
