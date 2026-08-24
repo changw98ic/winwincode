@@ -469,6 +469,29 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
     )?;
     duplicate_ids(
         snapshot
+            .session_bindings
+            .iter()
+            .map(|binding| binding.execution_job_id.0.as_str()),
+        "delivery.sessionBindings.executionJobId",
+    )?;
+    duplicate_ids(
+        snapshot
+            .session_bindings
+            .iter()
+            .filter_map(|binding| binding.worker_session_id.as_ref())
+            .map(|session_id| session_id.0.as_str()),
+        "delivery.sessionBindings.workerSessionId",
+    )?;
+    duplicate_ids(
+        snapshot
+            .session_bindings
+            .iter()
+            .filter_map(|binding| binding.codex_thread_id.as_ref())
+            .map(|thread_id| thread_id.0.as_str()),
+        "delivery.sessionBindings.codexThreadId",
+    )?;
+    duplicate_ids(
+        snapshot
             .attention_items
             .iter()
             .map(|item| item.id.0.as_str()),
@@ -566,13 +589,15 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
         if binding.delivery_id != snapshot.id
             || run.is_none()
             || run.is_some_and(|run| {
-                run.actor_type == StageRunActorType::Codex && binding.codex_session_id.is_none()
+                run.actor_type != StageRunActorType::Codex
+                    || run.delivery_task_id != binding.delivery_task_id
+                    || binding.bound_at_millis < run.started_at_millis
             })
         {
             return Err(validation_error(
                 DeliveryValidationErrorCode::RelationshipMismatch,
                 format!("delivery.sessionBindings[{index}]"),
-                "session binding does not match its delivery and stage actor",
+                "session binding does not exactly match its Delivery, task, Codex StageRun, or start time",
             ));
         }
     }

@@ -1,5 +1,7 @@
 use winwincode_delivery::domain::{Delivery, DeliveryValidationErrorCode};
 
+mod support;
+
 #[test]
 fn canonical_typescript_fixture_round_trips() {
     let fixture = include_bytes!("fixtures/delivery-main.json");
@@ -23,7 +25,7 @@ fn delivery_spec_requires_required_acceptance_criterion() {
 }
 
 #[test]
-fn legacy_typescript_oracle_snapshots_round_trip_through_rust_domain() {
+fn legacy_typescript_oracle_snapshots_migrate_once_into_the_canonical_rust_domain() {
     let oracle_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json");
     let oracle: serde_json::Value = serde_json::from_slice(
@@ -35,7 +37,10 @@ fn legacy_typescript_oracle_snapshots_round_trip_through_rust_domain() {
 
     for scenario in scenarios {
         let id = scenario["id"].as_str().expect("scenario id");
-        let expected = scenario["observation"]["snapshot"].clone();
+        let expected = support::migrate_legacy_typescript_snapshot(
+            scenario["observation"]["snapshot"].clone(),
+        )
+        .unwrap_or_else(|error| panic!("TypeScript oracle scenario {id} did not migrate: {error}"));
         let delivery =
             Delivery::decode_json(&serde_json::to_vec(&expected).expect("snapshot json"))
                 .unwrap_or_else(|error| {

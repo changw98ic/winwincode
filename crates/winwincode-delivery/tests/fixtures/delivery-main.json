@@ -81,9 +81,12 @@
       "schemaVersion": 3,
       "id": "binding-verifier-1",
       "deliveryId": "delivery-main",
+      "deliveryTaskId": "delivery-task-api",
       "stageRunId": "stage-verification-1",
-      "dshSessionId": "dsh-session-verifier",
-      "codexSessionId": "codex-session-verifier",
+      "productSessionId": "product-session-verifier",
+      "executionJobId": "execution-job-verifier",
+      "workerSessionId": "worker-session-verifier",
+      "codexThreadId": "codex-thread-verifier",
       "boundAtMillis": 1800000000011
     }
   ],

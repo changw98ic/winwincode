@@ -6,6 +6,8 @@
 //! intentionally has no dependency on Codex Core, an HTTP server, or Delivery
 //! domain logic.
 
+pub mod delivery_execution;
+
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;

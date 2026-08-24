@@ -1,28 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use winwincode_domain::{DeliveryId, StageRunId};
-
-use super::{
-    DeliveryValidationError, DeliveryValidationErrorCode, SessionBindingId, portable_identifier,
-    safe_non_negative, schema_version, validation_error,
+use winwincode_domain::{
+    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, ProductSessionId, StageRunId,
+    WorkerSessionId,
 };
 
-/// Current TypeScript session identities kept only as migration input.
+use super::{
+    DeliveryValidationError, SessionBindingId, portable_identifier, safe_non_negative,
+    schema_version,
+};
+
+/// Exact link between a Codex-backed Delivery stage and separately owned sessions.
 ///
-/// The ProductSession/WorkerSession/CodexThread split replaces these fields in
-/// the later Session migration. They are deliberately not public wire DTOs.
+/// Product, Delivery, task, `StageRun`, and `ExecutionJob` identities are immutable.
+/// `WorkerSession` and `CodexThread` are filled only when their respective owners
+/// report them. There is deliberately no generic `sessionId` or legacy DSH
+/// session field in the canonical Rust model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionBinding {
     pub schema_version: u8,
     pub id: SessionBindingId,
     pub delivery_id: DeliveryId,
+    #[serde(deserialize_with = "super::deserialize_required_option")]
+    pub delivery_task_id: Option<DeliveryTaskId>,
     pub stage_run_id: StageRunId,
+    pub product_session_id: ProductSessionId,
+    pub execution_job_id: ExecutionJobId,
     #[serde(deserialize_with = "super::deserialize_required_option")]
-    pub dsh_session_id: Option<String>,
+    pub worker_session_id: Option<WorkerSessionId>,
     #[serde(deserialize_with = "super::deserialize_required_option")]
-    pub codex_session_id: Option<String>,
+    pub codex_thread_id: Option<CodexThreadId>,
     pub bound_at_millis: u64,
 }
 
@@ -33,39 +42,39 @@ pub(crate) fn validate(
     schema_version(binding.schema_version, &format!("{path}.schemaVersion"))?;
     portable_identifier(&binding.id.0, &format!("{path}.id"))?;
     portable_identifier(&binding.delivery_id.0, &format!("{path}.deliveryId"))?;
+    if let Some(task_id) = &binding.delivery_task_id {
+        portable_identifier(&task_id.0, &format!("{path}.deliveryTaskId"))?;
+    }
     portable_identifier(&binding.stage_run_id.0, &format!("{path}.stageRunId"))?;
-    if let Some(session_id) = &binding.dsh_session_id {
-        portable_identifier(session_id, &format!("{path}.dshSessionId"))?;
+    portable_identifier(
+        &binding.product_session_id.0,
+        &format!("{path}.productSessionId"),
+    )?;
+    portable_identifier(
+        &binding.execution_job_id.0,
+        &format!("{path}.executionJobId"),
+    )?;
+    if let Some(session_id) = &binding.worker_session_id {
+        portable_identifier(&session_id.0, &format!("{path}.workerSessionId"))?;
     }
-    if let Some(session_id) = &binding.codex_session_id {
-        portable_identifier(session_id, &format!("{path}.codexSessionId"))?;
-    }
-    if binding.dsh_session_id.is_none() && binding.codex_session_id.is_none() {
-        return Err(validation_error(
-            DeliveryValidationErrorCode::InvalidValue,
-            path,
-            "session binding must reference a DSH session, a Codex session, or both",
-        ));
+    if let Some(thread_id) = &binding.codex_thread_id {
+        portable_identifier(&thread_id.0, &format!("{path}.codexThreadId"))?;
     }
     safe_non_negative(binding.bound_at_millis, &format!("{path}.boundAtMillis"))
 }
 
 #[cfg(test)]
 mod tests {
-    use winwincode_domain::DeliveryId;
+    use winwincode_domain::{DeliveryId, DeliveryTaskId};
 
     use crate::domain::{Delivery, test_fixture};
 
     #[test]
-    fn session_binding_requires_at_least_one_session_identity() {
+    fn session_binding_matches_delivery_stage_run_and_task() {
         let mut fixture = test_fixture();
-        fixture.session_bindings[0].dsh_session_id = None;
-        fixture.session_bindings[0].codex_session_id = None;
+        fixture.session_bindings[0].delivery_task_id = Some(DeliveryTaskId("foreign-task".into()));
         assert!(Delivery::try_from_snapshot(fixture).is_err());
-    }
 
-    #[test]
-    fn session_binding_matches_delivery_stage_run_and_actor() {
         let mut fixture = test_fixture();
         fixture.session_bindings[0].delivery_id = DeliveryId("foreign".into());
         assert!(Delivery::try_from_snapshot(fixture).is_err());
