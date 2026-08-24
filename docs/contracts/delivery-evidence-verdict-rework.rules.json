@@ -1,7 +1,7 @@
 {
   "schemaVersion": "winwincode.delivery-evidence-verdict-rework-rules.v1",
   "issueId": "winwincode-9c4.16.2.4",
-  "purpose": "Freeze the fail-closed Rust behavior for current candidates, independent verification, exact evidence, computed verdicts, and bounded precise rework before implementation starts.",
+  "purpose": "Enforce the fail-closed Rust behavior for current candidates, independent verification, exact evidence, computed verdict transitions, and bounded precise rework.",
   "rustTarget": {
     "crate": "crates/winwincode-delivery",
     "markerModule": "domain/candidate.rs",
@@ -15,7 +15,7 @@
     ]
   },
   "implementationBoundary": {
-    "phase24DomainPolicy": "Phase 2.4 is a pure fail-closed domain layer. It defines sealed validated fact types, checks their identity, ordering, candidate, role, outcome, and rework relationships, and derives CandidateRef, EvidenceRef, CriterionResult, DeliveryVerdict, and Attention. Public commands, API DTOs, and raw Worker messages cannot construct a sealed fact.",
+    "phase24DomainPolicy": "Phase 2.4 is a fail-closed domain and application layer. It defines sealed validated fact types, checks their identity, ordering, candidate, role, outcome, and rework relationships, derives CandidateRef, EvidenceRef, CriterionResult, DeliveryVerdict, and Attention, and persists stage, Attention, and Verdict changes only through operation-specific sealed transitions. Public commands, API DTOs, raw snapshots, and raw Worker messages cannot construct a sealed fact or relabel a derived transition.",
     "productionEnablementPolicy": "A domain unit test may create sealed fixtures through crate-private test support. Production candidate freeze, evidence resolution, verification settlement, verdict computation, and replacement-candidate acceptance remain unavailable until the owning adapters below produce the required sealed facts and pass their integration gates; a domain test is not proof that Git, an Artifact, a checkout, or a runtime event was actually verified.",
     "adapterDependencies": [
       {
@@ -35,7 +35,7 @@
       {
         "factType": "VerifiedTerminalOutcome",
         "owner": "Phase 2.3 stage coordinator and Worker outcome adapter",
-        "availability": "phase-2.3-extension",
+        "availability": "phase-4-adapter-gate",
         "produces": "A sealed terminal outcome matched to StageRun, ExecutionJob, attempt, Lease, fencing token, Worker, Worker instance, WorkerSession, CodexThread, status, and lastEventSequence.",
         "integrationGate": "accepts_only_the_exact_fenced_terminal_outcome_with_last_event_sequence",
         "ruleIds": [

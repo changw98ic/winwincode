@@ -118,7 +118,7 @@ const SEALED_FACT_AVAILABILITY = Object.freeze({
   AcceptedRuntimeSourceFact: 'follow-up-adapter',
   ValidatedCheckoutAttestationFact: 'follow-up-adapter',
   ValidatedGitSnapshotFact: 'follow-up-adapter',
-  VerifiedTerminalOutcome: 'phase-2.3-extension',
+  VerifiedTerminalOutcome: 'phase-4-adapter-gate',
 })
 
 const ADAPTER_BACKED_RULE_IDS = Object.freeze([
@@ -188,10 +188,14 @@ test('phase 2.4 rules freeze candidate, evidence, verdict, and rework behavior',
     [...rules.rustTarget.prohibitedIdentityFields].sort(),
     PROHIBITED_RUST_SESSION_FIELDS,
   )
-  assert.match(rules.implementationBoundary.phase24DomainPolicy, /pure fail-closed domain/u)
+  assert.match(rules.implementationBoundary.phase24DomainPolicy, /fail-closed domain and application/u)
   assert.match(
     rules.implementationBoundary.phase24DomainPolicy,
     /cannot construct a sealed fact/u,
+  )
+  assert.match(
+    rules.implementationBoundary.phase24DomainPolicy,
+    /operation-specific sealed transitions/u,
   )
   assert.match(
     rules.implementationBoundary.productionEnablementPolicy,
