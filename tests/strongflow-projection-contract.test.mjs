@@ -110,11 +110,17 @@ function rustFiles(directory) {
 }
 
 function oneOfValues(schema, definitionName, discriminator) {
-  return schema.$defs[definitionName].oneOf.map(branch => {
-    const definition = schema.$defs[branch.$ref.split('/').at(-1)]
+  function values(definition) {
+    if (definition.oneOf !== undefined) {
+      return definition.oneOf.flatMap(nested => {
+        const nestedName = nested.$ref.split('/').at(-1)
+        return values(schema.$defs[nestedName])
+      })
+    }
     const object = definition.allOf?.find(entry => entry.type === 'object') ?? definition
-    return object.properties[discriminator].const
-  })
+    return [object.properties[discriminator].const]
+  }
+  return values(schema.$defs[definitionName])
 }
 
 test('StrongFlow projection matrix covers every required field group and named Rust seam', () => {
@@ -132,10 +138,10 @@ test('StrongFlow projection matrix covers every required field group and named R
     assert.ok(section.fields.length > 0, `${section.id} needs public fields`)
     assert.equal(new Set(section.fields).size, section.fields.length, `${section.id} repeats fields`)
     assert.ok([
-      'approved-plan-review',
       'bound-runtime-events',
       'canonical-delivery',
       'canonical-publication',
+      'validated-plan-review',
     ].includes(section.source.kind), `${section.id} has an unknown source`)
     assert.ok(section.source.refs.length > 0, `${section.id} needs source references`)
     for (const path of section.source.refs) {
@@ -171,6 +177,18 @@ test('StrongFlow projection rules freeze binding, replay, redaction, and Web aut
   assert.equal(matrix.runtimeBinding.unboundEventPolicy, 'reject-before-projection')
   assert.equal(matrix.runtimeBinding.ambiguousEventPolicy, 'reject-before-projection')
   assert.equal(matrix.runtimeBinding.staleLeasePolicy, 'reject-before-persist-and-projection')
+
+  assert.deepEqual(matrix.readCut.exactCoordinates, [
+    'scope',
+    'deliveryId',
+    'deliveryRevision',
+    'runtimeLedgerRevision',
+    'runtimeAcceptedSequence',
+    'publicationRevision',
+  ])
+  assert.equal(matrix.readCut.authority, 'server-issued-authenticated-cursor')
+  assert.equal(matrix.readCut.partialPairPolicy, 'discard-and-reload')
+  assert.equal(matrix.readCut.generatedTimeAllowed, false)
 
   assert.deepEqual(matrix.dataPolicy.liveDiff.allowedFields, [
     'changedFileCount',
@@ -208,7 +226,7 @@ test('StrongFlow projection rules freeze binding, replay, redaction, and Web aut
   }
 })
 
-test('phase-one public contracts expose safe transport anchors and keep known detail gaps explicit', () => {
+test('canonical contracts close every StrongFlow transport finding', () => {
   const matrix = json(rulesPath)
   const domain = json(domainSchemaPath)
   const http = json(httpSchemaPath)
@@ -219,51 +237,83 @@ test('phase-one public contracts expose safe transport anchors and keep known de
   assert.ok(oneOfValues(http, 'QueryRequest', 'query').includes('runtime.projection.get'))
   assert.ok(oneOfValues(http, 'QueryRequest', 'query').includes('publication.list'))
   assert.ok(oneOfValues(events, 'ControlPlaneWebSocketEventPayload', 'type')
-    .includes('runtime-projection.appended.v1'))
-  assert.ok(oneOfValues(events, 'ControlPlaneWebSocketEventPayload', 'type')
-    .includes('delivery.changed.v1'))
+    .includes('runtime-projection.invalidated.v1'))
+  assert.equal(oneOfValues(events, 'ControlPlaneWebSocketEventPayload', 'type')
+    .includes('runtime-projection.appended.v1'), false)
 
-  const runtimeItem = domain.$defs.RuntimeProjectionItem
+  const queryResults = http.$defs.QueryResult.oneOf.map(branch => branch.$ref)
+  assert.ok(queryResults.includes('#/$defs/DeliveryDetailProjection'))
+  assert.equal(queryResults.includes('./domain.schema.json#/$defs/DeliveryProjection'), false)
+  assert.equal(http.$defs.DeliveryPage.properties.items.items.$ref,
+    './domain.schema.json#/$defs/DeliveryProjection')
+
+  const detail = http.$defs.DeliveryDetailProjection.properties
+  assert.equal(detail.readCursor.$ref,
+    './domain.schema.json#/$defs/StrongFlowReadCursor')
   for (const field of [
-    'productSessionId',
-    'workerSessionId',
-    'codexThreadId',
-    'leaseId',
-    'deliveryId',
-    'stageRunId',
-    'projectionSequence',
-    'projectionKind',
-    'summary',
-    'occurredAt',
-  ]) assert.ok(runtimeItem.properties[field], field)
-  assert.equal(runtimeItem.properties.unifiedDiff, undefined)
-  assert.equal(runtimeItem.properties.toolPayload, undefined)
+    'requirements',
+    'solutionReview',
+    'stages',
+    'tasks',
+    'attention',
+    'evidence',
+    'currentCandidate',
+    'verdict',
+    'publication',
+  ]) assert.ok(detail[field], field)
+
+  const runtime = domain.$defs.RuntimeProjectionSnapshot.properties
+  assert.ok(runtime.readCursor)
+  assert.ok(runtime.sessions)
+  assert.equal(runtime.items, undefined)
+  const session = domain.$defs.RuntimeSessionProjection.properties
+  for (const field of [
+    'plan',
+    'agents',
+    'agentEdges',
+    'activities',
+    'usage',
+    'recovery',
+    'diffSummary',
+  ]) assert.ok(session[field], field)
+  assert.equal(session.rawRuntimeLog, undefined)
+  assert.equal(session.toolPayload, undefined)
+  assert.deepEqual(Object.keys(domain.$defs.RuntimeDiffSummaryProjection.properties).sort(), [
+    'additions',
+    'changedFileCount',
+    'deletions',
+    'detailsVisible',
+    'sourceRef',
+  ])
 
   const findingIds = matrix.contractFindings.map(finding => finding.id)
   assert.equal(new Set(findingIds).size, findingIds.length)
   assert.deepEqual([...findingIds].sort(), REQUIRED_FINDING_IDS)
   for (const finding of matrix.contractFindings) {
-    assert.equal(finding.status, 'open')
+    assert.equal(finding.status, 'closed')
     assert.ok(finding.current.length > 0, finding.id)
     assert.ok(finding.target.length > 0, finding.id)
     assert.ok(finding.action.length > 0, finding.id)
+    assert.ok(finding.resolution.length > 0, finding.id)
     for (const path of finding.refs) assert.equal(existsSync(repositoryPath(path)), true, path)
   }
 
-  const deliveryFields = domain.$defs.DeliveryProjection.properties
-  assert.equal(deliveryFields.requirements, undefined)
-  assert.equal(deliveryFields.solution, undefined)
-  assert.equal(deliveryFields.stages, undefined)
-  assert.equal(deliveryFields.tasks, undefined)
-  assert.equal(deliveryFields.attention, undefined)
-  assert.equal(deliveryFields.evidence, undefined)
-  assert.equal(deliveryFields.verdict, undefined)
-  assert.equal(deliveryFields.publication, undefined)
+  const compact = domain.$defs.DeliveryProjection.properties
+  for (const field of [
+    'requirements',
+    'solution',
+    'solutionReview',
+    'stages',
+    'tasks',
+    'attention',
+    'evidence',
+    'verdict',
+    'publication',
+  ]) assert.equal(compact[field], undefined, field)
 
-  for (const field of ['plan', 'agents', 'activities', 'usage', 'evidence']) {
-    assert.equal(runtimeItem.properties[field], undefined, field)
-  }
-  assert.equal(executionPort.$defs.RuntimeEventMessage.properties.codexThreadId, undefined)
+  assert.ok(executionPort.$defs.RuntimeEventMessage.required.includes('codexThreadId'))
+  assert.ok(oneOfValues(executionPort, 'ExecutionPortMessage', 'kind')
+    .includes('session.binding'))
 })
 
 test('plain-language contract states reload, live Diff, and generated-Web boundaries', () => {
@@ -274,7 +324,7 @@ test('plain-language contract states reload, live Diff, and generated-Web bounda
     '执行中只显示 Diff 数量摘要',
     'Web 只使用生成的 HTTP 和 WebSocket 客户端',
     'Web 不连接 Execution Worker',
-    'WebSocket 只通知读取方刷新或追加只读内容',
+    'WebSocket 只通知读取方刷新',
   ]) assert.equal(contract.includes(phrase), true, phrase)
 })
 

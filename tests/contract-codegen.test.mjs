@@ -79,6 +79,9 @@ test('one canonical schema generation is deterministic and compiles for Rust and
   assert.match(typescript, /export type SchemaVersion = "winwincode\/v1"/u)
   assert.match(firstContents[0], /pub enum SchemaVersion \{/u)
   assert.match(firstContents[0], /    WinwincodeV1,/u)
+  assert.match(firstContents[0], /pub enum CreatedEventTypeValue \{/u)
+  assert.match(firstContents[0], /    Created,/u)
+  assert.match(firstContents[0], /pub type_value: CreatedEventTypeValue,/u)
   assert.match(
     typescript,
     /\/\*\*\n \* Read-only data shown by the fixture client\.\n \* It exercises multiline generated documentation\.\n \*\//u,

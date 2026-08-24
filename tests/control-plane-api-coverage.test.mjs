@@ -23,11 +23,17 @@ function definition(schema, ref) {
 }
 
 function specializations(schema, unionName, discriminator) {
-  return schema.$defs[unionName].oneOf.map(({ $ref }) => {
+  return [...new Set(schema.$defs[unionName].oneOf.flatMap(({ $ref }) => {
     const branch = definition(schema, $ref)
     const object = branch.allOf?.find(entry => entry.type === 'object') ?? branch
-    return object.properties[discriminator].const
-  })
+    if (object.properties?.[discriminator]?.const !== undefined) {
+      return [object.properties[discriminator].const]
+    }
+    return object.oneOf.flatMap(nested => {
+      const nestedObject = definition(schema, nested.$ref)
+      return nestedObject.properties[discriminator].const
+    })
+  }))]
 }
 
 function sorted(values) {

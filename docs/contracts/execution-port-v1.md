@@ -42,7 +42,7 @@ Attempt 或 Fencing 校验。
 | Worker → Control Plane | `worker.register`、`worker.capabilities`、`worker.heartbeat` |
 | Control Plane → Worker | `worker.registration_result`、`worker.heartbeat_ack` |
 | Control Plane → Worker | `job.dispatch`、`lease.renew`、`runtime.replay_request`、`job.cancel` |
-| Worker → Control Plane | `job.dispatch_result`、`runtime.event`、`job.cancel_ack`、`job.outcome` |
+| Worker → Control Plane | `job.dispatch_result`、`session.binding`、`runtime.event`、`job.cancel_ack`、`job.outcome` |
 | Worker → Control Plane | `artifact.open`、`artifact.chunk`、`model.open`、`model.ack` |
 | Control Plane → Worker | `artifact.ack`、`model.chunk` |
 | Worker → Control Plane | `input.request`、`approval.request` |
@@ -63,6 +63,13 @@ expiresAt
 
 `fencingToken` 使用十进制字符串，避免跨 Rust、JavaScript 和数据库时丢失 64 位整数
 精度。重新派发到另一个 Worker 实例或新的尝试时，Control Plane 必须使用更大的 token。
+
+Worker 接受 Job 并建立 CodexThread 后，先发送一条 `session.binding`。它把
+`ProductSessionId + WorkerSessionId + CodexThreadId` 绑定到当前
+`Job + attempt + Lease + fencingToken`。只有 Control Plane 已经接受并保存这条绑定后，
+对应的 `runtime.event` 才能进入持久化和 StrongFlow 投影。相同身份重发是幂等的；同一
+Job/Lease 改成另一条 Session 或 CodexThread 是冲突。`runtime.event.codexThreadId` 也必须
+与已接受绑定相同，不能从摘要或编码 payload 中猜测。
 
 ## 重试与恢复的固定结果
 
@@ -109,7 +116,7 @@ Heartbeat 只更新存活、容量和当前 Lease 进度，不隐式派发 Job�
 
 ## 可执行样本
 
-- `tests/fixtures/contracts/execution-port.valid.json` 为 25 种消息各提供一个合法样本，并为
+- `tests/fixtures/contracts/execution-port.valid.json` 为 26 种消息各提供一个合法样本，并为
   默认 Chat 与 Delivery Stage 各提供一个合法 `ExecutionScope`。
 - `tests/fixtures/contracts/execution-port.invalid.json` 固定缺失 Lease、越权写 Delivery、
   泄露 Credential、非法 sequence/fence、缺失重放点和传输字段泄露等拒绝样本。
