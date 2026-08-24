@@ -21,7 +21,7 @@ use super::{
 };
 use winwincode_domain::{
     CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ProductSessionId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 const MAX_CHANGED_PATHS: usize = 100_000;
@@ -76,7 +76,7 @@ pub struct ValidatedGitSnapshotFact {
     changed_paths: Vec<CandidatePathFact>,
     changed_hunks: Vec<CandidateHunkFact>,
     artifact_ref: String,
-    artifact_sha256: String,
+    artifact_digest: Sha256Digest,
     last_event_sequence: u64,
     finished_at_millis: u64,
     validation_seal: [u8; 32],
@@ -157,6 +157,14 @@ impl ValidatedGitSnapshotFact {
 
     pub(crate) fn changed_hunks(&self) -> &[CandidateHunkFact] {
         &self.changed_hunks
+    }
+
+    pub(crate) fn artifact_ref(&self) -> &str {
+        &self.artifact_ref
+    }
+
+    pub(crate) fn artifact_digest(&self) -> &Sha256Digest {
+        &self.artifact_digest
     }
 
     pub(crate) const fn last_event_sequence(&self) -> u64 {
@@ -317,7 +325,7 @@ struct GitSnapshotSealIdentity<'fact> {
     changed_paths: &'fact [CandidatePathFact],
     changed_hunks: &'fact [CandidateHunkFact],
     artifact_ref: &'fact str,
-    artifact_sha256: &'fact str,
+    artifact_digest: &'fact Sha256Digest,
     last_event_sequence: u64,
     finished_at_millis: u64,
 }
@@ -610,7 +618,11 @@ fn validate_git_snapshot_shape(
     ];
     if object_ids.iter().any(|value| !git_object_id(value))
         || !lowercase_sha256(&snapshot.diff_sha256)
-        || !lowercase_sha256(&snapshot.artifact_sha256)
+        || !snapshot
+            .artifact_digest
+            .0
+            .strip_prefix("sha256:")
+            .is_some_and(lowercase_sha256)
     {
         return Err(invalid_candidate(
             "sealed Git objects, diff, and artifact must use lowercase hexadecimal identities",
@@ -673,6 +685,11 @@ fn verify_terminal_snapshot_binding(
     outcome: &VerifiedTerminalOutcome,
     snapshot: &ValidatedGitSnapshotFact,
 ) -> Result<(), DeliveryValidationError> {
+    let last_event_sequence = i64::try_from(snapshot.last_event_sequence).ok();
+    let exact_artifact = outcome.artifacts().iter().any(|artifact| {
+        artifact.artifact_id.0 == snapshot.artifact_ref
+            && artifact.digest == snapshot.artifact_digest
+    });
     let exact = outcome.status() == TerminalOutcomeStatus::Succeeded
         && outcome.stage_run_id() == &producer.id
         && outcome.execution_job_id() == &binding.execution_job_id
@@ -682,6 +699,10 @@ fn verify_terminal_snapshot_binding(
         && outcome.fencing_token() == snapshot.fencing_token()
         && outcome.worker_id() == snapshot.worker_id()
         && outcome.worker_instance_id() == snapshot.worker_instance_id()
+        && outcome.codex_thread_id() == Some(snapshot.codex_thread_id())
+        && Some(outcome.last_event_sequence().0) == last_event_sequence
+        && outcome.finished_at_millis() == snapshot.finished_at_millis
+        && exact_artifact
         && snapshot.stage_run_id == producer.id
         && snapshot.session_binding_id == binding.id
         && snapshot.product_session_id == binding.product_session_id
@@ -723,7 +744,7 @@ fn seal_git_snapshot(
         changed_paths: &snapshot.changed_paths,
         changed_hunks: &snapshot.changed_hunks,
         artifact_ref: &snapshot.artifact_ref,
-        artifact_sha256: &snapshot.artifact_sha256,
+        artifact_digest: &snapshot.artifact_digest,
         last_event_sequence: snapshot.last_event_sequence,
         finished_at_millis: snapshot.finished_at_millis,
     };
@@ -781,8 +802,10 @@ fn stale_candidate(message: &str) -> DeliveryValidationError {
 pub(crate) mod test_support {
     use super::*;
     use crate::application::stage::{
-        ActiveLeaseIdentity, TerminalOutcomeStatus, fixture_verified_terminal_outcome,
+        ActiveLeaseIdentity, TerminalArtifactReference, TerminalOutcomeMetadata,
+        TerminalOutcomeStatus, fixture_verified_terminal_outcome,
     };
+    use winwincode_domain::{ArtifactId, ExecutionAckSequence, Sha256Digest};
 
     pub(crate) fn validated_git_snapshot(
         delivery: &Delivery,
@@ -870,7 +893,7 @@ pub(crate) mod test_support {
                 .collect(),
             changed_paths,
             artifact_ref: format!("artifact:job:{}", binding.execution_job_id.0),
-            artifact_sha256: "9".repeat(64),
+            artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
             last_event_sequence: 12,
             finished_at_millis: run.finished_at_millis.expect("fixture finished StageRun"),
             validation_seal: [0; 32],
@@ -895,6 +918,18 @@ pub(crate) mod test_support {
                 worker_session_id: snapshot.worker_session_id.clone(),
             },
             TerminalOutcomeStatus::Succeeded,
+            TerminalOutcomeMetadata {
+                codex_thread_id: Some(snapshot.codex_thread_id.clone()),
+                finished_at_millis: snapshot.finished_at_millis,
+                last_event_sequence: ExecutionAckSequence(
+                    i64::try_from(snapshot.last_event_sequence)
+                        .expect("fixture event sequence fits i64"),
+                ),
+                artifacts: vec![TerminalArtifactReference {
+                    artifact_id: ArtifactId(snapshot.artifact_ref.clone()),
+                    digest: snapshot.artifact_digest.clone(),
+                }],
+            },
         );
         let _ = delivery;
         FreezeCandidateFacts {
@@ -1030,6 +1065,30 @@ mod tests {
                 &FreezeCandidateFacts {
                     git_snapshot: other_job_snapshot,
                     terminal_outcome: current_outcome,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn candidate_rejects_snapshot_metadata_not_named_by_the_accepted_outcome() {
+        let delivery = writer_delivery();
+        let original = snapshot(&delivery);
+        let accepted_outcome = freeze_facts(&delivery, original.clone()).terminal_outcome;
+        let mut substituted_artifact = original;
+        substituted_artifact.artifact_ref = "artifact:job:foreign".into();
+        substituted_artifact.artifact_digest = Sha256Digest(format!("sha256:{}", "8".repeat(64)));
+        substituted_artifact.last_event_sequence += 1;
+        substituted_artifact.validation_seal =
+            seal_git_snapshot(&substituted_artifact).expect("substituted sealed artifact");
+
+        assert!(
+            freeze_delivery_candidate(
+                &delivery,
+                &FreezeCandidateFacts {
+                    git_snapshot: substituted_artifact,
+                    terminal_outcome: accepted_outcome,
                 },
             )
             .is_err()
