@@ -394,7 +394,7 @@
     },
     {
       "id": "stage.atomic_handoff",
-      "statement": "Starting a legal next stage settles the bound previous StageRun and appends the next run, task state, review Attention, and execution intent in one command transaction.",
+      "statement": "Starting a legal next stage first rechecks the successful outcome against the authoritative current lease, then settles the bound previous StageRun and appends the next run, task state, review Attention, and execution intent in one command transaction.",
       "refs": [
         "docs/contracts/control-plane-storage-lifecycle.md",
         "packages/strongflow/src/delivery-service.ts"
@@ -802,6 +802,7 @@
           "verification_progress_stops_after_required_roles_without_optional_adversary",
           "ordinary_success_must_use_the_atomic_stage_handoff",
           "terminal_outcome_rejects_a_lease_that_changed_after_verification",
+          "successful_handoff_rejects_a_lease_that_changed_after_verification",
           "unsuccessful_terminal_outcome_settles_without_advancing_delivery",
           "worker_can_cancel_and_finish_before_reporting_a_codex_thread"
         ]

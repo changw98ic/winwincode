@@ -38,6 +38,7 @@ pub struct AdvanceStageInput {
     pub identities: NewStageIdentities,
     pub review: Option<ReviewAttentionSeed>,
     pub previous_outcome: Option<VerifiedTerminalOutcome>,
+    pub current_lease: Option<ActiveLeaseIdentity>,
     pub now_millis: u64,
 }
 
@@ -332,7 +333,12 @@ fn select_next_stage<'delivery>(
     }
     let (stage, next_status, actor_type) =
         legal_transition(delivery.snapshot().status, previous.map(|run| run.stage))?;
-    validate_previous_outcome(delivery, previous, input.previous_outcome.as_ref())?;
+    validate_previous_outcome(
+        delivery,
+        previous,
+        input.previous_outcome.as_ref(),
+        input.current_lease.as_ref(),
+    )?;
     let delivery_task_id = select_task_id(delivery, stage, previous)?;
     let role = role_for_stage(delivery, stage, previous, delivery_task_id.as_ref())?;
     validate_stage_executor(stage, actor_type, role)?;
@@ -360,14 +366,15 @@ fn validate_previous_outcome(
     delivery: &Delivery,
     previous: Option<&StageRun>,
     outcome: Option<&VerifiedTerminalOutcome>,
+    current_lease: Option<&ActiveLeaseIdentity>,
 ) -> Result<(), CoordinationError> {
     let Some(previous) = previous else {
-        return if outcome.is_none() {
+        return if outcome.is_none() && current_lease.is_none() {
             Ok(())
         } else {
             Err(CoordinationError::new(
                 CoordinationErrorCode::InvalidRequest,
-                "a terminal outcome was supplied without an active StageRun",
+                "a terminal outcome or lease was supplied without an active StageRun",
             ))
         };
     };
@@ -378,6 +385,18 @@ fn validate_previous_outcome(
             "an active StageRun requires a verified terminal Worker outcome before handoff",
         )
     })?;
+    let current_lease = current_lease.ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "an active StageRun handoff requires the authoritative current lease identity",
+        )
+    })?;
+    if outcome.lease_identity != *current_lease {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "successful terminal outcome no longer matches the authoritative current lease",
+        ));
+    }
     let exact = outcome.stage_run_id == previous.id
         && outcome.lease_identity.execution_job_id == binding.execution_job_id
         && binding.worker_session_id.as_ref() == Some(&outcome.lease_identity.worker_session_id)
