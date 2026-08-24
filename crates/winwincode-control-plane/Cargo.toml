@@ -13,6 +13,7 @@ include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 serde_json.workspace = true
 sha2.workspace = true
 winwincode-api.workspace = true
+winwincode-delivery = { path = "../winwincode-delivery" }
 winwincode-domain.workspace = true
 winwincode-storage = { path = "../winwincode-storage" }
 

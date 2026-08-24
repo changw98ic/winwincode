@@ -23,6 +23,14 @@ Control Plane has a renewable lease with an explicit stale threshold; graceful
 and failed lifecycle cleanup remains limited to the current instance's exact
 marker and path.
 
-It does not contain an HTTP server, Delivery domain logic, or any Codex Core
-dependency. Those modules arrive in later migration tasks through the accepted
-Control Plane interfaces.
+`delivery_execution` maps one validated Delivery stage effect to the generated
+`ExecutionJob` and returns a `PendingDeliveryExecution`. Its transaction port
+must commit the Delivery journal, command receipt, and job outbox intent before
+dispatch. The durable receipt carries the original event and job; the adapter
+validates that job again, dispatches that exact value, and only then marks the
+outbox event published. Commit, dispatch, and acknowledgement failures remain
+distinct so restart can replay pending work without inventing a new job.
+
+The crate does not contain an HTTP server, Codex scheduling state, or any Codex
+Core dependency. Delivery transitions remain in `winwincode-delivery`; this
+crate only composes them with generated Control Plane and ExecutionPort types.
