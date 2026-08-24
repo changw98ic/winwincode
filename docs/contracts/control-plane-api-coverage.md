@@ -31,3 +31,7 @@ HTTP、WebSocket 和 ExecutionPort 合同。`tests/control-plane-api-coverage.te
 矩阵同时固定边界：WebSocket 不接业务写入；Worker 不写 DeliveryVerdict 或数据库；Web
 和 Worker 都拿不到长期 Provider Credential；公开合同只允许 `codexThreadId` 作为 Codex
 会话引用，不暴露 Turn、Plan 或 Agent 内部对象。
+
+公共错误的 `details` 仍可携带递归的机器可读事实，但每层对象都应用同一份敏感字段
+拒绝规则。合同样本包含直接和嵌套泄露两类反例，生成的 Rust 与 TypeScript 类型也必须
+能够编译这一递归结构。

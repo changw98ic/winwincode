@@ -28,6 +28,39 @@
       "type": "string",
       "pattern": "^req_[a-z0-9]+$"
     },
+    "RecursiveJsonObject": {
+      "description": "A recursive object map used to exercise generated type recursion.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RecursiveJsonValue"
+      }
+    },
+    "RecursiveJsonValue": {
+      "description": "A recursive JSON value used to exercise arrays and object maps.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecursiveJsonValue"
+          }
+        },
+        {
+          "$ref": "#/$defs/RecursiveJsonObject"
+        }
+      ]
+    },
     "Revision": {
       "description": "Expected canonical state revision.",
       "type": "integer",

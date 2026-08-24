@@ -99,3 +99,7 @@ revision、ProductSession、WorkerSession、ExecutionJob 和 InputRequest 的完
 
 只有 `RATE_LIMITED` 和 `SERVICE_UNAVAILABLE` 标记为可重试。凭据查询只返回引用和
 `secretState`，不会返回密钥内容或 Vault 内部定位信息。
+
+`ErrorEnvelope.details` 可以保存递归 JSON 事实，但每一层对象都会拒绝凭据、原始模型
+请求、工具载荷、数据库记录和 Codex 内部对象等越权字段名；嵌套对象和数组不能绕过
+这项检查。

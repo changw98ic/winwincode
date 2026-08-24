@@ -252,6 +252,48 @@
           "details": {}
         }
       }
+    },
+    {
+      "name": "error.secret-bearing-detail",
+      "definition": "ErrorEnvelope",
+      "category": "secret",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "INTERNAL_ERROR",
+          "message": "Provider request failed.",
+          "retryable": false,
+          "details": {
+            "apiKey": "must-not-cross-the-boundary"
+          }
+        }
+      }
+    },
+    {
+      "name": "error.nested-secret-bearing-detail",
+      "definition": "ErrorEnvelope",
+      "category": "secret",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "INTERNAL_ERROR",
+          "message": "Provider request failed.",
+          "retryable": false,
+          "details": {
+            "provider": {
+              "diagnostics": [
+                {
+                  "apiKey": "must-not-cross-the-boundary"
+                }
+              ]
+            }
+          }
+        }
+      }
     }
   ]
 }
