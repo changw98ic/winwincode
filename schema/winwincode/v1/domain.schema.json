@@ -786,9 +786,11 @@
         "RESOURCE_NOT_FOUND",
         "IDEMPOTENCY_CONFLICT",
         "REVISION_CONFLICT",
+        "CANDIDATE_STALE",
         "WRONG_STATE",
         "RATE_LIMITED",
         "SERVICE_UNAVAILABLE",
+        "TRUSTED_FACTS_UNAVAILABLE",
         "INTERNAL_ERROR"
       ]
     },
@@ -801,6 +803,7 @@
         "RESOURCE_NOT_FOUND",
         "IDEMPOTENCY_CONFLICT",
         "REVISION_CONFLICT",
+        "CANDIDATE_STALE",
         "WRONG_STATE",
         "INTERNAL_ERROR"
       ]
@@ -809,7 +812,8 @@
       "type": "string",
       "enum": [
         "RATE_LIMITED",
-        "SERVICE_UNAVAILABLE"
+        "SERVICE_UNAVAILABLE",
+        "TRUSTED_FACTS_UNAVAILABLE"
       ]
     },
     "ErrorDetailValue": {

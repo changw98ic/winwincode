@@ -1,17 +1,65 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Delivery stage coordination application service.
+//!
+//! Raw Scheduler and Worker facts are deliberately not an external production
+//! API while their authoritative Phase 4 adapters do not exist.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::ActiveLeaseIdentity;
+//!
+//! let _caller_built_lease = ActiveLeaseIdentity {
+//!     execution_job_id: todo!(),
+//!     attempt: 1,
+//!     lease_id: todo!(),
+//!     fencing_token: todo!(),
+//!     worker_id: todo!(),
+//!     worker_instance_id: todo!(),
+//!     worker_session_id: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::TerminalWorkerOutcome;
+//!
+//! let _caller_built_outcome = TerminalWorkerOutcome {
+//!     stage_run_id: todo!(),
+//!     execution_job_id: todo!(),
+//!     attempt: 1,
+//!     lease_id: todo!(),
+//!     fencing_token: todo!(),
+//!     worker_id: todo!(),
+//!     worker_instance_id: todo!(),
+//!     worker_session_id: todo!(),
+//!     status: todo!(),
+//!     metadata: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! let _caller_callable_resolver =
+//!     winwincode_delivery::application::stage::verify_terminal_outcome;
+//! ```
 
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionJobId, FencingToken, LeaseId, ProductSessionId, Sha256Digest, StageRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId,
 };
 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
     DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, SessionBinding,
     SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
+    rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::domain::{MAX_COLLECTION_LENGTH, MAX_SAFE_INTEGER};
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
@@ -39,6 +87,9 @@ pub struct AdvanceStageInput {
     pub review: Option<ReviewAttentionSeed>,
     pub previous_outcome: Option<VerifiedTerminalOutcome>,
     pub current_lease: Option<ActiveLeaseIdentity>,
+    /// Exact current-candidate remediation authority. Required only for a
+    /// `Reworking` stage and consumed into the immutable dispatch intent.
+    pub rework_authorization: Option<Box<ReworkAuthorization>>,
     pub now_millis: u64,
 }
 
@@ -53,27 +104,93 @@ pub enum TerminalOutcomeStatus {
 /// Scheduler-owned lease identity loaded from durable Control Plane state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveLeaseIdentity {
-    pub execution_job_id: ExecutionJobId,
-    pub attempt: u64,
-    pub lease_id: LeaseId,
-    pub fencing_token: FencingToken,
-    pub worker_id: WorkerId,
-    pub worker_instance_id: WorkerInstanceId,
-    pub worker_session_id: WorkerSessionId,
+    execution_job_id: ExecutionJobId,
+    attempt: u64,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    worker_session_id: WorkerSessionId,
+}
+
+impl ActiveLeaseIdentity {
+    pub fn execution_job_id(&self) -> &ExecutionJobId {
+        &self.execution_job_id
+    }
+
+    pub const fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    pub fn lease_id(&self) -> &LeaseId {
+        &self.lease_id
+    }
+
+    pub fn fencing_token(&self) -> &FencingToken {
+        &self.fencing_token
+    }
+
+    pub fn worker_id(&self) -> &WorkerId {
+        &self.worker_id
+    }
+
+    pub fn worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.worker_instance_id
+    }
+
+    pub fn worker_session_id(&self) -> &WorkerSessionId {
+        &self.worker_session_id
+    }
 }
 
 /// Terminal fact reported by Worker through `ExecutionPort`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalWorkerOutcome {
-    pub stage_run_id: StageRunId,
-    pub execution_job_id: ExecutionJobId,
-    pub attempt: u64,
-    pub lease_id: LeaseId,
-    pub fencing_token: FencingToken,
-    pub worker_id: WorkerId,
-    pub worker_instance_id: WorkerInstanceId,
-    pub worker_session_id: WorkerSessionId,
-    pub status: TerminalOutcomeStatus,
+    stage_run_id: StageRunId,
+    execution_job_id: ExecutionJobId,
+    attempt: u64,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    worker_session_id: WorkerSessionId,
+    status: TerminalOutcomeStatus,
+    metadata: TerminalOutcomeMetadata,
+}
+
+/// Bounded facts carried by the accepted Worker `job.outcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalOutcomeMetadata {
+    codex_thread_id: Option<CodexThreadId>,
+    finished_at_millis: u64,
+    last_event_sequence: ExecutionAckSequence,
+    artifacts: Vec<TerminalArtifactReference>,
+}
+
+impl TerminalOutcomeMetadata {
+    pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
+        self.codex_thread_id.as_ref()
+    }
+
+    pub const fn finished_at_millis(&self) -> u64 {
+        self.finished_at_millis
+    }
+
+    pub fn last_event_sequence(&self) -> &ExecutionAckSequence {
+        &self.last_event_sequence
+    }
+
+    pub fn artifacts(&self) -> &[TerminalArtifactReference] {
+        &self.artifacts
+    }
+}
+
+/// One immutable Artifact identity named by the accepted Worker outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalArtifactReference {
+    pub artifact_id: ArtifactId,
+    pub digest: Sha256Digest,
 }
 
 /// A terminal fact that matched the current `StageRun`, `SessionBinding`, and
@@ -83,6 +200,7 @@ pub struct VerifiedTerminalOutcome {
     stage_run_id: StageRunId,
     lease_identity: ActiveLeaseIdentity,
     status: TerminalOutcomeStatus,
+    metadata: TerminalOutcomeMetadata,
 }
 
 impl VerifiedTerminalOutcome {
@@ -98,12 +216,59 @@ impl VerifiedTerminalOutcome {
         &self.lease_identity.worker_session_id
     }
 
+    pub fn lease_id(&self) -> &LeaseId {
+        &self.lease_identity.lease_id
+    }
+
+    pub fn fencing_token(&self) -> &FencingToken {
+        &self.lease_identity.fencing_token
+    }
+
+    pub fn worker_id(&self) -> &WorkerId {
+        &self.lease_identity.worker_id
+    }
+
+    pub fn worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.lease_identity.worker_instance_id
+    }
+
     pub const fn attempt(&self) -> u64 {
         self.lease_identity.attempt
     }
 
     pub const fn status(&self) -> TerminalOutcomeStatus {
         self.status
+    }
+
+    pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
+        self.metadata.codex_thread_id.as_ref()
+    }
+
+    pub const fn finished_at_millis(&self) -> u64 {
+        self.metadata.finished_at_millis
+    }
+
+    pub fn last_event_sequence(&self) -> &ExecutionAckSequence {
+        &self.metadata.last_event_sequence
+    }
+
+    pub fn artifacts(&self) -> &[TerminalArtifactReference] {
+        &self.metadata.artifacts
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn fixture_verified_terminal_outcome(
+    stage_run_id: StageRunId,
+    lease_identity: ActiveLeaseIdentity,
+    status: TerminalOutcomeStatus,
+    metadata: TerminalOutcomeMetadata,
+) -> VerifiedTerminalOutcome {
+    VerifiedTerminalOutcome {
+        stage_run_id,
+        lease_identity,
+        status,
+        metadata,
     }
 }
 
@@ -113,7 +278,8 @@ impl VerifiedTerminalOutcome {
 ///
 /// Fails closed when any Delivery, job, attempt, Worker, lease, instance, or
 /// fencing identity differs.
-pub fn verify_terminal_outcome(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn verify_terminal_outcome(
     delivery: &Delivery,
     lease: &ActiveLeaseIdentity,
     outcome: TerminalWorkerOutcome,
@@ -136,6 +302,7 @@ pub fn verify_terminal_outcome(
         ));
     }
     let binding = exact_binding(delivery, run, true)?;
+    validate_terminal_metadata(run, binding, &outcome.metadata)?;
     let exact = outcome.stage_run_id == run.id
         && outcome.execution_job_id == binding.execution_job_id
         && outcome.execution_job_id == lease.execution_job_id
@@ -157,7 +324,195 @@ pub fn verify_terminal_outcome(
         stage_run_id: outcome.stage_run_id,
         lease_identity: lease.clone(),
         status: outcome.status,
+        metadata: outcome.metadata,
     })
+}
+
+/// Construction helpers used only by Rust integration tests. Production
+/// Control Plane builds do not enable this feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support {
+    use super::{
+        ActiveLeaseIdentity, CodexThreadId, CoordinationError, Delivery, ExecutionAckSequence,
+        ExecutionJobId, FencingToken, LeaseId, Sha256Digest, StageRunId, TerminalArtifactReference,
+        TerminalOutcomeMetadata, TerminalOutcomeStatus, TerminalWorkerOutcome,
+        VerifiedTerminalOutcome, WorkerId, WorkerInstanceId, WorkerSessionId,
+    };
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn active_lease_identity(
+        execution_job_id: ExecutionJobId,
+        attempt: u64,
+        lease_id: LeaseId,
+        fencing_token: FencingToken,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        worker_session_id: WorkerSessionId,
+    ) -> ActiveLeaseIdentity {
+        ActiveLeaseIdentity {
+            execution_job_id,
+            attempt,
+            lease_id,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            worker_session_id,
+        }
+    }
+
+    pub fn terminal_outcome_metadata(
+        codex_thread_id: Option<CodexThreadId>,
+        finished_at_millis: u64,
+        last_event_sequence: ExecutionAckSequence,
+        artifacts: Vec<TerminalArtifactReference>,
+    ) -> TerminalOutcomeMetadata {
+        TerminalOutcomeMetadata {
+            codex_thread_id,
+            finished_at_millis,
+            last_event_sequence,
+            artifacts,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn terminal_worker_outcome(
+        stage_run_id: StageRunId,
+        execution_job_id: ExecutionJobId,
+        attempt: u64,
+        lease_id: LeaseId,
+        fencing_token: FencingToken,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        worker_session_id: WorkerSessionId,
+        status: TerminalOutcomeStatus,
+        metadata: TerminalOutcomeMetadata,
+    ) -> TerminalWorkerOutcome {
+        TerminalWorkerOutcome {
+            stage_run_id,
+            execution_job_id,
+            attempt,
+            lease_id,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            worker_session_id,
+            status,
+            metadata,
+        }
+    }
+
+    pub fn verify_terminal_outcome(
+        delivery: &Delivery,
+        lease: &ActiveLeaseIdentity,
+        outcome: TerminalWorkerOutcome,
+    ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+        super::verify_terminal_outcome(delivery, lease, outcome)
+    }
+
+    pub fn set_terminal_codex_thread_id(
+        outcome: &mut TerminalWorkerOutcome,
+        codex_thread_id: Option<CodexThreadId>,
+    ) {
+        outcome.metadata.codex_thread_id = codex_thread_id;
+    }
+
+    pub fn set_terminal_last_event_sequence(
+        outcome: &mut TerminalWorkerOutcome,
+        sequence: ExecutionAckSequence,
+    ) {
+        outcome.metadata.last_event_sequence = sequence;
+    }
+
+    pub fn set_first_terminal_artifact_digest(
+        outcome: &mut TerminalWorkerOutcome,
+        digest: Sha256Digest,
+    ) {
+        outcome
+            .metadata
+            .artifacts
+            .first_mut()
+            .expect("terminal test fixture requires an Artifact")
+            .digest = digest;
+    }
+
+    pub fn duplicate_first_terminal_artifact(outcome: &mut TerminalWorkerOutcome) {
+        let duplicate = outcome
+            .metadata
+            .artifacts
+            .first()
+            .expect("terminal test fixture requires an Artifact")
+            .clone();
+        outcome.metadata.artifacts.push(duplicate);
+    }
+
+    pub fn terminal_metadata(outcome: &TerminalWorkerOutcome) -> &TerminalOutcomeMetadata {
+        &outcome.metadata
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn validate_terminal_metadata(
+    run: &StageRun,
+    binding: &SessionBinding,
+    metadata: &TerminalOutcomeMetadata,
+) -> Result<(), CoordinationError> {
+    let max_sequence = i64::try_from(MAX_SAFE_INTEGER).unwrap_or(i64::MAX);
+    if metadata.finished_at_millis > MAX_SAFE_INTEGER
+        || metadata.finished_at_millis < run.started_at_millis
+        || metadata.finished_at_millis < binding.bound_at_millis
+        || !(0..=max_sequence).contains(&metadata.last_event_sequence.0)
+        || metadata.codex_thread_id != binding.codex_thread_id
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "terminal Worker metadata does not match the StageRun time, CodexThread, or event sequence",
+        ));
+    }
+    if metadata.artifacts.len() > MAX_COLLECTION_LENGTH {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "terminal Worker artifacts exceed the supported limit",
+        ));
+    }
+    let mut artifact_ids = HashSet::with_capacity(metadata.artifacts.len());
+    for artifact in &metadata.artifacts {
+        let valid_digest = artifact
+            .digest
+            .0
+            .strip_prefix("sha256:")
+            .is_some_and(lowercase_sha256);
+        if !portable_execution_identifier(&artifact.artifact_id.0)
+            || !artifact_ids.insert(artifact.artifact_id.0.as_str())
+            || !valid_digest
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::InvalidRequest,
+                "terminal Worker artifacts must have unique identities and lowercase SHA-256 digests",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn portable_execution_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 200
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'@' | b'-')
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +526,49 @@ pub struct ExecutionIntent {
     pub role: String,
     pub attempt: u64,
     pub goal: String,
+    rework_authorization: Option<Box<ReworkAuthorization>>,
+    validation_seal: Sha256Digest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionIntentSealIdentity<'intent> {
+    delivery: &'intent DeliverySnapshot,
+    execution_job_id: &'intent ExecutionJobId,
+    product_session_id: &'intent ProductSessionId,
+    delivery_id: &'intent DeliveryId,
+    delivery_task_id: Option<&'intent DeliveryTaskId>,
+    stage_run_id: &'intent StageRunId,
+    stage: DeliveryStage,
+    role: &'intent str,
+    attempt: u64,
+    goal: &'intent str,
+    rework_authorization_digest: Option<&'intent Sha256Digest>,
+}
+
+impl ExecutionIntent {
+    pub fn rework_authorization(&self) -> Option<&ReworkAuthorization> {
+        self.rework_authorization.as_deref()
+    }
+
+    /// Confirms this intent is the unchanged output of the Delivery
+    /// application service for the exact post-advance snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects field mutation, authorization replacement, or pairing the
+    /// intent with another Delivery snapshot before durable publication.
+    pub fn validate_for_delivery(&self, delivery: &Delivery) -> Result<(), CoordinationError> {
+        let expected = seal_execution_intent(delivery.snapshot(), self)?;
+        if self.validation_seal == expected {
+            Ok(())
+        } else {
+            Err(CoordinationError::new(
+                CoordinationErrorCode::BindingConflict,
+                "ExecutionIntent changed after the Delivery stage was prepared",
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,12 +576,115 @@ pub enum StageAdvanceEffect {
     Dispatch(ExecutionIntent),
     Review(AttentionItemId),
     Resume(ExecutionIntent),
+    Clarify(ReworkClarificationReason),
+}
+
+/// Immutable outbox projection for a bounded rework decision that requires
+/// human clarification instead of another Worker job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryReworkClarifiedEvent {
+    pub schema_version: u8,
+    pub delivery_id: DeliveryId,
+    pub delivery_revision: u64,
+    pub reason: ReworkClarificationReason,
+    pub occurred_at_millis: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageAdvanceResult {
     pub delivery: Delivery,
     pub effect: StageAdvanceEffect,
+    source_delivery: Delivery,
+    sealed_delivery: Delivery,
+    sealed_effect: StageAdvanceEffect,
+    kind: StageAdvanceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageAdvanceKind {
+    Start,
+    Resume,
+    Clarify,
+}
+
+impl StageAdvanceResult {
+    /// Checks that the public projection still matches the application-owned
+    /// transition. Callers may inspect the projection, but cannot turn an
+    /// edited copy into stage-start authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict when either the Delivery or execution effect was
+    /// changed after [`advance`] created this result.
+    pub fn validate_projection(&self) -> Result<(), CoordinationError> {
+        if self.delivery != self.sealed_delivery || self.effect != self.sealed_effect {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "stage advance projection differs from its sealed application transition",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_start_source(
+        &self,
+        current: &Delivery,
+    ) -> Result<(), CoordinationError> {
+        self.validate_projection()?;
+        if self.kind != StageAdvanceKind::Start {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "only a newly selected stage can be committed as stage.started",
+            ));
+        }
+        if self.source_delivery != *current {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::RevisionConflict,
+                "stage advance source is not the exact current Delivery",
+            ));
+        }
+        if self.delivery.id() != current.id()
+            || self.delivery.revision() != current.revision().saturating_add(1)
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "stage advance result is not the next revision of its source Delivery",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_rework_clarification_source(
+        &self,
+        current: &Delivery,
+    ) -> Result<(), CoordinationError> {
+        self.validate_projection()?;
+        if self.kind != StageAdvanceKind::Clarify
+            || !matches!(self.effect, StageAdvanceEffect::Clarify(_))
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "only a derived bounded-rework decision can be committed as rework.clarified",
+            ));
+        }
+        if self.source_delivery != *current {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::RevisionConflict,
+                "rework clarification source is not the exact current Delivery",
+            ));
+        }
+        if self.delivery.id() != current.id()
+            || self.delivery.revision() != current.revision().saturating_add(1)
+            || self.delivery.snapshot().status != DeliveryStatus::Clarifying
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "rework clarification is not the next Clarifying revision of its source Delivery",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,15 +774,107 @@ pub fn advance(
     let mut snapshot = delivery.clone().into_snapshot();
     snapshot.revision += 1;
     snapshot.status = next.next_status;
-    settle_previous_run(&mut snapshot, next.previous, input.now_millis)?;
+    settle_previous_run(
+        &mut snapshot,
+        next.previous,
+        input.previous_outcome.as_ref(),
+    )?;
     start_selected_task(&mut snapshot, &next)?;
+    if next.stage == DeliveryStage::Reworking {
+        crate::domain::rework::invalidate_candidate_authorization_for_writer_start(&mut snapshot);
+    }
     snapshot.stage_runs.push(run);
     snapshot.updated_at_millis = input.now_millis;
     let effect = append_stage_effect(delivery, &mut snapshot, &next, input)?;
-    let delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
+    let advanced_delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
         CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
     })?;
-    Ok(StageAdvanceResult { delivery, effect })
+    Ok(StageAdvanceResult {
+        source_delivery: delivery.clone(),
+        sealed_delivery: advanced_delivery.clone(),
+        sealed_effect: effect.clone(),
+        delivery: advanced_delivery,
+        effect,
+        kind: StageAdvanceKind::Start,
+    })
+}
+
+/// Consumes the sealed precise-rework decision instead of letting a caller
+/// choose a task or silently ignore a clarification result.
+///
+/// A start decision delegates to [`advance`] with the exact authorization. A
+/// bounded/repeated failure changes the Delivery to `Clarifying` without
+/// creating a remediator `StageRun`, `SessionBinding`, or `ExecutionJob`.
+///
+/// # Errors
+///
+/// Rejects a stale revision, non-reworking Delivery, active run, unresolved
+/// Attention, or an input that tries to combine another authorization or
+/// terminal/review facts with the sealed decision.
+pub fn advance_rework(
+    delivery: &Delivery,
+    mut input: AdvanceStageInput,
+    decision: ReworkDecision,
+) -> Result<StageAdvanceResult, CoordinationError> {
+    if input.rework_authorization.is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "advance_rework owns the sealed authorization input",
+        ));
+    }
+    match decision {
+        ReworkDecision::Start(authorization) => {
+            input.rework_authorization = Some(authorization);
+            advance(delivery, input)
+        }
+        ReworkDecision::Clarify(clarification) => {
+            clarification
+                .validate_for_transition(delivery)
+                .map_err(|error| {
+                    CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+                })?;
+            let reason = clarification.reason();
+            if delivery.revision() != input.expected_revision {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::RevisionConflict,
+                    "Delivery revision changed before rework clarification",
+                ));
+            }
+            require_mutation_time(delivery, input.now_millis)?;
+            let invalid_input = input.review.is_some()
+                || input.previous_outcome.is_some()
+                || input.current_lease.is_some()
+                || delivery.snapshot().status != DeliveryStatus::Reworking
+                || delivery.snapshot().stage_runs.iter().any(is_active)
+                || delivery
+                    .snapshot()
+                    .attention_items
+                    .iter()
+                    .any(|item| item.blocking && item.status == AttentionItemStatus::Open);
+            if invalid_input {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::WrongState,
+                    "rework clarification requires one idle, unblocked Reworking Delivery",
+                ));
+            }
+            let mut snapshot = delivery.clone().into_snapshot();
+            snapshot.status = DeliveryStatus::Clarifying;
+            snapshot.revision += 1;
+            snapshot.updated_at_millis = input.now_millis;
+            let clarified_delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+            })?;
+            let effect = StageAdvanceEffect::Clarify(reason);
+            Ok(StageAdvanceResult {
+                source_delivery: delivery.clone(),
+                sealed_delivery: clarified_delivery.clone(),
+                sealed_effect: effect.clone(),
+                delivery: clarified_delivery,
+                effect,
+                kind: StageAdvanceKind::Clarify,
+            })
+        }
+    }
 }
 
 struct NextStage<'delivery> {
@@ -338,19 +931,28 @@ fn select_next_stage<'delivery>(
         previous,
         input.previous_outcome.as_ref(),
         input.current_lease.as_ref(),
+        input.now_millis,
     )?;
-    let delivery_task_id = select_task_id(delivery, stage, previous)?;
+    let rework_authorization = validate_rework_authorization(delivery, stage, input)?;
+    let delivery_task_id = select_task_id(delivery, stage, previous, rework_authorization)?;
     let role = role_for_stage(delivery, stage, previous, delivery_task_id.as_ref())?;
     validate_stage_executor(stage, actor_type, role)?;
-    let attempt = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| {
-            run.stage == stage && run.role == role && run.delivery_task_id == delivery_task_id
-        })
-        .count() as u64
-        + 1;
+    let attempt = rework_authorization.map_or_else(
+        || {
+            delivery
+                .snapshot()
+                .stage_runs
+                .iter()
+                .filter(|run| {
+                    run.stage == stage
+                        && run.role == role
+                        && run.delivery_task_id == delivery_task_id
+                })
+                .count() as u64
+                + 1
+        },
+        ReworkAuthorization::next_attempt,
+    );
     Ok(NextStage {
         previous,
         stage,
@@ -362,11 +964,41 @@ fn select_next_stage<'delivery>(
     })
 }
 
+fn validate_rework_authorization<'input>(
+    delivery: &Delivery,
+    stage: DeliveryStage,
+    input: &'input AdvanceStageInput,
+) -> Result<Option<&'input ReworkAuthorization>, CoordinationError> {
+    match (stage, input.rework_authorization.as_deref()) {
+        (DeliveryStage::Reworking, Some(authorization)) => {
+            authorization
+                .validate_for_dispatch(delivery)
+                .map_err(|error| {
+                    CoordinationError::new(
+                        CoordinationErrorCode::Conflict,
+                        format!("rework dispatch authorization is stale: {error}"),
+                    )
+                })?;
+            Ok(Some(authorization))
+        }
+        (DeliveryStage::Reworking, None) => Err(CoordinationError::new(
+            CoordinationErrorCode::AttentionRequired,
+            "rework dispatch requires a sealed current-candidate authorization",
+        )),
+        (_, Some(_)) => Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "rework authorization cannot be attached to a non-reworking stage",
+        )),
+        (_, None) => Ok(None),
+    }
+}
+
 fn validate_previous_outcome(
     delivery: &Delivery,
     previous: Option<&StageRun>,
     outcome: Option<&VerifiedTerminalOutcome>,
     current_lease: Option<&ActiveLeaseIdentity>,
+    handoff_at_millis: u64,
 ) -> Result<(), CoordinationError> {
     let Some(previous) = previous else {
         return if outcome.is_none() && current_lease.is_none() {
@@ -400,7 +1032,10 @@ fn validate_previous_outcome(
     let exact = outcome.stage_run_id == previous.id
         && outcome.lease_identity.execution_job_id == binding.execution_job_id
         && binding.worker_session_id.as_ref() == Some(&outcome.lease_identity.worker_session_id)
+        && binding.codex_thread_id.as_ref() == outcome.codex_thread_id()
         && outcome.lease_identity.attempt == previous.attempt
+        && outcome.finished_at_millis() >= previous.started_at_millis
+        && outcome.finished_at_millis() <= handoff_at_millis
         && outcome.status == TerminalOutcomeStatus::Succeeded;
     if exact {
         Ok(())
@@ -415,9 +1050,18 @@ fn validate_previous_outcome(
 fn settle_previous_run(
     snapshot: &mut DeliverySnapshot,
     previous: Option<&StageRun>,
-    finished_at_millis: u64,
+    outcome: Option<&VerifiedTerminalOutcome>,
 ) -> Result<(), CoordinationError> {
     if let Some(previous) = previous {
+        let finished_at_millis = outcome
+            .filter(|outcome| outcome.stage_run_id() == &previous.id)
+            .map(VerifiedTerminalOutcome::finished_at_millis)
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::WrongState,
+                    "the previous StageRun has no exact verified finish time",
+                )
+            })?;
         let stored = snapshot
             .stage_runs
             .iter_mut()
@@ -548,7 +1192,7 @@ fn append_execution_effect(
         codex_thread_id: None,
         bound_at_millis: input.now_millis,
     });
-    Ok(StageAdvanceEffect::Dispatch(ExecutionIntent {
+    let mut intent = ExecutionIntent {
         execution_job_id: input.identities.execution_job_id,
         product_session_id: input.product_session_id,
         delivery_id: delivery.id().clone(),
@@ -558,7 +1202,43 @@ fn append_execution_effect(
         role: next.role.to_owned(),
         attempt: next.attempt,
         goal: goal_for_task(delivery, next.delivery_task_id.as_ref()),
-    }))
+        rework_authorization: input.rework_authorization,
+        validation_seal: Sha256Digest(String::new()),
+    };
+    intent.validation_seal = seal_execution_intent(snapshot, &intent)?;
+    Ok(StageAdvanceEffect::Dispatch(intent))
+}
+
+fn seal_execution_intent(
+    delivery: &DeliverySnapshot,
+    intent: &ExecutionIntent,
+) -> Result<Sha256Digest, CoordinationError> {
+    let identity = ExecutionIntentSealIdentity {
+        delivery,
+        execution_job_id: &intent.execution_job_id,
+        product_session_id: &intent.product_session_id,
+        delivery_id: &intent.delivery_id,
+        delivery_task_id: intent.delivery_task_id.as_ref(),
+        stage_run_id: &intent.stage_run_id,
+        stage: intent.stage,
+        role: &intent.role,
+        attempt: intent.attempt,
+        goal: &intent.goal,
+        rework_authorization_digest: intent
+            .rework_authorization
+            .as_deref()
+            .map(ReworkAuthorization::authorization_digest),
+    };
+    let encoded = serde_json::to_vec(&identity).map_err(|error| {
+        CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            format!("ExecutionIntent seal cannot be encoded: {error}"),
+        )
+    })?;
+    Ok(Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(encoded)
+    )))
 }
 
 fn goal_for_task(delivery: &Delivery, task_id: Option<&DeliveryTaskId>) -> String {
@@ -614,6 +1294,12 @@ pub fn resume_active(
             "Delivery has more than one active StageRun",
         ));
     }
+    if run.stage == DeliveryStage::Reworking {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "a remediator dispatch must replay its committed authorized ExecutionJob instead of reconstructing an unscoped intent",
+        ));
+    }
     let binding = exact_binding(delivery, run, false)?;
     let goal = run
         .delivery_task_id
@@ -629,19 +1315,28 @@ pub fn resume_active(
             || delivery.snapshot().spec.goal.clone(),
             |task| task.goal.clone(),
         );
+    let mut intent = ExecutionIntent {
+        execution_job_id: binding.execution_job_id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        delivery_id: run.delivery_id.clone(),
+        delivery_task_id: run.delivery_task_id.clone(),
+        stage_run_id: run.id.clone(),
+        stage: run.stage,
+        role: run.role.clone(),
+        attempt: run.attempt,
+        goal,
+        rework_authorization: None,
+        validation_seal: Sha256Digest(String::new()),
+    };
+    intent.validation_seal = seal_execution_intent(delivery.snapshot(), &intent)?;
+    let effect = StageAdvanceEffect::Resume(intent);
     Ok(StageAdvanceResult {
         delivery: delivery.clone(),
-        effect: StageAdvanceEffect::Resume(ExecutionIntent {
-            execution_job_id: binding.execution_job_id.clone(),
-            product_session_id: binding.product_session_id.clone(),
-            delivery_id: run.delivery_id.clone(),
-            delivery_task_id: run.delivery_task_id.clone(),
-            stage_run_id: run.id.clone(),
-            stage: run.stage,
-            role: run.role.clone(),
-            attempt: run.attempt,
-            goal,
-        }),
+        effect: effect.clone(),
+        source_delivery: delivery.clone(),
+        sealed_delivery: delivery.clone(),
+        sealed_effect: effect,
+        kind: StageAdvanceKind::Resume,
     })
 }
 
@@ -762,7 +1457,6 @@ pub fn apply_terminal_outcome(
     expected_revision: u64,
     active_lease: &ActiveLeaseIdentity,
     outcome: &VerifiedTerminalOutcome,
-    finished_at_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     if delivery.revision() != expected_revision {
         return Err(CoordinationError::new(
@@ -770,7 +1464,7 @@ pub fn apply_terminal_outcome(
             "Delivery revision changed before terminal outcome",
         ));
     }
-    require_mutation_time(delivery, finished_at_millis)?;
+    require_mutation_time(delivery, outcome.finished_at_millis())?;
     if &outcome.lease_identity != active_lease {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -801,7 +1495,8 @@ pub fn apply_terminal_outcome(
     if run.attempt != outcome.lease_identity.attempt
         || binding.execution_job_id != outcome.lease_identity.execution_job_id
         || binding.worker_session_id.as_ref() != Some(&outcome.lease_identity.worker_session_id)
-        || finished_at_millis < run.started_at_millis
+        || binding.codex_thread_id.as_ref() != outcome.codex_thread_id()
+        || outcome.finished_at_millis() < run.started_at_millis
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -830,14 +1525,14 @@ pub fn apply_terminal_outcome(
         }
         TerminalOutcomeStatus::Cancelled => StageRunStatus::Cancelled,
     };
-    stored_run.finished_at_millis = Some(finished_at_millis);
+    stored_run.finished_at_millis = Some(outcome.finished_at_millis());
     if outcome.status != TerminalOutcomeStatus::Succeeded
         && let Some(task_id) = task_id
     {
         restore_task_after_unsuccessful_outcome(&mut snapshot, &task_id, run_stage)?;
     }
     snapshot.revision += 1;
-    snapshot.updated_at_millis = finished_at_millis;
+    snapshot.updated_at_millis = outcome.finished_at_millis();
     Delivery::try_from_snapshot(snapshot)
         .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string()))
 }
@@ -934,6 +1629,7 @@ fn select_task_id(
     delivery: &Delivery,
     stage: DeliveryStage,
     previous: Option<&StageRun>,
+    rework_authorization: Option<&ReworkAuthorization>,
 ) -> Result<Option<DeliveryTaskId>, CoordinationError> {
     if !matches!(
         stage,
@@ -956,6 +1652,16 @@ fn select_task_id(
                 "task verification cannot follow a Delivery-level writer",
             )
         });
+    }
+    if stage == DeliveryStage::Reworking {
+        return rework_authorization
+            .map(|authorization| Some(authorization.delivery_task_id().clone()))
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::AttentionRequired,
+                    "rework task selection requires the sealed authorization",
+                )
+            });
     }
     Ok(Some(runnable_task(delivery, stage)?.id.clone()))
 }

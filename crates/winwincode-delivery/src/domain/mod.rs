@@ -8,12 +8,15 @@
 //! crosses the command or store seam keeps the aggregate invariants.
 
 mod attention;
-mod evidence;
+pub mod candidate;
+pub mod evidence;
+pub mod rework;
 mod session_binding;
 mod spec;
 mod stage_run;
 mod task;
-mod verdict;
+pub mod verdict;
+pub mod verification;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -24,6 +27,11 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
+pub(crate) use candidate::assert_frozen_candidate_current;
+pub use candidate::{
+    CandidatePathFact, CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate,
+    ValidatedGitSnapshotFact, freeze_delivery_candidate,
+};
 pub use evidence::{EvidenceRef, EvidenceRefType};
 pub use session_binding::SessionBinding;
 pub use spec::{
@@ -32,7 +40,10 @@ pub use spec::{
 };
 pub use stage_run::{DeliveryStage, StageRun, StageRunActorType, StageRunStatus};
 pub use task::{DeliveryTask, DeliveryTaskStatus};
-pub use verdict::{CriterionResult, CriterionVerdict, DeliveryVerdict, DeliveryVerdictStatus};
+pub use verdict::{
+    ComputedDeliveryVerdict, CriterionResult, CriterionVerdict, DeliveryVerdict,
+    DeliveryVerdictStatus, compute_delivery_verdict,
+};
 pub use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId, StageRunId};
 
 pub const DELIVERY_SCHEMA_VERSION: u8 = 3;
@@ -804,7 +815,7 @@ fn validate_verdict_relationships(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_fixture() -> DeliverySnapshot {
     serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
         .expect("checked Delivery fixture shape")

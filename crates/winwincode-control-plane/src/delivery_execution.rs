@@ -8,21 +8,24 @@
 //! request receipt, and the immutable job outbox intent together before the
 //! dispatcher is called.
 
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    DeliveryStageExecutionScope, ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
-    JobCancelAckMessage,
+    DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope, DeliveryStageExecutionScope,
+    ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, JobCancelAckMessage,
 };
 use winwincode_delivery::{
     application::{
         CoordinationError,
         stage::{
-            ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent, StageAdvanceEffect,
-            StageAdvanceResult, acknowledge_cancel,
+            ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent, ExecutionIntent,
+            StageAdvanceEffect, StageAdvanceResult, acknowledge_cancel,
         },
     },
-    domain::Delivery,
+    domain::{
+        Delivery, DeliveryStage, StageRunActorType, StageRunStatus, rework::ReworkAuthorization,
+    },
 };
 use winwincode_domain::{RequestId, Sha256Digest};
 
@@ -37,7 +40,7 @@ pub struct DeliveryExecutionConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingDeliveryExecution {
     request_id: RequestId,
-    delivery: Delivery,
+    stage_transition: StageAdvanceResult,
     job: ExecutionJob,
 }
 
@@ -47,7 +50,11 @@ impl PendingDeliveryExecution {
     }
 
     pub fn delivery(&self) -> &Delivery {
-        &self.delivery
+        &self.stage_transition.delivery
+    }
+
+    pub fn stage_transition(&self) -> &StageAdvanceResult {
+        &self.stage_transition
     }
 
     pub fn job(&self) -> &ExecutionJob {
@@ -197,29 +204,35 @@ pub fn prepare_delivery_advance(
     result: StageAdvanceResult,
     config: DeliveryExecutionConfig,
 ) -> Result<PendingDeliveryExecution, DeliveryExecutionError> {
-    let StageAdvanceEffect::Dispatch(intent) = result.effect else {
+    result.validate_projection().map_err(|error| {
+        DeliveryExecutionError::InvalidEffect(format!("invalid sealed stage transition: {error}"))
+    })?;
+    let StageAdvanceEffect::Dispatch(intent) = &result.effect else {
         return Err(DeliveryExecutionError::InvalidEffect(
             "only a newly committed Codex stage creates an ExecutionJob intent".to_owned(),
         ));
     };
+    validate_dispatch_intent(&result.delivery, intent)?;
     let attempt = i64::try_from(intent.attempt).map_err(|_| {
         DeliveryExecutionError::InvalidEffect(
             "Delivery stage attempt exceeds the ExecutionPort range".to_owned(),
         )
     })?;
+    let (goal, payload_digest, rework_authorization) = execution_payload(intent, &config)?;
     let job = ExecutionJob {
         attempt,
-        execution_profile: intent.role,
-        goal: intent.goal,
-        job_id: intent.execution_job_id,
+        execution_profile: intent.role.clone(),
+        goal,
+        job_id: intent.execution_job_id.clone(),
         limits: config.limits,
-        payload_digest: config.payload_digest,
+        payload_digest,
         scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            delivery_id: intent.delivery_id,
-            delivery_task_id: intent.delivery_task_id,
+            delivery_id: intent.delivery_id.clone(),
+            delivery_task_id: intent.delivery_task_id.clone(),
             kind: "delivery-stage".to_owned(),
-            product_session_id: intent.product_session_id,
-            stage_run_id: intent.stage_run_id,
+            product_session_id: intent.product_session_id.clone(),
+            rework_authorization,
+            stage_run_id: intent.stage_run_id.clone(),
         }),
         workspace: config.workspace,
     };
@@ -227,7 +240,7 @@ pub fn prepare_delivery_advance(
     validate_execution_job(&job)?;
     Ok(PendingDeliveryExecution {
         request_id,
-        delivery: result.delivery,
+        stage_transition: result,
         job,
     })
 }
@@ -282,7 +295,7 @@ fn validate_commit_receipt(
     commit: &DeliveryExecutionCommitReceipt,
 ) -> Result<(), String> {
     validate_execution_job(&commit.job).map_err(|error| error.to_string())?;
-    if commit.committed_revision != pending.delivery.revision() {
+    if commit.committed_revision != pending.delivery().revision() {
         return Err("durable receipt revision does not match the committed Delivery".to_owned());
     }
     if !bounded_length(commit.outbox_event_id.trim(), 1, 200) {
@@ -294,13 +307,195 @@ fn validate_commit_receipt(
             return Err("durable receipt job is not a Delivery stage job".to_owned());
         }
     };
-    if receipt_delivery_id != pending.delivery.id() {
+    if receipt_delivery_id != pending.delivery().id() {
         return Err("durable receipt job belongs to another Delivery".to_owned());
     }
     if !commit.replayed && commit.job != pending.job {
         return Err("new durable receipt does not contain the exact pending job".to_owned());
     }
     Ok(())
+}
+
+fn validate_dispatch_intent(
+    delivery: &Delivery,
+    intent: &ExecutionIntent,
+) -> Result<(), DeliveryExecutionError> {
+    intent
+        .validate_for_delivery(delivery)
+        .map_err(DeliveryExecutionError::Coordination)?;
+    match (intent.stage, intent.rework_authorization()) {
+        (DeliveryStage::Reworking, Some(authorization)) => authorization
+            .validate_started_dispatch(delivery, &intent.stage_run_id)
+            .map_err(|error| {
+                DeliveryExecutionError::InvalidEffect(format!(
+                    "invalid rework dispatch authorization: {error}"
+                ))
+            })?,
+        (DeliveryStage::Reworking, None) => {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "invalid rework dispatch authorization: missing sealed authorization".to_owned(),
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "invalid dispatch intent: non-reworking stage carries rework authorization"
+                    .to_owned(),
+            ));
+        }
+        (_, None) => {}
+    }
+    let mut runs = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| run.id == intent.stage_run_id && run.status == StageRunStatus::Running);
+    let run = runs.next().ok_or_else(|| {
+        DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: no matching running Delivery StageRun".to_owned(),
+        )
+    })?;
+    if runs.next().is_some()
+        || run.delivery_id != intent.delivery_id
+        || run.delivery_task_id != intent.delivery_task_id
+        || run.stage != intent.stage
+        || run.actor_type != StageRunActorType::Codex
+        || run.role != intent.role
+        || run.attempt != intent.attempt
+    {
+        return Err(DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: fields differ from the exact Delivery StageRun".to_owned(),
+        ));
+    }
+    let mut bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.stage_run_id == intent.stage_run_id);
+    let binding = bindings.next().ok_or_else(|| {
+        DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: no exact Delivery SessionBinding".to_owned(),
+        )
+    })?;
+    if bindings.next().is_some()
+        || binding.delivery_id != intent.delivery_id
+        || binding.delivery_task_id != intent.delivery_task_id
+        || binding.product_session_id != intent.product_session_id
+        || binding.execution_job_id != intent.execution_job_id
+        || binding.worker_session_id.is_some()
+        || binding.codex_thread_id.is_some()
+    {
+        return Err(DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: fields differ from the exact pending SessionBinding"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn execution_payload(
+    intent: &ExecutionIntent,
+    config: &DeliveryExecutionConfig,
+) -> Result<
+    (
+        String,
+        Sha256Digest,
+        Option<DeliveryReworkAuthorizationScope>,
+    ),
+    DeliveryExecutionError,
+> {
+    match (intent.stage, intent.rework_authorization()) {
+        (DeliveryStage::Reworking, Some(authorization)) => {
+            validate_rework_dispatch_scope(intent, config, authorization)?;
+            let authorization_scope = execution_rework_scope(authorization);
+            let payload_digest = authorized_payload_digest(
+                &intent.goal,
+                &config.payload_digest,
+                &authorization_scope,
+            )?;
+            Ok((
+                intent.goal.clone(),
+                payload_digest,
+                Some(authorization_scope),
+            ))
+        }
+        (DeliveryStage::Reworking, None) => Err(DeliveryExecutionError::InvalidEffect(
+            "remediator ExecutionJob is missing its sealed rework authorization".to_owned(),
+        )),
+        (_, Some(_)) => Err(DeliveryExecutionError::InvalidEffect(
+            "non-reworking ExecutionJob cannot carry a rework authorization".to_owned(),
+        )),
+        (_, None) => Ok((intent.goal.clone(), config.payload_digest.clone(), None)),
+    }
+}
+
+fn execution_rework_scope(authorization: &ReworkAuthorization) -> DeliveryReworkAuthorizationScope {
+    DeliveryReworkAuthorizationScope {
+        authorization_digest: authorization.authorization_digest().clone(),
+        candidate_ref: authorization.candidate_ref().to_owned(),
+        diff_sha256: authorization.diff_sha256().to_owned(),
+        requires_full_reverification: authorization.requires_full_reverification(),
+        source_candidate_commit_id: authorization
+            .previous_candidate()
+            .candidate_commit_id()
+            .to_owned(),
+        source_candidate_tree_id: authorization
+            .previous_candidate()
+            .candidate_tree_id()
+            .to_owned(),
+        targets: authorization
+            .targets()
+            .iter()
+            .map(|target| DeliveryReworkTargetScope {
+                delivery_task_id: target.delivery_task_id().clone(),
+                diagram_id: target.diagram_id().to_owned(),
+                evidence_ref_ids: target
+                    .evidence_ref_ids()
+                    .iter()
+                    .map(|id| id.0.clone())
+                    .collect(),
+                file_path: target.file_path().to_owned(),
+                node_id: target.node_id().to_owned(),
+                source_hunk_sha256: target.hunk_sha256().to_owned(),
+            })
+            .collect(),
+    }
+}
+
+fn authorized_payload_digest(
+    base_goal: &str,
+    base_payload_digest: &Sha256Digest,
+    authorization: &DeliveryReworkAuthorizationScope,
+) -> Result<Sha256Digest, DeliveryExecutionError> {
+    let encoded =
+        serde_json::to_vec(&(base_goal, base_payload_digest, authorization)).map_err(|error| {
+            DeliveryExecutionError::InvalidEffect(format!(
+                "rework authorization cannot be encoded: {error}"
+            ))
+        })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"winwincode/rework-execution-payload/v1\0");
+    hasher.update(encoded);
+    Ok(Sha256Digest(format!("sha256:{:x}", hasher.finalize())))
+}
+
+fn validate_rework_dispatch_scope(
+    intent: &ExecutionIntent,
+    config: &DeliveryExecutionConfig,
+    authorization: &ReworkAuthorization,
+) -> Result<(), DeliveryExecutionError> {
+    let exact = intent.role == authorization.writer_role()
+        && intent.delivery_task_id.as_ref() == Some(authorization.delivery_task_id())
+        && intent.attempt == authorization.next_attempt()
+        && config.workspace.checkout_revision
+            == authorization.previous_candidate().candidate_commit_id();
+    if exact {
+        Ok(())
+    } else {
+        Err(DeliveryExecutionError::InvalidEffect(
+            "remediator ExecutionJob does not match its authorized task, attempt, or candidate checkout"
+                .to_owned(),
+        ))
+    }
 }
 
 /// Accepts a generated `job.cancel_ack` without treating it as terminal.
@@ -327,13 +522,13 @@ pub fn acknowledge_job_cancel(
         )
     })?;
     let exact = acknowledgement.request_id == *expected_request_id
-        && acknowledgement.lease.job_id == lease.execution_job_id
-        && lease_attempt == lease.attempt
-        && acknowledgement.lease.lease_id == lease.lease_id
-        && acknowledgement.lease.fencing_token == lease.fencing_token
-        && acknowledgement.lease.worker_id == lease.worker_id
-        && acknowledgement.lease.worker_instance_id == lease.worker_instance_id
-        && acknowledgement.worker_session_id == lease.worker_session_id;
+        && &acknowledgement.lease.job_id == lease.execution_job_id()
+        && lease_attempt == lease.attempt()
+        && &acknowledgement.lease.lease_id == lease.lease_id()
+        && &acknowledgement.lease.fencing_token == lease.fencing_token()
+        && &acknowledgement.lease.worker_id == lease.worker_id()
+        && &acknowledgement.lease.worker_instance_id == lease.worker_instance_id()
+        && &acknowledgement.worker_session_id == lease.worker_session_id();
     if !exact {
         return Err(DeliveryExecutionError::InvalidEffect(
             "job.cancel_ack does not match the exact request and active lease".to_owned(),
@@ -361,8 +556,8 @@ fn validate_request_id(request_id: &RequestId) -> Result<(), DeliveryExecutionEr
 }
 
 fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionError> {
-    let scope_valid = match &job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+    let (scope_identity_valid, rework_scope_error) = match &job.scope {
+        ExecutionScope::DeliveryStageExecutionScope(scope) => (
             scope.kind == "delivery-stage"
                 && canonical_identifier(&scope.product_session_id.0, "psn")
                 && canonical_identifier(&scope.delivery_id.0, "dlv")
@@ -370,29 +565,219 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
                     .delivery_task_id
                     .as_ref()
                     .is_none_or(|id| canonical_identifier(&id.0, "dtk"))
-                && canonical_identifier(&scope.stage_run_id.0, "run")
-        }
-        ExecutionScope::ProductSessionExecutionScope(_) => false,
+                && canonical_identifier(&scope.stage_run_id.0, "run"),
+            delivery_rework_scope_error(job, scope),
+        ),
+        ExecutionScope::ProductSessionExecutionScope(_) => (false, Some("executionJob.scope.kind")),
     };
-    let valid = canonical_identifier(&job.job_id.0, "job")
-        && (1..=1_000).contains(&job.attempt)
-        && sha256_digest(&job.payload_digest.0)
-        && scope_valid
-        && canonical_identifier(&job.workspace.repository_id.0, "rep")
-        && bounded_length(&job.workspace.checkout_revision, 1, 200)
-        && job.workspace.write_mode == "candidate"
-        && bounded_length(&job.execution_profile, 1, 100)
-        && bounded_length(&job.goal, 1, 20_000)
-        && instant(&job.limits.deadline_at.0)
-        && (1..=604_800).contains(&job.limits.max_runtime_seconds)
-        && (0..=1_099_511_627_776).contains(&job.limits.max_artifact_bytes);
-    if valid {
-        Ok(())
-    } else {
-        Err(DeliveryExecutionError::InvalidEffect(
-            "generated ExecutionJob is invalid under the canonical ExecutionPort schema".to_owned(),
-        ))
+    for (field, valid) in [
+        (
+            "executionJob.jobId",
+            canonical_identifier(&job.job_id.0, "job"),
+        ),
+        ("executionJob.attempt", (1..=1_000).contains(&job.attempt)),
+        (
+            "executionJob.payloadDigest",
+            sha256_digest(&job.payload_digest.0),
+        ),
+        ("executionJob.scope.identity", scope_identity_valid),
+        (
+            "executionJob.workspace.repositoryId",
+            canonical_identifier(&job.workspace.repository_id.0, "rep"),
+        ),
+        (
+            "executionJob.workspace.checkoutRevision",
+            bounded_length(&job.workspace.checkout_revision, 1, 200),
+        ),
+        (
+            "executionJob.workspace.writeMode",
+            job.workspace.write_mode == "candidate",
+        ),
+        (
+            "executionJob.executionProfile",
+            bounded_length(&job.execution_profile, 1, 100),
+        ),
+        ("executionJob.goal", bounded_length(&job.goal, 1, 20_000)),
+        (
+            "executionJob.limits.deadlineAt",
+            instant(&job.limits.deadline_at.0),
+        ),
+        (
+            "executionJob.limits.maxRuntimeSeconds",
+            (1..=604_800).contains(&job.limits.max_runtime_seconds),
+        ),
+        (
+            "executionJob.limits.maxArtifactBytes",
+            (0..=1_099_511_627_776).contains(&job.limits.max_artifact_bytes),
+        ),
+    ] {
+        if !valid {
+            return Err(invalid_execution_value(field));
+        }
     }
+    if let Some(field) = rework_scope_error {
+        return Err(invalid_execution_value(field));
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "every structured authorization field stays visibly fail-closed at the Worker boundary"
+)]
+fn delivery_rework_scope_error(
+    job: &ExecutionJob,
+    scope: &DeliveryStageExecutionScope,
+) -> Option<&'static str> {
+    let Some(authorization) = scope.rework_authorization.as_ref() else {
+        return (job.execution_profile == "remediator")
+            .then_some("executionJob.scope.reworkAuthorization");
+    };
+    let Some(task_id) = scope.delivery_task_id.as_ref() else {
+        return Some("executionJob.scope.deliveryTaskId");
+    };
+    for (field, valid) in [
+        (
+            "executionJob.executionProfile",
+            job.execution_profile == "remediator",
+        ),
+        (
+            "executionJob.workspace.checkoutRevision",
+            job.workspace.checkout_revision == authorization.source_candidate_commit_id,
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.requiresFullReverification",
+            authorization.requires_full_reverification,
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.authorizationDigest",
+            sha256_digest(&authorization.authorization_digest.0),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.candidateRef",
+            authorization
+                .candidate_ref
+                .strip_prefix("git-candidate:sha256:")
+                .is_some_and(lowercase_sha256),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.diffSha256",
+            lowercase_sha256(&authorization.diff_sha256),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.sourceCandidateCommitId",
+            git_object_id(&authorization.source_candidate_commit_id),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.sourceCandidateTreeId",
+            git_object_id(&authorization.source_candidate_tree_id),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.targets",
+            !authorization.targets.is_empty() && authorization.targets.len() <= 1_000,
+        ),
+    ] {
+        if !valid {
+            return Some(field);
+        }
+    }
+    let mut targets = HashSet::with_capacity(authorization.targets.len());
+    for target in &authorization.targets {
+        let key = (
+            target.delivery_task_id.0.as_str(),
+            target.diagram_id.as_str(),
+            target.node_id.as_str(),
+            target.file_path.as_str(),
+            target.source_hunk_sha256.as_str(),
+        );
+        let mut evidence = HashSet::with_capacity(target.evidence_ref_ids.len());
+        for (field, valid) in [
+            (
+                "executionJob.scope.reworkAuthorization.targets.deliveryTaskId",
+                target.delivery_task_id == *task_id
+                    && canonical_identifier(&target.delivery_task_id.0, "dtk"),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.diagramId",
+                portable_execution_identifier(&target.diagram_id),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.nodeId",
+                portable_execution_identifier(&target.node_id),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.filePath",
+                portable_path(&target.file_path),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.sourceHunkSha256",
+                lowercase_sha256(&target.source_hunk_sha256),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.evidenceRefIds",
+                !target.evidence_ref_ids.is_empty()
+                    && target.evidence_ref_ids.len() <= 1_000
+                    && target
+                        .evidence_ref_ids
+                        .iter()
+                        .all(|id| derived_evidence_id(id) && evidence.insert(id.as_str())),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets",
+                targets.insert(key),
+            ),
+        ] {
+            if !valid {
+                return Some(field);
+            }
+        }
+    }
+    None
+}
+
+fn git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && lowercase_hex(value)
+}
+
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64 && lowercase_hex(value)
+}
+
+fn derived_evidence_id(value: &str) -> bool {
+    value
+        .strip_prefix("evidence:sha256:")
+        .is_some_and(lowercase_sha256)
+}
+
+fn lowercase_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn portable_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4_096
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value.bytes().any(|byte| byte <= 31 || byte == 127)
+        && !value
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        && !value
+            .get(1..2)
+            .is_some_and(|second| second == ":" && value.as_bytes()[0].is_ascii_alphabetic())
+}
+
+fn portable_execution_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 200
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'@' | b'-')
+        })
 }
 
 fn validate_cancel_ack(
@@ -525,4 +910,56 @@ fn decimal(bytes: &[u8]) -> Option<u32> {
         byte.is_ascii_digit()
             .then_some(value * 10 + u32::from(byte - b'0'))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winwincode_domain::DeliveryTaskId;
+
+    fn authorization_scope(file_path: &str) -> DeliveryReworkAuthorizationScope {
+        DeliveryReworkAuthorizationScope {
+            authorization_digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            candidate_ref: format!("git-candidate:sha256:{}", "d".repeat(64)),
+            diff_sha256: "b".repeat(64),
+            requires_full_reverification: true,
+            source_candidate_commit_id: "1".repeat(40),
+            source_candidate_tree_id: "2".repeat(40),
+            targets: vec![DeliveryReworkTargetScope {
+                delivery_task_id: DeliveryTaskId("dtk_01J00000000000000000000000".into()),
+                diagram_id: "diagram-main".into(),
+                evidence_ref_ids: vec![format!("evidence:sha256:{}", "f".repeat(64))],
+                file_path: file_path.into(),
+                node_id: "node-api".into(),
+                source_hunk_sha256: "e".repeat(64),
+            }],
+        }
+    }
+
+    #[test]
+    fn rework_authorization_is_structured_and_part_of_the_payload_digest() {
+        let base_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        let first = authorization_scope("src/invitation.rs");
+        let first_digest = authorized_payload_digest("repair invitation", &base_digest, &first)
+            .expect("authorized payload");
+        let replayed_digest = authorized_payload_digest("repair invitation", &base_digest, &first)
+            .expect("deterministic replay payload");
+        assert_eq!(first_digest, replayed_digest);
+        let encoded = serde_json::to_value(&first).expect("structured authorization");
+        assert_eq!(encoded["targets"][0]["filePath"], "src/invitation.rs");
+        assert_eq!(encoded["targets"][0]["nodeId"], "node-api");
+        assert_eq!(
+            encoded["targets"][0]["evidenceRefIds"][0],
+            format!("evidence:sha256:{}", "f".repeat(64))
+        );
+
+        let second = authorization_scope("src/foreign.rs");
+        let second_digest = authorized_payload_digest("repair invitation", &base_digest, &second)
+            .expect("changed authorization payload");
+        assert_ne!(first_digest, second_digest);
+        let changed_goal =
+            authorized_payload_digest("repair another invitation", &base_digest, &first)
+                .expect("changed base goal");
+        assert_ne!(first_digest, changed_goal);
+    }
 }

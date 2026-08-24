@@ -145,6 +145,14 @@ impl ProductStateStorage for TraceStorage {
         })
     }
 
+    fn load_receipt(
+        &self,
+        _identity: &ReceiptIdentity,
+        _command_digest: &winwincode_domain::Sha256Digest,
+    ) -> Result<Option<CommitReceipt>, StorageError> {
+        Ok(None)
+    }
+
     fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         Ok(self.state.lock().expect("state lock").clone())
     }

@@ -235,6 +235,31 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
     schema.$defs.DeliveryStageExecutionScope.properties.kind.const,
     'delivery-stage',
   )
+  assert.equal(
+    schema.$defs.DeliveryStageExecutionScope.properties.reworkAuthorization.$ref,
+    '#/$defs/DeliveryReworkAuthorizationScope',
+  )
+  assert.deepEqual(schema.$defs.DeliveryReworkAuthorizationScope.required, [
+    'authorizationDigest',
+    'candidateRef',
+    'diffSha256',
+    'sourceCandidateCommitId',
+    'sourceCandidateTreeId',
+    'requiresFullReverification',
+    'targets',
+  ])
+  assert.equal(
+    schema.$defs.DeliveryReworkAuthorizationScope.properties.targets.items.$ref,
+    '#/$defs/DeliveryReworkTargetScope',
+  )
+  assert.deepEqual(schema.$defs.DeliveryReworkTargetScope.required, [
+    'deliveryTaskId',
+    'diagramId',
+    'nodeId',
+    'filePath',
+    'sourceHunkSha256',
+    'evidenceRefIds',
+  ])
 
   const scopeSchema = {
     ...schema,

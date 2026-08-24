@@ -53,10 +53,12 @@ const ERROR_STATUS = Object.freeze({
   RESOURCE_NOT_FOUND: 404,
   IDEMPOTENCY_CONFLICT: 409,
   REVISION_CONFLICT: 409,
+  CANDIDATE_STALE: 409,
   WRONG_STATE: 409,
   RATE_LIMITED: 429,
   INTERNAL_ERROR: 500,
   SERVICE_UNAVAILABLE: 503,
+  TRUSTED_FACTS_UNAVAILABLE: 503,
 })
 
 async function json(...parts) {
@@ -286,8 +288,11 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
   )
   assert.equal(semantics.errors.RATE_LIMITED.retryable, true)
   assert.equal(semantics.errors.SERVICE_UNAVAILABLE.retryable, true)
+  assert.equal(semantics.errors.TRUSTED_FACTS_UNAVAILABLE.retryable, true)
   for (const code of Object.keys(ERROR_STATUS).filter(code => (
-    code !== 'RATE_LIMITED' && code !== 'SERVICE_UNAVAILABLE'
+    code !== 'RATE_LIMITED'
+    && code !== 'SERVICE_UNAVAILABLE'
+    && code !== 'TRUSTED_FACTS_UNAVAILABLE'
   ))) assert.equal(semantics.errors[code].retryable, false)
 })
 

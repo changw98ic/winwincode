@@ -8,6 +8,8 @@
 
 pub mod delivery_execution;
 mod delivery_transaction;
+mod rework_transaction;
+mod verdict_transaction;
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -21,6 +23,7 @@ use delivery_execution::{
 };
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
+use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdictFacts};
 use winwincode_domain::Sha256Digest;
 pub use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
@@ -216,6 +219,51 @@ impl fmt::Display for CommitError {
 }
 
 impl std::error::Error for CommitError {}
+
+/// Failure of the specialized atomic Delivery verdict command.
+#[derive(Debug)]
+pub enum DeliveryVerdictCommitError {
+    /// Sealed candidate, verification, or Evidence facts were stale or invalid.
+    Coordination(CoordinationError),
+    /// No Delivery journal, state, receipt, or event fact committed.
+    Storage(StorageError),
+    /// The complete transaction committed; publication remains in the outbox.
+    PublicationPending {
+        receipt: Box<CommitReceipt>,
+        source: OutboxError,
+    },
+}
+
+impl DeliveryVerdictCommitError {
+    #[must_use]
+    pub fn committed_receipt(&self) -> Option<&CommitReceipt> {
+        match self {
+            Self::PublicationPending { receipt, .. } => Some(receipt),
+            Self::Coordination(_) | Self::Storage(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for DeliveryVerdictCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Coordination(error) => write!(formatter, "verdict computation failed: {error}"),
+            Self::Storage(error) => write!(formatter, "verdict transaction failed: {error}"),
+            Self::PublicationPending { source, .. } => write!(
+                formatter,
+                "verdict transaction committed, but its event remains pending: {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeliveryVerdictCommitError {}
+
+impl From<StorageError> for DeliveryVerdictCommitError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
 
 /// Successful deterministic shutdown facts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -430,6 +478,59 @@ impl ControlPlane {
         delivery_transaction::execute(storage, command, pending, dispatcher)
     }
 
+    /// Atomically commits a constructor-derived bounded-rework clarification
+    /// without creating or dispatching an `ExecutionJob`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error before any durable write when the command,
+    /// transition, revision, receipt, or journal publication is not exact.
+    pub fn commit_delivery_rework_clarification(
+        &mut self,
+        command: &CommandEnvelope,
+        transition: &winwincode_delivery::application::stage::StageAdvanceResult,
+    ) -> Result<CommitReceipt, CommitError> {
+        let receipt = {
+            let storage = self.storage_mut().map_err(CommitError::Storage)?;
+            rework_transaction::execute(storage, command, transition)
+                .map_err(CommitError::Storage)?
+        };
+        self.flush_outbox()
+            .map_err(|source| CommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })?;
+        Ok(receipt)
+    }
+
+    /// Recomputes and atomically commits one Delivery's Evidence, Verdict,
+    /// blocking Attention, task state, status, scoped receipt, journal record,
+    /// and immutable outbox event.
+    ///
+    /// # Errors
+    ///
+    /// Returns before persistence for stale authoritative facts or when any
+    /// atomic member fails. Publication failure carries the committed receipt
+    /// and leaves the one event pending for replay.
+    pub fn commit_delivery_verdict(
+        &mut self,
+        command: &CommandEnvelope,
+        facts: SubmitVerdictFacts<'_>,
+    ) -> Result<CommitReceipt, DeliveryVerdictCommitError> {
+        let receipt = {
+            let storage = self
+                .storage_mut()
+                .map_err(DeliveryVerdictCommitError::Storage)?;
+            verdict_transaction::execute(storage, command, facts)?
+        };
+        self.flush_outbox()
+            .map_err(|source| DeliveryVerdictCommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })?;
+        Ok(receipt)
+    }
+
     /// Loads canonical state through the configured storage adapter.
     ///
     /// # Errors
@@ -529,20 +630,10 @@ pub(crate) fn storage_commit(
     command: &CommandEnvelope,
     change: StateChange,
 ) -> Result<StateCommit, StorageError> {
-    let actor_key = receipt_actor_key(&command.actor)?;
-    let scope_key = receipt_scope_key(&command.scope)?;
-    require_canonical_id(&command.request_id.0, "req_", "command requestId")?;
-    let receipt_identity = ReceiptIdentity::new(actor_key, scope_key, command.request_id.clone())?;
+    let (receipt_identity, command_digest) = command_receipt(command)?;
     let expected_revision = u64::try_from(command.expected_revision.0).map_err(|_| {
         StorageError::invalid_input("command expectedRevision must not be negative")
     })?;
-    let serialized = serde_json::to_vec(command).map_err(|error| {
-        StorageError::adapter(format!(
-            "failed to encode the canonical command digest: {error}"
-        ))
-    })?;
-    let digest = Sha256::digest(serialized);
-    let command_digest = Sha256Digest(format!("sha256:{digest:x}"));
 
     Ok(StateCommit::new(
         receipt_identity,
@@ -552,6 +643,23 @@ pub(crate) fn storage_commit(
         change.state,
         change.events,
     ))
+}
+
+pub(crate) fn command_receipt(
+    command: &CommandEnvelope,
+) -> Result<(ReceiptIdentity, Sha256Digest), StorageError> {
+    let actor_key = receipt_actor_key(&command.actor)?;
+    let scope_key = receipt_scope_key(&command.scope)?;
+    require_canonical_id(&command.request_id.0, "req_", "command requestId")?;
+    let receipt_identity = ReceiptIdentity::new(actor_key, scope_key, command.request_id.clone())?;
+    let serialized = serde_json::to_vec(command).map_err(|error| {
+        StorageError::adapter(format!(
+            "failed to encode the canonical command digest: {error}"
+        ))
+    })?;
+    let digest = Sha256::digest(serialized);
+    let command_digest = Sha256Digest(format!("sha256:{digest:x}"));
+    Ok((receipt_identity, command_digest))
 }
 
 fn delivery_command(command: &CommandName) -> bool {

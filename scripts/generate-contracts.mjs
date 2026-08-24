@@ -311,6 +311,70 @@ function tsObjectType(schema, document, context) {
   return body
 }
 
+function allOfObjectShape(schema, document, context) {
+  const properties = new Map()
+  const required = new Set()
+  let additionalProperties
+  const resolving = new Set()
+
+  function merge(node, sourceDocument) {
+    if (!isObject(node)) return false
+    if (typeof node.$ref === 'string') {
+      const name = referenceName(node, sourceDocument, context)
+      const entry = context.registry.get(name)
+      if (entry === undefined) return false
+      const key = `${entry.document.id}#/$defs/${name}`
+      if (resolving.has(key)) {
+        throw new Error(`${document.path}: recursive allOf object ${key} is not supported`)
+      }
+      resolving.add(key)
+      const merged = merge(entry.schema, entry.document)
+      resolving.delete(key)
+      return merged
+    }
+    if (Array.isArray(node.allOf) && node.properties === undefined && node.type === undefined) {
+      return node.allOf.every(branch => merge(branch, sourceDocument))
+    }
+    if (
+      node.type !== 'object'
+      && node.properties === undefined
+      && node.additionalProperties === undefined
+    ) return false
+
+    for (const name of node.required ?? []) required.add(name)
+    for (const [name, propertySchema] of Object.entries(node.properties ?? {})) {
+      properties.set(name, {
+        schema: isObject(propertySchema) ? propertySchema : {},
+        document: sourceDocument,
+      })
+    }
+    if (node.additionalProperties === false) additionalProperties = false
+    else if (additionalProperties !== false && node.additionalProperties !== undefined) {
+      additionalProperties = node.additionalProperties === true
+        ? true
+        : { schema: node.additionalProperties, document: sourceDocument }
+    }
+    return true
+  }
+
+  if (!merge(schema, document)) return undefined
+  return { properties, required, additionalProperties }
+}
+
+function tsObjectShapeType(shape, context) {
+  const properties = [...shape.properties.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, property]) => (
+      `  readonly ${JSON.stringify(name)}${shape.required.has(name) ? '' : '?'}: ${tsType(property.schema, property.document, context)}`
+    ))
+  const body = properties.length === 0 ? '{}' : `{\n${properties.join('\n')}\n}`
+  if (shape.additionalProperties === true) return `Readonly<Record<string, unknown>> & ${body}`
+  if (isObject(shape.additionalProperties)) {
+    return `Readonly<Record<string, ${tsType(shape.additionalProperties.schema, shape.additionalProperties.document, context)}>> & ${body}`
+  }
+  return body
+}
+
 function tsType(schema, document, context) {
   if (!isObject(schema)) return 'unknown'
   if (typeof schema.$ref === 'string') return referenceName(schema, document, context)
@@ -394,6 +458,13 @@ function renderTypescriptDefinition(entry, context) {
     }
     lines.push('}')
     return lines.join('\n')
+  }
+  if (Array.isArray(schema.allOf)) {
+    const shape = allOfObjectShape(schema, document, context)
+    if (shape !== undefined) {
+      lines.push(`export type ${name} = ${tsObjectShapeType(shape, context)}`)
+      return lines.join('\n')
+    }
   }
   if (schema.type === 'object' || schema.properties !== undefined) {
     if (
@@ -560,9 +631,33 @@ function rustObjectFields(
   existingNames = new Set(),
   qualifyShared = false,
 ) {
-  const fields = []
   const required = new Set(Array.isArray(schema.required) ? schema.required : [])
-  for (const [jsonName, propertySchema] of Object.entries(schema.properties ?? {})
+  const properties = new Map(Object.entries(schema.properties ?? {}).map(([name, propertySchema]) => [
+    name,
+    { schema: isObject(propertySchema) ? propertySchema : {}, document },
+  ]))
+  const additionalProperties = schema.additionalProperties === true
+    ? true
+    : isObject(schema.additionalProperties)
+      ? { schema: schema.additionalProperties, document }
+      : schema.additionalProperties
+  return rustObjectShapeFields(
+    { properties, required, additionalProperties },
+    context,
+    existingNames,
+    qualifyShared,
+  )
+}
+
+function rustObjectShapeFields(
+  shape,
+  context,
+  existingNames,
+  qualifyShared,
+  typeOverrides = new Map(),
+) {
+  const fields = []
+  for (const [jsonName, property] of [...shape.properties.entries()]
     .sort(([left], [right]) => left.localeCompare(right))) {
     let fieldName = rustFieldName(jsonName)
     let suffix = 2
@@ -571,24 +666,30 @@ function rustObjectFields(
       suffix += 1
     }
     existingNames.add(fieldName)
-    const resolvedSchema = isObject(propertySchema) ? propertySchema : {}
-    let type = rustType(resolvedSchema, document, context, qualifyShared)
-    const optional = !required.has(jsonName)
+    const resolvedSchema = property.schema
+    let type = typeOverrides.get(jsonName)
+      ?? rustType(resolvedSchema, property.document, context, qualifyShared)
+    const optional = !shape.required.has(jsonName)
     if (optional && !type.startsWith('Option<')) type = `Option<${type}>`
-    fields.push(...rustDocumentation(resolvedSchema.description))
+    fields.push(...rustDocumentation(resolvedSchema.description).map(line => `    ${line}`))
     if (optional) fields.push('    #[serde(default, skip_serializing_if = "Option::is_none")]')
     fields.push(`    #[serde(rename = ${JSON.stringify(jsonName)})]`)
     fields.push(`    pub ${fieldName}: ${type},`)
   }
-  if (schema.additionalProperties === true || isObject(schema.additionalProperties)) {
+  if (shape.additionalProperties === true || isObject(shape.additionalProperties)) {
     let fieldName = 'additional_properties'
     let suffix = 2
     while (existingNames.has(fieldName)) {
       fieldName = `additional_properties_${String(suffix)}`
       suffix += 1
     }
-    const valueType = isObject(schema.additionalProperties)
-      ? rustType(schema.additionalProperties, document, context, qualifyShared)
+    const valueType = isObject(shape.additionalProperties)
+      ? rustType(
+          shape.additionalProperties.schema,
+          shape.additionalProperties.document,
+          context,
+          qualifyShared,
+        )
       : 'serde_json::Value'
     fields.push('    #[serde(default, flatten)]')
     fields.push(`    pub ${fieldName}: std::collections::BTreeMap<String, ${valueType}>,`)
@@ -599,6 +700,7 @@ function rustObjectFields(
 function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
+  if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
   const fields = rustObjectFields(
     entry.schema,
     entry.document,
@@ -618,41 +720,26 @@ function renderRustObject(entry, context, qualifyShared) {
 
 function renderRustAllOf(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
-  lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
-  lines.push(`pub struct ${entry.name} {`)
-  const existingNames = new Set()
-  let inlineIndex = 0
-  for (const branch of entry.schema.allOf) {
-    if (!isObject(branch)) throw new Error(`${entry.document.path}: ${entry.name} allOf branch must be an object`)
-    if (typeof branch.$ref === 'string') {
-      const referenced = referenceName(branch, entry.document, context)
-      const type = rustNamedType(referenced, context, qualifyShared)
-      let fieldName = rustFieldName(referenced)
-      let suffix = 2
-      while (existingNames.has(fieldName)) {
-        fieldName = `${rustFieldName(referenced)}_${String(suffix)}`
-        suffix += 1
-      }
-      existingNames.add(fieldName)
-      lines.push('    #[serde(flatten)]')
-      lines.push(`    pub ${fieldName}: ${type},`)
-      continue
-    }
-    if (branch.type === 'object' || branch.properties !== undefined) {
-      lines.push(...rustObjectFields(
-        branch,
-        entry.document,
-        context,
-        existingNames,
-        qualifyShared,
-      ))
-      continue
-    }
-    inlineIndex += 1
-    throw new Error(
-      `${entry.document.path}: ${entry.name} allOf branch ${String(inlineIndex)} cannot generate a Rust DTO`,
-    )
+  const shape = allOfObjectShape(entry.schema, entry.document, context)
+  if (shape === undefined) {
+    throw new Error(`${entry.document.path}: ${entry.name} allOf cannot generate a Rust DTO`)
   }
+  const constTypes = new Map()
+  for (const [jsonName, property] of shape.properties) {
+    if (typeof property.schema.const !== 'string') continue
+    const typeName = `${entry.name}${rustVariantName(jsonName)}`
+    constTypes.set(jsonName, typeName)
+    lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+    lines.push(`pub enum ${typeName} {`)
+    lines.push(`    #[serde(rename = ${JSON.stringify(property.schema.const)})]`)
+    lines.push(`    ${rustVariantName(property.schema.const)},`)
+    lines.push('}')
+    lines.push('')
+  }
+  lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
+  if (shape.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
+  lines.push(`pub struct ${entry.name} {`)
+  lines.push(...rustObjectShapeFields(shape, context, new Set(), qualifyShared, constTypes))
   lines.push('}')
   return lines.join('\n')
 }
@@ -761,7 +848,7 @@ function renderRustApi(context, digest) {
     `// ${GENERATED_MARKER}`,
     `// Source digest: sha256:${digest}`,
     '',
-    '#![allow(clippy::doc_markdown)]',
+    '#![allow(clippy::doc_markdown, clippy::large_enum_variant)]',
     '',
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared scalar value objects are defined once in `winwincode-domain`.',
