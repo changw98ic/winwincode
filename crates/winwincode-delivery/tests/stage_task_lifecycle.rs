@@ -1245,29 +1245,29 @@ fn replayed_advance_returns_original_stage_run_without_new_state() {
         .expect("seed Delivery");
     let advanced = advance(&draft, advance_input(1, "replay-stage")).expect("stage advance");
     let first = store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             expected_revision: 1,
             transition: advanced.clone(),
-        }))
+        })))
         .expect("first append");
     let replay = store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             expected_revision: 1,
             transition: advanced.clone(),
-        }))
+        })))
         .expect("identical request replays");
 
     let conflict = store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             expected_revision: advanced.delivery.revision(),
             transition: advanced,
-        }))
+        })))
         .expect_err("different expectedRevision is conflicting request reuse");
 
     assert!(!first.replayed);

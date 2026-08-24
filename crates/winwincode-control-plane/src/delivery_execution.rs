@@ -204,13 +204,9 @@ pub fn prepare_delivery_advance(
     result: StageAdvanceResult,
     config: DeliveryExecutionConfig,
 ) -> Result<PendingDeliveryExecution, DeliveryExecutionError> {
-    result
-        .validate_projection()
-        .map_err(|error| {
-            DeliveryExecutionError::InvalidEffect(format!(
-                "invalid sealed stage transition: {error}"
-            ))
-        })?;
+    result.validate_projection().map_err(|error| {
+        DeliveryExecutionError::InvalidEffect(format!("invalid sealed stage transition: {error}"))
+    })?;
     let StageAdvanceEffect::Dispatch(intent) = &result.effect else {
         return Err(DeliveryExecutionError::InvalidEffect(
             "only a newly committed Codex stage creates an ExecutionJob intent".to_owned(),
