@@ -5,6 +5,14 @@ atomically writes one canonical state revision and its outbox events. The local
 adapter uses SQLite with a bundled SQLite library; a later PostgreSQL adapter
 must implement the same small interface instead of changing application code.
 
+Command receipts are keyed by the canonical actor identity, every ID present
+in the organization/workspace/project/repository scope, and `requestId`.
+Storage receives opaque typed keys and a SHA-256 command digest rather than the
+command payload, credentials, or authentication proof. SQLite schema v1 is
+migrated once to the composite v2 identity; no v1 lookup path remains at
+runtime. An idempotent replay returns the original event IDs from the durable
+outbox.
+
 The outbox is delivered at least once in its persisted sequence order. Event
 publishers therefore deduplicate by the stable `event_id`.
 

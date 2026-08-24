@@ -137,7 +137,7 @@
         "ControlPlane",
         "ControlPlaneConfig",
         "EventPublisher",
-        "StateCommit",
+        "StateChange",
         "CommitReceipt",
         "ShutdownReport",
         "StartError",
@@ -148,6 +148,10 @@
         "ControlPlane::shutdown"
       ],
       "winwincode-storage": [
+        "ReceiptActorKey",
+        "ReceiptScopeKey",
+        "ReceiptIdentity",
+        "StateCommit",
         "ProductStateStorage",
         "SqliteStorage",
         "SqliteStorage::open",
@@ -183,8 +187,41 @@
         "restart_replays_committed_but_unpublished_outbox_events",
         "shutdown_flushes_outbox_then_closes_publisher_and_storage",
         "shutdown_publish_failure_still_closes_storage_and_releases_temporary_directory",
-        "shutdown_releases_the_sqlite_connection_and_temporary_directory"
+        "shutdown_releases_the_sqlite_connection_and_temporary_directory",
+        "command_receipts_use_canonical_actor_full_scope_request_and_payload_digest",
+        "command_digest_is_stable_when_json_object_keys_arrive_in_another_order",
+        "invalid_scope_ids_fail_before_the_storage_port_is_called"
       ]
+    }
+  },
+  "receiptIdentity": {
+    "keyFields": [
+      "actor.kind",
+      "actor.id",
+      "scope.kind",
+      "scope.organizationId",
+      "scope.workspaceId-when-present",
+      "scope.projectId-when-present",
+      "scope.repositoryId-when-present",
+      "requestId"
+    ],
+    "sameIdentitySameDigest": "replay-durable-receipt",
+    "sameIdentityDifferentDigest": "idempotency-conflict",
+    "differentActorOrScopeSameRequestId": "independent-command",
+    "commandDigest": "sha256-of-canonical-command-envelope",
+    "semanticJsonObjectKeyOrderAffectsDigest": false,
+    "replayEventIdsSource": "durable-outbox",
+    "persistedSecretsAllowed": false,
+    "persistedActorProofAllowed": false,
+    "legacyV1Migration": {
+      "targetSchemaVersion": 2,
+      "receiptIdentity": "reserved-legacy-v1-migration-identity",
+      "preserves": [
+        "canonical-state",
+        "outbox-sequence",
+        "outbox-publication-state"
+      ],
+      "legacyRuntimeLookupPath": false
     }
   }
 }

@@ -35,3 +35,7 @@ runTests(['--test', '--test-concurrency=4', ...parallelTests])
 
 // Any future process-boundary test can opt into this serial list.
 for (const path of serialProcessTests) runTests(['--test', path])
+
+// The full ten-scenario oracle runs after the parallel Node suite and reuses
+// the TypeScript build already produced by test:ts.
+runTests(['scripts/export-delivery-strongflow-oracle.mjs', '--check'])
