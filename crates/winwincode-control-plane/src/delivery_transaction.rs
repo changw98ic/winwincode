@@ -11,9 +11,9 @@ use winwincode_api::generated::{
 };
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
-    AppendDelivery, AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort,
-    DeliveryMutationOperation, DeliveryStore, JournalBackendError, JournalBackendErrorCode,
-    JournalEntryState, JournalRecordBytes, LoadedDeliveryJournal,
+    AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort, DeliveryStore,
+    JournalBackendError, JournalBackendErrorCode, JournalEntryState, JournalRecordBytes,
+    LoadedDeliveryJournal, StartDeliveryStage,
 };
 use winwincode_domain::DeliveryId;
 use winwincode_storage::{
@@ -84,13 +84,11 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             DeliveryExecutionPortError::new("Delivery expectedRevision must not be negative")
         })?;
         let mutation = DeliveryStore::borrowed(&journal)
-            .execute(DeliveryCommand::Append(AppendDelivery {
-                delivery_id: pending.delivery().id().clone(),
+            .execute(DeliveryCommand::StartStage(StartDeliveryStage {
                 request_id: pending.request_id().clone(),
                 request_digest,
-                operation: DeliveryMutationOperation::StageStarted,
                 expected_revision,
-                snapshot: pending.delivery().clone(),
+                transition: pending.stage_transition().clone(),
             }))
             .map_err(port_error)?;
         commit.state = mutation.snapshot.encode_json().map_err(port_error)?;
@@ -263,11 +261,13 @@ fn strict_execution_job(payload: &[u8]) -> Result<ExecutionJob, DeliveryExecutio
     Ok(job)
 }
 
-fn delivery_stream_id(delivery_id: &DeliveryId) -> String {
+pub(crate) fn delivery_stream_id(delivery_id: &DeliveryId) -> String {
     format!("delivery:{}", delivery_id.0)
 }
 
-fn delivery_journal_key(delivery_id: &DeliveryId) -> Result<AggregateJournalKey, StorageError> {
+pub(crate) fn delivery_journal_key(
+    delivery_id: &DeliveryId,
+) -> Result<AggregateJournalKey, StorageError> {
     AggregateJournalKey::new(DELIVERY_AGGREGATE_TYPE, &delivery_id.0)
 }
 
@@ -279,14 +279,14 @@ fn port_error(error: impl std::fmt::Display) -> DeliveryExecutionPortError {
     DeliveryExecutionPortError::new(error.to_string())
 }
 
-struct StagedDeliveryJournal {
+pub(crate) struct StagedDeliveryJournal {
     delivery_id: DeliveryId,
     loaded: Option<LoadedAggregateJournal>,
     publication: Mutex<Option<AggregateJournalPublication>>,
 }
 
 impl StagedDeliveryJournal {
-    fn new(delivery_id: DeliveryId, loaded: Option<LoadedAggregateJournal>) -> Self {
+    pub(crate) fn new(delivery_id: DeliveryId, loaded: Option<LoadedAggregateJournal>) -> Self {
         Self {
             delivery_id,
             loaded,
@@ -294,7 +294,7 @@ impl StagedDeliveryJournal {
         }
     }
 
-    fn into_publication(
+    pub(crate) fn into_publication(
         self,
     ) -> Result<Option<AggregateJournalPublication>, DeliveryExecutionPortError> {
         self.publication

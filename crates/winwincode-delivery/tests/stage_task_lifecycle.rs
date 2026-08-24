@@ -22,8 +22,8 @@ use winwincode_delivery::{
         StageRunActorType,
     },
     store::{
-        AppendDelivery, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
-        DeliveryMutationOperation, DeliveryStore, InMemoryDeliveryJournal,
+        CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryStore,
+        InMemoryDeliveryJournal, StartDeliveryStage,
     },
 };
 use winwincode_domain::{
@@ -1219,7 +1219,7 @@ fn resolving_combined_attention_uses_the_safest_transition_in_either_order() {
         };
         let delivery = resolve(&delivery, first, 1_800_000_000_130);
         assert_eq!(delivery.snapshot().status, DeliveryStatus::NeedsAttention);
-        resolve(&delivery, second, 1_800_000_000_140)
+        resolve(&delivery, second, 1_800_000_000_140).into_delivery()
     }
 
     for order in [
@@ -1243,38 +1243,30 @@ fn replayed_advance_returns_original_stage_run_without_new_state() {
             snapshot: draft.clone(),
         }))
         .expect("seed Delivery");
-    let advanced = advance(&draft, advance_input(1, "replay-stage"))
-        .expect("stage advance")
-        .delivery;
+    let advanced = advance(&draft, advance_input(1, "replay-stage")).expect("stage advance");
     let first = store
-        .execute(DeliveryCommand::Append(AppendDelivery {
-            delivery_id: draft.id().clone(),
+        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
-            operation: DeliveryMutationOperation::StageStarted,
             expected_revision: 1,
-            snapshot: advanced.clone(),
+            transition: advanced.clone(),
         }))
         .expect("first append");
     let replay = store
-        .execute(DeliveryCommand::Append(AppendDelivery {
-            delivery_id: draft.id().clone(),
+        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
-            operation: DeliveryMutationOperation::StageStarted,
             expected_revision: 1,
-            snapshot: advanced.clone(),
+            transition: advanced.clone(),
         }))
         .expect("identical request replays");
 
     let conflict = store
-        .execute(DeliveryCommand::Append(AppendDelivery {
-            delivery_id: draft.id().clone(),
+        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
-            operation: DeliveryMutationOperation::StageStarted,
-            expected_revision: advanced.revision(),
-            snapshot: advanced,
+            expected_revision: advanced.delivery.revision(),
+            transition: advanced,
         }))
         .expect_err("different expectedRevision is conflicting request reuse");
 

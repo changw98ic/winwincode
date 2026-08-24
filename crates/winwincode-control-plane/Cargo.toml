@@ -19,6 +19,7 @@ winwincode-storage = { path = "../winwincode-storage" }
 
 [dev-dependencies]
 rusqlite.workspace = true
+winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -40,7 +40,7 @@ pub struct DeliveryExecutionConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingDeliveryExecution {
     request_id: RequestId,
-    delivery: Delivery,
+    stage_transition: StageAdvanceResult,
     job: ExecutionJob,
 }
 
@@ -50,7 +50,11 @@ impl PendingDeliveryExecution {
     }
 
     pub fn delivery(&self) -> &Delivery {
-        &self.delivery
+        &self.stage_transition.delivery
+    }
+
+    pub fn stage_transition(&self) -> &StageAdvanceResult {
+        &self.stage_transition
     }
 
     pub fn job(&self) -> &ExecutionJob {
@@ -200,32 +204,35 @@ pub fn prepare_delivery_advance(
     result: StageAdvanceResult,
     config: DeliveryExecutionConfig,
 ) -> Result<PendingDeliveryExecution, DeliveryExecutionError> {
-    let StageAdvanceEffect::Dispatch(intent) = result.effect else {
+    result.validate_projection().map_err(|error| {
+        DeliveryExecutionError::InvalidEffect(format!("invalid sealed stage transition: {error}"))
+    })?;
+    let StageAdvanceEffect::Dispatch(intent) = &result.effect else {
         return Err(DeliveryExecutionError::InvalidEffect(
             "only a newly committed Codex stage creates an ExecutionJob intent".to_owned(),
         ));
     };
-    validate_dispatch_intent(&result.delivery, &intent)?;
+    validate_dispatch_intent(&result.delivery, intent)?;
     let attempt = i64::try_from(intent.attempt).map_err(|_| {
         DeliveryExecutionError::InvalidEffect(
             "Delivery stage attempt exceeds the ExecutionPort range".to_owned(),
         )
     })?;
-    let (goal, payload_digest, rework_authorization) = execution_payload(&intent, &config)?;
+    let (goal, payload_digest, rework_authorization) = execution_payload(intent, &config)?;
     let job = ExecutionJob {
         attempt,
-        execution_profile: intent.role,
+        execution_profile: intent.role.clone(),
         goal,
-        job_id: intent.execution_job_id,
+        job_id: intent.execution_job_id.clone(),
         limits: config.limits,
         payload_digest,
         scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
-            delivery_id: intent.delivery_id,
-            delivery_task_id: intent.delivery_task_id,
+            delivery_id: intent.delivery_id.clone(),
+            delivery_task_id: intent.delivery_task_id.clone(),
             kind: "delivery-stage".to_owned(),
-            product_session_id: intent.product_session_id,
+            product_session_id: intent.product_session_id.clone(),
             rework_authorization,
-            stage_run_id: intent.stage_run_id,
+            stage_run_id: intent.stage_run_id.clone(),
         }),
         workspace: config.workspace,
     };
@@ -233,7 +240,7 @@ pub fn prepare_delivery_advance(
     validate_execution_job(&job)?;
     Ok(PendingDeliveryExecution {
         request_id,
-        delivery: result.delivery,
+        stage_transition: result,
         job,
     })
 }
@@ -288,7 +295,7 @@ fn validate_commit_receipt(
     commit: &DeliveryExecutionCommitReceipt,
 ) -> Result<(), String> {
     validate_execution_job(&commit.job).map_err(|error| error.to_string())?;
-    if commit.committed_revision != pending.delivery.revision() {
+    if commit.committed_revision != pending.delivery().revision() {
         return Err("durable receipt revision does not match the committed Delivery".to_owned());
     }
     if !bounded_length(commit.outbox_event_id.trim(), 1, 200) {
@@ -300,7 +307,7 @@ fn validate_commit_receipt(
             return Err("durable receipt job is not a Delivery stage job".to_owned());
         }
     };
-    if receipt_delivery_id != pending.delivery.id() {
+    if receipt_delivery_id != pending.delivery().id() {
         return Err("durable receipt job belongs to another Delivery".to_owned());
     }
     if !commit.replayed && commit.job != pending.job {
