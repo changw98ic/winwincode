@@ -34,8 +34,8 @@ const REQUIRED_RULE_IDS = Object.freeze([
   'verdict.all_criteria_exactly_once',
   'verdict.pass_or_fail_requires_evidence',
   'verdict.required_result_fold',
-  'session_binding.has_session_identity',
-  'session_binding.matches_delivery_run_and_actor',
+  'session_binding.required_product_and_job_identities',
+  'session_binding.matches_delivery_stage_run_and_task',
 ].sort())
 
 const REQUIRED_FINDING_IDS = Object.freeze([

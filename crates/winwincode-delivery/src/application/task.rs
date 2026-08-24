@@ -7,7 +7,7 @@ use crate::domain::{
     DeliveryTaskStatus, StageRunStatus,
 };
 
-use super::{CoordinationError, CoordinationErrorCode};
+use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskFact {
@@ -74,6 +74,7 @@ pub fn approve_task_breakdown(
             "Delivery revision changed before task breakdown approval",
         ));
     }
+    require_mutation_time(delivery, now_millis)?;
     if delivery.snapshot().status != DeliveryStatus::Executing {
         return Err(CoordinationError::new(
             CoordinationErrorCode::WrongState,

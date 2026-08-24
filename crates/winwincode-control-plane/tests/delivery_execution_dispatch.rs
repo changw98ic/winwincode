@@ -296,10 +296,9 @@ impl DeliveryExecutionTransaction for DurableReceiptTransaction {
 }
 
 #[test]
-fn dispatch_uses_the_exact_job_recovered_from_the_durable_receipt() {
+fn new_commit_rejects_a_foreign_durable_job_without_dispatch() {
     let pending = pending_execution(8, false);
     let durable_job = pending_execution(9, false).job().clone();
-    let durable_job_id = durable_job.job_id.0.clone();
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut transaction = DurableReceiptTransaction {
         receipt: Some(DeliveryExecutionCommitReceipt {
@@ -313,14 +312,17 @@ fn dispatch_uses_the_exact_job_recovered_from_the_durable_receipt() {
         trace: Arc::clone(&trace),
     };
 
-    let receipt = commit_and_dispatch(&pending, &mut transaction, &mut dispatcher)
-        .expect("dispatch durable receipt job");
+    let error = commit_and_dispatch(&pending, &mut transaction, &mut dispatcher)
+        .expect_err("foreign durable job must stay committed and undispatched");
 
-    assert_eq!(receipt.commit.job.job_id.0, durable_job_id);
     assert_eq!(
-        *trace.lock().expect("trace lock"),
-        [format!("dispatch:{durable_job_id}")]
+        error
+            .committed_receipt()
+            .expect("committed receipt")
+            .outbox_event_id,
+        "delivery-job-event-8"
     );
+    assert!(trace.lock().expect("trace lock").is_empty());
 }
 
 #[test]

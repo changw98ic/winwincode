@@ -520,8 +520,16 @@ impl<'journal> DeliveryStore<'journal> {
             .iter()
             .find(|record| record.request_id == command.request_id)
         {
+            let prior_expected_revision =
+                prior.snapshot.revision().checked_sub(1).ok_or_else(|| {
+                    store_error(
+                        DeliveryStoreErrorCode::StoreCorrupt,
+                        "append record cannot have revision zero",
+                    )
+                })?;
             if prior.request_digest != command.request_digest
                 || prior.operation != command.operation
+                || prior_expected_revision != command.expected_revision
             {
                 return Err(store_error(
                     DeliveryStoreErrorCode::RequestConflict,
