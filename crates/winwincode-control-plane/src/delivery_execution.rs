@@ -247,10 +247,10 @@ pub fn commit_and_dispatch(
     let commit = transaction
         .commit_delivery_and_job_intent(pending)
         .map_err(DeliveryExecutionError::Commit)?;
-    if let Err(error) = validate_execution_job(&commit.job) {
+    if let Err(message) = validate_commit_receipt(pending, &commit) {
         return Err(DeliveryExecutionError::CommittedPayloadInvalid {
             commit: Box::new(commit),
-            message: error.to_string(),
+            message,
         });
     }
     if commit.replayed {
@@ -275,6 +275,32 @@ pub fn commit_and_dispatch(
         commit,
         dispatched: true,
     })
+}
+
+fn validate_commit_receipt(
+    pending: &PendingDeliveryExecution,
+    commit: &DeliveryExecutionCommitReceipt,
+) -> Result<(), String> {
+    validate_execution_job(&commit.job).map_err(|error| error.to_string())?;
+    if commit.committed_revision != pending.delivery.revision() {
+        return Err("durable receipt revision does not match the committed Delivery".to_owned());
+    }
+    if !bounded_length(commit.outbox_event_id.trim(), 1, 200) {
+        return Err("durable receipt has an invalid outbox event identity".to_owned());
+    }
+    let receipt_delivery_id = match &commit.job.scope {
+        ExecutionScope::DeliveryStageExecutionScope(scope) => &scope.delivery_id,
+        ExecutionScope::ProductSessionExecutionScope(_) => {
+            return Err("durable receipt job is not a Delivery stage job".to_owned());
+        }
+    };
+    if receipt_delivery_id != pending.delivery.id() {
+        return Err("durable receipt job belongs to another Delivery".to_owned());
+    }
+    if !commit.replayed && commit.job != pending.job {
+        return Err("new durable receipt does not contain the exact pending job".to_owned());
+    }
+    Ok(())
 }
 
 /// Accepts a generated `job.cancel_ack` without treating it as terminal.

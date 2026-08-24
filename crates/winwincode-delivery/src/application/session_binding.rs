@@ -9,7 +9,7 @@ use winwincode_domain::{
 
 use crate::domain::{Delivery, StageRunStatus};
 
-use super::{CoordinationError, CoordinationErrorCode};
+use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBindingIdentity {
@@ -34,6 +34,7 @@ pub fn accept_worker_session(
     now_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     require_revision(delivery, expected_revision)?;
+    require_mutation_time(delivery, now_millis)?;
     let index = exact_binding_index(delivery, identity)?;
     require_active_run(delivery, identity)?;
     if delivery
@@ -84,6 +85,7 @@ pub fn report_codex_thread(
     now_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     require_revision(delivery, expected_revision)?;
+    require_mutation_time(delivery, now_millis)?;
     let index = exact_binding_index(delivery, identity)?;
     require_active_run(delivery, identity)?;
     let current = &delivery.snapshot().session_bindings[index];

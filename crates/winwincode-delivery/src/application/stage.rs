@@ -14,7 +14,7 @@ use crate::domain::{
 };
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
-use super::{CoordinationError, CoordinationErrorCode};
+use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewStageIdentities {
@@ -307,6 +307,7 @@ fn select_next_stage<'delivery>(
             "Delivery revision changed before stage advance",
         ));
     }
+    require_mutation_time(delivery, input.now_millis)?;
     if delivery
         .snapshot()
         .attention_items
@@ -329,6 +330,9 @@ fn select_next_stage<'delivery>(
             CoordinationErrorCode::Conflict,
             "Delivery has more than one active StageRun",
         ));
+    }
+    if let Some(previous) = previous {
+        validate_stage_executor(previous.stage, previous.actor_type, &previous.role)?;
     }
     let (stage, next_status, actor_type) =
         legal_transition(delivery.snapshot().status, previous.map(|run| run.stage))?;
@@ -565,7 +569,9 @@ fn goal_for_task(delivery: &Delivery, task_id: Option<&DeliveryTaskId>) -> Strin
 /// # Errors
 ///
 /// Fails closed on a stale revision, zero/multiple active runs, a human review
-/// stage, or an incomplete/conflicting exact `SessionBinding`.
+/// stage, or a conflicting exact `SessionBinding`. A pending dispatch may not
+/// have a `WorkerSession` or `CodexThread` yet; durable replay must still reuse
+/// its original job and attempt.
 pub fn resume_active(
     delivery: &Delivery,
     expected_revision: u64,
@@ -593,7 +599,7 @@ pub fn resume_active(
             "Delivery has more than one active StageRun",
         ));
     }
-    let binding = exact_binding(delivery, run, true)?;
+    let binding = exact_binding(delivery, run, false)?;
     let goal = run
         .delivery_task_id
         .as_ref()
@@ -745,6 +751,7 @@ pub fn apply_cancelled_outcome(
             "Delivery revision changed before cancellation outcome",
         ));
     }
+    require_mutation_time(delivery, finished_at_millis)?;
     if outcome.status != TerminalOutcomeStatus::Cancelled {
         return Err(CoordinationError::new(
             CoordinationErrorCode::InvalidRequest,
@@ -893,7 +900,10 @@ fn select_task_id(
         return Ok(None);
     }
     if delivery.snapshot().tasks.is_empty() {
-        return Ok(None);
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "execution requires a non-empty approved DeliveryTask graph",
+        ));
     }
     if stage == DeliveryStage::Verifying
         && let Some(previous) = previous
@@ -930,11 +940,12 @@ fn role_for_stage(
         return match (previous.stage, previous.role.as_str()) {
             (DeliveryStage::Executing | DeliveryStage::Reworking, _) => Ok("reviewer"),
             (DeliveryStage::Verifying, "reviewer") => Ok("verifier"),
-            (DeliveryStage::Verifying, "verifier") => Ok("adversarial-verifier"),
-            (DeliveryStage::Verifying, "adversarial-verifier") => Err(CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "all required verification roles completed; submit a DeliveryVerdict",
-            )),
+            (DeliveryStage::Verifying, "verifier" | "adversarial-verifier") => {
+                Err(CoordinationError::new(
+                    CoordinationErrorCode::WrongState,
+                    "all required verification roles completed; submit a DeliveryVerdict",
+                ))
+            }
             _ => Err(CoordinationError::new(
                 CoordinationErrorCode::Conflict,
                 "verification progress contains an unexpected role",
@@ -960,7 +971,7 @@ fn role_for_stage(
         })
         .map(|(_, run)| run.role.as_str())
         .collect::<Vec<_>>();
-    ["reviewer", "verifier", "adversarial-verifier"]
+    ["reviewer", "verifier"]
         .into_iter()
         .find(|role| !completed_roles.contains(role))
         .ok_or_else(|| {
@@ -976,6 +987,7 @@ fn exact_binding<'delivery>(
     run: &StageRun,
     require_complete: bool,
 ) -> Result<&'delivery SessionBinding, CoordinationError> {
+    validate_stage_executor(run.stage, run.actor_type, &run.role)?;
     if run.actor_type == StageRunActorType::Human {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,

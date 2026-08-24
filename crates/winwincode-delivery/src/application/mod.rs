@@ -7,6 +7,8 @@
 
 use std::{error::Error, fmt};
 
+use crate::domain::{Delivery, MAX_SAFE_INTEGER};
+
 pub mod attention;
 pub mod session_binding;
 pub mod stage;
@@ -53,3 +55,17 @@ impl fmt::Display for CoordinationError {
 }
 
 impl Error for CoordinationError {}
+
+pub(crate) fn require_mutation_time(
+    delivery: &Delivery,
+    now_millis: u64,
+) -> Result<(), CoordinationError> {
+    if now_millis < delivery.snapshot().updated_at_millis || now_millis > MAX_SAFE_INTEGER {
+        Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "mutation time must not precede the current Delivery state",
+        ))
+    } else {
+        Ok(())
+    }
+}

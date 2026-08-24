@@ -209,6 +209,22 @@ fn advance_selects_only_the_legal_next_stage() {
 }
 
 #[test]
+fn stage_advance_rejects_time_before_current_delivery_state() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let mut snapshot = ready.into_snapshot();
+    snapshot.updated_at_millis += 100;
+    let ready = Delivery::try_from_snapshot(snapshot).expect("Delivery with a later update");
+    let mut input = advance_input(1, "backdated-stage");
+    input.now_millis = ready.snapshot().updated_at_millis - 50;
+
+    let error =
+        advance(&ready, input).expect_err("stage start cannot move Delivery time backwards");
+
+    assert_eq!(error.code(), CoordinationErrorCode::InvalidRequest);
+    assert!(ready.snapshot().stage_runs.is_empty());
+}
+
+#[test]
 fn advance_rejects_when_more_than_one_stage_run_is_active() {
     let ready = delivery_with_status(DeliveryStatus::Ready);
     let started = advance(&ready, advance_input(1, "first")).expect("first stage");
@@ -271,6 +287,22 @@ fn stage_actor_and_role_policy_rejects_wrong_executor() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn recovery_rejects_stage_with_foreign_actor_or_role() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let started = advance(&ready, advance_input(1, "foreign-role"))
+        .expect("planning starts")
+        .delivery;
+    let mut snapshot = started.into_snapshot();
+    snapshot.stage_runs[0].role = "executor".into();
+    let corrupted = Delivery::try_from_snapshot(snapshot)
+        .expect("legacy snapshot reaches application policy validation");
+
+    let error = resume_active(&corrupted, corrupted.revision())
+        .expect_err("recovery must not resume a foreign stage role");
+    assert_eq!(error.code(), CoordinationErrorCode::InvalidRequest);
 }
 
 #[test]
@@ -373,6 +405,35 @@ fn active_stage_run_resumes_without_new_run_or_attempt() {
 }
 
 #[test]
+fn active_stage_run_resumes_before_worker_acceptance_without_new_identity() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = advance(&ready, advance_input(1, "resume-before-worker"))
+        .expect("planning starts")
+        .delivery;
+    let revision = planning.revision();
+    let run = planning.snapshot().stage_runs[0].clone();
+    let binding = planning.snapshot().session_bindings[0].clone();
+    assert!(binding.worker_session_id.is_none());
+    assert!(binding.codex_thread_id.is_none());
+
+    let resumed = resume_active(&planning, revision)
+        .expect("durable job resumes before Worker accepts dispatch");
+
+    assert_eq!(resumed.delivery, planning);
+    assert_eq!(resumed.delivery.revision(), revision);
+    assert_eq!(
+        resumed.delivery.snapshot().stage_runs.as_slice(),
+        std::slice::from_ref(&run)
+    );
+    let StageAdvanceEffect::Resume(intent) = resumed.effect else {
+        panic!("resume must return the original pending ExecutionIntent");
+    };
+    assert_eq!(intent.stage_run_id, run.id);
+    assert_eq!(intent.execution_job_id, binding.execution_job_id);
+    assert_eq!(intent.attempt, run.attempt);
+}
+
+#[test]
 fn cancel_request_waits_for_terminal_job_outcome() {
     let ready = delivery_with_status(DeliveryStatus::Ready);
     let planning = completed_active_binding(
@@ -460,6 +521,28 @@ fn task_breakdown_approval_replaces_empty_graph_once() {
     )
     .expect_err("the same Spec revision cannot replace its task graph");
     assert_eq!(error.code(), CoordinationErrorCode::Conflict);
+}
+
+#[test]
+fn approved_plan_without_a_frozen_task_graph_cannot_start_execution() {
+    let approved_plan = approved_plan_without_tasks();
+    let mut input = advance_input(approved_plan.revision(), "empty-task-graph");
+    input.now_millis = 1_800_000_000_200;
+
+    let error = advance(&approved_plan, input)
+        .expect_err("execution must wait for a non-empty approved task graph");
+
+    assert_eq!(error.code(), CoordinationErrorCode::WrongState);
+    assert!(
+        approved_plan
+            .snapshot()
+            .stage_runs
+            .last()
+            .is_some_and(|run| {
+                run.stage == DeliveryStage::PlanReview
+                    && run.status == winwincode_delivery::domain::StageRunStatus::Succeeded
+            })
+    );
 }
 
 #[test]
@@ -692,7 +775,16 @@ fn conflicting_session_binding_stops_recovery() {
     let started = advance(&ready, advance_input(1, "binding-conflict"))
         .expect("planning starts")
         .delivery;
-    assert!(resume_active(&started, started.revision()).is_err());
+    let resumed = resume_active(&started, started.revision())
+        .expect("pending dispatch resumes before Worker acceptance");
+    let StageAdvanceEffect::Resume(intent) = resumed.effect else {
+        panic!("pending dispatch must resume the same execution intent");
+    };
+    assert_eq!(intent.stage_run_id, started.snapshot().stage_runs[0].id);
+    assert_eq!(
+        intent.execution_job_id,
+        started.snapshot().session_bindings[0].execution_job_id
+    );
 
     let binding = &started.snapshot().session_bindings[0];
     let wrong_identity = SessionBindingIdentity {
@@ -847,6 +939,42 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
         1
     );
     assert_eq!(resolved.snapshot().stage_runs.len(), 2);
+
+    let remaining = resolved
+        .snapshot()
+        .attention_items
+        .iter()
+        .find(|item| item.status == winwincode_delivery::domain::AttentionItemStatus::Open)
+        .expect("second blocker remains")
+        .clone();
+    let completed = resolve_attention(
+        &resolved,
+        ResolveAttentionInput {
+            expected_revision: resolved.revision(),
+            attention_item_id: remaining.id,
+            stage_run_id: remaining.stage_run_id.expect("same review run"),
+            expected_context: remaining.context,
+            actor: "reviewer-one".into(),
+            decision: AttentionDecision::Resolved,
+            resolution: "second decision approved".into(),
+            now_millis: 1_800_000_000_300,
+        },
+    )
+    .expect("remaining current blocker can resolve");
+
+    assert_eq!(completed.snapshot().status, DeliveryStatus::Executing);
+    assert!(!completed.snapshot().attention_items.iter().any(|item| {
+        item.blocking && item.status == winwincode_delivery::domain::AttentionItemStatus::Open
+    }));
+    assert_eq!(
+        completed
+            .snapshot()
+            .stage_runs
+            .last()
+            .expect("review run")
+            .status,
+        winwincode_delivery::domain::StageRunStatus::Succeeded
+    );
 }
 
 #[test]
@@ -880,29 +1008,55 @@ fn replayed_advance_returns_original_stage_run_without_new_state() {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             operation: DeliveryMutationOperation::StageStarted,
+            expected_revision: 1,
+            snapshot: advanced.clone(),
+        }))
+        .expect("identical request replays");
+
+    let conflict = store
+        .execute(DeliveryCommand::Append(AppendDelivery {
+            delivery_id: draft.id().clone(),
+            request_id: RequestId("request-advance-replay".into()),
+            request_digest: "b".repeat(64),
+            operation: DeliveryMutationOperation::StageStarted,
             expected_revision: advanced.revision(),
             snapshot: advanced,
         }))
-        .expect("identical request replays");
+        .expect_err("different expectedRevision is conflicting request reuse");
 
     assert!(!first.replayed);
     assert!(replay.replayed);
     assert_eq!(replay.snapshot, first.snapshot);
     assert_eq!(replay.snapshot.snapshot().stage_runs.len(), 1);
     assert_eq!(replay.snapshot.snapshot().session_bindings.len(), 1);
+    assert_eq!(
+        conflict.code(),
+        winwincode_delivery::store::DeliveryStoreErrorCode::RequestConflict
+    );
 }
 
 #[test]
-fn verification_progress_selects_each_role_once_and_then_stops() {
-    let executing = delivery_with_status(DeliveryStatus::Executing);
+fn verification_progress_stops_after_required_roles_without_optional_adversary() {
+    let approved = approved_plan_without_tasks();
+    let approved_task = task(&approved, "task-verification-sequence", vec![]);
+    let executing = approve_task_breakdown(
+        &approved,
+        approved.revision(),
+        vec![approved_task],
+        1_800_000_000_200,
+    )
+    .expect("task graph approved");
+    let mut writer_input = advance_input(executing.revision(), "writer-sequence");
+    writer_input.now_millis = 1_800_000_000_300;
     let writer = completed_active_binding(
-        advance(&executing, advance_input(1, "writer-sequence"))
+        advance(&executing, writer_input)
             .expect("executor starts")
             .delivery,
         "writer-sequence",
     );
 
-    let mut reviewer_input = advance_input(2, "reviewer-sequence");
+    let mut reviewer_input = advance_input(writer.revision(), "reviewer-sequence");
+    reviewer_input.now_millis = 1_800_000_000_400;
     reviewer_input.previous_outcome = Some(successful_outcome(&writer));
     let reviewer = advance(&writer, reviewer_input)
         .expect("reviewer starts")
@@ -918,7 +1072,8 @@ fn verification_progress_selects_each_role_once_and_then_stops() {
     );
     let reviewer = completed_active_binding(reviewer, "reviewer-sequence");
 
-    let mut verifier_input = advance_input(3, "verifier-sequence");
+    let mut verifier_input = advance_input(reviewer.revision(), "verifier-sequence");
+    verifier_input.now_millis = 1_800_000_000_500;
     verifier_input.previous_outcome = Some(successful_outcome(&reviewer));
     let verifier = advance(&reviewer, verifier_input)
         .expect("verifier starts")
@@ -934,28 +1089,13 @@ fn verification_progress_selects_each_role_once_and_then_stops() {
     );
     let verifier = completed_active_binding(verifier, "verifier-sequence");
 
-    let mut adversarial_input = advance_input(4, "adversarial-sequence");
-    adversarial_input.previous_outcome = Some(successful_outcome(&verifier));
-    let adversarial = advance(&verifier, adversarial_input)
-        .expect("adversarial verifier starts")
-        .delivery;
-    assert_eq!(
-        adversarial
-            .snapshot()
-            .stage_runs
-            .last()
-            .expect("adversarial verifier")
-            .role,
-        "adversarial-verifier"
-    );
-    let adversarial = completed_active_binding(adversarial, "adversarial-sequence");
-
-    let mut beyond = advance_input(5, "verification-overrun");
-    beyond.previous_outcome = Some(successful_outcome(&adversarial));
-    let error = advance(&adversarial, beyond)
-        .expect_err("completed verification set must not loop forever");
+    let mut beyond = advance_input(verifier.revision(), "verification-overrun");
+    beyond.now_millis = 1_800_000_000_600;
+    beyond.previous_outcome = Some(successful_outcome(&verifier));
+    let error =
+        advance(&verifier, beyond).expect_err("optional adversarial verifier must not be forced");
     assert_eq!(error.code(), CoordinationErrorCode::WrongState);
-    assert_eq!(adversarial.snapshot().stage_runs.len(), 4);
+    assert_eq!(verifier.snapshot().stage_runs.len(), 5);
 }
 
 #[test]
