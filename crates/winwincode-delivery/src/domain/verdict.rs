@@ -17,8 +17,9 @@ use super::{
     CriterionResultId, Delivery, DeliverySpecId, DeliveryStatus, DeliveryTaskStatus,
     DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictId, EvidenceRef,
     EvidenceRefType, FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH,
-    assert_frozen_candidate_current, bounded_text, collection_length, duplicate_ids,
-    portable_identifier, safe_non_negative, schema_version, unique_texts, validation_error,
+    StageRunActorType, assert_frozen_candidate_current, bounded_text, collection_length,
+    duplicate_ids, portable_identifier, safe_non_negative, schema_version, unique_texts,
+    validation_error,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +184,7 @@ pub fn compute_delivery_verdict(
             "verification belongs to another frozen candidate",
         ));
     }
+    validate_verification_is_current(delivery, candidate, verification)?;
     safe_non_negative(produced_at_millis, "verdict.producedAtMillis")?;
     if produced_at_millis < delivery.snapshot().updated_at_millis {
         return Err(invalid_computation(
@@ -322,6 +324,63 @@ pub fn compute_delivery_verdict(
         verdict,
         next_status,
     })
+}
+
+fn validate_verification_is_current(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+    verification: &IndependentVerification,
+) -> Result<(), DeliveryValidationError> {
+    for settlement in verification.settlements() {
+        let Some(assignment) = settlement.assignment() else {
+            continue;
+        };
+        let role_runs = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .filter(|run| {
+                run.stage == super::DeliveryStage::Verifying
+                    && run.actor_type == StageRunActorType::Codex
+                    && run.role == role_id(settlement.role())
+            })
+            .collect::<Vec<_>>();
+        let current_attempt = role_runs.iter().map(|run| run.attempt).max();
+        let current_runs = role_runs
+            .into_iter()
+            .filter(|run| Some(run.attempt) == current_attempt)
+            .collect::<Vec<_>>();
+        if current_runs.len() != 1 || current_runs[0].id != *assignment.stage_run_id() {
+            return Err(invalid_computation(
+                "verification projection no longer owns the role's current StageRun",
+            ));
+        }
+        let current_bindings = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .filter(|binding| binding.stage_run_id == current_runs[0].id)
+            .collect::<Vec<_>>();
+        if current_bindings.len() != 1 {
+            return Err(invalid_computation(
+                "verification projection no longer has one current SessionBinding",
+            ));
+        }
+        let binding = current_bindings[0];
+        let binding_is_current = binding.id == *assignment.session_binding_id()
+            && binding.product_session_id == *assignment.product_session_id()
+            && binding.execution_job_id == *assignment.execution_job_id()
+            && binding.worker_session_id.as_ref() == Some(assignment.worker_session_id())
+            && binding.codex_thread_id.as_ref() == Some(assignment.codex_thread_id())
+            && assignment.repository() == candidate.repository()
+            && assignment.checkout_revision() == candidate.candidate_commit_id();
+        if !binding_is_current {
+            return Err(invalid_computation(
+                "verification projection Session or candidate checkout is stale",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_resolved_evidence(
@@ -1217,6 +1276,57 @@ mod tests {
                 .unresolved_findings
                 .iter()
                 .any(|finding| finding.starts_with("evidence-mismatch:"))
+        );
+    }
+
+    #[test]
+    fn stale_verification_projection_cannot_authorize_a_later_role_attempt() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let (verification, evidence) = passing_inputs(&delivery, &candidate);
+        let mut snapshot = delivery.into_snapshot();
+        let task_id = snapshot.stage_runs[0].delivery_task_id.clone();
+        let stage_run_id = StageRunId("stage-reviewer-2".into());
+        snapshot.stage_runs.push(StageRun {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: stage_run_id.clone(),
+            delivery_id: snapshot.id.clone(),
+            delivery_task_id: task_id.clone(),
+            stage: DeliveryStage::Verifying,
+            actor_type: StageRunActorType::Codex,
+            role: "reviewer".into(),
+            status: StageRunStatus::Succeeded,
+            attempt: 2,
+            started_at_millis: 1_800_000_000_070,
+            finished_at_millis: Some(1_800_000_000_080),
+        });
+        snapshot.session_bindings.push(SessionBinding {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: SessionBindingId("binding-reviewer-2".into()),
+            delivery_id: snapshot.id.clone(),
+            delivery_task_id: task_id,
+            stage_run_id,
+            product_session_id: ProductSessionId("product-reviewer-2".into()),
+            execution_job_id: ExecutionJobId("job-reviewer-2".into()),
+            worker_session_id: Some(WorkerSessionId("worker-reviewer-2".into())),
+            codex_thread_id: Some(CodexThreadId("thread-reviewer-2".into())),
+            bound_at_millis: 1_800_000_000_071,
+        });
+        snapshot.updated_at_millis = 1_800_000_000_080;
+        let retried = Delivery::try_from_snapshot(snapshot).expect("retried verification Delivery");
+
+        let error = compute_delivery_verdict(
+            &retried,
+            &candidate,
+            &verification,
+            &evidence,
+            PRODUCED_AT_MILLIS,
+        )
+        .expect_err("older settled projection must be stale after a later role attempt");
+
+        assert_eq!(
+            error.code(),
+            crate::domain::DeliveryValidationErrorCode::RelationshipMismatch
         );
     }
 
