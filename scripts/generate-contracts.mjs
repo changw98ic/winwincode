@@ -761,7 +761,7 @@ function renderRustApi(context, digest) {
     `// ${GENERATED_MARKER}`,
     `// Source digest: sha256:${digest}`,
     '',
-    '#![allow(clippy::doc_markdown)]',
+    '#![allow(clippy::doc_markdown, clippy::large_enum_variant)]',
     '',
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared scalar value objects are defined once in `winwincode-domain`.',

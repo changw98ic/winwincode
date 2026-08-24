@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
     ExecutionJobId, FencingToken, LeaseId, ProductSessionId, Sha256Digest, StageRunId, WorkerId,
@@ -15,7 +16,8 @@ use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
     DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, MAX_COLLECTION_LENGTH,
     MAX_SAFE_INTEGER, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
-    StageRunStatus, rework::ReworkAuthorization,
+    StageRunStatus,
+    rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
 };
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
@@ -308,7 +310,49 @@ pub struct ExecutionIntent {
     pub role: String,
     pub attempt: u64,
     pub goal: String,
-    pub rework_authorization: Option<Box<ReworkAuthorization>>,
+    rework_authorization: Option<Box<ReworkAuthorization>>,
+    validation_seal: Sha256Digest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionIntentSealIdentity<'intent> {
+    delivery: &'intent DeliverySnapshot,
+    execution_job_id: &'intent ExecutionJobId,
+    product_session_id: &'intent ProductSessionId,
+    delivery_id: &'intent DeliveryId,
+    delivery_task_id: Option<&'intent DeliveryTaskId>,
+    stage_run_id: &'intent StageRunId,
+    stage: DeliveryStage,
+    role: &'intent str,
+    attempt: u64,
+    goal: &'intent str,
+    rework_authorization_digest: Option<&'intent Sha256Digest>,
+}
+
+impl ExecutionIntent {
+    pub fn rework_authorization(&self) -> Option<&ReworkAuthorization> {
+        self.rework_authorization.as_deref()
+    }
+
+    /// Confirms this intent is the unchanged output of the Delivery
+    /// application service for the exact post-advance snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects field mutation, authorization replacement, or pairing the
+    /// intent with another Delivery snapshot before durable publication.
+    pub fn validate_for_delivery(&self, delivery: &Delivery) -> Result<(), CoordinationError> {
+        let expected = seal_execution_intent(delivery.snapshot(), self)?;
+        if self.validation_seal == expected {
+            Ok(())
+        } else {
+            Err(CoordinationError::new(
+                CoordinationErrorCode::BindingConflict,
+                "ExecutionIntent changed after the Delivery stage was prepared",
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +360,7 @@ pub enum StageAdvanceEffect {
     Dispatch(ExecutionIntent),
     Review(AttentionItemId),
     Resume(ExecutionIntent),
+    Clarify(ReworkClarificationReason),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,6 +472,73 @@ pub fn advance(
         CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
     })?;
     Ok(StageAdvanceResult { delivery, effect })
+}
+
+/// Consumes the sealed precise-rework decision instead of letting a caller
+/// choose a task or silently ignore a clarification result.
+///
+/// A start decision delegates to [`advance`] with the exact authorization. A
+/// bounded/repeated failure changes the Delivery to `Clarifying` without
+/// creating a remediator `StageRun`, `SessionBinding`, or `ExecutionJob`.
+///
+/// # Errors
+///
+/// Rejects a stale revision, non-reworking Delivery, active run, unresolved
+/// Attention, or an input that tries to combine another authorization or
+/// terminal/review facts with the sealed decision.
+pub fn advance_rework(
+    delivery: &Delivery,
+    mut input: AdvanceStageInput,
+    decision: ReworkDecision,
+) -> Result<StageAdvanceResult, CoordinationError> {
+    if input.rework_authorization.is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "advance_rework owns the sealed authorization input",
+        ));
+    }
+    match decision {
+        ReworkDecision::Start(authorization) => {
+            input.rework_authorization = Some(authorization);
+            advance(delivery, input)
+        }
+        ReworkDecision::Clarify(reason) => {
+            if delivery.revision() != input.expected_revision {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::RevisionConflict,
+                    "Delivery revision changed before rework clarification",
+                ));
+            }
+            require_mutation_time(delivery, input.now_millis)?;
+            let invalid_input = input.review.is_some()
+                || input.previous_outcome.is_some()
+                || input.current_lease.is_some()
+                || delivery.snapshot().status != DeliveryStatus::Reworking
+                || delivery.snapshot().stage_runs.iter().any(is_active)
+                || delivery
+                    .snapshot()
+                    .attention_items
+                    .iter()
+                    .any(|item| item.blocking && item.status == AttentionItemStatus::Open);
+            if invalid_input {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::WrongState,
+                    "rework clarification requires one idle, unblocked Reworking Delivery",
+                ));
+            }
+            let mut snapshot = delivery.clone().into_snapshot();
+            snapshot.status = DeliveryStatus::Clarifying;
+            snapshot.revision += 1;
+            snapshot.updated_at_millis = input.now_millis;
+            let delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+            })?;
+            Ok(StageAdvanceResult {
+                delivery,
+                effect: StageAdvanceEffect::Clarify(reason),
+            })
+        }
+    }
 }
 
 struct NextStage<'delivery> {
@@ -744,7 +856,7 @@ fn append_execution_effect(
         codex_thread_id: None,
         bound_at_millis: input.now_millis,
     });
-    Ok(StageAdvanceEffect::Dispatch(ExecutionIntent {
+    let mut intent = ExecutionIntent {
         execution_job_id: input.identities.execution_job_id,
         product_session_id: input.product_session_id,
         delivery_id: delivery.id().clone(),
@@ -755,7 +867,42 @@ fn append_execution_effect(
         attempt: next.attempt,
         goal: goal_for_task(delivery, next.delivery_task_id.as_ref()),
         rework_authorization: input.rework_authorization,
-    }))
+        validation_seal: Sha256Digest(String::new()),
+    };
+    intent.validation_seal = seal_execution_intent(snapshot, &intent)?;
+    Ok(StageAdvanceEffect::Dispatch(intent))
+}
+
+fn seal_execution_intent(
+    delivery: &DeliverySnapshot,
+    intent: &ExecutionIntent,
+) -> Result<Sha256Digest, CoordinationError> {
+    let identity = ExecutionIntentSealIdentity {
+        delivery,
+        execution_job_id: &intent.execution_job_id,
+        product_session_id: &intent.product_session_id,
+        delivery_id: &intent.delivery_id,
+        delivery_task_id: intent.delivery_task_id.as_ref(),
+        stage_run_id: &intent.stage_run_id,
+        stage: intent.stage,
+        role: &intent.role,
+        attempt: intent.attempt,
+        goal: &intent.goal,
+        rework_authorization_digest: intent
+            .rework_authorization
+            .as_deref()
+            .map(ReworkAuthorization::authorization_digest),
+    };
+    let encoded = serde_json::to_vec(&identity).map_err(|error| {
+        CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            format!("ExecutionIntent seal cannot be encoded: {error}"),
+        )
+    })?;
+    Ok(Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(encoded)
+    )))
 }
 
 fn goal_for_task(delivery: &Delivery, task_id: Option<&DeliveryTaskId>) -> String {
@@ -832,20 +979,23 @@ pub fn resume_active(
             || delivery.snapshot().spec.goal.clone(),
             |task| task.goal.clone(),
         );
+    let mut intent = ExecutionIntent {
+        execution_job_id: binding.execution_job_id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        delivery_id: run.delivery_id.clone(),
+        delivery_task_id: run.delivery_task_id.clone(),
+        stage_run_id: run.id.clone(),
+        stage: run.stage,
+        role: run.role.clone(),
+        attempt: run.attempt,
+        goal,
+        rework_authorization: None,
+        validation_seal: Sha256Digest(String::new()),
+    };
+    intent.validation_seal = seal_execution_intent(delivery.snapshot(), &intent)?;
     Ok(StageAdvanceResult {
         delivery: delivery.clone(),
-        effect: StageAdvanceEffect::Resume(ExecutionIntent {
-            execution_job_id: binding.execution_job_id.clone(),
-            product_session_id: binding.product_session_id.clone(),
-            delivery_id: run.delivery_id.clone(),
-            delivery_task_id: run.delivery_task_id.clone(),
-            stage_run_id: run.id.clone(),
-            stage: run.stage,
-            role: run.role.clone(),
-            attempt: run.attempt,
-            goal,
-            rework_authorization: None,
-        }),
+        effect: StageAdvanceEffect::Resume(intent),
     })
 }
 

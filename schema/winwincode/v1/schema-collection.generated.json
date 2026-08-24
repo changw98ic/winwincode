@@ -2721,6 +2721,99 @@
       ],
       "type": "object"
     },
+    "DeliveryReworkAuthorizationScope": {
+      "additionalProperties": false,
+      "properties": {
+        "authorizationDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "candidateRef": {
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "diffSha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "requiresFullReverification": {
+          "const": true
+        },
+        "sourceCandidateCommitId": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "sourceCandidateTreeId": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReworkTargetScope"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "authorizationDigest",
+        "candidateRef",
+        "diffSha256",
+        "sourceCandidateCommitId",
+        "sourceCandidateTreeId",
+        "requiresFullReverification",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "DeliveryReworkTargetScope": {
+      "additionalProperties": false,
+      "properties": {
+        "deliveryTaskId": {
+          "$ref": "#/$defs/DeliveryTaskId"
+        },
+        "diagramId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "evidenceRefIds": {
+          "items": {
+            "$ref": "#/$defs/EvidenceId"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "filePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nodeId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "sourceHunkSha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "deliveryTaskId",
+        "diagramId",
+        "nodeId",
+        "filePath",
+        "sourceHunkSha256",
+        "evidenceRefIds"
+      ],
+      "type": "object"
+    },
     "DeliverySpecInput": {
       "additionalProperties": false,
       "properties": {
@@ -2784,6 +2877,9 @@
         },
         "productSessionId": {
           "$ref": "#/$defs/ProductSessionId"
+        },
+        "reworkAuthorization": {
+          "$ref": "#/$defs/DeliveryReworkAuthorizationScope"
         },
         "stageRunId": {
           "$ref": "#/$defs/StageRunId"
@@ -6713,6 +6809,6 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:a80ef179452018741fc77b9fc62b4fa417526ed8de9319c2715ad6097df2565a",
+  "x-source-digest": "sha256:6fe10ed15e0032f26bbf2e951b4b5aad77ed6208de06f899031f6635790acc1f",
   "x-winwincode-license": "Apache-2.0"
 }

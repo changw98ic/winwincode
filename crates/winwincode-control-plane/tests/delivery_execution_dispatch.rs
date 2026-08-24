@@ -128,7 +128,14 @@ fn assert_prepare_rejected(
 ) {
     let error = prepare_delivery_advance(request_id, result, config)
         .expect_err("malformed value must fail before pending publication");
-    assert!(error.to_string().contains("invalid"), "{name}: {error}");
+    assert!(
+        matches!(
+            &error,
+            winwincode_control_plane::delivery_execution::DeliveryExecutionError::InvalidEffect(_)
+                | winwincode_control_plane::delivery_execution::DeliveryExecutionError::Coordination(_)
+        ),
+        "{name}: {error}"
+    );
 }
 
 struct RecordingTransaction {
@@ -366,6 +373,7 @@ fn delivery_stage_scope_carries_exact_product_delivery_task_and_run_identity() {
         delivery_task_id,
         kind,
         product_session_id,
+        rework_authorization,
         stage_run_id,
     }) = &pending.job().scope
     else {
@@ -380,6 +388,7 @@ fn delivery_stage_scope_carries_exact_product_delivery_task_and_run_identity() {
     );
     assert_eq!(product_session_id.0, canonical_id("psn", 3));
     assert_eq!(stage_run_id.0, canonical_id("run", 3));
+    assert!(rework_authorization.is_none());
     assert_eq!(pending.job().execution_profile, "executor");
 }
 

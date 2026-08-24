@@ -237,6 +237,14 @@ pub struct FrozenDeliveryCandidate {
     producer_execution_job_id: ExecutionJobId,
     producer_worker_session_id: WorkerSessionId,
     producer_codex_thread_id: CodexThreadId,
+    producer_lease_id: LeaseId,
+    producer_fencing_token: FencingToken,
+    producer_worker_id: WorkerId,
+    producer_worker_instance_id: WorkerInstanceId,
+    producer_artifact_ref: String,
+    producer_artifact_digest: Sha256Digest,
+    producer_last_event_sequence: u64,
+    producer_finished_at_millis: u64,
     base_commit_id: String,
     base_tree_id: String,
     candidate_commit_id: String,
@@ -310,6 +318,38 @@ impl FrozenDeliveryCandidate {
         &self.producer_codex_thread_id
     }
 
+    pub fn producer_lease_id(&self) -> &LeaseId {
+        &self.producer_lease_id
+    }
+
+    pub fn producer_fencing_token(&self) -> &FencingToken {
+        &self.producer_fencing_token
+    }
+
+    pub fn producer_worker_id(&self) -> &WorkerId {
+        &self.producer_worker_id
+    }
+
+    pub fn producer_worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.producer_worker_instance_id
+    }
+
+    pub fn producer_artifact_ref(&self) -> &str {
+        &self.producer_artifact_ref
+    }
+
+    pub fn producer_artifact_digest(&self) -> &Sha256Digest {
+        &self.producer_artifact_digest
+    }
+
+    pub const fn producer_last_event_sequence(&self) -> u64 {
+        self.producer_last_event_sequence
+    }
+
+    pub const fn producer_finished_at_millis(&self) -> u64 {
+        self.producer_finished_at_millis
+    }
+
     pub fn base_commit_id(&self) -> &str {
         &self.base_commit_id
     }
@@ -381,6 +421,14 @@ struct CandidateIdentity<'candidate> {
     producer_execution_job_id: &'candidate ExecutionJobId,
     producer_worker_session_id: &'candidate WorkerSessionId,
     producer_codex_thread_id: &'candidate CodexThreadId,
+    producer_lease_id: &'candidate LeaseId,
+    producer_fencing_token: &'candidate FencingToken,
+    producer_worker_id: &'candidate WorkerId,
+    producer_worker_instance_id: &'candidate WorkerInstanceId,
+    producer_artifact_ref: &'candidate str,
+    producer_artifact_digest: &'candidate Sha256Digest,
+    producer_last_event_sequence: u64,
+    producer_finished_at_millis: u64,
     base_commit_id: &'candidate str,
     base_tree_id: &'candidate str,
     candidate_commit_id: &'candidate str,
@@ -464,6 +512,14 @@ fn freeze_candidate_for_stage(
             .codex_thread_id
             .clone()
             .ok_or_else(|| stale_candidate("candidate producer CodexThread is missing"))?,
+        producer_lease_id: snapshot.lease_id.clone(),
+        producer_fencing_token: snapshot.fencing_token.clone(),
+        producer_worker_id: snapshot.worker_id.clone(),
+        producer_worker_instance_id: snapshot.worker_instance_id.clone(),
+        producer_artifact_ref: snapshot.artifact_ref.clone(),
+        producer_artifact_digest: snapshot.artifact_digest.clone(),
+        producer_last_event_sequence: snapshot.last_event_sequence,
+        producer_finished_at_millis: snapshot.finished_at_millis,
         base_commit_id: snapshot.base_commit_id.clone(),
         base_tree_id: snapshot.base_tree_id.clone(),
         candidate_commit_id: snapshot.candidate_commit_id.clone(),
@@ -507,7 +563,8 @@ pub(crate) fn assert_frozen_candidate_current(
         && candidate.producer_product_session_id == binding.product_session_id
         && candidate.producer_execution_job_id == binding.execution_job_id
         && binding.worker_session_id.as_ref() == Some(&candidate.producer_worker_session_id)
-        && binding.codex_thread_id.as_ref() == Some(&candidate.producer_codex_thread_id);
+        && binding.codex_thread_id.as_ref() == Some(&candidate.producer_codex_thread_id)
+        && producer.finished_at_millis == Some(candidate.producer_finished_at_millis);
     if !same_writer {
         return Err(stale_candidate(
             "candidate writer or complete SessionBinding identity changed",
@@ -553,6 +610,14 @@ impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity
             producer_execution_job_id: &candidate.producer_execution_job_id,
             producer_worker_session_id: &candidate.producer_worker_session_id,
             producer_codex_thread_id: &candidate.producer_codex_thread_id,
+            producer_lease_id: &candidate.producer_lease_id,
+            producer_fencing_token: &candidate.producer_fencing_token,
+            producer_worker_id: &candidate.producer_worker_id,
+            producer_worker_instance_id: &candidate.producer_worker_instance_id,
+            producer_artifact_ref: &candidate.producer_artifact_ref,
+            producer_artifact_digest: &candidate.producer_artifact_digest,
+            producer_last_event_sequence: candidate.producer_last_event_sequence,
+            producer_finished_at_millis: candidate.producer_finished_at_millis,
             base_commit_id: &candidate.base_commit_id,
             base_tree_id: &candidate.base_tree_id,
             candidate_commit_id: &candidate.candidate_commit_id,

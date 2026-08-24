@@ -8,12 +8,12 @@
 //! request receipt, and the immutable job outbox intent together before the
 //! dispatcher is called.
 
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    DeliveryStageExecutionScope, ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
-    JobCancelAckMessage,
+    DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope, DeliveryStageExecutionScope,
+    ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, JobCancelAckMessage,
 };
 use winwincode_delivery::{
     application::{
@@ -211,7 +211,7 @@ pub fn prepare_delivery_advance(
             "Delivery stage attempt exceeds the ExecutionPort range".to_owned(),
         )
     })?;
-    let (goal, payload_digest) = execution_payload(&intent, &config)?;
+    let (goal, payload_digest, rework_authorization) = execution_payload(&intent, &config)?;
     let job = ExecutionJob {
         attempt,
         execution_profile: intent.role,
@@ -224,6 +224,7 @@ pub fn prepare_delivery_advance(
             delivery_task_id: intent.delivery_task_id,
             kind: "delivery-stage".to_owned(),
             product_session_id: intent.product_session_id,
+            rework_authorization,
             stage_run_id: intent.stage_run_id,
         }),
         workspace: config.workspace,
@@ -312,6 +313,30 @@ fn validate_dispatch_intent(
     delivery: &Delivery,
     intent: &ExecutionIntent,
 ) -> Result<(), DeliveryExecutionError> {
+    intent
+        .validate_for_delivery(delivery)
+        .map_err(DeliveryExecutionError::Coordination)?;
+    match (intent.stage, intent.rework_authorization()) {
+        (DeliveryStage::Reworking, Some(authorization)) => authorization
+            .validate_started_dispatch(delivery, &intent.stage_run_id)
+            .map_err(|error| {
+                DeliveryExecutionError::InvalidEffect(format!(
+                    "invalid rework dispatch authorization: {error}"
+                ))
+            })?,
+        (DeliveryStage::Reworking, None) => {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "invalid rework dispatch authorization: missing sealed authorization".to_owned(),
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "invalid dispatch intent: non-reworking stage carries rework authorization"
+                    .to_owned(),
+            ));
+        }
+        (_, None) => {}
+    }
     let mut runs = delivery
         .snapshot()
         .stage_runs
@@ -363,16 +388,28 @@ fn validate_dispatch_intent(
 fn execution_payload(
     intent: &ExecutionIntent,
     config: &DeliveryExecutionConfig,
-) -> Result<(String, Sha256Digest), DeliveryExecutionError> {
-    match (intent.stage, intent.rework_authorization.as_deref()) {
+) -> Result<
+    (
+        String,
+        Sha256Digest,
+        Option<DeliveryReworkAuthorizationScope>,
+    ),
+    DeliveryExecutionError,
+> {
+    match (intent.stage, intent.rework_authorization()) {
         (DeliveryStage::Reworking, Some(authorization)) => {
             validate_rework_dispatch_scope(intent, config, authorization)?;
-            let authorization_value = serde_json::to_value(authorization).map_err(|error| {
-                DeliveryExecutionError::InvalidEffect(format!(
-                    "rework authorization cannot be encoded: {error}"
-                ))
-            })?;
-            encode_authorized_payload(&intent.goal, &config.payload_digest, &authorization_value)
+            let authorization_scope = execution_rework_scope(authorization);
+            let payload_digest = authorized_payload_digest(
+                &intent.goal,
+                &config.payload_digest,
+                &authorization_scope,
+            )?;
+            Ok((
+                intent.goal.clone(),
+                payload_digest,
+                Some(authorization_scope),
+            ))
         }
         (DeliveryStage::Reworking, None) => Err(DeliveryExecutionError::InvalidEffect(
             "remediator ExecutionJob is missing its sealed rework authorization".to_owned(),
@@ -380,30 +417,54 @@ fn execution_payload(
         (_, Some(_)) => Err(DeliveryExecutionError::InvalidEffect(
             "non-reworking ExecutionJob cannot carry a rework authorization".to_owned(),
         )),
-        (_, None) => Ok((intent.goal.clone(), config.payload_digest.clone())),
+        (_, None) => Ok((intent.goal.clone(), config.payload_digest.clone(), None)),
     }
 }
 
-fn encode_authorized_payload(
+fn execution_rework_scope(authorization: &ReworkAuthorization) -> DeliveryReworkAuthorizationScope {
+    DeliveryReworkAuthorizationScope {
+        authorization_digest: authorization.authorization_digest().clone(),
+        candidate_ref: authorization.candidate_ref().to_owned(),
+        diff_sha256: authorization.diff_sha256().to_owned(),
+        requires_full_reverification: authorization.requires_full_reverification(),
+        source_candidate_commit_id: authorization
+            .previous_candidate()
+            .candidate_commit_id()
+            .to_owned(),
+        source_candidate_tree_id: authorization
+            .previous_candidate()
+            .candidate_tree_id()
+            .to_owned(),
+        targets: authorization
+            .targets()
+            .iter()
+            .map(|target| DeliveryReworkTargetScope {
+                delivery_task_id: target.delivery_task_id().clone(),
+                diagram_id: target.diagram_id().to_owned(),
+                evidence_ref_ids: target.evidence_ref_ids().to_vec(),
+                file_path: target.file_path().to_owned(),
+                node_id: target.node_id().to_owned(),
+                source_hunk_sha256: target.hunk_sha256().to_owned(),
+            })
+            .collect(),
+    }
+}
+
+fn authorized_payload_digest(
     base_goal: &str,
     base_payload_digest: &Sha256Digest,
-    authorization: &serde_json::Value,
-) -> Result<(String, Sha256Digest), DeliveryExecutionError> {
-    let authorization_json = serde_json::to_string(authorization).map_err(|error| {
-        DeliveryExecutionError::InvalidEffect(format!(
-            "rework authorization cannot be encoded: {error}"
-        ))
-    })?;
-    let goal = format!("{base_goal}\n\nREWORK_AUTHORIZATION_JSON={authorization_json}");
+    authorization: &DeliveryReworkAuthorizationScope,
+) -> Result<Sha256Digest, DeliveryExecutionError> {
+    let encoded =
+        serde_json::to_vec(&(base_goal, base_payload_digest, authorization)).map_err(|error| {
+            DeliveryExecutionError::InvalidEffect(format!(
+                "rework authorization cannot be encoded: {error}"
+            ))
+        })?;
     let mut hasher = Sha256::new();
     hasher.update(b"winwincode/rework-execution-payload/v1\0");
-    hasher.update(base_payload_digest.0.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(authorization_json.as_bytes());
-    Ok((
-        goal,
-        Sha256Digest(format!("sha256:{:x}", hasher.finalize())),
-    ))
+    hasher.update(encoded);
+    Ok(Sha256Digest(format!("sha256:{:x}", hasher.finalize())))
 }
 
 fn validate_rework_dispatch_scope(
@@ -493,6 +554,7 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
                     .delivery_task_id
                     .as_ref()
                     .is_none_or(|id| canonical_identifier(&id.0, "dtk"))
+                && delivery_rework_scope_valid(job, scope)
                 && canonical_identifier(&scope.stage_run_id.0, "run")
         }
         ExecutionScope::ProductSessionExecutionScope(_) => false,
@@ -516,6 +578,94 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
             "generated ExecutionJob is invalid under the canonical ExecutionPort schema".to_owned(),
         ))
     }
+}
+
+fn delivery_rework_scope_valid(job: &ExecutionJob, scope: &DeliveryStageExecutionScope) -> bool {
+    let Some(authorization) = scope.rework_authorization.as_ref() else {
+        return job.execution_profile != "remediator";
+    };
+    let Some(task_id) = scope.delivery_task_id.as_ref() else {
+        return false;
+    };
+    if job.execution_profile != "remediator"
+        || job.workspace.checkout_revision != authorization.source_candidate_commit_id
+        || !authorization.requires_full_reverification
+        || !sha256_digest(&authorization.authorization_digest.0)
+        || !authorization
+            .candidate_ref
+            .strip_prefix("git-candidate:sha256:")
+            .is_some_and(lowercase_sha256)
+        || !lowercase_sha256(&authorization.diff_sha256)
+        || !git_object_id(&authorization.source_candidate_commit_id)
+        || !git_object_id(&authorization.source_candidate_tree_id)
+        || authorization.targets.is_empty()
+        || authorization.targets.len() > 1_000
+    {
+        return false;
+    }
+    let mut targets = HashSet::with_capacity(authorization.targets.len());
+    authorization.targets.iter().all(|target| {
+        let key = (
+            target.delivery_task_id.0.as_str(),
+            target.diagram_id.as_str(),
+            target.node_id.as_str(),
+            target.file_path.as_str(),
+            target.source_hunk_sha256.as_str(),
+        );
+        let mut evidence = HashSet::with_capacity(target.evidence_ref_ids.len());
+        target.delivery_task_id == *task_id
+            && canonical_identifier(&target.delivery_task_id.0, "dtk")
+            && portable_execution_identifier(&target.diagram_id)
+            && portable_execution_identifier(&target.node_id)
+            && portable_path(&target.file_path)
+            && lowercase_sha256(&target.source_hunk_sha256)
+            && !target.evidence_ref_ids.is_empty()
+            && target.evidence_ref_ids.len() <= 1_000
+            && target
+                .evidence_ref_ids
+                .iter()
+                .all(|id| canonical_identifier(&id.0, "evd") && evidence.insert(id.0.as_str()))
+            && targets.insert(key)
+    })
+}
+
+fn git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && lowercase_hex(value)
+}
+
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64 && lowercase_hex(value)
+}
+
+fn lowercase_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn portable_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4_096
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value.bytes().any(|byte| byte <= 31 || byte == 127)
+        && !value
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        && !value
+            .get(1..2)
+            .is_some_and(|second| second == ":" && value.as_bytes()[0].is_ascii_alphabetic())
+}
+
+fn portable_execution_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 200
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'@' | b'-')
+        })
 }
 
 fn validate_cancel_ack(
@@ -653,32 +803,51 @@ fn decimal(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winwincode_domain::{DeliveryTaskId, EvidenceId};
+
+    fn authorization_scope(file_path: &str) -> DeliveryReworkAuthorizationScope {
+        DeliveryReworkAuthorizationScope {
+            authorization_digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            candidate_ref: format!("git-candidate:sha256:{}", "d".repeat(64)),
+            diff_sha256: "b".repeat(64),
+            requires_full_reverification: true,
+            source_candidate_commit_id: "1".repeat(40),
+            source_candidate_tree_id: "2".repeat(40),
+            targets: vec![DeliveryReworkTargetScope {
+                delivery_task_id: DeliveryTaskId("dtk_01J00000000000000000000000".into()),
+                diagram_id: "diagram-main".into(),
+                evidence_ref_ids: vec![EvidenceId("evd_01J00000000000000000000000".into())],
+                file_path: file_path.into(),
+                node_id: "node-api".into(),
+                source_hunk_sha256: "e".repeat(64),
+            }],
+        }
+    }
 
     #[test]
-    fn rework_authorization_is_part_of_goal_and_payload_digest() {
+    fn rework_authorization_is_structured_and_part_of_the_payload_digest() {
         let base_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
-        let first = serde_json::json!({
-            "candidateRef": "candidate-one",
-            "diffSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "target": "src/invitation.rs:hunk-one",
-            "attempt": 2,
-        });
-        let (first_goal, first_digest) =
-            encode_authorized_payload("repair invitation", &base_digest, &first)
-                .expect("authorized payload");
-        let (replayed_goal, replayed_digest) =
-            encode_authorized_payload("repair invitation", &base_digest, &first)
-                .expect("deterministic replay payload");
-        assert_eq!(first_goal, replayed_goal);
+        let first = authorization_scope("src/invitation.rs");
+        let first_digest = authorized_payload_digest("repair invitation", &base_digest, &first)
+            .expect("authorized payload");
+        let replayed_digest = authorized_payload_digest("repair invitation", &base_digest, &first)
+            .expect("deterministic replay payload");
         assert_eq!(first_digest, replayed_digest);
-        assert!(first_goal.contains("candidate-one"));
-        assert!(first_goal.contains("src/invitation.rs:hunk-one"));
+        let encoded = serde_json::to_value(&first).expect("structured authorization");
+        assert_eq!(encoded["targets"][0]["filePath"], "src/invitation.rs");
+        assert_eq!(encoded["targets"][0]["nodeId"], "node-api");
+        assert_eq!(
+            encoded["targets"][0]["evidenceRefIds"][0],
+            "evd_01J00000000000000000000000"
+        );
 
-        let mut second = first;
-        second["target"] = serde_json::Value::String("src/foreign.rs:hunk-two".into());
-        let (_, second_digest) =
-            encode_authorized_payload("repair invitation", &base_digest, &second)
-                .expect("changed authorization payload");
+        let second = authorization_scope("src/foreign.rs");
+        let second_digest = authorized_payload_digest("repair invitation", &base_digest, &second)
+            .expect("changed authorization payload");
         assert_ne!(first_digest, second_digest);
+        let changed_goal =
+            authorized_payload_digest("repair another invitation", &base_digest, &first)
+                .expect("changed base goal");
+        assert_ne!(first_digest, changed_goal);
     }
 }
