@@ -24,6 +24,75 @@ function schema(name) {
   return json(join(schemaRoot, name))
 }
 
+function schemaDocuments() {
+  return new Map(schemaFiles.map(name => {
+    const document = schema(name)
+    return [document.$id, document]
+  }))
+}
+
+function visitSchema(value, callback, path = '#') {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => visitSchema(entry, callback, `${path}/${index}`))
+    return
+  }
+  if (value === null || typeof value !== 'object') return
+  callback(value, path)
+  for (const [key, entry] of Object.entries(value)) {
+    visitSchema(entry, callback, `${path}/${key}`)
+  }
+}
+
+function resolveSchemaRef(documents, sourceDocument, ref) {
+  const resolved = new URL(ref, sourceDocument.$id)
+  const documentId = `${resolved.origin}${resolved.pathname}`
+  const document = documents.get(documentId)
+  assert.ok(document, `missing schema document for ${ref} from ${sourceDocument.$id}`)
+
+  let node = document
+  if (resolved.hash !== '') {
+    assert.match(resolved.hash, /^#(?:\/|$)/u, `unsupported schema fragment: ${ref}`)
+    for (const segment of resolved.hash.slice(2).split('/').filter(Boolean)) {
+      const key = decodeURIComponent(segment).replaceAll('~1', '/').replaceAll('~0', '~')
+      node = node?.[key]
+      assert.notEqual(node, undefined, `missing schema target: ${ref}`)
+    }
+  }
+  return { document, node }
+}
+
+function schemaPropertyConst(documents, document, node, property, seen = new Set()) {
+  if (node.properties?.[property]?.const !== undefined) {
+    return node.properties[property].const
+  }
+  if (typeof node.$ref === 'string') {
+    const key = `${document.$id}:${node.$ref}:${property}`
+    if (seen.has(key)) return undefined
+    seen.add(key)
+    const resolved = resolveSchemaRef(documents, document, node.$ref)
+    return schemaPropertyConst(documents, resolved.document, resolved.node, property, seen)
+  }
+  for (const branch of node.allOf ?? []) {
+    const value = schemaPropertyConst(documents, document, branch, property, seen)
+    if (value !== undefined) return value
+  }
+  return undefined
+}
+
+function schemaRequiresProperty(documents, document, node, property, seen = new Set()) {
+  if (node.required?.includes(property)) return true
+  if (typeof node.$ref === 'string') {
+    const key = `${document.$id}:${node.$ref}:${property}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    const resolved = resolveSchemaRef(documents, document, node.$ref)
+    return schemaRequiresProperty(documents, resolved.document, resolved.node, property, seen)
+  }
+  return (node.allOf ?? []).some(branch => (
+    schemaRequiresProperty(documents, document, branch, property, seen)
+  ))
+}
+
 function contractValidator() {
   const ajv = new Ajv2020({ allErrors: true, strict: true })
   addFormats(ajv)
@@ -147,6 +216,134 @@ test('all public v1 schemas compile together with strict Draft 2020-12 reference
   }
 })
 
+test('every raw reference resolves, including references inside generated OpenAPI metadata', () => {
+  const documents = schemaDocuments()
+
+  for (const document of documents.values()) {
+    visitSchema(document, node => {
+      if (typeof node.$ref === 'string') {
+        resolveSchemaRef(documents, document, node.$ref)
+      }
+    })
+  }
+})
+
+test('public unions have one required discriminator and no schema copies', () => {
+  const documents = schemaDocuments()
+  const taggedUnions = [
+    ['domain.schema.json', 'Actor', 'kind'],
+    ['domain.schema.json', 'Scope', 'kind'],
+    ['control-plane-http.schema.json', 'CommandRequest', 'command'],
+    ['control-plane-http.schema.json', 'QueryRequest', 'query'],
+    ['control-plane-events.schema.json', 'ControlPlaneWebSocketEventPayload', 'type'],
+    ['control-plane-events.schema.json', 'ControlPlaneWebSocketClientFrame', 'type'],
+    ['control-plane-events.schema.json', 'ControlPlaneWebSocketServerFrame', 'type'],
+    ['execution-port.schema.json', 'ExecutionScope', 'kind'],
+    ['execution-port.schema.json', 'ExecutionPortMessage', 'kind'],
+  ]
+
+  for (const [file, definition, discriminator] of taggedUnions) {
+    const document = documents.get(`${schemaBase}${file}`)
+    const union = document.$defs[definition]
+    const values = union.oneOf.map(branch => {
+      const value = schemaPropertyConst(
+        documents,
+        document,
+        branch,
+        discriminator,
+      )
+      assert.notEqual(value, undefined, `${definition} branch lacks ${discriminator}`)
+      assert.equal(
+        schemaRequiresProperty(documents, document, branch, discriminator),
+        true,
+        `${definition}.${value} does not require ${discriminator}`,
+      )
+      return value
+    })
+    assert.equal(new Set(values).size, values.length, `${definition} repeats a discriminator`)
+  }
+
+  const definitionsByFile = schemaFiles.map(file => (
+    [file, new Set(Object.keys(documents.get(`${schemaBase}${file}`).$defs))]
+  ))
+  for (let left = 0; left < definitionsByFile.length; left += 1) {
+    for (let right = left + 1; right < definitionsByFile.length; right += 1) {
+      const [leftFile, leftDefinitions] = definitionsByFile[left]
+      const [rightFile, rightDefinitions] = definitionsByFile[right]
+      const copies = [...leftDefinitions].filter(name => rightDefinitions.has(name))
+      assert.deepEqual(copies, [], `${leftFile} and ${rightFile} copy public definitions`)
+    }
+  }
+})
+
+test('public objects stay closed and error details inherit every authority redaction', () => {
+  const documents = schemaDocuments()
+  const openObjects = new Map(schemaFiles.map(file => [file, []]))
+  for (const file of schemaFiles) {
+    const document = documents.get(`${schemaBase}${file}`)
+    visitSchema(document, (node, path) => {
+      if (node.type === 'object' && node.additionalProperties !== false) {
+        openObjects.get(file).push(path)
+      }
+    })
+  }
+
+  assert.deepEqual(openObjects.get('domain.schema.json'), [
+    '#/$defs/CommandEnvelope/properties/payload',
+    '#/$defs/ErrorDetails',
+  ])
+  assert.deepEqual(openObjects.get('control-plane-events.schema.json'), [])
+  assert.deepEqual(openObjects.get('execution-port.schema.json'), [])
+  for (const path of openObjects.get('control-plane-http.schema.json')) {
+    assert.equal(
+      path === '#/$defs/QueryEnvelope/properties/parameters'
+      || /^#\/\$defs\/[A-Za-z][A-Za-z0-9]*(?:Command|Query)\/allOf\/1$/u.test(path),
+      true,
+      `HTTP object is open outside an envelope specialization: ${path}`,
+    )
+  }
+
+  const matrix = json(join(
+    root,
+    'docs',
+    'contracts',
+    'control-plane-api-coverage.matrix.json',
+  ))
+  const domain = documents.get(`${schemaBase}domain.schema.json`)
+  const redactedErrorProperties = new Set(
+    domain.$defs.ErrorDetails.propertyNames.not.enum,
+  )
+  for (const property of [
+    ...matrix.authorityBoundaries.forbiddenPublicProperties,
+    'password',
+    'vaultLocator',
+  ]) {
+    assert.equal(
+      redactedErrorProperties.has(property),
+      true,
+      `ErrorDetails permits authority-sensitive property ${property}`,
+    )
+  }
+
+  const http = documents.get(`${schemaBase}control-plane-http.schema.json`)
+  assert.equal(http.$defs.CredentialReferenceCreatePayload.properties.vaultLocator.writeOnly, true)
+  for (const file of ['control-plane-http.schema.json', 'control-plane-events.schema.json', 'execution-port.schema.json']) {
+    const document = documents.get(`${schemaBase}${file}`)
+    visitSchema(document, (node, path) => {
+      for (const property of Object.keys(node.properties ?? {})) {
+        if (property === 'vaultLocator' && path === '#/$defs/CredentialReferenceCreatePayload') {
+          continue
+        }
+        assert.equal(
+          matrix.authorityBoundaries.forbiddenPublicProperties.includes(property),
+          false,
+          `${file}${path} exposes forbidden property ${property}`,
+        )
+      }
+    })
+  }
+})
+
 test('strict validation covers every canonical domain sample and keeps IDs distinct', () => {
   const ajv = contractValidator()
   const domainId = `${schemaBase}domain.schema.json`
@@ -162,22 +359,50 @@ test('strict validation covers every canonical domain sample and keeps IDs disti
     )
   }
 
-  const idValues = Object.freeze({
-    ChatMessageId: 'msg_01J00000000000000000000000',
-    DeliveryId: 'dlv_01J00000000000000000000000',
-    ExecutionJobId: 'job_01J00000000000000000000000',
-    InputRequestId: 'inp_01J00000000000000000000000',
-    ProductSessionId: 'psn_01J00000000000000000000000',
-    StageRunId: 'run_01J00000000000000000000000',
-    WorkerId: 'wrk_01J00000000000000000000000',
-    WorkerSessionId: 'wsn_01J00000000000000000000000',
-  })
-  for (const [definition, ownValue] of Object.entries(idValues)) {
-    const validate = validator(ajv, domainId, definition)
+  const idValues = Object.freeze([
+    [domainId, 'ApprovalId', 'apr_01J00000000000000000000000'],
+    [domainId, 'AttentionItemId', 'att_01J00000000000000000000000'],
+    [domainId, 'ChatMessageId', 'msg_01J00000000000000000000000'],
+    [domainId, 'CodexThreadId', 'cdx_01J00000000000000000000000'],
+    [domainId, 'CredentialReferenceId', 'crd_01J00000000000000000000000'],
+    [domainId, 'DeliveryId', 'dlv_01J00000000000000000000000'],
+    [domainId, 'DeliveryTaskId', 'dtk_01J00000000000000000000000'],
+    [domainId, 'EvidenceId', 'evd_01J00000000000000000000000'],
+    [domainId, 'ExecutionJobId', 'job_01J00000000000000000000000'],
+    [domainId, 'InputRequestId', 'inp_01J00000000000000000000000'],
+    [domainId, 'LeaseId', 'lse_01J00000000000000000000000'],
+    [domainId, 'OrganizationId', 'org_01J00000000000000000000000'],
+    [domainId, 'ProductSessionId', 'psn_01J00000000000000000000000'],
+    [domainId, 'ProjectId', 'prj_01J00000000000000000000000'],
+    [domainId, 'PublicationId', 'pub_01J00000000000000000000000'],
+    [domainId, 'RepositoryId', 'rep_01J00000000000000000000000'],
+    [domainId, 'RequestId', 'req_01J00000000000000000000000'],
+    [domainId, 'ServiceAccountId', 'svc_01J00000000000000000000000'],
+    [domainId, 'StageRunId', 'run_01J00000000000000000000000'],
+    [domainId, 'SystemActorId', 'sys_01J00000000000000000000000'],
+    [domainId, 'UserId', 'usr_01J00000000000000000000000'],
+    [domainId, 'WorkerId', 'wrk_01J00000000000000000000000'],
+    [domainId, 'WorkerSessionId', 'wsn_01J00000000000000000000000'],
+    [domainId, 'WorkspaceId', 'wsp_01J00000000000000000000000'],
+    [`${schemaBase}control-plane-events.schema.json`, 'ControlPlaneWebSocketEventId', 'evt_01J00000000000000000000000'],
+    [`${schemaBase}control-plane-events.schema.json`, 'ControlPlaneWebSocketSubscriptionId', 'sub_01J00000000000000000000000'],
+    [`${schemaBase}execution-port.schema.json`, 'ArtifactId', 'art_01J00000000000000000000000'],
+    [`${schemaBase}execution-port.schema.json`, 'ExecutionEventId', 'xevt_01J00000000000000000000000'],
+    [`${schemaBase}execution-port.schema.json`, 'ExecutionMessageId', 'xmsg_01J00000000000000000000000'],
+    [`${schemaBase}execution-port.schema.json`, 'ModelExchangeId', 'mdl_01J00000000000000000000000'],
+    [`${schemaBase}execution-port.schema.json`, 'WorkerInstanceId', 'wki_01J00000000000000000000000'],
+  ])
+  for (const [schemaId, definition, ownValue] of idValues) {
+    const validate = validator(ajv, schemaId, definition)
     assertValidation(validate, ownValue, true, definition)
-    for (const otherValue of Object.values(idValues)) {
+    for (const [, otherDefinition, otherValue] of idValues) {
       if (otherValue !== ownValue) {
-        assertValidation(validate, otherValue, false, `${definition} rejects ${otherValue}`)
+        assertValidation(
+          validate,
+          otherValue,
+          false,
+          `${definition} rejects ${otherDefinition}`,
+        )
       }
     }
     assertValidation(validate, null, false, `${definition} rejects null`)
@@ -223,6 +448,16 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
       name,
     )
   }
+  const leakedError = structuredClone(examples.revisionConflict)
+  leakedError.error.details.provider = {
+    diagnostics: [{ apiKey: 'must-not-cross-the-boundary' }],
+  }
+  assertValidation(
+    validator(ajv, domainId, 'ErrorEnvelope'),
+    leakedError,
+    false,
+    'error details reject secret-bearing fields',
+  )
   assertValidation(
     validator(ajv, httpId, 'CommandCompletedResponse'),
     examples.responses.commandCompleted,

@@ -3077,6 +3077,65 @@
       ],
       "type": "string"
     },
+    "ErrorDetails": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ErrorDetailValue"
+      },
+      "description": "Machine-readable error facts. Authority-sensitive property names are rejected recursively at the public boundary.",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "accessToken",
+            "agentGraph",
+            "apiKey",
+            "codexPlan",
+            "database",
+            "databaseRow",
+            "deliveryPatch",
+            "deliveryVerdict",
+            "password",
+            "providerCredential",
+            "rawProviderRequest",
+            "rawProviderResponse",
+            "secret",
+            "secretMaterial",
+            "socketPath",
+            "sql",
+            "table",
+            "toolPayload",
+            "turn",
+            "vaultLocator"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ErrorDetailValue": {
+      "description": "A recursive JSON value whose object branches apply the public error redaction rules.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/ErrorDetailValue"
+          },
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/ErrorDetails"
+        }
+      ]
+    },
     "ErrorEnvelope": {
       "additionalProperties": false,
       "properties": {
@@ -5176,8 +5235,7 @@
           "$ref": "#/$defs/RetryableErrorCode"
         },
         "details": {
-          "additionalProperties": true,
-          "type": "object"
+          "$ref": "#/$defs/ErrorDetails"
         },
         "message": {
           "maxLength": 4096,
@@ -6004,8 +6062,7 @@
           "$ref": "#/$defs/TerminalErrorCode"
         },
         "details": {
-          "additionalProperties": true,
-          "type": "object"
+          "$ref": "#/$defs/ErrorDetails"
         },
         "message": {
           "maxLength": 4096,
@@ -6656,6 +6713,6 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:d344adbfcb3f6446d1f8e773d31ac7431960086c76e9e562cbdfe2aef1b9a906",
+  "x-source-digest": "sha256:a80ef179452018741fc77b9fc62b4fa417526ed8de9319c2715ad6097df2565a",
   "x-winwincode-license": "Apache-2.0"
 }

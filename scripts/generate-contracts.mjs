@@ -392,6 +392,15 @@ function renderTypescriptDefinition(entry, context) {
     return lines.join('\n')
   }
   if (schema.type === 'object' || schema.properties !== undefined) {
+    if (
+      isObject(schema.additionalProperties)
+      && Object.keys(schema.properties ?? {}).length === 0
+    ) {
+      lines.push(
+        `export interface ${name} extends Readonly<Record<string, ${tsType(schema.additionalProperties, document, context)}>> {}`,
+      )
+      return lines.join('\n')
+    }
     lines.push(`export type ${name} = ${tsObjectType(schema, document, context)}`)
     return lines.join('\n')
   }

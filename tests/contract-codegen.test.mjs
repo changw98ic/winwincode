@@ -67,6 +67,14 @@ test('one canonical schema generation is deterministic and compiles for Rust and
   assert.match(typescript, /export enum ErrorCode/u)
   assert.match(typescript, /  InternalError = "INTERNAL_ERROR",/u)
   assert.match(typescript, /export type ContractEvent = CreatedEvent \| FailedEvent/u)
+  assert.match(
+    typescript,
+    /export interface RecursiveJsonObject extends Readonly<Record<string, RecursiveJsonValue>> \{\}/u,
+  )
+  assert.match(
+    typescript,
+    /export type RecursiveJsonValue = null \| boolean \| number \| string \| ReadonlyArray<RecursiveJsonValue> \| RecursiveJsonObject/u,
+  )
   assert.match(typescript, /export type SchemaVersion = "winwincode\/v1"/u)
   assert.match(firstContents[0], /pub enum SchemaVersion \{/u)
   assert.match(firstContents[0], /    WinwincodeV1,/u)

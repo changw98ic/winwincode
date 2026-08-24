@@ -519,7 +519,7 @@ test('fixed positive and negative samples pin missing, null, enum, version, and 
   assert.equal(samples.schemaId, schema.$id)
   assert.deepEqual(
     [...new Set(samples.cases.map(sample => sample.category))].sort(),
-    ['enum', 'error_semantics', 'missing', 'null', 'valid', 'version'],
+    ['enum', 'error_semantics', 'missing', 'null', 'secret', 'valid', 'version'],
   )
   assert.equal(
     new Set(samples.cases.map(sample => sample.name)).size,
@@ -528,7 +528,11 @@ test('fixed positive and negative samples pin missing, null, enum, version, and 
 
   for (const sample of samples.cases) {
     assert.ok(schema.$defs[sample.definition], `${sample.name}: unknown definition`)
-    if (sample.valid) assertValid(schema, sample.definition, sample.value)
-    else assertInvalid(schema, sample.definition, sample.value)
+    const validate = ajvDefinitionValidator(schema, sample.definition)
+    assert.equal(
+      validate(sample.value),
+      sample.valid,
+      `${sample.name}: ${JSON.stringify(validate.errors)}`,
+    )
   }
 })

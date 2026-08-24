@@ -812,6 +812,65 @@
         "SERVICE_UNAVAILABLE"
       ]
     },
+    "ErrorDetailValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ErrorDetailValue"
+          }
+        },
+        {
+          "$ref": "#/$defs/ErrorDetails"
+        }
+      ],
+      "description": "A recursive JSON value whose object branches apply the public error redaction rules."
+    },
+    "ErrorDetails": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ErrorDetailValue"
+      },
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "accessToken",
+            "agentGraph",
+            "apiKey",
+            "codexPlan",
+            "database",
+            "databaseRow",
+            "deliveryPatch",
+            "deliveryVerdict",
+            "password",
+            "providerCredential",
+            "rawProviderRequest",
+            "rawProviderResponse",
+            "secret",
+            "secretMaterial",
+            "socketPath",
+            "sql",
+            "table",
+            "toolPayload",
+            "turn",
+            "vaultLocator"
+          ]
+        }
+      },
+      "description": "Machine-readable error facts. Authority-sensitive property names are rejected recursively at the public boundary."
+    },
     "TerminalError": {
       "type": "object",
       "additionalProperties": false,
@@ -834,8 +893,7 @@
           "const": false
         },
         "details": {
-          "type": "object",
-          "additionalProperties": true
+          "$ref": "#/$defs/ErrorDetails"
         }
       }
     },
@@ -861,8 +919,7 @@
           "const": true
         },
         "details": {
-          "type": "object",
-          "additionalProperties": true
+          "$ref": "#/$defs/ErrorDetails"
         }
       }
     },
