@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{AttentionItemId, DeliveryTaskId, EvidenceId, StageRunId};
 
-use crate::domain::rework::VerdictAttentionAction;
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption, CriterionResult,
     CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliverySnapshot, DeliveryStatus,
     DeliveryTaskStatus, DeliveryVerdict, DeliveryVerdictId, EvidenceRef, FrozenDeliveryCandidate,
     evidence::ResolvedDeliveryEvidence,
+    rework::VerdictAttentionAction,
     verification::{IndependentVerification, VerificationRole},
 };
 
@@ -105,6 +105,16 @@ impl DerivedVerdictAttentionAction {
             Self::ClarifyDefinition => "clarify-definition",
         }
     }
+
+    const fn transition_action(self) -> VerdictAttentionAction {
+        match self {
+            Self::StartRework => VerdictAttentionAction::StartRework,
+            Self::ClarifyDefinition => VerdictAttentionAction::ClarifyDefinition,
+            Self::RetryVerification
+            | Self::CompleteVerification
+            | Self::ResolveVerificationConflict => VerdictAttentionAction::RetryVerification,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +196,17 @@ pub fn compute_verdict_transition(
             facts.produced_at_millis,
         )?
     };
+    if new_attention.iter().any(|item| {
+        snapshot
+            .attention_items
+            .iter()
+            .any(|stored| stored.id == item.id)
+    }) {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "derived Attention identity already exists in the current Delivery",
+        ));
+    }
     if verdict.status != CriterionVerdict::Pass && new_attention.is_empty() {
         return Err(CoordinationError::new(
             CoordinationErrorCode::AttentionRequired,
@@ -354,14 +375,7 @@ fn derive_verdict_attention(
         )?);
     }
     items.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-    if items.windows(2).any(|pair| pair[0].id == pair[1].id)
-        || items.iter().any(|item| {
-            snapshot
-                .attention_items
-                .iter()
-                .any(|stored| stored.id == item.id)
-        })
-    {
+    if items.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(CoordinationError::new(
             CoordinationErrorCode::Conflict,
             "derived Attention identity is duplicated",
@@ -407,7 +421,7 @@ fn attention_action(
             DerivedVerdictAttentionAction::ResolveVerificationConflict
         }
         CriterionVerdict::Inconclusive => DerivedVerdictAttentionAction::CompleteVerification,
-        CriterionVerdict::Pass => unreachable!("passing criteria do not create Attention"),
+        CriterionVerdict::Pass => DerivedVerdictAttentionAction::ClarifyDefinition,
     }
 }
 
@@ -508,95 +522,121 @@ fn attention_copy(
 }
 
 #[allow(
-    dead_code,
-    reason = "consumed by the pending dedicated Attention transition"
+    clippy::too_many_lines,
+    reason = "the complete derived Attention set is validated in one fail-closed pass"
 )]
-pub(crate) fn current_verdict_attention_action(
+pub(crate) fn current_verdict_attention_actions(
     delivery: &Delivery,
     item: &AttentionItem,
-) -> Result<Option<VerdictAttentionAction>, CoordinationError> {
-    let context: VerdictAttentionContext = match serde_json::from_str(&item.context) {
-        Ok(context) => context,
-        Err(_) if !item.id.0.starts_with("attention:sha256:") => return Ok(None),
-        Err(_) => {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::StaleAttention,
-                "verdict Attention context is malformed",
-            ));
-        }
+) -> Result<Option<Vec<VerdictAttentionAction>>, CoordinationError> {
+    let claimed_protocol = serde_json::from_str::<serde_json::Value>(&item.context)
+        .ok()
+        .and_then(|context| {
+            context
+                .get("protocol")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(VERDICT_ATTENTION_PROTOCOL);
+    let Some(verdict) = delivery.snapshot().verdict.as_ref() else {
+        return if claimed_protocol {
+            Err(stale_verdict_attention(
+                "verdict Attention has no current Delivery verdict",
+            ))
+        } else {
+            Ok(None)
+        };
     };
-    if context.protocol != VERDICT_ATTENTION_PROTOCOL {
-        if item.id.0.starts_with("attention:sha256:") {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::StaleAttention,
-                "derived Attention uses an unsupported context protocol",
-            ));
-        }
+    let Some(stage_run_id) = item.stage_run_id.as_ref() else {
+        return if claimed_protocol {
+            Err(stale_verdict_attention(
+                "verdict Attention has no verification StageRun",
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    let expected = derive_verdict_attention(
+        delivery.snapshot(),
+        verdict,
+        stage_run_id,
+        item.created_at_millis,
+    )?;
+    let identity_matches = expected.iter().any(|expected| expected.id == item.id);
+    if !claimed_protocol && !identity_matches {
         return Ok(None);
     }
-    let verdict = delivery.snapshot().verdict.as_ref().ok_or_else(|| {
-        CoordinationError::new(
-            CoordinationErrorCode::StaleAttention,
-            "verdict Attention has no current Delivery verdict",
-        )
-    })?;
-    if context.verdict_id != verdict.id
-        || context.candidate_ref != verdict.candidate_ref
-        || item.delivery_id != *delivery.id()
-        || item.delivery_spec_id != delivery.snapshot().spec.id
-        || item.stage_run_id.as_ref() != Some(&context.stage_run_id)
-        || !item.blocking
-    {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::StaleAttention,
-            "verdict Attention does not match the current Delivery verdict",
+    if item.status != AttentionItemStatus::Open {
+        return Err(stale_verdict_attention(
+            "only an open current verdict Attention item can be resolved",
         ));
     }
-    let mut source = delivery.snapshot().clone();
-    source
-        .attention_items
-        .retain(|stored| !stored.id.0.starts_with("attention:sha256:"));
-    let expected = derive_verdict_attention(
-        &source,
-        verdict,
-        &context.stage_run_id,
-        item.created_at_millis,
-    )?
-    .into_iter()
-    .find(|expected| expected.id == item.id)
-    .ok_or_else(|| {
-        CoordinationError::new(
-            CoordinationErrorCode::StaleAttention,
-            "verdict Attention is absent from the complete current classification",
-        )
-    })?;
-    let mut normalized = item.clone();
-    normalized.status = AttentionItemStatus::Open;
-    normalized.resolution = None;
-    normalized.resolved_by = None;
-    normalized.resolved_at_millis = None;
-    if expected != normalized {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::StaleAttention,
-            "verdict Attention differs from its current computed classification",
+
+    let mut current = Vec::new();
+    for stored in &delivery.snapshot().attention_items {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&stored.context) else {
+            continue;
+        };
+        if value.get("protocol").and_then(serde_json::Value::as_str)
+            != Some(VERDICT_ATTENTION_PROTOCOL)
+        {
+            continue;
+        }
+        let context: VerdictAttentionContext = serde_json::from_value(value)
+            .map_err(|_| stale_verdict_attention("verdict Attention context is malformed"))?;
+        if context.verdict_id == verdict.id {
+            current.push((stored, context));
+        }
+    }
+    if current.len() != expected.len() {
+        return Err(stale_verdict_attention(
+            "current verdict does not retain its complete computed Attention set",
         ));
     }
-    let action = if item.status == AttentionItemStatus::Dismissed {
-        VerdictAttentionAction::ClarifyDefinition
-    } else {
-        match context.action {
-            DerivedVerdictAttentionAction::StartRework => VerdictAttentionAction::StartRework,
-            DerivedVerdictAttentionAction::ClarifyDefinition => {
-                VerdictAttentionAction::ClarifyDefinition
+
+    let mut actions = Vec::with_capacity(expected.len());
+    for expected_item in &expected {
+        let (stored, context) = current
+            .iter()
+            .find(|(stored, _)| stored.id == expected_item.id)
+            .ok_or_else(|| {
+                stale_verdict_attention(
+                    "verdict Attention is absent from the complete current classification",
+                )
+            })?;
+        let mut normalized = (*stored).clone();
+        match normalized.status {
+            AttentionItemStatus::Open => {}
+            AttentionItemStatus::Resolved => {
+                normalized.status = AttentionItemStatus::Open;
+                normalized.resolution = None;
+                normalized.resolved_by = None;
+                normalized.resolved_at_millis = None;
             }
-            DerivedVerdictAttentionAction::RetryVerification
-            | DerivedVerdictAttentionAction::CompleteVerification
-            | DerivedVerdictAttentionAction::ResolveVerificationConflict => {
-                VerdictAttentionAction::RetryVerification
+            AttentionItemStatus::Dismissed => {
+                return Err(stale_verdict_attention(
+                    "computed verdict Attention cannot be dismissed",
+                ));
             }
         }
-    };
-    Ok(Some(action))
+        if normalized != *expected_item
+            || context.protocol != VERDICT_ATTENTION_PROTOCOL
+            || context.verdict_id != verdict.id
+            || context.candidate_ref != verdict.candidate_ref
+            || context.stage_run_id != *stage_run_id
+        {
+            return Err(stale_verdict_attention(
+                "verdict Attention differs from its current computed classification",
+            ));
+        }
+        actions.push(context.action.transition_action());
+    }
+    Ok(Some(actions))
+}
+
+fn stale_verdict_attention(message: &'static str) -> CoordinationError {
+    CoordinationError::new(CoordinationErrorCode::StaleAttention, message)
 }
 
 fn event_from_transition(
@@ -884,11 +924,14 @@ mod tests {
         CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
     };
 
-    use super::{SubmitVerdictFacts, compute_verdict_transition};
+    use super::{SubmitVerdictFacts, compute_verdict_transition, test_support};
+    use crate::application::attention::{
+        AttentionDecision, ResolveAttentionInput, resolve_attention,
+    };
     use crate::domain::{
-        Delivery, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, EvidenceRefType,
-        FrozenDeliveryCandidate, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
-        StageRunStatus,
+        AttentionItemStatus, Delivery, DeliveryStage, DeliveryStatus, DeliveryTaskStatus,
+        EvidenceRefType, FrozenDeliveryCandidate, SessionBinding, SessionBindingId, StageRun,
+        StageRunActorType, StageRunStatus,
         candidate::test_support::frozen_candidate,
         evidence::{VerifiedEvidenceOutcome, test_support::resolved_role_evidence},
         test_fixture,
@@ -901,6 +944,66 @@ mod tests {
     };
 
     const PRODUCED_AT_MILLIS: u64 = 1_800_000_000_100;
+
+    #[test]
+    fn computed_failure_attention_resolves_to_bounded_rework() {
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("delivery-verdict-attention-resolution".into()),
+            test_support::VerdictFixtureOutcome::Fail,
+        );
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: &fixture.verification,
+                evidence: &fixture.evidence,
+                produced_at_millis: PRODUCED_AT_MILLIS,
+            },
+        )
+        .expect("computed failing verdict");
+        let failed = transition.delivery();
+        let item = failed
+            .snapshot()
+            .attention_items
+            .iter()
+            .find(|item| {
+                item.options
+                    .iter()
+                    .any(|option| option.id == "start-rework")
+            })
+            .expect("computed start-rework Attention");
+        let stage_run_id = item.stage_run_id.clone().expect("verification StageRun");
+
+        let resolved = resolve_attention(
+            failed,
+            ResolveAttentionInput {
+                expected_revision: failed.revision(),
+                attention_item_id: item.id.clone(),
+                stage_run_id,
+                expected_context: item.context.clone(),
+                actor: "delivery-reviewer".into(),
+                decision: AttentionDecision::Resolved,
+                resolution: "Approve the exact bounded remediation scope.".into(),
+                now_millis: PRODUCED_AT_MILLIS + 1,
+            },
+        )
+        .expect("current computed failure Attention resolves");
+
+        assert_eq!(resolved.snapshot().status, DeliveryStatus::Reworking);
+        assert_eq!(
+            resolved
+                .snapshot()
+                .attention_items
+                .iter()
+                .find(|stored| stored.id == item.id)
+                .expect("resolved Attention")
+                .status,
+            AttentionItemStatus::Resolved
+        );
+        assert_eq!(resolved.snapshot().verdict, failed.snapshot().verdict);
+        assert_eq!(resolved.snapshot().evidence, failed.snapshot().evidence);
+    }
 
     fn verifying_delivery() -> Delivery {
         let mut snapshot = test_fixture();

@@ -2907,12 +2907,16 @@
           "$ref": "#/$defs/CommandEnvelope"
         },
         {
+          "description": "Repository-scoped stale-check request. The authenticated actor, complete repository scope, requestId, and expectedRevision form the command boundary.",
           "properties": {
             "command": {
               "const": "delivery.submit_verdict"
             },
             "payload": {
               "$ref": "#/$defs/DeliverySubmitVerdictPayload"
+            },
+            "scope": {
+              "$ref": "#/$defs/RepositoryScope"
             }
           },
           "type": "object"
@@ -2921,9 +2925,11 @@
     },
     "DeliverySubmitVerdictPayload": {
       "additionalProperties": false,
+      "description": "Requests server-side verdict computation from sealed Control Plane facts. Caller-derived Evidence, criterion results, verdicts, Attention, status, credentials, verification conclusions, and raw runtime facts are rejected.",
       "properties": {
         "candidateDigest": {
-          "$ref": "#/$defs/Sha256Digest"
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "Current frozen candidate digest used for stale-check only; it is not Evidence, a verdict, or an authorization fact."
         },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
@@ -3125,9 +3131,11 @@
         "RESOURCE_NOT_FOUND",
         "IDEMPOTENCY_CONFLICT",
         "REVISION_CONFLICT",
+        "CANDIDATE_STALE",
         "WRONG_STATE",
         "RATE_LIMITED",
         "SERVICE_UNAVAILABLE",
+        "TRUSTED_FACTS_UNAVAILABLE",
         "INTERNAL_ERROR"
       ],
       "type": "string"
@@ -5312,7 +5320,8 @@
     "RetryableErrorCode": {
       "enum": [
         "RATE_LIMITED",
-        "SERVICE_UNAVAILABLE"
+        "SERVICE_UNAVAILABLE",
+        "TRUSTED_FACTS_UNAVAILABLE"
       ],
       "type": "string"
     },
@@ -6144,6 +6153,7 @@
         "RESOURCE_NOT_FOUND",
         "IDEMPOTENCY_CONFLICT",
         "REVISION_CONFLICT",
+        "CANDIDATE_STALE",
         "WRONG_STATE",
         "INTERNAL_ERROR"
       ],
@@ -6768,6 +6778,6 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:9bdfa01be919d77968f3040619139c3c77f31f1ba3acde030c0f5e8b9dfd3de9",
+  "x-source-digest": "sha256:04ca02563acbcc89fffd7c963da6d6a1a34d9897caac385a8cb1590127fe56b1",
   "x-winwincode-license": "Apache-2.0"
 }

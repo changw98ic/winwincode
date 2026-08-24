@@ -2,15 +2,18 @@
 
 //! Specialized atomic transaction for a bounded rework clarification.
 
+use serde_json::Value;
 use winwincode_api::generated::{CommandEnvelope, CommandName, DeliveryAdvancePayload};
 use winwincode_delivery::{
     application::stage::{DeliveryReworkClarifiedEvent, StageAdvanceEffect, StageAdvanceResult},
     store::{ClarifyDeliveryRework, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
 };
-use winwincode_storage::{CommitReceipt, NewOutboxEvent, ProductStateStorage, StorageError};
+use winwincode_storage::{
+    CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StorageError,
+};
 
 use crate::{
-    StateChange,
+    StateChange, command_receipt,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     storage_commit,
 };
@@ -22,8 +25,22 @@ pub(crate) fn execute(
     command: &CommandEnvelope,
     transition: &StageAdvanceResult,
 ) -> Result<CommitReceipt, StorageError> {
-    let expected_revision = validate_command(command, transition)?;
-    let delivery_id = transition.delivery.id().clone();
+    let (payload, expected_revision) = validate_command_envelope(command)?;
+    let (receipt_identity, command_digest) = command_receipt(command)?;
+    if let Some(receipt) = storage.load_receipt(&receipt_identity, &command_digest)? {
+        validate_receipt(
+            &receipt,
+            &receipt_identity,
+            &payload.delivery_id,
+            expected_revision,
+            None,
+            true,
+        )?;
+        return Ok(receipt);
+    }
+
+    validate_transition(&payload, expected_revision, transition)?;
+    let delivery_id = payload.delivery_id;
     let journal_key = delivery_journal_key(&delivery_id)?;
     let loaded = storage.load_journal(&journal_key)?;
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
@@ -78,9 +95,32 @@ pub(crate) fn execute(
         ));
     }
     let receipt = storage.commit(&commit)?;
-    if receipt.stream_id != stream_id || receipt.revision != mutation.snapshot.revision() {
+    validate_receipt(
+        &receipt,
+        &commit.receipt_identity,
+        &delivery_id,
+        expected_revision,
+        Some(&event),
+        mutation.replayed,
+    )?;
+    Ok(receipt)
+}
+
+fn validate_receipt(
+    receipt: &CommitReceipt,
+    expected_identity: &ReceiptIdentity,
+    delivery_id: &winwincode_domain::DeliveryId,
+    expected_revision: u64,
+    expected_event: Option<&DeliveryReworkClarifiedEvent>,
+    expected_replay: bool,
+) -> Result<(), StorageError> {
+    if receipt.stream_id != delivery_stream_id(delivery_id)
+        || receipt.revision != expected_revision.saturating_add(1)
+        || &receipt.receipt_identity != expected_identity
+        || receipt.idempotent_replay != expected_replay
+    {
         return Err(StorageError::invalid_input(
-            "durable rework clarification receipt does not match its Delivery revision",
+            "durable rework clarification receipt does not match its scoped request, replay state, or Delivery revision",
         ));
     }
     let [stored_event] = receipt.events.as_slice() else {
@@ -88,18 +128,33 @@ pub(crate) fn execute(
             "durable rework clarification receipt must contain exactly one event",
         ));
     };
-    let stored: DeliveryReworkClarifiedEvent =
-        serde_json::from_slice(&stored_event.payload).map_err(storage_error)?;
+    let stored = strict_clarification_event(&stored_event.payload)?;
     if stored_event.topic != REWORK_CLARIFIED_TOPIC
-        || stored_event.event_id != event_id
-        || stored != event
-        || serde_json::to_vec(&stored).map_err(storage_error)? != stored_event.payload
+        || stored_event.event_id != clarification_event_id(&stored)
+        || stored.schema_version != winwincode_delivery::domain::DELIVERY_SCHEMA_VERSION
+        || stored.delivery_id != *delivery_id
+        || stored.delivery_revision != receipt.revision
+        || expected_event.is_some_and(|expected| expected != &stored)
     {
         return Err(StorageError::invalid_input(
-            "durable rework clarification event does not match the sealed transition",
+            "durable rework clarification event does not match the original scoped Delivery command",
         ));
     }
-    Ok(receipt)
+    Ok(())
+}
+
+fn strict_clarification_event(
+    payload: &[u8],
+) -> Result<DeliveryReworkClarifiedEvent, StorageError> {
+    let value: Value = serde_json::from_slice(payload).map_err(storage_error)?;
+    let event: DeliveryReworkClarifiedEvent =
+        serde_json::from_value(value.clone()).map_err(storage_error)?;
+    if serde_json::to_value(&event).map_err(storage_error)? != value {
+        return Err(StorageError::invalid_input(
+            "durable rework clarification event has unknown or non-canonical fields",
+        ));
+    }
+    Ok(event)
 }
 
 fn clarification_event(
@@ -126,10 +181,9 @@ fn clarification_event_id(event: &DeliveryReworkClarifiedEvent) -> String {
     )
 }
 
-fn validate_command(
+fn validate_command_envelope(
     command: &CommandEnvelope,
-    transition: &StageAdvanceResult,
-) -> Result<u64, StorageError> {
+) -> Result<(DeliveryAdvancePayload, u64), StorageError> {
     if command.command != CommandName::DeliveryAdvance {
         return Err(StorageError::invalid_input(
             "rework clarification transaction requires delivery.advance",
@@ -144,8 +198,20 @@ fn validate_command(
     let expected_revision = u64::try_from(command.expected_revision.0).map_err(|_| {
         StorageError::invalid_input("Delivery expectedRevision must not be negative")
     })?;
-    if serde_json::to_value(&payload).map_err(storage_error)? != command.payload
-        || payload.delivery_id != *transition.delivery.id()
+    if serde_json::to_value(&payload).map_err(storage_error)? != command.payload {
+        return Err(StorageError::invalid_input(
+            "delivery.advance payload is not canonical",
+        ));
+    }
+    Ok((payload, expected_revision))
+}
+
+fn validate_transition(
+    payload: &DeliveryAdvancePayload,
+    expected_revision: u64,
+    transition: &StageAdvanceResult,
+) -> Result<(), StorageError> {
+    if payload.delivery_id != *transition.delivery.id()
         || transition.delivery.revision() != expected_revision.saturating_add(1)
         || !matches!(transition.effect, StageAdvanceEffect::Clarify(_))
     {
@@ -153,7 +219,7 @@ fn validate_command(
             "delivery.advance does not match the sealed rework clarification",
         ));
     }
-    Ok(expected_revision)
+    Ok(())
 }
 
 fn storage_error(error: impl std::fmt::Display) -> StorageError {

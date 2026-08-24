@@ -1,7 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Delivery stage coordination application service.
+//!
+//! Raw Scheduler and Worker facts are deliberately not an external production
+//! API while their authoritative Phase 4 adapters do not exist.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::ActiveLeaseIdentity;
+//!
+//! let _caller_built_lease = ActiveLeaseIdentity {
+//!     execution_job_id: todo!(),
+//!     attempt: 1,
+//!     lease_id: todo!(),
+//!     fencing_token: todo!(),
+//!     worker_id: todo!(),
+//!     worker_instance_id: todo!(),
+//!     worker_session_id: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::TerminalWorkerOutcome;
+//!
+//! let _caller_built_outcome = TerminalWorkerOutcome {
+//!     stage_run_id: todo!(),
+//!     execution_job_id: todo!(),
+//!     attempt: 1,
+//!     lease_id: todo!(),
+//!     fencing_token: todo!(),
+//!     worker_id: todo!(),
+//!     worker_instance_id: todo!(),
+//!     worker_session_id: todo!(),
+//!     status: todo!(),
+//!     metadata: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! let _caller_callable_resolver =
+//!     winwincode_delivery::application::stage::verify_terminal_outcome;
+//! ```
 
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -14,11 +54,12 @@ use winwincode_domain::{
 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
-    DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, MAX_COLLECTION_LENGTH,
-    MAX_SAFE_INTEGER, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
-    StageRunStatus,
+    DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, SessionBinding,
+    SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
     rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::domain::{MAX_COLLECTION_LENGTH, MAX_SAFE_INTEGER};
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
@@ -63,37 +104,85 @@ pub enum TerminalOutcomeStatus {
 /// Scheduler-owned lease identity loaded from durable Control Plane state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveLeaseIdentity {
-    pub execution_job_id: ExecutionJobId,
-    pub attempt: u64,
-    pub lease_id: LeaseId,
-    pub fencing_token: FencingToken,
-    pub worker_id: WorkerId,
-    pub worker_instance_id: WorkerInstanceId,
-    pub worker_session_id: WorkerSessionId,
+    execution_job_id: ExecutionJobId,
+    attempt: u64,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    worker_session_id: WorkerSessionId,
+}
+
+impl ActiveLeaseIdentity {
+    pub fn execution_job_id(&self) -> &ExecutionJobId {
+        &self.execution_job_id
+    }
+
+    pub const fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    pub fn lease_id(&self) -> &LeaseId {
+        &self.lease_id
+    }
+
+    pub fn fencing_token(&self) -> &FencingToken {
+        &self.fencing_token
+    }
+
+    pub fn worker_id(&self) -> &WorkerId {
+        &self.worker_id
+    }
+
+    pub fn worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.worker_instance_id
+    }
+
+    pub fn worker_session_id(&self) -> &WorkerSessionId {
+        &self.worker_session_id
+    }
 }
 
 /// Terminal fact reported by Worker through `ExecutionPort`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalWorkerOutcome {
-    pub stage_run_id: StageRunId,
-    pub execution_job_id: ExecutionJobId,
-    pub attempt: u64,
-    pub lease_id: LeaseId,
-    pub fencing_token: FencingToken,
-    pub worker_id: WorkerId,
-    pub worker_instance_id: WorkerInstanceId,
-    pub worker_session_id: WorkerSessionId,
-    pub status: TerminalOutcomeStatus,
-    pub metadata: TerminalOutcomeMetadata,
+    stage_run_id: StageRunId,
+    execution_job_id: ExecutionJobId,
+    attempt: u64,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    worker_session_id: WorkerSessionId,
+    status: TerminalOutcomeStatus,
+    metadata: TerminalOutcomeMetadata,
 }
 
 /// Bounded facts carried by the accepted Worker `job.outcome`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalOutcomeMetadata {
-    pub codex_thread_id: Option<CodexThreadId>,
-    pub finished_at_millis: u64,
-    pub last_event_sequence: ExecutionAckSequence,
-    pub artifacts: Vec<TerminalArtifactReference>,
+    codex_thread_id: Option<CodexThreadId>,
+    finished_at_millis: u64,
+    last_event_sequence: ExecutionAckSequence,
+    artifacts: Vec<TerminalArtifactReference>,
+}
+
+impl TerminalOutcomeMetadata {
+    pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
+        self.codex_thread_id.as_ref()
+    }
+
+    pub const fn finished_at_millis(&self) -> u64 {
+        self.finished_at_millis
+    }
+
+    pub fn last_event_sequence(&self) -> &ExecutionAckSequence {
+        &self.last_event_sequence
+    }
+
+    pub fn artifacts(&self) -> &[TerminalArtifactReference] {
+        &self.artifacts
+    }
 }
 
 /// One immutable Artifact identity named by the accepted Worker outcome.
@@ -189,7 +278,8 @@ pub(crate) fn fixture_verified_terminal_outcome(
 ///
 /// Fails closed when any Delivery, job, attempt, Worker, lease, instance, or
 /// fencing identity differs.
-pub fn verify_terminal_outcome(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn verify_terminal_outcome(
     delivery: &Delivery,
     lease: &ActiveLeaseIdentity,
     outcome: TerminalWorkerOutcome,
@@ -238,6 +328,130 @@ pub fn verify_terminal_outcome(
     })
 }
 
+/// Construction helpers used only by Rust integration tests. Production
+/// Control Plane builds do not enable this feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support {
+    use super::{
+        ActiveLeaseIdentity, CodexThreadId, CoordinationError, Delivery, ExecutionAckSequence,
+        ExecutionJobId, FencingToken, LeaseId, Sha256Digest, StageRunId, TerminalArtifactReference,
+        TerminalOutcomeMetadata, TerminalOutcomeStatus, TerminalWorkerOutcome,
+        VerifiedTerminalOutcome, WorkerId, WorkerInstanceId, WorkerSessionId,
+    };
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn active_lease_identity(
+        execution_job_id: ExecutionJobId,
+        attempt: u64,
+        lease_id: LeaseId,
+        fencing_token: FencingToken,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        worker_session_id: WorkerSessionId,
+    ) -> ActiveLeaseIdentity {
+        ActiveLeaseIdentity {
+            execution_job_id,
+            attempt,
+            lease_id,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            worker_session_id,
+        }
+    }
+
+    pub fn terminal_outcome_metadata(
+        codex_thread_id: Option<CodexThreadId>,
+        finished_at_millis: u64,
+        last_event_sequence: ExecutionAckSequence,
+        artifacts: Vec<TerminalArtifactReference>,
+    ) -> TerminalOutcomeMetadata {
+        TerminalOutcomeMetadata {
+            codex_thread_id,
+            finished_at_millis,
+            last_event_sequence,
+            artifacts,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn terminal_worker_outcome(
+        stage_run_id: StageRunId,
+        execution_job_id: ExecutionJobId,
+        attempt: u64,
+        lease_id: LeaseId,
+        fencing_token: FencingToken,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        worker_session_id: WorkerSessionId,
+        status: TerminalOutcomeStatus,
+        metadata: TerminalOutcomeMetadata,
+    ) -> TerminalWorkerOutcome {
+        TerminalWorkerOutcome {
+            stage_run_id,
+            execution_job_id,
+            attempt,
+            lease_id,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            worker_session_id,
+            status,
+            metadata,
+        }
+    }
+
+    pub fn verify_terminal_outcome(
+        delivery: &Delivery,
+        lease: &ActiveLeaseIdentity,
+        outcome: TerminalWorkerOutcome,
+    ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+        super::verify_terminal_outcome(delivery, lease, outcome)
+    }
+
+    pub fn set_terminal_codex_thread_id(
+        outcome: &mut TerminalWorkerOutcome,
+        codex_thread_id: Option<CodexThreadId>,
+    ) {
+        outcome.metadata.codex_thread_id = codex_thread_id;
+    }
+
+    pub fn set_terminal_last_event_sequence(
+        outcome: &mut TerminalWorkerOutcome,
+        sequence: ExecutionAckSequence,
+    ) {
+        outcome.metadata.last_event_sequence = sequence;
+    }
+
+    pub fn set_first_terminal_artifact_digest(
+        outcome: &mut TerminalWorkerOutcome,
+        digest: Sha256Digest,
+    ) {
+        outcome
+            .metadata
+            .artifacts
+            .first_mut()
+            .expect("terminal test fixture requires an Artifact")
+            .digest = digest;
+    }
+
+    pub fn duplicate_first_terminal_artifact(outcome: &mut TerminalWorkerOutcome) {
+        let duplicate = outcome
+            .metadata
+            .artifacts
+            .first()
+            .expect("terminal test fixture requires an Artifact")
+            .clone();
+        outcome.metadata.artifacts.push(duplicate);
+    }
+
+    pub fn terminal_metadata(outcome: &TerminalWorkerOutcome) -> &TerminalOutcomeMetadata {
+        &outcome.metadata
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn validate_terminal_metadata(
     run: &StageRun,
     binding: &SessionBinding,
@@ -281,6 +495,7 @@ fn validate_terminal_metadata(
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn lowercase_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -288,6 +503,7 @@ fn lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn portable_execution_identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
     value.len() <= 200

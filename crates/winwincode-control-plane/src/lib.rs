@@ -630,20 +630,10 @@ pub(crate) fn storage_commit(
     command: &CommandEnvelope,
     change: StateChange,
 ) -> Result<StateCommit, StorageError> {
-    let actor_key = receipt_actor_key(&command.actor)?;
-    let scope_key = receipt_scope_key(&command.scope)?;
-    require_canonical_id(&command.request_id.0, "req_", "command requestId")?;
-    let receipt_identity = ReceiptIdentity::new(actor_key, scope_key, command.request_id.clone())?;
+    let (receipt_identity, command_digest) = command_receipt(command)?;
     let expected_revision = u64::try_from(command.expected_revision.0).map_err(|_| {
         StorageError::invalid_input("command expectedRevision must not be negative")
     })?;
-    let serialized = serde_json::to_vec(command).map_err(|error| {
-        StorageError::adapter(format!(
-            "failed to encode the canonical command digest: {error}"
-        ))
-    })?;
-    let digest = Sha256::digest(serialized);
-    let command_digest = Sha256Digest(format!("sha256:{digest:x}"));
 
     Ok(StateCommit::new(
         receipt_identity,
@@ -653,6 +643,23 @@ pub(crate) fn storage_commit(
         change.state,
         change.events,
     ))
+}
+
+pub(crate) fn command_receipt(
+    command: &CommandEnvelope,
+) -> Result<(ReceiptIdentity, Sha256Digest), StorageError> {
+    let actor_key = receipt_actor_key(&command.actor)?;
+    let scope_key = receipt_scope_key(&command.scope)?;
+    require_canonical_id(&command.request_id.0, "req_", "command requestId")?;
+    let receipt_identity = ReceiptIdentity::new(actor_key, scope_key, command.request_id.clone())?;
+    let serialized = serde_json::to_vec(command).map_err(|error| {
+        StorageError::adapter(format!(
+            "failed to encode the canonical command digest: {error}"
+        ))
+    })?;
+    let digest = Sha256::digest(serialized);
+    let command_digest = Sha256Digest(format!("sha256:{digest:x}"));
+    Ok((receipt_identity, command_digest))
 }
 
 fn delivery_command(command: &CommandName) -> bool {

@@ -190,7 +190,7 @@ fn seed_rework_history(root: &PathBuf, fixture: &ReworkJournalFixture) {
     let journal = InMemoryDeliveryJournal::new();
     let store = DeliveryStore::borrowed(&journal);
     store
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("1".repeat(64)),
             request_digest: "1".repeat(64),
             snapshot: fixture.initial_delivery.clone(),
@@ -304,7 +304,7 @@ impl DeliveryJournalPort for CapturingJournal {
 fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
     let capture = CapturingJournal::default();
     DeliveryStore::borrowed(&capture)
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("c".repeat(64)),
             request_digest: "b".repeat(64),
             snapshot: delivery.clone(),
@@ -529,7 +529,7 @@ fn raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails() {
     let before = delivery_before_advance(99);
     let pending = pending_execution(99, "partial-checkout");
     store
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("d".repeat(64)),
             request_digest: "d".repeat(64),
             snapshot: before,
@@ -1163,7 +1163,7 @@ fn rework_request_replay_returns_original_durable_job_not_retry_config() {
 }
 
 #[test]
-fn repeated_rework_commits_clarifying_without_dispatch_and_replays_one_event() {
+fn repeated_rework_replay_returns_original_receipt_before_stale_facts_or_broken_journal() {
     let seed = 203;
     let root = temporary_directory("rework-clarification");
     let fixture = repeated_rework_clarification(&DeliveryId(canonical_id("dlv", seed)));
@@ -1185,15 +1185,9 @@ fn repeated_rework_commits_clarifying_without_dispatch_and_replays_one_event() {
     let first = control_plane
         .commit_delivery_rework_clarification(&command, &fixture.transition)
         .expect("bounded rework clarification");
-    let replay = control_plane
-        .commit_delivery_rework_clarification(&command, &fixture.transition)
-        .expect("bounded rework clarification replay");
     assert!(!first.idempotent_replay);
-    assert!(replay.idempotent_replay);
-    assert_eq!(replay.events, first.events);
     assert_eq!(first.events.len(), 1);
     assert_eq!(first.events[0].topic, "delivery.rework.clarified");
-    assert_eq!(published.lock().expect("published events").len(), 1);
     let state = control_plane
         .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
         .expect("clarified state read")
@@ -1212,6 +1206,42 @@ fn repeated_rework_commits_clarifying_without_dispatch_and_replays_one_event() {
     control_plane.shutdown().expect("shutdown should succeed");
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("inspection database");
+    connection
+        .execute(
+            "UPDATE product_state SET revision = revision + 1 WHERE stream_id = ?1",
+            [format!("delivery:{}", fixture.source_delivery.id().0)],
+        )
+        .expect("advance current state revision after original receipt");
+    connection
+        .execute(
+            "UPDATE aggregate_journal_records SET payload = X'00' \
+             WHERE aggregate_type = 'delivery' AND aggregate_id = ?1 AND sequence = 4",
+            [fixture.source_delivery.id().0.as_str()],
+        )
+        .expect("make the current Delivery journal unreadable");
+    connection.close().expect("fault injector close");
+
+    let foreign = repeated_rework_clarification(&DeliveryId(canonical_id("dlv", seed + 1)));
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&published),
+        }),
+    )
+    .expect("Control Plane should restart");
+    let replay = control_plane
+        .commit_delivery_rework_clarification(&command, &foreign.transition)
+        .expect("durable replay must precede stale transition and journal reads");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.revision, first.revision);
+    assert_eq!(replay.events, first.events);
+    assert_eq!(published.lock().expect("published events").len(), 1);
+    control_plane
+        .shutdown()
+        .expect("replay shutdown should succeed");
+
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("final inspection database");
     let job_events: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM outbox WHERE topic = 'execution.job.dispatch'",
@@ -1230,6 +1260,94 @@ fn repeated_rework_commits_clarifying_without_dispatch_and_replays_one_event() {
     assert_eq!(journal_records, 4);
     connection.close().expect("inspection connection close");
     fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn clarification_failure_at_each_atomic_member_rolls_back_every_fact() {
+    let failure_points = [
+        (
+            "state",
+            "CREATE TRIGGER fail_clarification_state BEFORE UPDATE ON product_state \
+             WHEN NEW.stream_id LIKE 'delivery:%' \
+             BEGIN SELECT RAISE(ABORT, 'injected clarification state failure'); END;",
+        ),
+        (
+            "journal",
+            "CREATE TRIGGER fail_clarification_journal BEFORE INSERT ON aggregate_journal_records \
+             WHEN NEW.sequence = 4 \
+             BEGIN SELECT RAISE(ABORT, 'injected clarification journal failure'); END;",
+        ),
+        (
+            "receipt",
+            "CREATE TRIGGER fail_clarification_receipt BEFORE INSERT ON command_receipts \
+             WHEN NEW.request_id LIKE 'req_%' \
+             BEGIN SELECT RAISE(ABORT, 'injected clarification receipt failure'); END;",
+        ),
+        (
+            "outbox",
+            "CREATE TRIGGER fail_clarification_outbox BEFORE INSERT ON outbox \
+             WHEN NEW.topic = 'delivery.rework.clarified' \
+             BEGIN SELECT RAISE(ABORT, 'injected clarification outbox failure'); END;",
+        ),
+    ];
+
+    for (offset, (member, trigger)) in failure_points.into_iter().enumerate() {
+        let seed = 220 + u64::try_from(offset).expect("small failure index");
+        let root = temporary_directory(&format!("clarification-{member}-rollback"));
+        let fixture = repeated_rework_clarification(&DeliveryId(canonical_id("dlv", seed)));
+        seed_rework_history(&root, &fixture.journal);
+        let command = rework_advance_command(seed, fixture.source_delivery.revision());
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("failure injection database");
+        connection.execute_batch(trigger).expect("failure trigger");
+        connection.close().expect("failure injector close");
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(&root),
+            Box::new(RecordingPublisher),
+        )
+        .expect("Control Plane should start");
+
+        control_plane
+            .commit_delivery_rework_clarification(&command, &fixture.transition)
+            .expect_err("injected clarification transaction failure");
+        let state = control_plane
+            .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
+            .expect("source state read")
+            .expect("source state");
+        assert_eq!(
+            state.revision,
+            fixture.source_delivery.revision(),
+            "failure at {member}"
+        );
+        assert_eq!(
+            state.payload,
+            fixture
+                .source_delivery
+                .encode_json()
+                .expect("source Delivery JSON"),
+            "failure at {member}"
+        );
+        control_plane.shutdown().expect("shutdown should succeed");
+
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("inspection database");
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_type = 'delivery' AND aggregate_id = ?1), \
+                   (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?2), \
+                   (SELECT COUNT(*) FROM outbox WHERE topic = 'delivery.rework.clarified')",
+                [
+                    fixture.source_delivery.id().0.as_str(),
+                    command.request_id.0.as_str(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("clarification rollback counts");
+        assert_eq!(counts, (3, 0, 0), "failure at {member}");
+        connection.close().expect("inspection connection close");
+        fs::remove_dir_all(root).expect("database directory release");
+    }
 }
 
 #[test]

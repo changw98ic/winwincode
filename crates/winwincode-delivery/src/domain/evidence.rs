@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exact Evidence source resolution for the current frozen candidate.
+//!
+//! The accepted runtime-ledger source remains internal until its Phase 4
+//! authoritative adapter exists.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::evidence::AcceptedRuntimeSourceFact;
+//! ```
 
 use std::{error::Error, fmt};
 
@@ -336,13 +343,6 @@ fn resolution_error(
 /// Rejects a stale candidate, foreign `StageRun` or `SessionBinding`, missing or
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
-#[cfg_attr(
-    all(not(test), not(feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Phase 3/4 adapter gate keeps production construction closed"
-    )
-)]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the sealed resolver command is single-use application input"
@@ -476,7 +476,10 @@ fn resolve_direct_candidate_source(
             },
         }),
         EvidenceSource::CandidateFile { path } => resolve_direct_candidate_file(candidate, path),
-        EvidenceSource::Runtime { .. } => unreachable!("runtime source resolved separately"),
+        EvidenceSource::Runtime { .. } => Err(resolution_error(
+            EvidenceResolutionErrorCode::InvalidEvidence,
+            "runtime Evidence must use the accepted runtime-source resolver",
+        )),
     }
 }
 
