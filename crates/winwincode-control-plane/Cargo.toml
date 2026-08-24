@@ -1,0 +1,16 @@
+[package]
+name = "winwincode-control-plane"
+description = "Application lifecycle host for the WinWinCode Control Plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+winwincode-storage = { path = "../winwincode-storage" }
+
+[lints]
+workspace = true
