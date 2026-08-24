@@ -12,6 +12,12 @@
         "INTERNAL_ERROR"
       ]
     },
+    "EmptyParameters": {
+      "description": "A closed object with no fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
     "OrganizationId": {
       "description": "Organization identity.",
       "type": "string",
@@ -68,7 +74,19 @@
         "schemaVersion": {
           "$ref": "#/$defs/SchemaVersion"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "note"
+            ]
+          },
+          "then": {
+            "minProperties": 1
+          }
+        }
+      ]
     }
   }
 }

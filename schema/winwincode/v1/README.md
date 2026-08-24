@@ -34,6 +34,19 @@ WebSocket 只推送投影、运行事件、审批请求和通知。业务变更�
 HTTP schema 只通过 `$ref` 使用通用领域定义，不再声明另一份 ID、Actor、Scope
 或 revision。
 
+## 生成与漂移检查
+
+`pnpm contracts:generate` 离线读取本目录全部 `*.schema.json`，一次更新以下四个文件：
+
+- `crates/winwincode-api/src/generated.rs`：Rust 公共传输类型；
+- `apps/web/src/generated/contracts.ts`：Web 客户端类型；
+- `schema-collection.generated.json`：可独立分发的 JSON Schema 集合；
+- `openapi.generated.json`：OpenAPI 3.1 文档。
+
+`pnpm contracts:check` 只做比较，不写文件；缺文件或人工修改生成物都会失败。每个公开
+`$defs` 名称在 v1 合同集合中必须唯一，跨文件 `$ref` 只能指向本目录内的 canonical
+schema。生成文件带统一来源摘要，重复生成相同输入不会改写文件。
+
 ## 已冻结的写入范围
 
 | 产品范围 | Command |

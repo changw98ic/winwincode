@@ -557,8 +557,13 @@ function rustObjectFields(schema, document, context, existingNames = new Set()) 
 function renderRustObject(entry, context) {
   const lines = [...rustDocumentation(entry.schema.description)]
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
+  const fields = rustObjectFields(entry.schema, entry.document, context)
+  if (fields.length === 0) {
+    lines.push(`pub struct ${entry.name} {}`)
+    return lines.join('\n')
+  }
   lines.push(`pub struct ${entry.name} {`)
-  lines.push(...rustObjectFields(entry.schema, entry.document, context))
+  lines.push(...fields)
   lines.push('}')
   return lines.join('\n')
 }
@@ -665,7 +670,6 @@ function renderRustDefinition(entry, context) {
     lines.push('}')
     return lines.join('\n')
   }
-  if (Array.isArray(schema.allOf)) return renderRustAllOf(entry, context)
   if (schema.type === 'object' || schema.properties !== undefined) {
     if (isObject(schema.additionalProperties) && Object.keys(schema.properties ?? {}).length === 0) {
       return [
@@ -675,6 +679,7 @@ function renderRustDefinition(entry, context) {
     }
     return renderRustObject(entry, context)
   }
+  if (Array.isArray(schema.allOf)) return renderRustAllOf(entry, context)
   if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {
     return renderRustUnion(entry, context)
   }
