@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 3,
+  "id": "delivery-main",
+  "revision": 7,
+  "status": "ready-to-deliver",
+  "spec": {
+    "schemaVersion": 3,
+    "id": "delivery-spec-v1",
+    "deliveryId": "delivery-main",
+    "revision": 1,
+    "title": "Implement invitation flow",
+    "goal": "Users can invite a teammate and verify the result.",
+    "scope": ["Invitation data and API"],
+    "outOfScope": ["Organization billing"],
+    "constraints": ["Keep the existing authentication boundary"],
+    "acceptanceCriteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-required",
+        "description": "A valid invitation can be accepted exactly once.",
+        "verificationMethod": "Run the invitation integration test.",
+        "required": true
+      },
+      {
+        "schemaVersion": 3,
+        "id": "criterion-optional",
+        "description": "The empty state remains readable at narrow widths.",
+        "verificationMethod": null,
+        "required": false
+      }
+    ],
+    "sourceRef": null,
+    "publicationTarget": null,
+    "repository": {
+      "schemaVersion": 3,
+      "kind": "local-git",
+      "locator": "/workspace/repository"
+    },
+    "baseRevision": "0123456789012345678901234567890123456789",
+    "maxReworkAttempts": 2,
+    "createdAtMillis": 1800000000000
+  },
+  "tasks": [
+    {
+      "schemaVersion": 3,
+      "id": "delivery-task-api",
+      "deliveryId": "delivery-main",
+      "title": "Invitation API",
+      "goal": "Deliver the independently verifiable invitation endpoint.",
+      "acceptanceCriterionIds": ["criterion-required"],
+      "blockedByTaskIds": [],
+      "owner": "backend-owner",
+      "status": "completed"
+    }
+  ],
+  "stageRuns": [
+    {
+      "schemaVersion": 3,
+      "id": "stage-verification-1",
+      "deliveryId": "delivery-main",
+      "deliveryTaskId": "delivery-task-api",
+      "stage": "verifying",
+      "actorType": "codex",
+      "role": "verifier",
+      "status": "succeeded",
+      "attempt": 1,
+      "startedAtMillis": 1800000000010,
+      "finishedAtMillis": 1800000000020
+    }
+  ],
+  "sessionBindings": [
+    {
+      "schemaVersion": 3,
+      "id": "binding-verifier-1",
+      "deliveryId": "delivery-main",
+      "stageRunId": "stage-verification-1",
+      "dshSessionId": "dsh-session-verifier",
+      "codexSessionId": "codex-session-verifier",
+      "boundAtMillis": 1800000000011
+    }
+  ],
+  "attentionItems": [],
+  "evidence": [
+    {
+      "schemaVersion": 3,
+      "id": "evidence-test-1",
+      "deliveryId": "delivery-main",
+      "deliverySpecId": "delivery-spec-v1",
+      "deliverySpecRevision": 1,
+      "stageRunId": "stage-verification-1",
+      "sessionBindingId": "binding-verifier-1",
+      "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "test",
+      "sourceRef": "runtime-event:codex-session-verifier/42",
+      "createdAtMillis": 1800000000019
+    }
+  ],
+  "verdict": {
+    "schemaVersion": 3,
+    "id": "delivery-verdict-1",
+    "deliveryId": "delivery-main",
+    "deliverySpecId": "delivery-spec-v1",
+    "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "pass",
+    "criteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-result-required",
+        "deliveryId": "delivery-main",
+        "deliverySpecId": "delivery-spec-v1",
+        "criterionId": "criterion-required",
+        "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "verdict": "pass",
+        "evidenceRefs": ["evidence-test-1"],
+        "explanation": "The direct integration test passed.",
+        "evaluatedAtMillis": 1800000000021
+      },
+      {
+        "schemaVersion": 3,
+        "id": "criterion-result-optional",
+        "deliveryId": "delivery-main",
+        "deliverySpecId": "delivery-spec-v1",
+        "criterionId": "criterion-optional",
+        "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "verdict": "inconclusive",
+        "evidenceRefs": [],
+        "explanation": "No required visual probe was defined.",
+        "evaluatedAtMillis": 1800000000021
+      }
+    ],
+    "unresolvedFindings": [],
+    "producedAtMillis": 1800000000022
+  },
+  "createdAtMillis": 1800000000000,
+  "updatedAtMillis": 1800000000023
+}
