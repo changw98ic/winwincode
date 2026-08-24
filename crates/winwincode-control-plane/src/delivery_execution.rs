@@ -450,13 +450,13 @@ pub fn acknowledge_job_cancel(
         )
     })?;
     let exact = acknowledgement.request_id == *expected_request_id
-        && acknowledgement.lease.job_id == lease.execution_job_id
-        && lease_attempt == lease.attempt
-        && acknowledgement.lease.lease_id == lease.lease_id
-        && acknowledgement.lease.fencing_token == lease.fencing_token
-        && acknowledgement.lease.worker_id == lease.worker_id
-        && acknowledgement.lease.worker_instance_id == lease.worker_instance_id
-        && acknowledgement.worker_session_id == lease.worker_session_id;
+        && &acknowledgement.lease.job_id == lease.execution_job_id()
+        && lease_attempt == lease.attempt()
+        && &acknowledgement.lease.lease_id == lease.lease_id()
+        && &acknowledgement.lease.fencing_token == lease.fencing_token()
+        && &acknowledgement.lease.worker_id == lease.worker_id()
+        && &acknowledgement.lease.worker_instance_id == lease.worker_instance_id()
+        && &acknowledgement.worker_session_id == lease.worker_session_id();
     if !exact {
         return Err(DeliveryExecutionError::InvalidEffect(
             "job.cancel_ack does not match the exact request and active lease".to_owned(),
