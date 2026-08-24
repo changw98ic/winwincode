@@ -118,10 +118,8 @@ try {
     forkEvents.push({ sequence: poll.event.sequence.toString(), kind: poll.event.kind })
   }
   report.forkEvents = forkEvents
-  const forkClosedPoll = kernel.pollEvent(fork.sessionId, 5_000)
-  await new Promise(resolvePromise => setImmediate(resolvePromise))
   await kernel.closeSession(fork.sessionId)
-  report.forkClosedPoll = await forkClosedPoll
+  report.forkClosedPoll = await kernel.pollEvent(fork.sessionId, 5_000)
 
   const submission = await kernel.submitTurn(source.sessionId, 'Reply with one word.')
   if (submission.turnId === undefined) throw new Error('turn submission did not return a turn ID')

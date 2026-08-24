@@ -858,7 +858,8 @@ impl Kernel {
     ///
     /// # Errors
     ///
-    /// Returns a typed failure when the session is unknown or the kernel is closed.
+    /// A session that has already been unregistered is a closed stream. Returns a typed failure
+    /// only when the kernel itself is closed.
     pub async fn next_event(
         &self,
         session_id: &str,
@@ -866,7 +867,9 @@ impl Kernel {
     ) -> KernelResult<EventPoll> {
         Self::guard(async {
             let runtime = self.runtime().await?;
-            let session = self.session(&runtime, session_id).await?;
+            let Some(session) = runtime.sessions.read().await.get(session_id).cloned() else {
+                return Ok(EventPoll::Closed);
+            };
             let mut events = session.events.lock().await;
             match timeout {
                 Some(timeout) => match tokio::time::timeout(timeout, events.recv()).await {
