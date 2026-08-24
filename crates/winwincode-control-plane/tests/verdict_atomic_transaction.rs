@@ -50,7 +50,7 @@ fn canonical_id(prefix: &str, value: u64) -> String {
 }
 
 fn fixture(seed: u64, outcome: VerdictFixtureOutcome) -> VerdictFixture {
-    verdict_fixture(DeliveryId(canonical_id("dlv", seed)), outcome)
+    verdict_fixture(&DeliveryId(canonical_id("dlv", seed)), outcome)
 }
 
 fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {

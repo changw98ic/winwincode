@@ -19,7 +19,7 @@ use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 const VERDICT_ATTENTION_PROTOCOL: &str = "winwincode.delivery-verdict-attention.v1";
 
 /// Sealed authoritative facts accepted by the verdict application service.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct SubmitVerdictFacts<'facts> {
     pub expected_revision: u64,
     pub candidate: &'facts FrozenDeliveryCandidate,
@@ -45,14 +45,6 @@ impl ComputedVerdictTransition {
 
     pub fn event(&self) -> &DeliveryVerdictSubmittedEvent {
         &self.event
-    }
-
-    pub(crate) const fn source_revision(&self) -> u64 {
-        self.source_revision
-    }
-
-    pub(crate) fn candidate_ref(&self) -> &str {
-        &self.candidate_ref
     }
 
     pub(crate) fn validate_source(&self, source: &Delivery) -> Result<(), CoordinationError> {
@@ -514,6 +506,10 @@ fn attention_copy(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "consumed by the pending dedicated Attention transition"
+)]
 pub(crate) fn current_verdict_attention_action(
     delivery: &Delivery,
     item: &AttentionItem,
@@ -720,7 +716,7 @@ pub mod test_support {
 
     #[must_use]
     pub fn verdict_fixture(
-        delivery_id: DeliveryId,
+        delivery_id: &DeliveryId,
         outcome: VerdictFixtureOutcome,
     ) -> VerdictFixture {
         let delivery = verifying_delivery(delivery_id);
@@ -763,7 +759,7 @@ pub mod test_support {
         }
     }
 
-    fn verifying_delivery(delivery_id: DeliveryId) -> Delivery {
+    fn verifying_delivery(delivery_id: &DeliveryId) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.id = delivery_id.clone();
         snapshot.spec.delivery_id = delivery_id.clone();

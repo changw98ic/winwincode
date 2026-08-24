@@ -217,7 +217,7 @@ pub struct SubmitDeliveryVerdict {
 pub enum DeliveryCommand {
     Create(CreateDelivery),
     Append(AppendDelivery),
-    SubmitVerdict(SubmitDeliveryVerdict),
+    SubmitVerdict(Box<SubmitDeliveryVerdict>),
 }
 
 #[derive(Debug, Clone)]
@@ -755,7 +755,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
         match command {
             DeliveryCommand::Create(create) => self.create(create),
             DeliveryCommand::Append(append) => self.append(append),
-            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(submit),
+            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
         }
     }
 }
@@ -1217,7 +1217,7 @@ mod tests {
 
     fn create_store_with_failed_verdict() -> (DeliveryStore<'static>, Delivery) {
         let fixture = verdict_fixture(
-            DeliveryId("delivery-store-verdict".into()),
+            &DeliveryId("delivery-store-verdict".into()),
             VerdictFixtureOutcome::Fail,
         );
         let backend = Arc::new(InMemoryDeliveryJournal::new());
@@ -1241,12 +1241,14 @@ mod tests {
         )
         .expect("computed failing verdict");
         let failed = store
-            .execute(DeliveryCommand::SubmitVerdict(SubmitDeliveryVerdict {
-                request_id: RequestId("submit-failed-verdict".into()),
-                request_digest: REQUEST_B.into(),
-                expected_revision: fixture.delivery.revision(),
-                transition,
-            }))
+            .execute(DeliveryCommand::SubmitVerdict(Box::new(
+                SubmitDeliveryVerdict {
+                    request_id: RequestId("submit-failed-verdict".into()),
+                    request_digest: REQUEST_B.into(),
+                    expected_revision: fixture.delivery.revision(),
+                    transition,
+                },
+            )))
             .expect("submit failing verdict")
             .snapshot;
         (store, failed)
@@ -1284,7 +1286,7 @@ mod tests {
         ] {
             let (store, failed) = create_store_with_failed_verdict();
             let passing_fixture = verdict_fixture(
-                DeliveryId("delivery-store-verdict".into()),
+                &DeliveryId("delivery-store-verdict".into()),
                 VerdictFixtureOutcome::Pass,
             );
             let passing = compute_verdict_transition(
