@@ -19,38 +19,42 @@
 
 ## 结论
 
-WinWinCode 是 Codex Core 和 DeepSeek Harness 之上的交付控制层，不是第二套 Agent 内核，也不是通用任务、权限、会话或监控平台。
+WinWinCode 是 Codex Core 之上的交付控制层，不是第二套 Agent 内核，也不是通用任务、权限、会话或监控平台。
 
 ```text
-DeepSeek Harness
-负责聊天、模型与提供商设置、凭据、Session、人工交互和界面外壳
+TypeScript Web UI
+负责聊天与 StrongFlow 表现、表单、图表和 HTTP/WebSocket 客户端
+
+Rust Control Plane
+负责 ProductSession、Provider Gateway、凭据引用、Delivery、审批和持久化
+
+Rust Execution Worker
+负责 ExecutionJob、WorkerSession、工作区和 Codex Core 适配
 
 Codex Core
-负责 Thread、Plan、Agent Graph、工具、Shell、MCP、沙箱、权限和执行恢复
-
-WinWinCode
-负责 DeliverySpec、跨 Session 阶段、业务 Attention、Evidence 和 Verdict
+负责 CodexThread、Plan、Agent Graph、工具、Shell、MCP、沙箱、权限和执行恢复
 ```
 
-三层之间通过标识和只读投影关联。一个事实只能有一个所有者。其他层可以保存引用或生成界面视图，不复制一份可独立修改的权威状态。
+各层通过强类型标识和只读投影关联。一个事实只能有一个所有者。其他层可以保存引用或生成界面视图，不复制一份可独立修改的权威状态。
 
 ## 所有权清单
 
 | 事实 | 唯一所有者 | WinWinCode 的处理 |
 | --- | --- | --- |
-| Thread、Turn、上下文和历史 | Codex Core | 保存 `codexSessionId` 引用 |
+| Codex Thread、Turn、上下文和历史 | Codex Core | 在 `SessionBinding` 保存 `CodexThreadId` 引用 |
 | Plan 与 Plan Item | Codex Core | 保留结构化事件并投影进度，不调度 |
 | Agent Graph、子 Agent 生命周期和通信 | Codex Core | 展示原图，不建立 roster、mailbox 或第二张图 |
 | Tool、Shell、MCP、Sandbox、Permission | Codex Core | 展示和引用执行事实，不实现第二套运行时 |
-| 执行审批与危险操作判断 | Codex Core | 由 DSH 显示原始审批交互 |
-| Chat、Provider、Model、Credential | DSH | 使用公开引用，不读取或复制凭据 |
-| DSH Session 日志与恢复 | DSH | 保存 `dshSessionId` 引用 |
+| 执行审批与危险操作判断 | Codex Core | Control Plane 只投影并记录审批结果引用 |
+| Chat 与产品会话 | Rust Control Plane | 保存 `ProductSessionId`，UI 只读写 API Projection |
+| Provider、Model、Credential | Rust Control Plane | Provider Gateway 解析凭据引用，Worker 不持有长期密钥 |
+| ExecutionJob、租约和 Worker 运行 | Rust Control Plane / Rust Execution Worker | 保存 `ExecutionJobId`、`WorkerSessionId`、lease 与 fencing 事实 |
 | Delivery 目标与验收条件 | WinWinCode | 保存 `DeliverySpec` 与 `AcceptanceCriterion` |
 | 跨 Session 的交付阶段 | WinWinCode | 保存 `StageRun` 与 `SessionBinding` |
 | 业务问题与人工决定 | WinWinCode | 保存 `AttentionItem` 及其解决结果 |
 | 验收依据与结论 | WinWinCode | 保存 `EvidenceRef`、`CriterionResult` 和 `DeliveryVerdict` |
 
-DSH 的 Agent Teams 不作为 WinWinCode 任务权威。它的 roster、mailbox 和共享任务图绑定 DSH Agent 生命周期，而执行中的子 Agent 属于 Codex Core。把两者再接到一个 StrongFlow 任务图会产生三份可以互相冲突的状态。
+旧 DSH Agent Teams 不进入目标运行合同。执行中的子 Agent 属于 Codex Core；把它们再接到一个 StrongFlow 任务图会产生两份可以互相冲突的执行状态。
 
 ## 唯一的交付数据模型
 
@@ -98,7 +102,7 @@ Delivery
 
 ### StageRun 与 SessionBinding
 
-`StageRun` 只记录一次交付阶段的责任类型、角色、尝试、状态和时间。`SessionBinding` 把它关联到 DSH、Codex 或两者的 Session 标识。WinWinCode 不从这些对象创建自己的 Agent 生命周期；实际创建、恢复、分叉、等待、转向和中断继续由 Codex Core 完成。
+`StageRun` 只记录一次交付阶段的责任类型、角色、尝试、状态和时间。`SessionBinding` 精确关联 `ProductSessionId`、`ExecutionJobId`、可选 `WorkerSessionId` 和可选 `CodexThreadId`。这些身份各有自己的生命周期，不能压成一个通用 Session ID。WinWinCode 不从这些对象创建自己的 Agent 生命周期；实际创建、恢复、分叉、等待、转向和中断继续由 Codex Core 完成。
 
 交付状态采用以下主路径：
 
@@ -111,7 +115,7 @@ Draft → Clarifying → Ready → Planning → Plan Review
 
 状态只回答交付层下一步是什么。Codex 内部一次命令重试、子 Agent 等待或上下文恢复不会生成新的交付阶段。
 
-`startStage()` 同时承担明确的阶段交接：如果当前有正在运行的 Codex 阶段，它必须已经绑定所属 Codex Session；服务在同一次原子变更中结束当前 `StageRun` 并开始下一项 `StageRun`，不会另建阶段调度器。计划审核和最终交付审核只能由 human `StageRun` 开始，并且必须同时创建与该 `StageRun` 绑定的开放阻塞 `AttentionItem`。审核完成前状态为 `Needs Attention`；人工身份和审核 Session 都验证通过后，才可以进入 `Executing` 或 `Delivered`。
+`startStage()` 同时承担明确的阶段交接：如果当前有正在运行的 Codex 阶段，它必须已经绑定精确的 `ExecutionJob`、`WorkerSession` 与 `CodexThread`；服务在同一次原子变更中结束当前 `StageRun` 并开始下一项 `StageRun`，不会另建阶段调度器。计划审核和最终交付审核只能由 human `StageRun` 开始，并且必须同时创建与该 `StageRun` 绑定的开放阻塞 `AttentionItem`。审核完成前状态为 `Needs Attention`；人工身份和 `ProductSession` 都验证通过后，才可以进入 `Executing` 或 `Delivered`。
 
 被其他 `DeliveryTask` 阻塞的任务不能开始。任务级执行或返工进入验证时，验证阶段必须继续指向刚刚产出候选结果的同一个 `DeliveryTask`；没有独立交付子单元的单一 Delivery 则在这些阶段保持 `deliveryTaskId: null`，不会为了返工虚构一个任务。这些检查只约束交付阶段的流转，不接管 Codex 内部如何安排 Plan 或子 Agent。
 
