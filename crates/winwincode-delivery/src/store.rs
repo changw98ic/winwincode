@@ -453,6 +453,20 @@ impl<'journal> DeliveryStore<'journal> {
                 "a new Delivery must start at revision 1",
             ));
         }
+        if command.snapshot.snapshot().verdict.is_some()
+            || !command.snapshot.snapshot().evidence.is_empty()
+            || command
+                .snapshot
+                .snapshot()
+                .attention_items
+                .iter()
+                .any(is_verdict_attention)
+        {
+            return Err(store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "Delivery creation cannot seed computed Evidence, Verdict, or verdict Attention",
+            ));
+        }
         let record = materialize_record(
             command.snapshot.id().clone(),
             1,
@@ -615,6 +629,8 @@ impl<'journal> DeliveryStore<'journal> {
                 DeliveryStoreErrorCode::InvalidStoreOptions,
                 "verdict.submitted is missing its sealed computed transition",
             ));
+        } else {
+            validate_generic_verdict_delta(command.operation, &stored.snapshot, &command.snapshot)?;
         }
         if command.expected_revision != stored.snapshot.revision()
             || command.snapshot.revision() != stored.snapshot.revision() + 1
@@ -707,6 +723,113 @@ impl<'journal> DeliveryStore<'journal> {
             })?;
         verify_journal(delivery_id, loaded)
     }
+}
+
+fn validate_generic_verdict_delta(
+    operation: DeliveryMutationOperation,
+    before: &Delivery,
+    after: &Delivery,
+) -> Result<(), DeliveryStoreError> {
+    let before = before.snapshot();
+    let after = after.snapshot();
+    let preserved_verdict = after.verdict == before.verdict;
+    let cleared_verdict = before.verdict.is_some() && after.verdict.is_none();
+    if !preserved_verdict && !cleared_verdict {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "only the sealed verdict command may add or replace a Delivery verdict",
+        ));
+    }
+
+    if preserved_verdict && after.evidence != before.evidence {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "a generic Delivery operation cannot add, replace, or partially remove computed Evidence",
+        ));
+    }
+    if cleared_verdict
+        && (!after.evidence.is_empty()
+            || !verdict_invalidation_is_authorized(operation, before, after))
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "computed Evidence and Verdict may be cleared only by a new Spec or an exact remediator writer start",
+        ));
+    }
+
+    for item in &after.attention_items {
+        match before
+            .attention_items
+            .iter()
+            .find(|stored| stored.id == item.id)
+        {
+            None if is_verdict_attention(item) => {
+                return Err(store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    "only the sealed verdict command may add verdict-derived Attention",
+                ));
+            }
+            Some(stored)
+                if stored.context != item.context
+                    && (is_verdict_attention(stored) || is_verdict_attention(item)) =>
+            {
+                return Err(store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    "a generic Delivery operation cannot replace verdict Attention context",
+                ));
+            }
+            None | Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn verdict_invalidation_is_authorized(
+    operation: DeliveryMutationOperation,
+    before: &crate::domain::DeliverySnapshot,
+    after: &crate::domain::DeliverySnapshot,
+) -> bool {
+    match operation {
+        DeliveryMutationOperation::DeliverySpecUpdated => {
+            after.spec != before.spec && after.spec.revision > before.spec.revision
+        }
+        DeliveryMutationOperation::StageStarted => {
+            let new_runs = after
+                .stage_runs
+                .iter()
+                .filter(|run| !before.stage_runs.iter().any(|stored| stored.id == run.id))
+                .collect::<Vec<_>>();
+            let [run] = new_runs.as_slice() else {
+                return false;
+            };
+            run.stage == crate::domain::DeliveryStage::Reworking
+                && run.actor_type == crate::domain::StageRunActorType::Codex
+                && run.role == "remediator"
+                && run.status == crate::domain::StageRunStatus::Running
+                && after.status == crate::domain::DeliveryStatus::Reworking
+                && after
+                    .session_bindings
+                    .iter()
+                    .any(|binding| binding.stage_run_id == run.id)
+        }
+        DeliveryMutationOperation::DeliveryCreated
+        | DeliveryMutationOperation::SessionBound
+        | DeliveryMutationOperation::AttentionResolved
+        | DeliveryMutationOperation::VerdictSubmitted => false,
+    }
+}
+
+fn is_verdict_attention(item: &crate::domain::AttentionItem) -> bool {
+    serde_json::from_str::<serde_json::Value>(&item.context)
+        .ok()
+        .and_then(|context| {
+            context
+                .get("protocol")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("winwincode.delivery-verdict-attention.v1")
 }
 
 impl DeliveryCommandPort for DeliveryStore<'_> {
@@ -1117,6 +1240,10 @@ impl DeliveryJournalPort for InMemoryDeliveryJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::verdict::{
+        SubmitVerdictFacts, compute_verdict_transition,
+        test_support::{VerdictFixtureOutcome, verdict_fixture},
+    };
 
     const REQUEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const REQUEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1199,6 +1326,57 @@ mod tests {
             .expect_err("raw VerdictSubmitted append");
 
         assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+    }
+
+    #[test]
+    fn every_generic_append_operation_rejects_a_fabricated_passing_verdict() {
+        for (index, operation) in [
+            DeliveryMutationOperation::DeliverySpecUpdated,
+            DeliveryMutationOperation::StageStarted,
+            DeliveryMutationOperation::SessionBound,
+            DeliveryMutationOperation::AttentionResolved,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fixture = verdict_fixture(
+                DeliveryId(format!("delivery-verdict-bypass-{index}")),
+                VerdictFixtureOutcome::Pass,
+            );
+            let transition = compute_verdict_transition(
+                &fixture.delivery,
+                SubmitVerdictFacts {
+                    expected_revision: fixture.delivery.revision(),
+                    candidate: &fixture.candidate,
+                    verification: &fixture.verification,
+                    evidence: &fixture.evidence,
+                    produced_at_millis: 1_800_000_000_100,
+                },
+            )
+            .expect("sealed passing transition fixture");
+            let backend = Arc::new(InMemoryDeliveryJournal::new());
+            let store = DeliveryStore::new(Arc::clone(&backend));
+            store
+                .execute(DeliveryCommand::Create(CreateDelivery {
+                    request_id: RequestId(format!("create-verdict-bypass-{index}")),
+                    request_digest: REQUEST_A.into(),
+                    snapshot: fixture.delivery.clone(),
+                }))
+                .expect("create verifying Delivery");
+
+            let error = store
+                .execute(DeliveryCommand::Append(AppendDelivery {
+                    delivery_id: fixture.delivery.id().clone(),
+                    request_id: RequestId(format!("raw-pass-{index}")),
+                    request_digest: REQUEST_B.into(),
+                    operation,
+                    expected_revision: fixture.delivery.revision(),
+                    snapshot: transition.delivery().clone(),
+                }))
+                .expect_err("generic operation must not submit a passing verdict");
+
+            assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+        }
     }
 
     #[test]

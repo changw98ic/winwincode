@@ -681,7 +681,7 @@ fn delivery_digest(delivery: &Delivery) -> Result<String, CoordinationError> {
 /// Narrow fixtures for cross-crate transaction tests. This module is absent
 /// from normal builds and still constructs every sealed fact through the
 /// production candidate, verification, Evidence, and verdict seams.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use winwincode_domain::{
         CodexThreadId, DeliveryId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,

@@ -14,7 +14,9 @@ use winwincode_delivery::{
         SubmitDeliveryVerdict,
     },
 };
-use winwincode_storage::{CommitReceipt, NewOutboxEvent, ProductStateStorage, StorageError};
+use winwincode_storage::{
+    CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StorageError,
+};
 
 use crate::{
     DeliveryVerdictCommitError, StateChange,
@@ -105,7 +107,14 @@ pub(crate) fn execute(
     let receipt = storage
         .commit(&commit)
         .map_err(DeliveryVerdictCommitError::Storage)?;
-    validate_receipt(&receipt, &mutation.snapshot).map_err(DeliveryVerdictCommitError::Storage)?;
+    validate_receipt(
+        &receipt,
+        &source,
+        &mutation.snapshot,
+        &commit.receipt_identity,
+        mutation.replayed,
+    )
+    .map_err(DeliveryVerdictCommitError::Storage)?;
     Ok(receipt)
 }
 
@@ -145,28 +154,35 @@ fn expected_revision(command: &CommandEnvelope) -> Result<u64, StorageError> {
         .map_err(|_| StorageError::invalid_input("Delivery expectedRevision must not be negative"))
 }
 
-fn validate_receipt(receipt: &CommitReceipt, delivery: &Delivery) -> Result<(), StorageError> {
+fn validate_receipt(
+    receipt: &CommitReceipt,
+    source: &Delivery,
+    delivery: &Delivery,
+    expected_identity: &ReceiptIdentity,
+    expected_replay: bool,
+) -> Result<(), StorageError> {
     if receipt.stream_id != delivery_stream_id(delivery.id())
         || receipt.revision != delivery.revision()
+        || &receipt.receipt_identity != expected_identity
+        || receipt.idempotent_replay != expected_replay
     {
         return Err(StorageError::invalid_input(
-            "durable verdict receipt does not match its Delivery revision",
+            "durable verdict receipt does not match its scoped request, replay state, or Delivery revision",
         ));
     }
-    let matching = receipt
-        .events
-        .iter()
-        .filter(|event| event.topic == VERDICT_SUBMITTED_TOPIC)
-        .collect::<Vec<_>>();
-    let [event] = matching.as_slice() else {
+    let [event] = receipt.events.as_slice() else {
         return Err(StorageError::invalid_input(
             "durable verdict receipt must contain exactly one verdict event",
         ));
     };
+    if event.topic != VERDICT_SUBMITTED_TOPIC {
+        return Err(StorageError::invalid_input(
+            "durable verdict receipt contains another event topic",
+        ));
+    }
     let submitted = strict_verdict_event(&event.payload)?;
-    if event.event_id != verdict_event_id(&submitted)
-        || !event_matches_delivery(&submitted, delivery)
-    {
+    let expected = event_from_persisted_transition(source, delivery)?;
+    if event.event_id != verdict_event_id(&submitted) || submitted != expected {
         return Err(StorageError::invalid_input(
             "durable verdict event does not match the committed Delivery facts",
         ));
@@ -186,30 +202,73 @@ fn strict_verdict_event(payload: &[u8]) -> Result<DeliveryVerdictSubmittedEvent,
     Ok(event)
 }
 
-fn event_matches_delivery(event: &DeliveryVerdictSubmittedEvent, delivery: &Delivery) -> bool {
-    let snapshot = delivery.snapshot();
-    event.schema_version == 1
-        && event.delivery_id == snapshot.id
-        && event.delivery_revision == snapshot.revision
-        && event.candidate_ref == event.verdict.candidate_ref
-        && snapshot.verdict.as_ref() == Some(&event.verdict)
-        && event.status == snapshot.status
-        && event.produced_at_millis == snapshot.updated_at_millis
-        && event
-            .evidence
-            .iter()
-            .all(|evidence| snapshot.evidence.contains(evidence))
-        && event
-            .attention_items
-            .iter()
-            .all(|attention| snapshot.attention_items.contains(attention))
-        && event.task_statuses.len() == snapshot.tasks.len()
-        && event.task_statuses.iter().all(|fact| {
-            snapshot
-                .tasks
+fn event_from_persisted_transition(
+    source: &Delivery,
+    delivery: &Delivery,
+) -> Result<DeliveryVerdictSubmittedEvent, StorageError> {
+    let before = source.snapshot();
+    let after = delivery.snapshot();
+    if after.revision != before.revision.saturating_add(1)
+        || !after.attention_items.starts_with(&before.attention_items)
+    {
+        return Err(StorageError::invalid_input(
+            "durable verdict snapshot is not the exact next Delivery transition",
+        ));
+    }
+    let verdict = after.verdict.clone().ok_or_else(|| {
+        StorageError::invalid_input("durable verdict snapshot has no computed verdict")
+    })?;
+    let evidence_ids = verdict
+        .criteria
+        .iter()
+        .flat_map(|result| result.evidence_refs.iter())
+        .map(|evidence_id| evidence_id.0.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let evidence = evidence_ids
+        .into_iter()
+        .map(|evidence_id| {
+            after
+                .evidence
                 .iter()
-                .any(|task| task.id == fact.delivery_task_id && task.status == fact.status)
+                .find(|evidence| evidence.id.0 == evidence_id)
+                .cloned()
+                .ok_or_else(|| {
+                    StorageError::invalid_input(
+                        "durable verdict cites Evidence absent from its Delivery snapshot",
+                    )
+                })
         })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DeliveryVerdictSubmittedEvent {
+        schema_version: 1,
+        delivery_id: after.id.clone(),
+        delivery_revision: after.revision,
+        candidate_ref: verdict.candidate_ref.clone(),
+        evidence,
+        verdict,
+        attention_items: after.attention_items[before.attention_items.len()..].to_vec(),
+        task_statuses: after
+            .tasks
+            .iter()
+            .map(
+                |task| winwincode_delivery::application::verdict::DeliveryTaskStatusFact {
+                    delivery_task_id: task.id.clone(),
+                    status: task.status,
+                },
+            )
+            .collect(),
+        status: after.status,
+        produced_at_millis: after.updated_at_millis,
+    })
+}
+
+#[cfg(test)]
+fn event_matches_delivery(
+    event: &DeliveryVerdictSubmittedEvent,
+    source: &Delivery,
+    delivery: &Delivery,
+) -> bool {
+    event_from_persisted_transition(source, delivery).is_ok_and(|expected| expected == *event)
 }
 
 fn verdict_event_id(event: &DeliveryVerdictSubmittedEvent) -> String {
@@ -218,4 +277,87 @@ fn verdict_event_id(event: &DeliveryVerdictSubmittedEvent) -> String {
 
 fn storage_error(error: impl std::fmt::Display) -> StorageError {
     StorageError::invalid_input(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use winwincode_delivery::{
+        application::verdict::{
+            SubmitVerdictFacts, compute_verdict_transition,
+            test_support::{VerdictFixtureOutcome, verdict_fixture},
+        },
+        domain::{Delivery, DeliveryTaskStatus},
+    };
+    use winwincode_domain::{DeliveryId, DeliveryTaskId};
+
+    use super::event_matches_delivery;
+
+    fn fail_transition() -> (
+        winwincode_delivery::application::verdict::DeliveryVerdictSubmittedEvent,
+        Delivery,
+        Delivery,
+    ) {
+        let fixture = verdict_fixture(
+            DeliveryId("delivery-receipt-exactness".into()),
+            VerdictFixtureOutcome::Fail,
+        );
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: &fixture.verification,
+                evidence: &fixture.evidence,
+                produced_at_millis: 1_800_000_000_100,
+            },
+        )
+        .expect("sealed failing transition");
+        (
+            transition.event().clone(),
+            fixture.delivery,
+            transition.delivery().clone(),
+        )
+    }
+
+    #[test]
+    fn durable_event_requires_the_complete_evidence_and_attention_sets() {
+        let (event, source, delivery) = fail_transition();
+        assert!(event_matches_delivery(&event, &source, &delivery));
+
+        let mut missing_evidence = event.clone();
+        missing_evidence.evidence.clear();
+        assert!(!event_matches_delivery(
+            &missing_evidence,
+            &source,
+            &delivery
+        ));
+
+        let mut missing_attention = event;
+        missing_attention.attention_items.clear();
+        assert!(!event_matches_delivery(
+            &missing_attention,
+            &source,
+            &delivery
+        ));
+    }
+
+    #[test]
+    fn durable_event_rejects_repeated_task_entries_that_hide_another_task() {
+        let (mut event, source, delivery) = fail_transition();
+        let mut source_snapshot = source.into_snapshot();
+        let mut source_second = source_snapshot.tasks[0].clone();
+        source_second.id = DeliveryTaskId("task-receipt-second".into());
+        source_second.status = DeliveryTaskStatus::Verifying;
+        source_snapshot.tasks.push(source_second);
+        let source = Delivery::try_from_snapshot(source_snapshot).expect("two-task source");
+        let mut snapshot = delivery.into_snapshot();
+        let mut second = snapshot.tasks[0].clone();
+        second.id = DeliveryTaskId("task-receipt-second".into());
+        second.status = DeliveryTaskStatus::Failed;
+        snapshot.tasks.push(second);
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("two-task Delivery");
+
+        event.task_statuses = vec![event.task_statuses[0].clone(); 2];
+        assert!(!event_matches_delivery(&event, &source, &delivery));
+    }
 }
