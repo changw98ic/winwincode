@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{RequestId, Sha256Digest};
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const LEGACY_V1_ACTOR_KEY: &[u8] = b"winwincode.command-receipt.actor.legacy-v1";
 const LEGACY_V1_SCOPE_KEY: &[u8] = b"winwincode.command-receipt.scope.legacy-v1";
 
@@ -28,6 +28,149 @@ pub struct NewOutboxEvent {
     pub event_id: String,
     pub topic: String,
     pub payload: Vec<u8>,
+}
+
+/// Stable opaque identity for one append-only domain journal.
+///
+/// Storage treats both fields as bound data. The Control Plane adapter owns
+/// their domain meaning, so this crate does not depend on Delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AggregateJournalKey {
+    aggregate_type: String,
+    aggregate_id: String,
+}
+
+impl AggregateJournalKey {
+    /// Builds one opaque aggregate journal identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::InvalidInput`] when either component is empty.
+    pub fn new(
+        aggregate_type: impl Into<String>,
+        aggregate_id: impl Into<String>,
+    ) -> Result<Self, StorageError> {
+        let aggregate_type = aggregate_type.into();
+        let aggregate_id = aggregate_id.into();
+        if aggregate_type.is_empty() || aggregate_id.is_empty() {
+            return Err(StorageError::invalid(
+                "aggregate journal type and id must not be empty",
+            ));
+        }
+        Ok(Self {
+            aggregate_type,
+            aggregate_id,
+        })
+    }
+
+    #[must_use]
+    pub fn aggregate_type(&self) -> &str {
+        &self.aggregate_type
+    }
+
+    #[must_use]
+    pub fn aggregate_id(&self) -> &str {
+        &self.aggregate_id
+    }
+}
+
+/// One opaque, digest-addressed append-only journal record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AggregateJournalRecord {
+    pub sequence: u64,
+    pub digest: String,
+    pub payload: Vec<u8>,
+}
+
+impl AggregateJournalRecord {
+    #[must_use]
+    pub fn new(sequence: u64, digest: impl Into<String>, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            sequence,
+            digest: digest.into(),
+            payload: payload.into(),
+        }
+    }
+}
+
+/// Fully committed opaque journal bytes loaded through the storage port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedAggregateJournal {
+    pub manifest: Vec<u8>,
+    pub records: Vec<AggregateJournalRecord>,
+}
+
+/// One journal create or tail-CAS append staged in a state transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AggregateJournalPublication {
+    Create {
+        key: AggregateJournalKey,
+        manifest: Vec<u8>,
+        first_record: AggregateJournalRecord,
+    },
+    Append {
+        key: AggregateJournalKey,
+        expected_tail_sequence: u64,
+        expected_tail_digest: String,
+        record: AggregateJournalRecord,
+    },
+}
+
+impl AggregateJournalPublication {
+    fn validate(&self) -> Result<(), StorageError> {
+        match self {
+            Self::Create {
+                manifest,
+                first_record,
+                ..
+            } => {
+                if manifest.is_empty() {
+                    return Err(StorageError::invalid(
+                        "aggregate journal manifest must not be empty",
+                    ));
+                }
+                validate_journal_record(first_record)?;
+                if first_record.sequence != 1 {
+                    return Err(StorageError::invalid(
+                        "aggregate journal first record sequence must be 1",
+                    ));
+                }
+            }
+            Self::Append {
+                expected_tail_sequence,
+                expected_tail_digest,
+                record,
+                ..
+            } => {
+                validate_journal_record(record)?;
+                if *expected_tail_sequence == 0 || expected_tail_digest.is_empty() {
+                    return Err(StorageError::invalid(
+                        "aggregate journal expected tail must be complete",
+                    ));
+                }
+                if record.sequence != expected_tail_sequence.saturating_add(1) {
+                    return Err(StorageError::invalid(
+                        "aggregate journal append sequence must follow the expected tail",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_journal_record(record: &AggregateJournalRecord) -> Result<(), StorageError> {
+    if record.sequence == 0 || record.sequence > i64::MAX as u64 {
+        return Err(StorageError::invalid(
+            "aggregate journal sequence is outside the SQLite range",
+        ));
+    }
+    if record.digest.is_empty() || record.payload.is_empty() {
+        return Err(StorageError::invalid(
+            "aggregate journal digest and payload must not be empty",
+        ));
+    }
+    Ok(())
 }
 
 impl NewOutboxEvent {
@@ -148,6 +291,7 @@ pub struct StateCommit {
     pub expected_revision: u64,
     pub state: Vec<u8>,
     pub events: Vec<NewOutboxEvent>,
+    journal_publication: Option<AggregateJournalPublication>,
 }
 
 impl StateCommit {
@@ -167,7 +311,20 @@ impl StateCommit {
             expected_revision,
             state: state.into(),
             events,
+            journal_publication: None,
         }
+    }
+
+    /// Adds one opaque aggregate publication to the same state transaction.
+    #[must_use]
+    pub fn with_journal_publication(mut self, publication: AggregateJournalPublication) -> Self {
+        self.journal_publication = Some(publication);
+        self
+    }
+
+    #[must_use]
+    pub const fn journal_publication(&self) -> Option<&AggregateJournalPublication> {
+        self.journal_publication.as_ref()
     }
 
     fn validate(&self) -> Result<(), StorageError> {
@@ -184,6 +341,9 @@ impl StateCommit {
             return Err(StorageError::invalid(
                 "expected_revision exceeds the SQLite integer range",
             ));
+        }
+        if let Some(publication) = &self.journal_publication {
+            publication.validate()?;
         }
 
         let mut event_ids = HashSet::with_capacity(self.events.len());
@@ -227,7 +387,11 @@ pub struct CommitReceipt {
     pub receipt_identity: ReceiptIdentity,
     pub stream_id: String,
     pub revision: u64,
-    pub event_ids: Vec<String>,
+    /// Exact durable events attached to the original scoped request.
+    ///
+    /// Replays return these stored bytes rather than values recomputed by a
+    /// retry, so application adapters can recover the original dispatch job.
+    pub events: Vec<OutboxEvent>,
     pub idempotent_replay: bool,
 }
 
@@ -237,6 +401,9 @@ pub enum StorageErrorKind {
     InvalidInput,
     RevisionConflict,
     RequestConflict,
+    JournalAlreadyExists,
+    JournalNotFound,
+    JournalConflict,
     Adapter,
     Closed,
 }
@@ -293,6 +460,36 @@ impl StorageError {
         }
     }
 
+    fn journal_already_exists(key: &AggregateJournalKey) -> Self {
+        Self {
+            kind: StorageErrorKind::JournalAlreadyExists,
+            message: format!(
+                "{} aggregate journal {} already exists",
+                key.aggregate_type, key.aggregate_id
+            ),
+        }
+    }
+
+    fn journal_not_found(key: &AggregateJournalKey) -> Self {
+        Self {
+            kind: StorageErrorKind::JournalNotFound,
+            message: format!(
+                "{} aggregate journal {} does not exist",
+                key.aggregate_type, key.aggregate_id
+            ),
+        }
+    }
+
+    fn journal_conflict(key: &AggregateJournalKey) -> Self {
+        Self {
+            kind: StorageErrorKind::JournalConflict,
+            message: format!(
+                "{} aggregate journal {} tail changed",
+                key.aggregate_type, key.aggregate_id
+            ),
+        }
+    }
+
     #[must_use]
     pub const fn kind(&self) -> StorageErrorKind {
         self.kind
@@ -326,6 +523,16 @@ pub trait ProductStateStorage: Send {
     ///
     /// Returns an adapter-neutral error when the read fails or storage is closed.
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError>;
+
+    /// Loads one fully committed opaque aggregate journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or storage is closed.
+    fn load_journal(
+        &self,
+        key: &AggregateJournalKey,
+    ) -> Result<Option<LoadedAggregateJournal>, StorageError>;
 
     /// Loads all unpublished events in durable sequence order.
     ///
@@ -447,6 +654,13 @@ impl ProductStateStorage for SqliteStorage {
             .transpose()
     }
 
+    fn load_journal(
+        &self,
+        key: &AggregateJournalKey,
+    ) -> Result<Option<LoadedAggregateJournal>, StorageError> {
+        load_aggregate_journal(self.connection()?, key)
+    }
+
     fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError> {
         let mut statement = self
             .connection()?
@@ -550,7 +764,7 @@ fn replay_receipt(
         stream_id: prior.stream_id,
         revision: u64::try_from(prior.revision)
             .map_err(|_| StorageError::adapter("stored revision is negative"))?,
-        event_ids: receipt_event_ids(transaction, &commit.receipt_identity)?,
+        events: receipt_events(transaction, &commit.receipt_identity)?,
         idempotent_replay: true,
     })
 }
@@ -583,21 +797,106 @@ fn append_state_commit(
         .checked_add(1)
         .ok_or_else(|| StorageError::invalid("revision is out of range"))?;
     append_state(transaction, commit, revision)?;
-    append_outbox_events(transaction, commit)?;
+    if let Some(publication) = commit.journal_publication() {
+        append_journal_publication(transaction, publication)?;
+    }
     append_receipt(transaction, commit, revision)?;
+    append_outbox_events(transaction, commit)?;
 
     Ok(CommitReceipt {
         receipt_identity: commit.receipt_identity.clone(),
         stream_id: commit.stream_id.clone(),
         revision: u64::try_from(revision)
             .map_err(|_| StorageError::adapter("committed revision is negative"))?,
-        event_ids: commit
-            .events
-            .iter()
-            .map(|event| event.event_id.clone())
-            .collect(),
+        events: receipt_events(transaction, &commit.receipt_identity)?,
         idempotent_replay: false,
     })
+}
+
+fn append_journal_publication(
+    transaction: &rusqlite::Transaction<'_>,
+    publication: &AggregateJournalPublication,
+) -> Result<(), StorageError> {
+    match publication {
+        AggregateJournalPublication::Create {
+            key,
+            manifest,
+            first_record,
+        } => {
+            let exists = transaction
+                .query_row(
+                    "SELECT 1 FROM aggregate_journals \
+                     WHERE aggregate_type = ?1 AND aggregate_id = ?2",
+                    params![key.aggregate_type(), key.aggregate_id()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .is_some();
+            if exists {
+                return Err(StorageError::journal_already_exists(key));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO aggregate_journals \
+                     (aggregate_type, aggregate_id, manifest) VALUES (?1, ?2, ?3)",
+                    params![key.aggregate_type(), key.aggregate_id(), manifest],
+                )
+                .map_err(sql_error)?;
+            insert_journal_record(transaction, key, first_record)?;
+        }
+        AggregateJournalPublication::Append {
+            key,
+            expected_tail_sequence,
+            expected_tail_digest,
+            record,
+        } => {
+            let tail = transaction
+                .query_row(
+                    "SELECT sequence, digest FROM aggregate_journal_records \
+                     WHERE aggregate_type = ?1 AND aggregate_id = ?2 \
+                     ORDER BY sequence DESC LIMIT 1",
+                    params![key.aggregate_type(), key.aggregate_id()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            let Some((tail_sequence, tail_digest)) = tail else {
+                return Err(StorageError::journal_not_found(key));
+            };
+            let expected_sequence = i64::try_from(*expected_tail_sequence)
+                .map_err(|_| StorageError::invalid("expected journal tail is out of range"))?;
+            if tail_sequence != expected_sequence || tail_digest != *expected_tail_digest {
+                return Err(StorageError::journal_conflict(key));
+            }
+            insert_journal_record(transaction, key, record)?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_journal_record(
+    transaction: &rusqlite::Transaction<'_>,
+    key: &AggregateJournalKey,
+    record: &AggregateJournalRecord,
+) -> Result<(), StorageError> {
+    let sequence = i64::try_from(record.sequence)
+        .map_err(|_| StorageError::invalid("journal sequence is out of range"))?;
+    transaction
+        .execute(
+            "INSERT INTO aggregate_journal_records \
+             (aggregate_type, aggregate_id, sequence, digest, payload) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                key.aggregate_type(),
+                key.aggregate_id(),
+                sequence,
+                record.digest,
+                record.payload,
+            ],
+        )
+        .map_err(sql_error)?;
+    Ok(())
 }
 
 fn append_state(
@@ -666,7 +965,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 1 | SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | 2 | SCHEMA_VERSION) {
         return Err(StorageError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -676,14 +975,19 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
     match version {
-        0 | SCHEMA_VERSION => create_schema_v2(&transaction)?,
-        1 => migrate_v1_to_v2(&transaction)?,
+        0 | SCHEMA_VERSION => create_schema_v3(&transaction)?,
+        1 => {
+            migrate_v1_to_v2(&transaction)?;
+            create_aggregate_journal_schema(&transaction)?;
+        }
+        2 => create_aggregate_journal_schema(&transaction)?,
         unsupported => {
             return Err(StorageError::adapter(format!(
                 "unsupported schema version {unsupported}"
             )));
         }
     }
+    validate_journal_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(sql_error)?;
@@ -698,6 +1002,51 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
         )));
     }
     Ok(())
+}
+
+fn validate_journal_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    let journal_columns = {
+        let mut statement = transaction
+            .prepare("PRAGMA table_info(aggregate_journals)")
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
+    };
+    if journal_columns != ["aggregate_type", "aggregate_id", "manifest"] {
+        return Err(StorageError::adapter(
+            "aggregate journal schema is not canonical",
+        ));
+    }
+    let record_columns = {
+        let mut statement = transaction
+            .prepare("PRAGMA table_info(aggregate_journal_records)")
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
+    };
+    if record_columns
+        != [
+            "aggregate_type",
+            "aggregate_id",
+            "sequence",
+            "digest",
+            "payload",
+        ]
+    {
+        return Err(StorageError::adapter(
+            "aggregate journal record schema is not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn create_schema_v3(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    create_schema_v2(transaction)?;
+    create_aggregate_journal_schema(transaction)
 }
 
 fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
@@ -732,6 +1081,32 @@ fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Stora
              );
              CREATE INDEX IF NOT EXISTS outbox_pending_sequence
                  ON outbox (published, sequence);",
+        )
+        .map_err(sql_error)
+}
+
+fn create_aggregate_journal_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StorageError> {
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS aggregate_journals (
+                 aggregate_type TEXT NOT NULL,
+                 aggregate_id TEXT NOT NULL,
+                 manifest BLOB NOT NULL,
+                 PRIMARY KEY (aggregate_type, aggregate_id)
+             );
+             CREATE TABLE IF NOT EXISTS aggregate_journal_records (
+                 aggregate_type TEXT NOT NULL,
+                 aggregate_id TEXT NOT NULL,
+                 sequence INTEGER NOT NULL CHECK (sequence > 0),
+                 digest TEXT NOT NULL,
+                 payload BLOB NOT NULL,
+                 PRIMARY KEY (aggregate_type, aggregate_id, sequence),
+                 FOREIGN KEY (aggregate_type, aggregate_id)
+                     REFERENCES aggregate_journals (aggregate_type, aggregate_id)
+                     ON DELETE CASCADE
+             );",
         )
         .map_err(sql_error)
 }
@@ -802,13 +1177,13 @@ fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Stora
     Ok(())
 }
 
-fn receipt_event_ids(
+fn receipt_events(
     transaction: &rusqlite::Transaction<'_>,
     identity: &ReceiptIdentity,
-) -> Result<Vec<String>, StorageError> {
+) -> Result<Vec<OutboxEvent>, StorageError> {
     let mut statement = transaction
         .prepare(
-            "SELECT event_id FROM outbox \
+            "SELECT sequence, event_id, topic, payload FROM outbox \
              WHERE receipt_actor_key = ?1 AND receipt_scope_key = ?2 AND request_id = ?3 \
              ORDER BY sequence",
         )
@@ -820,10 +1195,72 @@ fn receipt_event_ids(
                 identity.scope_key().as_bytes(),
                 identity.request_id().0,
             ],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
         )
         .map_err(sql_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    rows.map(|row| {
+        let (sequence, event_id, topic, payload) = row.map_err(sql_error)?;
+        Ok(OutboxEvent {
+            sequence: u64::try_from(sequence)
+                .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
+            event_id,
+            topic,
+            payload,
+        })
+    })
+    .collect()
+}
+
+fn load_aggregate_journal(
+    connection: &Connection,
+    key: &AggregateJournalKey,
+) -> Result<Option<LoadedAggregateJournal>, StorageError> {
+    let manifest = connection
+        .query_row(
+            "SELECT manifest FROM aggregate_journals \
+             WHERE aggregate_type = ?1 AND aggregate_id = ?2",
+            params![key.aggregate_type(), key.aggregate_id()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let Some(manifest) = manifest else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence, digest, payload FROM aggregate_journal_records \
+             WHERE aggregate_type = ?1 AND aggregate_id = ?2 ORDER BY sequence",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![key.aggregate_type(), key.aggregate_id()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(sql_error)?;
+    let records = rows
+        .map(|row| {
+            let (sequence, digest, payload) = row.map_err(sql_error)?;
+            Ok(AggregateJournalRecord {
+                sequence: u64::try_from(sequence)
+                    .map_err(|_| StorageError::adapter("journal sequence is negative"))?,
+                digest,
+                payload,
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    Ok(Some(LoadedAggregateJournal { manifest, records }))
 }
 
 fn validate_sha256_digest(digest: &Sha256Digest) -> Result<(), StorageError> {
