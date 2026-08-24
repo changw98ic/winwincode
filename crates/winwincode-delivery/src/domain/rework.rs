@@ -443,12 +443,51 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 mod tests {
     use super::*;
     use crate::domain::{
-        CriterionResult, DeliveryStatus, DeliveryVerdict, DeliveryVerdictId, EvidenceRef,
-        EvidenceRefType, FreezeCandidateFacts, SessionBindingId, test_fixture,
+        CandidateGitSnapshotResolver, CriterionResult, DeliveryStatus, DeliveryVerdict,
+        DeliveryVerdictId, EvidenceRef, EvidenceRefType, FreezeCandidateFacts, RepositoryRef,
+        ResolvedGitCommit, ResolvedGitDiff, SessionBindingId, test_fixture,
     };
     use winwincode_domain::{
         CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
     };
+
+    struct GitFixture {
+        facts: FreezeCandidateFacts,
+    }
+
+    impl CandidateGitSnapshotResolver for GitFixture {
+        fn resolve_commit(
+            &self,
+            _repository: &RepositoryRef,
+            commit_id: &str,
+        ) -> Result<ResolvedGitCommit, String> {
+            let tree_id = if commit_id == self.facts.base_commit_id {
+                self.facts.base_tree_id.clone()
+            } else if commit_id == self.facts.candidate_commit_id {
+                self.facts.candidate_tree_id.clone()
+            } else {
+                return Err("unknown commit".into());
+            };
+            Ok(ResolvedGitCommit {
+                commit_id: commit_id.into(),
+                tree_id,
+            })
+        }
+
+        fn resolve_diff(
+            &self,
+            _repository: &RepositoryRef,
+            base_commit_id: &str,
+            candidate_commit_id: &str,
+        ) -> Result<ResolvedGitDiff, String> {
+            Ok(ResolvedGitDiff {
+                base_commit_id: base_commit_id.into(),
+                candidate_commit_id: candidate_commit_id.into(),
+                diff_sha256: self.facts.diff_sha256.clone(),
+                changed_paths: self.facts.changed_paths.clone(),
+            })
+        }
+    }
 
     fn current_failure() -> (
         Delivery,
@@ -473,24 +512,25 @@ mod tests {
         binding.worker_session_id = Some(WorkerSessionId("writer-worker".into()));
         binding.codex_thread_id = Some(CodexThreadId("writer-thread".into()));
         let writer = Delivery::try_from_snapshot(snapshot).expect("writer");
-        let candidate = super::super::freeze_delivery_candidate(
-            &writer,
-            FreezeCandidateFacts {
-                producer_stage_run_id: StageRunId("writer".into()),
-                producer_session_binding_id: SessionBindingId("writer-binding".into()),
-                base_commit_id: "0123456789012345678901234567890123456789".into(),
-                base_tree_id: "1".repeat(40),
-                candidate_commit_id: "2".repeat(40),
-                candidate_tree_id: "3".repeat(40),
-                diff_sha256: "a".repeat(64),
-                changed_paths: vec![super::super::CandidatePathFact {
-                    path: "src/invitation.rs".into(),
-                    state: CandidatePathState::Present,
-                    object_id: Some("4".repeat(40)),
-                }],
-            },
-        )
-        .expect("candidate");
+        let facts = FreezeCandidateFacts {
+            producer_stage_run_id: StageRunId("writer".into()),
+            producer_session_binding_id: SessionBindingId("writer-binding".into()),
+            base_commit_id: "0123456789012345678901234567890123456789".into(),
+            base_tree_id: "1".repeat(40),
+            candidate_commit_id: "2".repeat(40),
+            candidate_tree_id: "3".repeat(40),
+            diff_sha256: "a".repeat(64),
+            changed_paths: vec![super::super::CandidatePathFact {
+                path: "src/invitation.rs".into(),
+                state: CandidatePathState::Present,
+                object_id: Some("4".repeat(40)),
+            }],
+        };
+        let git = GitFixture {
+            facts: facts.clone(),
+        };
+        let candidate =
+            super::super::freeze_delivery_candidate(&writer, facts, &git).expect("candidate");
         let mut snapshot = writer.into_snapshot();
         snapshot.status = DeliveryStatus::NeedsAttention;
         snapshot.evidence = vec![EvidenceRef {

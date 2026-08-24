@@ -50,6 +50,42 @@ pub struct FreezeCandidateFacts {
     pub changed_paths: Vec<CandidatePathFact>,
 }
 
+/// Commit/tree pair read from the authoritative Git object database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGitCommit {
+    pub commit_id: String,
+    pub tree_id: String,
+}
+
+/// Base-to-candidate diff read from the authoritative Git object database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGitDiff {
+    pub base_commit_id: String,
+    pub candidate_commit_id: String,
+    pub diff_sha256: String,
+    pub changed_paths: Vec<CandidatePathFact>,
+}
+
+/// Trusted Git snapshot boundary implemented by the local/remote Worker adapter.
+///
+/// Browser and command payloads never implement this port. The Control Plane
+/// wires an adapter that resolves immutable Git objects independently from the
+/// values in [`FreezeCandidateFacts`].
+pub trait CandidateGitSnapshotResolver {
+    fn resolve_commit(
+        &self,
+        repository: &RepositoryRef,
+        commit_id: &str,
+    ) -> Result<ResolvedGitCommit, String>;
+
+    fn resolve_diff(
+        &self,
+        repository: &RepositoryRef,
+        base_commit_id: &str,
+        candidate_commit_id: &str,
+    ) -> Result<ResolvedGitDiff, String>;
+}
+
 /// One immutable candidate identity derived from canonical Delivery and Git facts.
 ///
 /// This value is serializable for projections, but it is not deserializable and
@@ -158,12 +194,14 @@ struct CandidateIdentity<'candidate> {
 pub fn freeze_delivery_candidate(
     delivery: &Delivery,
     mut facts: FreezeCandidateFacts,
+    git: &impl CandidateGitSnapshotResolver,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
     let producer = current_writer(delivery, &facts.producer_stage_run_id)?;
     exact_producer_binding(delivery, producer, &facts.producer_session_binding_id)?;
 
     let mut changed_paths = std::mem::take(&mut facts.changed_paths);
     validate_git_facts(delivery, &facts, &mut changed_paths)?;
+    verify_authoritative_git_snapshot(delivery, &facts, &changed_paths, git)?;
 
     let mut candidate = FrozenDeliveryCandidate {
         candidate_ref: String::new(),
@@ -213,21 +251,17 @@ pub fn assert_frozen_candidate_current(
             "candidate does not match the current DeliverySpec",
         ));
     }
-    let rebuilt = freeze_delivery_candidate(
-        delivery,
-        FreezeCandidateFacts {
-            producer_stage_run_id: candidate.producer_stage_run_id.clone(),
-            producer_session_binding_id: candidate.producer_session_binding_id.clone(),
-            base_commit_id: candidate.base_commit_id.clone(),
-            base_tree_id: candidate.base_tree_id.clone(),
-            candidate_commit_id: candidate.candidate_commit_id.clone(),
-            candidate_tree_id: candidate.candidate_tree_id.clone(),
-            diff_sha256: candidate.diff_sha256.clone(),
-            changed_paths: candidate.changed_paths.clone(),
-        },
-    )
-    .map_err(|_| stale_candidate("candidate producer or Git facts are no longer current"))?;
-    if rebuilt != *candidate {
+    current_writer(delivery, &candidate.producer_stage_run_id)
+        .and_then(|producer| {
+            exact_producer_binding(delivery, producer, &candidate.producer_session_binding_id)
+        })
+        .map_err(|_| stale_candidate("candidate producer is no longer current"))?;
+    let identity = CandidateIdentity::from(candidate);
+    let encoded = serde_json::to_vec(&identity).map_err(|_| {
+        stale_candidate("candidate identity can no longer be encoded deterministically")
+    })?;
+    let expected_ref = format!("git-candidate:sha256:{:x}", Sha256::digest(encoded));
+    if candidate.candidate_ref != expected_ref {
         return Err(stale_candidate("candidate facts changed after freezing"));
     }
     Ok(())
@@ -381,6 +415,47 @@ fn validate_git_facts(
     Ok(())
 }
 
+fn verify_authoritative_git_snapshot(
+    delivery: &Delivery,
+    facts: &FreezeCandidateFacts,
+    changed_paths: &[CandidatePathFact],
+    git: &impl CandidateGitSnapshotResolver,
+) -> Result<(), DeliveryValidationError> {
+    let repository = &delivery.snapshot().spec.repository;
+    let base = git
+        .resolve_commit(repository, &facts.base_commit_id)
+        .map_err(|_| invalid_candidate("authoritative Git resolver rejected the base commit"))?;
+    let candidate = git
+        .resolve_commit(repository, &facts.candidate_commit_id)
+        .map_err(|_| {
+            invalid_candidate("authoritative Git resolver rejected the candidate commit")
+        })?;
+    let mut diff = git
+        .resolve_diff(
+            repository,
+            &facts.base_commit_id,
+            &facts.candidate_commit_id,
+        )
+        .map_err(|_| invalid_candidate("authoritative Git resolver rejected the candidate diff"))?;
+    diff.changed_paths
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    let exact = base.commit_id == facts.base_commit_id
+        && base.tree_id == facts.base_tree_id
+        && candidate.commit_id == facts.candidate_commit_id
+        && candidate.tree_id == facts.candidate_tree_id
+        && diff.base_commit_id == facts.base_commit_id
+        && diff.candidate_commit_id == facts.candidate_commit_id
+        && diff.diff_sha256 == facts.diff_sha256
+        && diff.changed_paths == changed_paths;
+    if exact {
+        Ok(())
+    } else {
+        Err(invalid_candidate(
+            "candidate facts do not match the authoritative Git commit, tree, diff, and path snapshot",
+        ))
+    }
+}
+
 fn git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value
@@ -471,11 +546,52 @@ mod tests {
         }
     }
 
+    struct GitFixture {
+        facts: FreezeCandidateFacts,
+    }
+
+    impl CandidateGitSnapshotResolver for GitFixture {
+        fn resolve_commit(
+            &self,
+            _repository: &RepositoryRef,
+            commit_id: &str,
+        ) -> Result<ResolvedGitCommit, String> {
+            if commit_id == self.facts.base_commit_id {
+                Ok(ResolvedGitCommit {
+                    commit_id: commit_id.into(),
+                    tree_id: self.facts.base_tree_id.clone(),
+                })
+            } else if commit_id == self.facts.candidate_commit_id {
+                Ok(ResolvedGitCommit {
+                    commit_id: commit_id.into(),
+                    tree_id: self.facts.candidate_tree_id.clone(),
+                })
+            } else {
+                Err("unknown commit".into())
+            }
+        }
+
+        fn resolve_diff(
+            &self,
+            _repository: &RepositoryRef,
+            base_commit_id: &str,
+            candidate_commit_id: &str,
+        ) -> Result<ResolvedGitDiff, String> {
+            Ok(ResolvedGitDiff {
+                base_commit_id: base_commit_id.into(),
+                candidate_commit_id: candidate_commit_id.into(),
+                diff_sha256: self.facts.diff_sha256.clone(),
+                changed_paths: self.facts.changed_paths.clone(),
+            })
+        }
+    }
+
     #[test]
     fn freezes_candidate_from_exact_writer_facts() {
         let delivery = writer_delivery();
-        let first = freeze_delivery_candidate(&delivery, facts()).expect("candidate");
-        let second = freeze_delivery_candidate(&delivery, facts()).expect("candidate");
+        let git = GitFixture { facts: facts() };
+        let first = freeze_delivery_candidate(&delivery, facts(), &git).expect("candidate");
+        let second = freeze_delivery_candidate(&delivery, facts(), &git).expect("candidate");
         assert_eq!(first, second);
         assert_eq!(
             first.candidate_ref().len(),
@@ -487,7 +603,8 @@ mod tests {
     #[test]
     fn rejects_candidate_after_spec_or_writer_change() {
         let delivery = writer_delivery();
-        let candidate = freeze_delivery_candidate(&delivery, facts()).expect("candidate");
+        let git = GitFixture { facts: facts() };
+        let candidate = freeze_delivery_candidate(&delivery, facts(), &git).expect("candidate");
 
         let mut changed_spec = delivery.clone().into_snapshot();
         changed_spec.spec.revision += 1;
@@ -525,5 +642,16 @@ mod tests {
         later.revision += 1;
         let later = Delivery::try_from_snapshot(later).expect("later writer");
         assert!(assert_frozen_candidate_current(&later, &candidate).is_err());
+    }
+
+    #[test]
+    fn rejects_untrusted_or_inconsistent_git_snapshot_facts() {
+        let delivery = writer_delivery();
+        let mut authoritative = facts();
+        authoritative.candidate_tree_id = "5".repeat(40);
+        let git = GitFixture {
+            facts: authoritative,
+        };
+        assert!(freeze_delivery_candidate(&delivery, facts(), &git).is_err());
     }
 }
