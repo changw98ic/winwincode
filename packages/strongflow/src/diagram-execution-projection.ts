@@ -21,6 +21,7 @@ import {
 
 import { assertFrozenDeliveryCandidateCurrent } from './candidate-evidence.js'
 import { DeliveryRuntimeProjection } from './delivery-runtime-projection.js'
+import type { StrongFlowExecutionFacts } from './execution-source.js'
 
 export type StrongFlowDiagramExecutionProjectionErrorCode =
   | 'INVALID_PROJECTION_FACTS'
@@ -41,16 +42,6 @@ export class StrongFlowDiagramExecutionProjectionError extends Error {
     this.name = 'StrongFlowDiagramExecutionProjectionError'
     this.code = code
   }
-}
-
-export interface StrongFlowDiagramExecutionFacts {
-  readonly runtimeEvents: readonly RuntimeEvent[]
-  readonly candidate: FrozenDeliveryCandidate | null
-}
-
-/** DSH-owned runtime facts supplied read-only to the StrongFlow projection. */
-export interface StrongFlowDiagramExecutionSource {
-  read(delivery: Delivery): Promise<StrongFlowDiagramExecutionFacts>
 }
 
 interface LineSlice {
@@ -420,7 +411,17 @@ function parseAuthoritativeDiff(
 function authoritativeDiff(
   candidate: FrozenDeliveryCandidate,
   events: readonly RuntimeEvent[],
+  candidateDiff: string | null | undefined,
 ): string {
+  if (candidateDiff !== undefined && candidateDiff !== null) {
+    if (digest(candidateDiff) !== candidate.diffSha256) {
+      return projectionError(
+        'AUTHORITATIVE_DIFF_INVALID',
+        'Git candidate diff bytes do not match the frozen candidate identity',
+      )
+    }
+    return candidateDiff
+  }
   const matches = events.filter(event => (
     event.kind === 'diff.updated'
     && typeof event.data.unified_diff === 'string'
@@ -515,6 +516,7 @@ function finishedProjection(
   context: StrongFlowPlanReviewContext,
   events: readonly RuntimeEvent[],
   candidate: FrozenDeliveryCandidate,
+  candidateDiff: string | null | undefined,
 ): StrongFlowDiagramExecutionProjection {
   let current: FrozenDeliveryCandidate
   try {
@@ -538,7 +540,7 @@ function finishedProjection(
   const parsedDiff = parseAuthoritativeDiff(
     context,
     current,
-    authoritativeDiff(current, events),
+    authoritativeDiff(current, events, candidateDiff),
     PROCESS_NODE_BY_STAGE[run.stage],
   )
   const filesByNode = new Map<string, string[]>()
@@ -664,7 +666,7 @@ function nonFinishedProjection(
  */
 export function projectStrongFlowDiagramExecution(
   delivery: Delivery,
-  facts: StrongFlowDiagramExecutionFacts,
+  facts: StrongFlowExecutionFacts,
 ): StrongFlowDiagramExecutionProjection | null {
   if (!isRecord(facts) || !Array.isArray(facts.runtimeEvents)) {
     return projectionError('INVALID_PROJECTION_FACTS', 'diagram execution facts are invalid')
@@ -675,7 +677,13 @@ export function projectStrongFlowDiagramExecution(
   const extractedCandidate = facts.candidate ?? candidateFromEvents(facts.runtimeEvents)
   const reenteringExecution = delivery.status === 'executing' || delivery.status === 'reworking'
   if (!reenteringExecution && extractedCandidate !== null) {
-    return finishedProjection(delivery, context, facts.runtimeEvents, extractedCandidate)
+    return finishedProjection(
+      delivery,
+      context,
+      facts.runtimeEvents,
+      extractedCandidate,
+      facts.candidateDiff,
+    )
   }
   if (reenteringExecution || writer !== null) {
     return nonFinishedProjection(delivery, context, facts.runtimeEvents, 'executing')

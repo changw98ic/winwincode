@@ -39,38 +39,41 @@ async function dispatch(
   readonly diagramExecution: Awaited<
     ReturnType<StrongFlowService['getDeliveryProjection']>
   >['diagramExecution']
+  readonly runtimeExecution: Awaited<
+    ReturnType<StrongFlowService['getDeliveryProjection']>
+  >['runtimeExecution']
 }> {
   switch (request.operation) {
     case 'createDelivery':
       return Object.freeze({ delivery: await service.createDelivery({
         requestId: request.requestId,
         ...request.payload,
-      }), diagramExecution: null })
+      }), diagramExecution: null, runtimeExecution: null })
     case 'updateDeliverySpec':
       return Object.freeze({ delivery: await service.updateDeliverySpec({
         requestId: request.requestId,
         ...request.payload,
-      }), diagramExecution: null })
+      }), diagramExecution: null, runtimeExecution: null })
     case 'startStage':
       return Object.freeze({ delivery: await service.startStage({
         requestId: request.requestId,
         ...request.payload,
-      }), diagramExecution: null })
+      }), diagramExecution: null, runtimeExecution: null })
     case 'bindSession':
       return Object.freeze({ delivery: await service.bindSession({
         requestId: request.requestId,
         ...request.payload,
-      }), diagramExecution: null })
+      }), diagramExecution: null, runtimeExecution: null })
     case 'resolveAttention':
       return Object.freeze({ delivery: await service.resolveAttention({
         requestId: request.requestId,
         ...request.payload,
-      }), diagramExecution: null })
+      }), diagramExecution: null, runtimeExecution: null })
     case 'submitVerdict':
       return Object.freeze({ delivery: await service.submitVerdict({
         requestId: request.requestId,
         ...request.payload,
-      }), diagramExecution: null })
+      }), diagramExecution: null, runtimeExecution: null })
     case 'getDeliveryProjection':
       return service.getDeliveryProjection(request.payload.deliveryId)
   }
@@ -117,6 +120,7 @@ export class StrongFlowServiceInvoker implements StrongFlowDeliveryInvoker {
         request,
         projection.delivery,
         projection.diagramExecution,
+        projection.runtimeExecution,
       )
     } catch (error) {
       if (error instanceof StrongFlowServiceError) {

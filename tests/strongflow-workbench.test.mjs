@@ -330,6 +330,113 @@ function diagramExecutionFixture(delivery, state) {
   }
 }
 
+function runtimeExecutionFixture(delivery) {
+  const event = (sequence, kind) => ({
+    eventId: `dsh-workbench-executor@${String(sequence)}`,
+    sourceRef: `runtime_event:dsh-workbench-executor@${String(sequence)}`,
+    sequence: String(sequence),
+    kind,
+  })
+  return {
+    schemaVersion: 1,
+    protocol: 'winwincode.runtime-execution-projection.v1',
+    deliveryId: delivery.id,
+    deliveryRevision: delivery.revision,
+    sessions: [{
+      stageRunId: 'delivery-workbench:stage:execute',
+      sessionBindingId: 'delivery-workbench:binding:execute',
+      dshSessionId: 'dsh-workbench-executor',
+      codexSessionId: 'codex-workbench-executor',
+      asOfSequence: '9',
+      plan: {
+        itemId: 'plan-workbench-executor',
+        explanation: '按已批准范围完成邀请流程。',
+        items: [
+          { step: '实现原子消费 API', status: 'completed' },
+          { step: '运行并发集成测试', status: 'in_progress' },
+          { step: '整理验收依据', status: 'pending' },
+        ],
+        text: null,
+        complete: false,
+        latestEvent: event(2, 'plan.updated'),
+      },
+      agents: [{
+        threadId: 'codex-workbench-executor',
+        path: '/root',
+        parentThreadId: null,
+        nickname: null,
+        role: 'executor',
+        status: 'running',
+        latestEvent: event(1, 'turn.started'),
+      }, {
+        threadId: 'codex-workbench-reviewer',
+        path: '/root/reviewer',
+        parentThreadId: 'codex-workbench-executor',
+        nickname: 'reviewer',
+        role: 'review',
+        status: 'waiting',
+        latestEvent: event(3, 'subagent.started'),
+      }],
+      agentEdges: [{
+        parentThreadId: 'codex-workbench-executor',
+        childThreadId: 'codex-workbench-reviewer',
+      }],
+      activities: [{
+        callId: 'call-workbench-tests',
+        activityType: 'test',
+        command: 'pnpm test:integration',
+        status: 'completed',
+        outcome: 'succeeded',
+        exitCode: 0,
+        latestEvent: event(4, 'tool.completed'),
+      }],
+      interactions: [{
+        id: 'input-workbench-expiry',
+        interactionType: 'user-input',
+        blocking: true,
+        status: 'pending',
+        questions: [{
+          id: 'question-workbench-expiry',
+          header: '邀请有效期',
+          question: '默认有效期使用 24 小时吗？',
+          isSecret: false,
+        }],
+        requestedEvent: event(5, 'input.requested'),
+        resolvedEvent: null,
+      }],
+      failures: [{
+        message: '第一次测试进程退出。',
+        code: 'process-exited',
+        event: event(6, 'failure'),
+      }],
+      recovery: {
+        state: 'recovered',
+        failureCount: 1,
+        recoveryCount: 1,
+        lastFailureEvent: event(6, 'failure'),
+        latestRecoveryEvent: event(7, 'turn.completed'),
+      },
+      diffSummary: {
+        changedFileCount: 2,
+        additions: 18,
+        deletions: 4,
+        detailsVisible: false,
+        event: event(8, 'diff.updated'),
+      },
+      usage: {
+        totals: { input_tokens: 120, output_tokens: 80, total_tokens: 200 },
+        event: event(9, 'usage.updated'),
+      },
+      evidence: [{
+        type: 'test',
+        outcome: 'succeeded',
+        sourceRef: 'runtime_event:dsh-workbench-executor@4',
+        eventId: 'dsh-workbench-executor@4',
+      }],
+    }],
+  }
+}
+
 test('StrongFlow create form produces one canonical DeliverySpec without promoting plan steps', () => {
   const client = loadStrongFlowClient()
   const request = client.createDeliveryRequestFromDraft({
@@ -369,6 +476,33 @@ test('StrongFlow create form produces one canonical DeliverySpec without promoti
   assert.equal(request.payload.tasks.length, 0)
 })
 
+test('StrongFlow confirms one exact draft as a new approved DeliverySpec revision', () => {
+  const client = loadStrongFlowClient()
+  const base = deliveryFixture()
+  const draft = parseDelivery({
+    ...base,
+    revision: 1,
+    status: 'draft',
+    tasks: [],
+    stageRuns: [],
+    sessionBindings: [],
+    updatedAtMillis: base.createdAtMillis,
+  })
+  const request = client.createRequirementsApprovalRequest(
+    draft,
+    'ui:approve-requirements:fixture',
+  )
+  assert.equal(request.operation, 'updateDeliverySpec')
+  assert.equal(request.payload.expectedRevision, draft.revision)
+  assert.equal(request.payload.spec.revision, draft.spec.revision + 1)
+  assert.notEqual(request.payload.spec.id, draft.spec.id)
+  assert.deepEqual(
+    structuredClone(request.payload.spec.acceptanceCriteria),
+    structuredClone(draft.spec.acceptanceCriteria),
+  )
+  assert.equal(request.payload.spec.goal, draft.spec.goal)
+})
+
 test('StrongFlow projection renders Delivery facts and links activity to its DSH Session', () => {
   const client = loadStrongFlowClient()
   const delivery = deliveryFixture()
@@ -376,6 +510,7 @@ test('StrongFlow projection renders Delivery facts and links activity to its DSH
     client.StrongFlowDeliveryProjection,
     {
       delivery,
+      runtimeExecution: runtimeExecutionFixture(delivery),
       sessionId: 'dsh-workbench-executor',
       refreshing: false,
       onRefresh() {},
@@ -391,8 +526,132 @@ test('StrongFlow projection renders Delivery facts and links activity to its DSH
   assert.match(markup, /打开 Chat Session/u)
   assert.match(markup, /dsh-workbench-executor/u)
   assert.match(markup, /Codex · codex-workbench-executor/u)
-  assert.match(markup, /Plan、Agent Graph 和工具活动仍从绑定的 Codex Session 读取/u)
+  assert.match(markup, /Codex 执行视图/u)
+  assert.match(markup, /实现原子消费 API/u)
+  assert.match(markup, /codex-workbench-reviewer/u)
+  assert.match(markup, /父节点：codex-workbench-executor/u)
+  assert.match(markup, /pnpm test:integration/u)
+  assert.match(markup, /默认有效期使用 24 小时吗/u)
+  assert.match(markup, /第一次测试进程退出/u)
+  assert.match(markup, /已恢复/u)
+  assert.match(markup, /2 个文件 · \+18 \/ -4/u)
+  assert.match(markup, /total_tokens：200/u)
+  assert.match(markup, /推进下一阶段/u)
+  assert.doesNotMatch(markup, /src\/invitations\/api\.ts|@@ -1 \+1 @@/u)
   assert.doesNotMatch(markup, /task scheduler|team roster|mailbox/iu)
+})
+
+test('StrongFlow local delivery review is writable only in its bound human Session', () => {
+  const client = loadStrongFlowClient()
+  const base = deliveryFixture()
+  const candidateRef = `git-candidate:sha256:${'a'.repeat(64)}`
+  const reviewRunId = 'delivery-workbench:stage:delivery-review'
+  const attention = {
+    schemaVersion: DELIVERY_SCHEMA_VERSION,
+    id: 'delivery-workbench:attention:delivery-review',
+    deliveryId: base.id,
+    deliverySpecId: base.spec.id,
+    stageRunId: reviewRunId,
+    type: 'delivery_approval',
+    title: '审核当前候选和验收结论',
+    context: JSON.stringify({
+      candidateRef,
+      deliveryVerdictId: 'delivery-workbench:verdict:1',
+      message: '当前冻结候选已经通过独立 reviewer 和 verifier。',
+    }),
+    options: [],
+    assignedTo: 'dsh-workbench-delivery-review',
+    blocking: true,
+    status: 'open',
+    resolution: null,
+    resolvedBy: null,
+    createdAtMillis: base.updatedAtMillis + 1,
+    resolvedAtMillis: null,
+  }
+  const delivery = {
+    ...base,
+    revision: base.revision + 1,
+    status: 'needs-attention',
+    stageRuns: [{
+      ...base.stageRuns[0],
+      status: 'succeeded',
+      finishedAtMillis: base.updatedAtMillis + 1,
+    }, {
+      schemaVersion: DELIVERY_SCHEMA_VERSION,
+      id: reviewRunId,
+      deliveryId: base.id,
+      deliveryTaskId: base.tasks[0].id,
+      stage: 'delivery-review',
+      actorType: 'human',
+      role: 'approver',
+      status: 'waiting',
+      attempt: 1,
+      startedAtMillis: base.updatedAtMillis + 2,
+      finishedAtMillis: null,
+    }],
+    sessionBindings: [...base.sessionBindings, {
+      schemaVersion: DELIVERY_SCHEMA_VERSION,
+      id: 'delivery-workbench:binding:delivery-review',
+      deliveryId: base.id,
+      stageRunId: reviewRunId,
+      dshSessionId: 'dsh-workbench-delivery-review',
+      codexSessionId: null,
+      boundAtMillis: base.updatedAtMillis + 2,
+    }],
+    attentionItems: [attention],
+    verdict: {
+      schemaVersion: DELIVERY_SCHEMA_VERSION,
+      id: 'delivery-workbench:verdict:1',
+      deliveryId: base.id,
+      deliverySpecId: base.spec.id,
+      deliverySpecRevision: base.spec.revision,
+      candidateRef,
+      status: 'pass',
+      criteria: [],
+      unresolvedFindings: [],
+      producedAtMillis: base.updatedAtMillis + 1,
+    },
+  }
+  const ownerMarkup = renderToStaticMarkup(React.createElement(
+    client.StrongFlowDeliveryProjection,
+    {
+      delivery,
+      sessionId: 'dsh-workbench-delivery-review',
+      refreshing: false,
+      onRefresh() {},
+      onClose() {},
+      openSession() {},
+      async onPlanReviewDecision() {},
+    },
+  ))
+  assert.match(ownerMarkup, /本地交付审核/u)
+  assert.match(ownerMarkup, /批准当前本地候选/u)
+
+  const observerMarkup = renderToStaticMarkup(React.createElement(
+    client.StrongFlowDeliveryProjection,
+    {
+      delivery,
+      sessionId: 'dsh-workbench-observer',
+      refreshing: false,
+      onRefresh() {},
+      onClose() {},
+      openSession() {},
+      async onPlanReviewDecision() {},
+    },
+  ))
+  assert.match(observerMarkup, /当前页面为只读交付审核视图/u)
+  assert.doesNotMatch(observerMarkup, /批准当前本地候选/u)
+
+  const request = client.createLocalDeliveryApprovalRequest({
+    delivery,
+    attentionItemId: attention.id,
+    comments: '批准当前冻结候选。',
+    requestId: 'ui:local-delivery-approval:fixture',
+  })
+  assert.equal(request.operation, 'resolveAttention')
+  assert.equal(request.payload.expectedRevision, delivery.revision)
+  assert.equal(request.payload.status, 'resolved')
+  assert.equal(request.payload.authentication.proof, 'dsh-reference-only')
 })
 
 test('StrongFlow renders the exact DeliverySpec before a separate solution review set', () => {
@@ -514,7 +773,7 @@ test('StrongFlow overlays live changes without exposing concrete diff details', 
   assert.doesNotMatch(markup, /临时|暂存|provisional|temporary/iu)
 })
 
-test('StrongFlow finished nodes are selectable and remediation binds the exact visible hunk', () => {
+test('StrongFlow finished nodes are selectable and remediation binds the exact visible hunk', async () => {
   const client = loadStrongFlowClient()
   const delivery = planReviewDeliveryFixture()
   const projection = diagramExecutionFixture(delivery, 'execution-finished')
@@ -578,4 +837,54 @@ test('StrongFlow finished nodes are selectable and remediation binds the exact v
     [`evidence:${'9'.repeat(64)}`],
   )
   assert.equal(request.payload.authentication.proof, 'dsh-reference-only')
+
+  const tasklessProjection = {
+    ...projection,
+    details: {
+      ...projection.details,
+      provenance: {
+        ...projection.details.provenance,
+        deliveryTaskId: null,
+      },
+    },
+  }
+  const tasklessRequest = client.createDiagramRemediationRequest({
+    delivery: { ...requestDelivery, tasks: [] },
+    projection: tasklessProjection,
+    attentionItemId: reviewAttention.id,
+    annotations: [{
+      diagramKind: 'system-architecture',
+      nodeId: 'delivery-workbench:component:invitation',
+      hunkId: projection.details.hunks[0].id,
+      note: '仅修正这个已批准的交付级 hunk。',
+    }],
+    summary: '按图上标注执行交付级返工。',
+    requestId: 'ui:diagram-remediation:taskless-fixture',
+  })
+  assert.equal(tasklessRequest.payload.remediation.deliveryTaskId, null)
+  let advanceRequest
+  const advanced = await client.advanceResolvedDiagramRemediation({
+    request: tasklessRequest,
+    delivery: {
+      ...requestDelivery,
+      revision: requestDelivery.revision + 1,
+      status: 'reworking',
+    },
+    requestId: 'ui:advance-remediation:fixture',
+    async invokeAdvance(value) {
+      advanceRequest = value
+      return {
+        delivery: { ...requestDelivery, status: 'verifying' },
+        outcome: {
+          kind: 'candidate-ready-for-review',
+          message: 'remediator 已完成。',
+          stageRunId: 'stage-remediator-review',
+          dshSessionId: null,
+        },
+      }
+    },
+  })
+  assert.equal(advanceRequest.deliveryId, requestDelivery.id)
+  assert.equal(advanceRequest.expectedRevision, requestDelivery.revision + 1)
+  assert.equal(advanced.outcome.kind, 'candidate-ready-for-review')
 })

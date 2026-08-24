@@ -409,6 +409,33 @@ test('finished diagram details match the exact candidate files, hunks, totals, a
   assert.deepEqual(parseStrongFlowDiagramExecutionProjection(projection), projection)
 })
 
+test('finished diagram regenerates its formal diff from the frozen Git candidate', () => {
+  const { finished, candidate, event } = finishedFixture()
+  const incrementalRuntimeEvent = {
+    ...event,
+    data: {
+      ...event.data,
+      unified_diff: 'diff --git a/src/invitations/api.ts b/src/invitations/api.ts\n',
+    },
+  }
+  const projection = projectStrongFlowDiagramExecution(finished, {
+    runtimeEvents: [incrementalRuntimeEvent],
+    candidate,
+    candidateDiff: exactDiff,
+  })
+  assert.equal(projection.state, 'execution-finished')
+  assert.equal(projection.details.diffSha256, candidate.diffSha256)
+  assert.equal(projection.details.files.length, 2)
+  assert.throws(
+    () => projectStrongFlowDiagramExecution(finished, {
+      runtimeEvents: [incrementalRuntimeEvent],
+      candidate,
+      candidateDiff: `${exactDiff}+tampered\n`,
+    }),
+    /Git candidate diff bytes/u,
+  )
+})
+
 test('a changed candidate diff fails before any finished detail is exposed', () => {
   const { finished, candidate, event } = finishedFixture()
   assert.throws(

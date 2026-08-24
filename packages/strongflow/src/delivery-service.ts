@@ -32,6 +32,7 @@ import {
   type StrongFlowDeliveryChannel,
   type StrongFlowDeliveryRemediation,
   type StrongFlowDiagramExecutionProjection,
+  type StrongFlowRuntimeExecutionProjection,
   type StrongFlowVerificationRoleId,
   type StageRun,
   type StageRunActorType,
@@ -70,8 +71,9 @@ import {
 import {
   diagramExecutionAnnotationExists,
   projectStrongFlowDiagramExecution,
-  type StrongFlowDiagramExecutionSource,
 } from './diagram-execution-projection.js'
+import { projectStrongFlowRuntimeExecution } from './runtime-execution-projection.js'
+import type { StrongFlowExecutionSource } from './execution-source.js'
 
 export const STRONGFLOW_SERVICE_SCHEMA_VERSION = DELIVERY_SCHEMA_VERSION
 
@@ -154,12 +156,13 @@ export interface StrongFlowServiceOptions {
   readonly home: string
   readonly authenticator: StrongFlowDeliveryAuthenticator
   readonly clock?: () => number
-  readonly diagramExecutionSource?: StrongFlowDiagramExecutionSource
+  readonly executionSource?: StrongFlowExecutionSource
 }
 
 export interface StrongFlowDeliveryProjection {
   readonly delivery: Delivery
   readonly diagramExecution: StrongFlowDiagramExecutionProjection | null
+  readonly runtimeExecution: StrongFlowRuntimeExecutionProjection | null
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,499}$/u
@@ -690,6 +693,7 @@ function assertAttentionResolution(
 
 interface ValidatedAttentionResolution {
   readonly storedResolution: string
+  readonly annotatedRework: boolean
   readonly reworkTaskId: DeliveryTaskId | null
 }
 
@@ -710,7 +714,11 @@ function validateAttentionRemediation(
         'structured remediation is accepted only when a delivery review is dismissed',
       )
     }
-    return Object.freeze({ storedResolution: summary, reworkTaskId: null })
+    return Object.freeze({
+      storedResolution: summary,
+      annotatedRework: false,
+      reworkTaskId: null,
+    })
   }
   if (remediation === null) {
     throw new StrongFlowServiceError(
@@ -734,12 +742,28 @@ function validateAttentionRemediation(
       'diagram annotations require the current frozen diagram projection',
     )
   }
-  const task = delivery.tasks.find(entry => entry.id === remediation.deliveryTaskId)
-  if (task?.status !== 'completed') {
+  const producerTaskId = diagramExecution.details.provenance.deliveryTaskId
+  if (remediation.deliveryTaskId !== producerTaskId) {
     throw new StrongFlowServiceError(
-      'WRONG_DELIVERY_STATE',
-      'diagram annotations must target one completed DeliveryTask from the reviewed candidate',
+      'DELIVERY_CONFLICT',
+      'diagram annotations must retain the reviewed candidate writer task scope',
     )
+  }
+  if (remediation.deliveryTaskId === null) {
+    if (delivery.tasks.length > 0) {
+      throw new StrongFlowServiceError(
+        'DELIVERY_CONFLICT',
+        'taskless diagram remediation is accepted only for a taskless Delivery',
+      )
+    }
+  } else {
+    const task = delivery.tasks.find(entry => entry.id === remediation.deliveryTaskId)
+    if (task?.status !== 'completed') {
+      throw new StrongFlowServiceError(
+        'WRONG_DELIVERY_STATE',
+        'diagram annotations must target one completed DeliveryTask from the reviewed candidate',
+      )
+    }
   }
   const changedPaths = new Set(candidate.changedPaths.map(entry => entry.path))
   const evidenceById = new Map(delivery.evidence.map(entry => [entry.id, entry]))
@@ -780,6 +804,7 @@ function validateAttentionRemediation(
   })
   return Object.freeze({
     storedResolution,
+    annotatedRework: true,
     reworkTaskId: remediation.deliveryTaskId,
   })
 }
@@ -805,25 +830,31 @@ export class StrongFlowService {
   readonly home: string
   readonly #authenticator: StrongFlowDeliveryAuthenticator
   readonly #clock: () => number
-  readonly #diagramExecutionSource: StrongFlowDiagramExecutionSource | null
+  readonly #executionSource: StrongFlowExecutionSource | null
 
   constructor(options: StrongFlowServiceOptions) {
     if (!isRecord(options)
+      || Object.keys(options).some(key => ![
+        'home',
+        'authenticator',
+        'clock',
+        'executionSource',
+      ].includes(key))
       || typeof options.home !== 'string'
       || options.home.length === 0
       || typeof options.authenticator?.authenticate !== 'function'
       || (options.clock !== undefined && typeof options.clock !== 'function')
-      || (options.diagramExecutionSource !== undefined
-        && typeof options.diagramExecutionSource.read !== 'function')) {
+      || (options.executionSource !== undefined
+        && typeof options.executionSource.read !== 'function')) {
       throw new StrongFlowServiceError(
         'INVALID_SERVICE_OPTIONS',
-        'StrongFlow service requires a home, an authenticator, and an optional clock',
+        'StrongFlow service requires a home, an authenticator, and optional clock and execution source',
       )
     }
     this.home = resolve(options.home)
     this.#authenticator = options.authenticator
     this.#clock = options.clock ?? Date.now
-    this.#diagramExecutionSource = options.diagramExecutionSource ?? null
+    this.#executionSource = options.executionSource ?? null
   }
 
   async createDelivery(inputValue: CreateDeliveryInput): Promise<Delivery> {
@@ -1137,10 +1168,14 @@ export class StrongFlowService {
           'a session can bind only to an active StageRun',
         )
       }
+      const runsById = new Map(current.stageRuns.map(entry => [entry.id, entry]))
       if (current.sessionBindings.some(binding => (
         binding.id === input.bindingId
-        || (input.dshSessionId !== null && binding.dshSessionId === input.dshSessionId)
         || (input.codexSessionId !== null && binding.codexSessionId === input.codexSessionId)
+        || (input.dshSessionId !== null
+          && binding.dshSessionId === input.dshSessionId
+          && (run.actorType === 'codex'
+            || runsById.get(binding.stageRunId)?.actorType === 'codex'))
       ))) {
         throw new StrongFlowServiceError(
           'DELIVERY_CONFLICT',
@@ -1311,20 +1346,22 @@ export class StrongFlowService {
         && input.status === 'dismissed'
         && input.remediation !== null
       const diagramExecution = requiresDiagramProjection
-        && this.#diagramExecutionSource !== null
+        && this.#executionSource !== null
         ? projectStrongFlowDiagramExecution(
           current,
-          await this.#diagramExecutionSource.read(current),
+          await this.#executionSource.read(current),
         )
         : null
       const validatedResolution = planReviewDecision !== null
         ? Object.freeze({
           storedResolution: planReviewDecision.storedResolution,
+          annotatedRework: false,
           reworkTaskId: null,
         })
         : githubPublicationDecision !== null
           ? Object.freeze({
             storedResolution: githubPublicationDecision.storedResolution,
+            annotatedRework: false,
             reworkTaskId: null,
           })
           : validateAttentionRemediation(
@@ -1352,7 +1389,7 @@ export class StrongFlowService {
       const startsAnnotatedRework = transition.linkedRun?.stage === 'delivery-review'
         && input.status === 'dismissed'
         && nextStatus === 'reworking'
-        && validatedResolution.reworkTaskId !== null
+        && validatedResolution.annotatedRework
       const resumesVerification = nextStatus === 'verifying'
         && transition.linkedRun?.deliveryTaskId != null
       const startsRework = nextStatus === 'reworking'
@@ -1361,7 +1398,7 @@ export class StrongFlowService {
         status: nextStatus,
         stageRuns: settleAttentionStageRun(current.stageRuns, item, now),
         attentionItems: Object.freeze(attentionItems),
-        tasks: startsAnnotatedRework
+        tasks: startsAnnotatedRework && validatedResolution.reworkTaskId !== null
           ? Object.freeze(current.tasks.map(task => (
             task.id === validatedResolution.reworkTaskId
               ? parseDeliveryTask({ ...task, status: 'failed' })
@@ -1572,13 +1609,16 @@ export class StrongFlowService {
     try {
       const parsedId = DeliveryId(deliveryId)
       const delivery = (await DeliveryStore.open(this.home, parsedId).then(store => store.read())).snapshot
-      const diagramExecution = this.#diagramExecutionSource === null
+      const facts = this.#executionSource === null
         ? null
-        : projectStrongFlowDiagramExecution(
-          delivery,
-          await this.#diagramExecutionSource.read(delivery),
-        )
-      return Object.freeze({ delivery, diagramExecution })
+        : await this.#executionSource.read(delivery)
+      const diagramExecution = facts === null
+        ? null
+        : projectStrongFlowDiagramExecution(delivery, facts)
+      const runtimeExecution = facts === null
+        ? null
+        : projectStrongFlowRuntimeExecution(delivery, facts.runtimeEvents)
+      return Object.freeze({ delivery, diagramExecution, runtimeExecution })
     } catch (error) {
       throw serviceFault(error)
     }

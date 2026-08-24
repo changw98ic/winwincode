@@ -32,6 +32,7 @@ let dshRuntime
 
 try {
   dshRuntime = await ScriptedDshFixtureRuntime.create({
+    owner: kit,
     home: kit.home,
     workspace: kit.repository,
     script: [{
@@ -353,6 +354,5 @@ try {
     rootEntries: (await readdir(kit.root)).toSorted(),
   })}\n`)
 } finally {
-  await dshRuntime?.close()
   await kit.cleanup()
 }

@@ -17,6 +17,9 @@ import {
   RuntimeSessionLedger,
   WinWinCodeAgentFactory,
 } from '../packages/dsh-profile/dist/index.js'
+import {
+  DshStrongFlowStageRuntime,
+} from '../packages/strongflow/dist/index.js'
 
 function rawEvent(sequence, type, data = {}, submissionId = 'submission-1') {
   const envelope = { id: submissionId, msg: { type, ...data } }
@@ -114,6 +117,10 @@ class FixtureKernel {
     return 'approval-fixture'
   }
 
+  async listSessions() {
+    return [...this.sessions.keys()]
+  }
+
   async closeSession(sessionId) {
     this.sessions.get(sessionId)?.queue.close()
   }
@@ -132,6 +139,30 @@ class FixtureKernel {
       if (next.done) return
       yield next.value
     }
+  }
+}
+
+class AbortableFixtureKernel extends FixtureKernel {
+  pendingTurns = new Map()
+
+  async submitTurn(sessionId, text) {
+    const state = this.sessions.get(sessionId)
+    assert.ok(state)
+    const turnId = `turn-abort-${this.submissions.length + 1}`
+    this.submissions.push({ sessionId, text, options: state.options })
+    this.pendingTurns.set(sessionId, turnId)
+    queueMicrotask(() => state.queue.push(rawEvent(1, 'task_started', { turn_id: turnId })))
+    return { status: 'started', turnId }
+  }
+
+  async interrupt(sessionId) {
+    const state = this.sessions.get(sessionId)
+    const turnId = this.pendingTurns.get(sessionId)
+    assert.ok(state)
+    assert.ok(turnId)
+    this.pendingTurns.delete(sessionId)
+    state.queue.push(rawEvent(2, 'turn_aborted', { turn_id: turnId }, turnId))
+    return 'interrupt-abort-fixture'
   }
 }
 
@@ -371,4 +402,73 @@ test('a persisted DSH session resumes from its sidecar and keeps normalized hist
   )
 
   await resumed.dispose()
+})
+
+test('StrongFlow DSH runtime creates, persists, resumes, and cancels role Sessions', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'winwincode-stage-runtime-home-'))
+  const persistenceRoot = await mkdtemp(join(tmpdir(), 'winwincode-stage-runtime-persistence-'))
+  t.after(async () => {
+    await rm(home, { recursive: true, force: true })
+    await rm(persistenceRoot, { recursive: true, force: true })
+  })
+
+  const firstKernel = new FixtureKernel()
+  const firstCtx = await mount(home, firstKernel, persistenceRoot)
+  const firstRuntime = new DshStrongFlowStageRuntime({
+    ctx: firstCtx,
+    agentFactory: firstCtx.get('winwincodeAgentFactory'),
+  })
+  const first = await firstRuntime.openRoleSession({
+    dshSessionId: 'dsh-stage-runtime-planner',
+    role: 'planner',
+    cwd: home,
+    modelRoute: { provider: 'fixture', model: 'fixture-coder' },
+  })
+  await first.turn('first planning turn')
+  assert.equal((await firstRuntime.readRuntimeSessionEvents(first.dshSessionId)).length, 5)
+  await first.dispose()
+  assert.equal(firstCtx.agents.get(SessionId(first.dshSessionId)), undefined)
+  await firstCtx.fiber.dispose()
+
+  const secondKernel = new FixtureKernel()
+  const secondCtx = await mount(home, secondKernel, persistenceRoot)
+  const secondRuntime = new DshStrongFlowStageRuntime({
+    ctx: secondCtx,
+    agentFactory: secondCtx.get('winwincodeAgentFactory'),
+  })
+  const resumed = await secondRuntime.openRoleSession({
+    dshSessionId: 'dsh-stage-runtime-planner',
+    role: 'planner',
+    cwd: home,
+    modelRoute: { provider: 'fixture', model: 'fixture-coder' },
+  })
+  await resumed.turn('second planning turn')
+  const replayed = await secondRuntime.readRuntimeSessionEvents(resumed.dshSessionId)
+  assert.equal(replayed.length, 10)
+  assert.deepEqual(replayed.map(event => event.cursor.sequence), [
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '10',
+  ])
+  await resumed.dispose()
+  await secondCtx.fiber.dispose()
+
+  const abortKernel = new AbortableFixtureKernel()
+  const abortCtx = await mount(home, abortKernel, persistenceRoot)
+  t.after(() => abortCtx.fiber.dispose())
+  const abortRuntime = new DshStrongFlowStageRuntime({
+    ctx: abortCtx,
+    agentFactory: abortCtx.get('winwincodeAgentFactory'),
+  })
+  const abortSession = await abortRuntime.openRoleSession({
+    dshSessionId: 'dsh-stage-runtime-abort',
+    role: 'executor',
+    cwd: home,
+    modelRoute: { provider: 'fixture', model: 'fixture-coder' },
+  })
+  const controller = new AbortController()
+  const activeTurn = abortSession.turn('cancel this execution turn', controller.signal)
+  setTimeout(() => controller.abort(), 0)
+  await assert.rejects(activeTurn, error => error?.name === 'AbortError')
+  const abortedEvents = await abortRuntime.readRuntimeSessionEvents(abortSession.dshSessionId)
+  assert.equal(abortedEvents.at(-1).kind, 'turn.aborted')
+  await abortSession.dispose()
 })

@@ -37,8 +37,9 @@
     "verify:installed-host": "node scripts/verify-installed-host.mjs",
     "verify:packages": "pnpm build:ts && pnpm build:native && node scripts/verify-packages.mjs && pnpm verify:native-install && pnpm verify:installed-host",
     "verify:cpb-boundary": "node scripts/verify-cpb-boundary.mjs",
+    "verify:fixture-cleanup": "node scripts/verify-delivery-testkit-cleanup.mjs",
     "verify:upstream": "node scripts/verify-upstream-lock.mjs",
-    "verify": "pnpm format:check && pnpm lint && pnpm verify:cpb-boundary && pnpm test && pnpm build && pnpm verify:packages && pnpm verify:upstream && pnpm verify:clean-install"
+    "verify": "pnpm format:check && pnpm lint && pnpm verify:cpb-boundary && pnpm test && pnpm verify:fixture-cleanup && pnpm build && pnpm verify:packages && pnpm verify:upstream && pnpm verify:clean-install"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

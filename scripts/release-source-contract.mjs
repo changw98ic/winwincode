@@ -33,6 +33,7 @@ export const NATIVE_RELEASE_REQUIRED_CHECKS = Object.freeze([
   'lint-and-typecheck',
   'cpb-design-only-boundary',
   'typescript-and-rust-tests',
+  'delivery-testkit-runtime-cleanup',
   'upstream-source-lock',
   'release-native-package',
   'publish-file-allowlists',

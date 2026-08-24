@@ -15,6 +15,7 @@ import {
 import {
   DeliveryRuntimeProjection,
   DeliveryRuntimeProjectionError,
+  projectStrongFlowRuntimeExecution,
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_300_000_000_000
@@ -306,9 +307,11 @@ test('live and reopened ledgers rebuild the same read-only Delivery runtime view
     kernelStreamId: 'kernel-stream-runtime-projection',
   })
   const live = new DeliveryRuntimeProjection({ delivery })
+  const normalizedEvents = []
   for (const sourceEvent of runtimeSourceEvents()) {
     const event = normalizer.ingest(sourceEvent)
     assert.ok(event)
+    normalizedEvents.push(event)
     live.apply(event)
     await ledger.appendEvent(event)
   }
@@ -371,6 +374,43 @@ test('live and reopened ledgers rebuild the same read-only Delivery runtime view
   assert.equal(stage.evidenceLinks.some(link => link.type === 'diff'), true)
 
   assert.deepEqual(live.apply((await reopened.read()).events.at(-1)), { changed: false })
+
+  const publicLive = projectStrongFlowRuntimeExecution(delivery, normalizedEvents)
+  const publicRestarted = projectStrongFlowRuntimeExecution(
+    delivery,
+    (await reopened.read()).events,
+  )
+  assert.deepEqual(publicRestarted, publicLive)
+  assert.equal(publicLive.sessions[0].sessionBindingId, bindingId)
+  assert.equal(publicLive.sessions[0].plan.items[1].step, 'Build the projection')
+  assert.equal(publicLive.sessions[0].agents.some(agent => (
+    agent.threadId === 'codex-subagent-reviewer'
+      && agent.parentThreadId === codexSessionId
+      && agent.status === 'completed'
+  )), true)
+  assert.equal(publicLive.sessions[0].activities[0].activityType, 'test')
+  assert.equal(publicLive.sessions[0].interactions.length, 2)
+  assert.equal(publicLive.sessions[0].failures.length, 2)
+  assert.equal(publicLive.sessions[0].recovery.state, 'recovered')
+  assert.deepEqual(publicLive.sessions[0].diffSummary, {
+    changedFileCount: 1,
+    additions: 2,
+    deletions: 1,
+    detailsVisible: false,
+    event: {
+      eventId: `${dshSessionId}@12`,
+      sourceRef: `runtime_event:${dshSessionId}@12`,
+      sequence: '12',
+      kind: 'diff.updated',
+    },
+  })
+  assert.deepEqual(publicLive.sessions[0].usage.totals, {
+    input_tokens: 20,
+    output_tokens: 8,
+    total_tokens: 28,
+  })
+  const serializedPublic = JSON.stringify(publicLive)
+  assert.doesNotMatch(serializedPublic, /unifiedDiff|changedFiles|src\/view\.ts|@@ -1 \+1,2 @@/u)
 })
 
 test('Delivery runtime projection rejects events outside its SessionBindings', () => {

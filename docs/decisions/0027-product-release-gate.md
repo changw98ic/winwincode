@@ -48,14 +48,15 @@ product-release-gate.json
 2. 源码规则、TypeScript 类型和 Clippy；
 3. CPB 只迁移设计的边界检查；
 4. 完整 TypeScript 与 Rust 测试；
-5. Codex、DSH 和补丁来源锁检查；
-6. 使用固定 Node 与 Rust 版本构建目标原生 Release 包；
-7. 原生文件身份、SHA-256、权限和第三方通知检查；
-8. 全部发布包文件清单检查；
-9. 从 tarball 建立空安装，运行无密钥内核、沙箱和角色权限检查；
-10. 从 tarball 启动原始 DSH Chat 与 StrongFlow，检查 CLI、人工审核、中断和恢复；
-11. 用 Release 原生包再走一次完整 Delivery：人工要求改方案、失败候选、独立验证失败、人工批准返工、新候选验证和最终批准；
-12. 打包六个发布包并写证据。
+5. 在独立进程中重复关闭 Testkit 的 DSH Agent、Cordis Context 与内嵌 Kernel，确认关闭后没有文件写入或 Tokio 任务；
+6. Codex、DSH 和补丁来源锁检查；
+7. 使用固定 Node 与 Rust 版本构建目标原生 Release 包；
+8. 原生文件身份、SHA-256、权限和第三方通知检查；
+9. 全部发布包文件清单检查；
+10. 从 tarball 建立空安装，运行无密钥内核、沙箱和角色权限检查；
+11. 从 tarball 启动原始 DSH Chat 与 StrongFlow，检查 CLI、人工审核、中断和恢复；
+12. 用 Release 原生包再走一次完整 Delivery：人工要求改方案、失败候选、独立验证失败、人工批准返工、新候选验证和最终批准；
+13. 打包六个发布包并写证据。
 
 六个包分别是 `winwincode` Host、contracts、DSH profile、native loader、StrongFlow 和当前平台原生包。每个文件的名称、版本、字节数和 SHA-256 写入 `release-packages.json` 与 `SHA256SUMS`。
 

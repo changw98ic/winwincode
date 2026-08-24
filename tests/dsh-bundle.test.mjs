@@ -139,6 +139,10 @@ test('WinWinCode composes as the final layer of a fresh DSH Web profile', () => 
         roleId: 'chat',
       },
     })
+    assert.deepEqual(byId.get('winwincode-github-publication-provider'), {
+      id: 'winwincode-github-publication-provider',
+      name: '@winwincode/dsh-profile/github-publication-provider',
+    })
     assert.deepEqual(byId.get('winwincode-strongflow'), {
       id: 'winwincode-strongflow',
       name: '@winwincode/strongflow',
@@ -215,6 +219,9 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
   let openedSessionId
   const scopedRemote = {
     strongflow: {
+      async advance() {
+        throw new Error('scoped StrongFlow Advance Remote reached')
+      },
       async invoke() {
         throw new Error('scoped StrongFlow Remote reached')
       },
@@ -285,7 +292,7 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
     [...remoteContribution.descriptors].map(descriptor => (
       `${descriptor.namespace}/${descriptor.method}`
     )),
-    ['strongflow/invoke'],
+    ['strongflow/invoke', 'strongflow/advance'],
   )
   assert.equal(slotName, 'conversation.view')
   assert.deepEqual(
@@ -313,6 +320,10 @@ test('DSH chat stays default and the StrongFlow client contributes one opt-in ta
   await assert.rejects(
     injected.invokeDelivery({}),
     /scoped StrongFlow Remote reached/u,
+  )
+  await assert.rejects(
+    injected.invokeAdvance({}),
+    /scoped StrongFlow Advance Remote reached/u,
   )
   assert.equal(openedSessionId, undefined)
   await dispose()

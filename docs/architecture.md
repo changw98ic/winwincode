@@ -17,7 +17,7 @@ WinWinCode 负责交付目标、跨 Session 阶段、业务 Attention、Evidence
 | 层 | 负责的事实 | 在本仓库中的接入点 |
 | --- | --- | --- |
 | Codex Core | Thread、Turn、Plan、Agent Graph、工具调用、Shell、MCP、沙箱、文件和网络权限、执行审批、Diff、用量、上下文与执行恢复 | [`crates/kernel/src/lib.rs`](../crates/kernel/src/lib.rs)、[`packages/native/src/index.ts`](../packages/native/src/index.ts) |
-| DSH | Chat、Session 日志、会话恢复、模型与 Provider 选择、凭据服务、执行审批交互、Web/Cordis 外壳和界面扩展槽位 | [`apps/host/src/web-host.ts`](../apps/host/src/web-host.ts)、[`packages/dsh-profile/src/agent-factory.ts`](../packages/dsh-profile/src/agent-factory.ts)、[`packages/dsh-profile/src/model-port.ts`](../packages/dsh-profile/src/model-port.ts) |
+| DSH | Chat、Session 日志、会话恢复、模型与 Provider 选择、凭据服务、执行审批交互、Web/Cordis 外壳和界面扩展槽位 | [`apps/host/src/web-host.ts`](../apps/host/src/web-host.ts)、[`packages/dsh-profile/src/agent-factory.ts`](../packages/dsh-profile/src/agent-factory.ts)、[`packages/dsh-profile/src/model-port.ts`](../packages/dsh-profile/src/model-port.ts)、[`packages/dsh-profile/src/github-publication-provider.ts`](../packages/dsh-profile/src/github-publication-provider.ts) |
 | WinWinCode | `DeliverySpec`、验收条件、`DeliveryTask`、跨 Session 阶段、业务 `AttentionItem`、`EvidenceRef`、逐项结果和最终 `DeliveryVerdict` | [`packages/contracts/src/delivery.ts`](../packages/contracts/src/delivery.ts)、[`packages/strongflow/src/delivery-service.ts`](../packages/strongflow/src/delivery-service.ts) |
 | GitHub 等外部系统 | Issue、Pull Request、评论、项目看板和团队讨论 | [`packages/contracts/src/strongflow-github-publication.ts`](../packages/contracts/src/strongflow-github-publication.ts)、[`packages/strongflow/src/github-publication-runner.ts`](../packages/strongflow/src/github-publication-runner.ts) |
 
@@ -132,6 +132,10 @@ Session 内的并行工作继续使用 Codex Agent Graph。StrongFlow 只显示 
 
 [`DeliveryRuntimeProjection`](../packages/strongflow/src/delivery-runtime-projection.ts) 只读取与当前 `SessionBinding` 完全一致的事件。它按 StageRun 和 DeliveryTask 汇总当前 Plan、Agent Graph、变更文件、验证活动、审批、失败和用量，不写回 Codex 或 Delivery。
 
+Host 返回浏览器前，再通过 [`StrongFlowRuntimeExecutionProjection`](../packages/contracts/src/strongflow-runtime-execution.ts) 形成有上限的只读视图。工作台直接显示当前 Plan、Agent 父子关系、最近命令和测试、待处理交互、失败恢复与用量；执行中的 Diff 只返回文件数和增删行数，不返回路径、hunk 或原始日志。候选冻结后，具体文件和 hunk 只从黄色图节点进入正式审核。
+
+浏览器的“推进下一阶段”只调用 Host 的 [`StrongFlowDeliveryStageCoordinator`](../packages/strongflow/src/delivery-stage-coordinator.ts)。协调器先让恢复逻辑选择唯一合法动作，再通过 DSH `ctx.agents` 建立或恢复对应角色 Session，并只提交现有 Delivery 操作。它不创建另一套 Plan、Agent Graph、工具运行时或任务调度器。人工退回黄色节点后，浏览器先提交当前候选绑定的结构化标注；服务验证节点、文件、hunk、Evidence、候选和 revision 后，同一次浏览器操作继续建立 `remediator` Session。任务为空的简单 Delivery 使用 Delivery 级返工，已有 `DeliveryTask` 的交付保持原任务边界。
+
 ## Delivery 流程
 
 `Delivery.status` 表示跨 Session 的业务状态，`StageRun` 表示一次由 Codex 或人完成的阶段尝试。人工审核期间，保存的 Delivery 状态是 `needs-attention`，对应的 `plan-review` 或 `delivery-review` StageRun 为 `waiting`。
@@ -208,7 +212,7 @@ flowchart TD
 | `executing` | 有变化的节点为浅蓝色 | 实时影响范围；不返回文件路径、命令、hunk 或 Evidence 详情 |
 | `execution-finished` | 有变化的节点为黄色 | 当前候选的文件、hunk、命令、测试、Agent 活动和 Evidence 引用 |
 
-结束状态不是执行中缓存的改名。Host 会从当前冻结候选和 SHA-256 完全一致的权威 Diff 重新生成详情。文件只按已审核方案中的仓库相对路径映射到架构节点，流程节点按执行阶段映射。候选、Diff 或审核集合不一致时，详情生成失败。
+结束状态不是执行中缓存的改名。Host 会通过 [`LocalGitDeliveryWorkspace`](../packages/strongflow/src/local-git-delivery-workspace.ts) 从确定的 Git base 和当前候选重新生成 Diff，并校验 SHA-256 后生成详情；它不依赖执行中视图保存的内容。文件只按已审核方案中的仓库相对路径映射到架构节点，流程节点按执行阶段映射。候选、Diff 或审核集合不一致时，详情生成失败。
 
 结构和检查见 [`packages/contracts/src/strongflow-diagram-execution.ts`](../packages/contracts/src/strongflow-diagram-execution.ts)、[`packages/strongflow/src/diagram-execution-projection.ts`](../packages/strongflow/src/diagram-execution-projection.ts) 与 [`tests/diagram-execution-projection.test.mjs`](../tests/diagram-execution-projection.test.mjs)。
 
@@ -290,7 +294,7 @@ Rust 内核再次核对角色与工作区模式，并把权限转换成 Codex �
 
 ### 凭据
 
-模型和 GitHub 提供商的认证由 DSH 或提供商插件持有。WinWinCode 的持久 Delivery 只保存 Provider、Session 或外部资源引用。六项变更操作在写入前检查原始密钥、Bearer、JWT、私钥、常见 Provider token 和带认证信息的 URL；响应也不能回显人工证明。
+模型和 GitHub 提供商的认证由 DSH 或提供商插件持有。安装 profile 中的 GitHub 适配器在每次请求开始时通过 DSH 凭据服务解析 `GITHUB_TOKEN`，不跨请求缓存值。WinWinCode 的持久 Delivery 只保存 Provider、Session 或外部资源引用。六项变更操作在写入前检查原始密钥、Bearer、JWT、私钥、常见 Provider token 和带认证信息的 URL；响应也不能回显人工证明。
 
 这项检查是持久化边界，不代替 DSH 凭据存储或操作系统账户保护。实现与回归检查见 [`packages/strongflow/src/credential-boundary.ts`](../packages/strongflow/src/credential-boundary.ts)、[`packages/contracts/src/strongflow-delivery-api.ts`](../packages/contracts/src/strongflow-delivery-api.ts) 和 [`tests/delivery-credential-boundary.test.mjs`](../tests/delivery-credential-boundary.test.mjs)。
 
@@ -299,7 +303,7 @@ Rust 内核再次核对角色与工作区模式，并把权限转换成 Codex �
 - Delivery 记录使用连续 sequence、前一记录摘要、当前记录摘要、`requestId` 和请求摘要；损坏或身份冲突会失败。
 - Runtime Event 保存 Codex Core 来源、DSH/Codex Session、事件流、顺序号、Turn、Item、Tool、Approval 和 Agent 身份。
 - 冻结候选绑定 base/candidate commit、tree、Diff SHA-256、变更路径、生产 StageRun 和 SessionBinding。
-- GitHub 发布默认 dry-run。显式 live 发布先写本地追加 journal，再按稳定 operation key 查询和对账远端 branch、PR、Issue comment 与 commit status。
+- GitHub 发布默认 dry-run。显式 live 发布还要求当前人工批准和 DSH `GITHUB_TOKEN`；发布器先写本地追加 journal，再由安装 profile 中的适配器按稳定 operation key 查询和对账远端 branch、PR、Issue comment 与 commit status。HTTP 状态、响应格式错误和连接失败只转成固定错误码，远端响应正文和凭据不会进入 journal。
 - 发布报告要求四个 macOS/Linux 原生目标、当前源码身份、当前真实 Delivery 结果、Apache-2.0 和第三方通知全部一致；报告本身不会执行发布。
 
 ## 代码与检查索引
@@ -315,13 +319,14 @@ Rust 内核再次核对角色与工作区模式，并把权限转换成 Codex �
 | 七项 Host 操作共用一个状态入口 | [`packages/contracts/src/strongflow-delivery-api.ts`](../packages/contracts/src/strongflow-delivery-api.ts)、[`packages/strongflow/src/delivery-invoker.ts`](../packages/strongflow/src/delivery-invoker.ts) | [`tests/strongflow-delivery-api.test.mjs`](../tests/strongflow-delivery-api.test.mjs)、[`tests/strongflow-delivery-adapters.test.mjs`](../tests/strongflow-delivery-adapters.test.mjs) |
 | 需求和方案分开且必须人工审核 | [`packages/strongflow/src/plan-review.ts`](../packages/strongflow/src/plan-review.ts) | [`tests/plan-review.test.mjs`](../tests/plan-review.test.mjs)、[`tests/strongflow-workbench.test.mjs`](../tests/strongflow-workbench.test.mjs) |
 | Codex Plan 和 Agent Graph 只做投影 | [`packages/dsh-profile/src/runtime-events.ts`](../packages/dsh-profile/src/runtime-events.ts)、[`packages/strongflow/src/delivery-runtime-projection.ts`](../packages/strongflow/src/delivery-runtime-projection.ts) | [`tests/delivery-runtime-projection.test.mjs`](../tests/delivery-runtime-projection.test.mjs) |
+| 浏览器只推进一个合法阶段，黄色标注进入有上限的 remediator | [`packages/strongflow/src/delivery-stage-coordinator.ts`](../packages/strongflow/src/delivery-stage-coordinator.ts)、[`packages/strongflow/src/dsh-stage-runtime.ts`](../packages/strongflow/src/dsh-stage-runtime.ts) | [`tests/delivery-stage-coordinator.test.mjs`](../tests/delivery-stage-coordinator.test.mjs)、[`tests/strongflow-workbench.test.mjs`](../tests/strongflow-workbench.test.mjs) |
 | 执行图具有前、中、后三种状态 | [`packages/strongflow/src/diagram-execution-projection.ts`](../packages/strongflow/src/diagram-execution-projection.ts) | [`tests/diagram-execution-projection.test.mjs`](../tests/diagram-execution-projection.test.mjs) |
 | Evidence 和 Verdict 由当前运行事实计算 | [`packages/strongflow/src/delivery-verdict.ts`](../packages/strongflow/src/delivery-verdict.ts)、[`packages/strongflow/src/candidate-evidence.ts`](../packages/strongflow/src/candidate-evidence.ts) | [`tests/delivery-verdict.test.mjs`](../tests/delivery-verdict.test.mjs)、[`tests/candidate-evidence.test.mjs`](../tests/candidate-evidence.test.mjs) |
 | Reviewer 与 Verifier 使用独立只读 Session | [`packages/strongflow/src/independent-verification.ts`](../packages/strongflow/src/independent-verification.ts) | [`tests/independent-verification.test.mjs`](../tests/independent-verification.test.mjs) |
 | 角色工作区、网络和审批由 Codex 权限执行 | [`packages/contracts/src/strongflow-role.ts`](../packages/contracts/src/strongflow-role.ts)、[`crates/kernel/src/lib.rs`](../crates/kernel/src/lib.rs) | [`tests/native-role-session.test.mjs`](../tests/native-role-session.test.mjs)、[`scripts/verify-native-install.mjs`](../scripts/verify-native-install.mjs) |
 | 人工 Session 证明和凭据不会进入 Delivery | [`packages/strongflow/src/delivery-remote.ts`](../packages/strongflow/src/delivery-remote.ts)、[`packages/strongflow/src/credential-boundary.ts`](../packages/strongflow/src/credential-boundary.ts) | [`tests/delivery-service.test.mjs`](../tests/delivery-service.test.mjs)、[`tests/delivery-credential-boundary.test.mjs`](../tests/delivery-credential-boundary.test.mjs) |
 | 重启只重建视图并选择一个下一步 | [`packages/dsh-profile/src/delivery-recovery.ts`](../packages/dsh-profile/src/delivery-recovery.ts) | [`tests/delivery-recovery.test.mjs`](../tests/delivery-recovery.test.mjs)、[`tests/delivery-restart-idempotency.test.mjs`](../tests/delivery-restart-idempotency.test.mjs) |
-| GitHub 写入可审核、可重试和可对账 | [`packages/strongflow/src/github-publication-runner.ts`](../packages/strongflow/src/github-publication-runner.ts) | [`tests/github-publication.test.mjs`](../tests/github-publication.test.mjs)、[`tests/github-review-package.test.mjs`](../tests/github-review-package.test.mjs) |
+| GitHub 写入可审核、可重试和可对账 | [`packages/strongflow/src/github-publication-runner.ts`](../packages/strongflow/src/github-publication-runner.ts)、[`packages/dsh-profile/src/github-publication-provider.ts`](../packages/dsh-profile/src/github-publication-provider.ts) | [`tests/github-publication.test.mjs`](../tests/github-publication.test.mjs)、[`tests/github-review-package.test.mjs`](../tests/github-review-package.test.mjs)、[`tests/dsh-github-publication-provider.test.mjs`](../tests/dsh-github-publication-provider.test.mjs) |
 | 发布要求当前源码、四个平台产物和当前交付证据 | [`scripts/product-release-gate.mjs`](../scripts/product-release-gate.mjs) | [`tests/product-release-gate.test.mjs`](../tests/product-release-gate.test.mjs) |
 
 完整设计决定见 [ADR-0023](decisions/0023-canonical-delivery-ownership.md)。上游 Codex 与 DSH 的固定版本和补丁边界见 [ADR-0001](decisions/0001-upstream-integration.md)。

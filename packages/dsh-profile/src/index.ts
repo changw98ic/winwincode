@@ -2,6 +2,7 @@ import type { SurfaceDescriptor, WorkspaceComponentDescriptor } from '@winwincod
 
 export * from './agent-factory.js'
 export * from './delivery-recovery.js'
+export * from './github-publication-provider.js'
 export * from './model-port.js'
 export * from './runtime-events.js'
 export * from './runtime-projection.js'

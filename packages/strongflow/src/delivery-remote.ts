@@ -5,15 +5,34 @@ import {
 } from '@deepseek-ai/dsh-typert-protocol'
 import {
   STRONGFLOW_DELIVERY_OPERATIONS,
+  materializeStrongFlowDeliveryAdvanceFailure,
+  materializeStrongFlowDeliveryAdvanceSuccess,
   materializeStrongFlowDeliveryRequest,
   materializeStrongFlowDeliveryFailure,
+  parseStrongFlowDeliveryAdvanceRequest,
   parseStrongFlowDeliveryRequest,
   parseStrongFlowDeliveryResponseForRequest,
+  type StrongFlowDeliveryAdvanceRequest,
+  type StrongFlowDeliveryAdvanceResponse,
   type StrongFlowDeliveryInvoker,
   type StrongFlowDeliveryOperation,
   type StrongFlowDeliveryRequest,
   type StrongFlowDeliveryResponse,
 } from '@winwincode/contracts'
+
+import {
+  StrongFlowDeliveryStageCoordinatorError,
+  type StrongFlowAdvanceCaller,
+  type StrongFlowDeliveryAdvanceResult,
+} from './delivery-stage-coordinator.js'
+
+export interface StrongFlowDeliveryAdvanceInvoker {
+  advance(
+    request: StrongFlowDeliveryAdvanceRequest,
+    caller: StrongFlowAdvanceCaller,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<StrongFlowDeliveryAdvanceResult>
+}
 
 import {
   STRONGFLOW_DELIVERY_REMOTE_NAMESPACE,
@@ -23,6 +42,7 @@ import {
 
 export interface StrongFlowDeliveryRemoteServiceOptions {
   readonly localSessionProof: string
+  readonly coordinator: StrongFlowDeliveryAdvanceInvoker
 }
 
 const DSH_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,499}$/u
@@ -38,6 +58,30 @@ function sessionIdentity(value: unknown): string | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
   const id = Reflect.get(value, 'id')
   return typeof id === 'string' && DSH_SESSION_ID_PATTERN.test(id) ? id : null
+}
+
+function advanceCaller(value: unknown): StrongFlowAdvanceCaller | null {
+  const dshSessionId = sessionIdentity(value)
+  if (dshSessionId === null || typeof value !== 'object' || value === null) return null
+  const options = Reflect.get(value, 'options') as unknown
+  if (typeof options !== 'object' || options === null || Array.isArray(options)) return null
+  const provider = Reflect.get(options, 'provider')
+  const model = Reflect.get(options, 'model')
+  const maxTokens = Reflect.get(options, 'maxTokens')
+  if (typeof provider !== 'string'
+    || provider.length === 0
+    || typeof model !== 'string'
+    || model.length === 0
+    || (maxTokens !== undefined
+      && (!Number.isSafeInteger(maxTokens) || Number(maxTokens) < 1))) return null
+  return Object.freeze({
+    dshSessionId,
+    modelRoute: Object.freeze({
+      provider,
+      model,
+      ...(maxTokens === undefined ? {} : { maxTokens: Number(maxTokens) }),
+    }),
+  })
 }
 
 function boundaryIdentity(value: unknown): {
@@ -65,6 +109,7 @@ function boundaryIdentity(value: unknown): {
 export class StrongFlowDeliveryRemoteService extends TypertRemoteService {
   private readonly invoker: StrongFlowDeliveryInvoker
   private readonly localSessionProof: string
+  private readonly coordinator: StrongFlowDeliveryAdvanceInvoker
 
   constructor(
     ctx: Context,
@@ -76,6 +121,67 @@ export class StrongFlowDeliveryRemoteService extends TypertRemoteService {
     })
     this.invoker = invoker
     this.localSessionProof = sessionProof(options.localSessionProof)
+    if (typeof options.coordinator?.advance !== 'function') {
+      throw new TypeError('StrongFlow Delivery Remote requires a stage coordinator')
+    }
+    this.coordinator = options.coordinator
+  }
+
+  @Remote
+  async advance(
+    agent: unknown,
+    request: unknown,
+    signal: AbortSignal,
+  ): Promise<StrongFlowDeliveryAdvanceResponse> {
+    let parsed: StrongFlowDeliveryAdvanceRequest
+    try {
+      parsed = parseStrongFlowDeliveryAdvanceRequest(request)
+    } catch {
+      const requestId = typeof request === 'object'
+        && request !== null
+        && typeof Reflect.get(request, 'requestId') === 'string'
+        ? Reflect.get(request, 'requestId') as string
+        : null
+      return materializeStrongFlowDeliveryAdvanceFailure({
+        requestId: requestId !== null && DSH_SESSION_ID_PATTERN.test(requestId)
+          ? requestId
+          : null,
+        code: 'INVALID_REQUEST',
+        message: 'StrongFlow 阶段推进请求格式无效。',
+      })
+    }
+    const caller = advanceCaller(agent)
+    if (caller === null) {
+      return materializeStrongFlowDeliveryAdvanceFailure({
+        requestId: parsed.requestId,
+        code: 'MODEL_SELECTION_REQUIRED',
+        message: '请先在当前 DSH Session 选择 Provider 和模型。',
+      })
+    }
+    try {
+      const result = await this.coordinator.advance(parsed, caller, { signal })
+      return materializeStrongFlowDeliveryAdvanceSuccess(
+        parsed,
+        result.delivery,
+        result.outcome,
+      )
+    } catch (error) {
+      if (error instanceof StrongFlowDeliveryStageCoordinatorError) {
+        return materializeStrongFlowDeliveryAdvanceFailure({
+          requestId: parsed.requestId,
+          code: error.code,
+          message: error.message,
+          currentRevision: error.currentRevision,
+        })
+      }
+      return materializeStrongFlowDeliveryAdvanceFailure({
+        requestId: parsed.requestId,
+        code: signal.aborted ? 'OPERATION_ABORTED' : 'INTERNAL_ERROR',
+        message: signal.aborted
+          ? 'StrongFlow 阶段推进已中止。'
+          : 'StrongFlow 阶段推进失败。',
+      })
+    }
   }
 
   @Remote

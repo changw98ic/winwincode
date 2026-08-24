@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { readFile, rm } from 'node:fs/promises'
+import { access, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -84,6 +84,7 @@ test('testkit drives a scripted DSH role through the real embedded Codex kernel'
   })
   t.after(() => kit.cleanup())
   const runtime = await ScriptedDshFixtureRuntime.create({
+    owner: kit,
     home: kit.home,
     workspace: kit.repository,
     script: [{
@@ -91,8 +92,6 @@ test('testkit drives a scripted DSH role through the real embedded Codex kernel'
       usage: { inputTokens: 16, outputTokens: 9 },
     }],
   })
-  t.after(() => runtime.close())
-
   const result = await runtime.runRole({
     sessionId: 'dsh-testkit-requirements',
     roleId: 'requirements',
@@ -125,6 +124,10 @@ test('testkit drives a scripted DSH role through the real embedded Codex kernel'
     'utf8',
   )
   assert.doesNotMatch(source, /packages\/(?:contracts|dsh-profile|native|strongflow)\/src\//u)
+  const ownedRoot = kit.root
+  await kit.cleanup()
+  assert.equal(runtime.closed, true)
+  await assert.rejects(access(ownedRoot), error => error?.code === 'ENOENT')
 })
 
 test('testkit covers every Delivery mutation, human gate, projection, evidence, and verdict', async t => {

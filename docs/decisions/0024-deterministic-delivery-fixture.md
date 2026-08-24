@@ -45,6 +45,10 @@ DSH 与 Codex 的真实循环用于证明角色 Session、模型路由和内核�
 - 命令成功、任务失败、超时、策略拒绝和基础设施错误；
 - 本地 Session 与 CLI 的人工身份凭据。
 
+临时目录同时是运行时所有权边界。`DeliveryServiceFixtureTestkit` 记录使用该目录的脚本 DSH runtime；清理时依次等待 Agent handle、Cordis Context、内嵌 Kernel 完全关闭，最后才删除目录。关闭失败会保留目录并让测试失败，不会用文件删除重试掩盖仍在运行的任务。
+
+候选仓库的 Node 测试仍只执行一次，并受 60 秒上限约束。这个上限覆盖完整测试集并发时的进程调度，不会在超时、`ENOTEMPTY` 或原生关闭错误后自动重试。
+
 子进程环境会移除名称中含有 `API_KEY`、`CREDENTIAL`、`SECRET` 或 `TOKEN` 的变量。测试不访问远端服务，所有 Git 操作都在临时本地仓库中完成。
 
 ## 已证明的行为
@@ -115,7 +119,10 @@ pass Verdict
 corepack pnpm build:ts
 node --test tests/delivery-fixture-testkit.test.mjs
 node --test tests/delivery-full-keyless.test.mjs
+corepack pnpm verify:fixture-cleanup
 ```
+
+`verify:fixture-cleanup` 会在独立子进程中运行清理并强制垃圾回收，检查目录不会重新出现，且原生层不会在 Node runtime 结束后再尝试启动 Tokio 任务。macOS 压力检查可设置 `WINWINCODE_CLEANUP_STRESS_ITERATIONS=32` 重复同一子进程路径。
 
 完整仓库门禁继续使用：
 

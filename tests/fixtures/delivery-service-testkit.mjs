@@ -59,6 +59,8 @@ const DEFAULT_DELIVERY_ID = 'delivery-deterministic-fixture'
 const DEFAULT_MODEL = 'fixture-coder'
 const DEFAULT_PROVIDER = 'fixture'
 const CREDENTIAL_ENVIRONMENT_PATTERN = /(?:API_KEY|CREDENTIAL|SECRET|TOKEN)/iu
+const CANDIDATE_TEST_TIMEOUT_MILLIS = 60_000
+const ADOPT_DSH_RUNTIME = Symbol('adoptDshRuntime')
 
 function immutable(value) {
   const clone = structuredClone(value)
@@ -227,9 +229,12 @@ export class ScriptedDshModelAdapter extends LlmAdapter {
 /** Real DSH composition over one embedded Codex kernel and a scripted provider. */
 export class ScriptedDshFixtureRuntime {
   #adapter
+  #closed = false
+  #closePromise
   #context
   #handles = new Set()
   #kernel
+  #releaseOwner
 
   constructor(options) {
     this.home = resolve(options.home)
@@ -240,9 +245,25 @@ export class ScriptedDshFixtureRuntime {
   }
 
   static async create(options) {
+    if (typeof options.owner?.[ADOPT_DSH_RUNTIME] !== 'function') {
+      throw new TypeError('scripted DSH fixture runtime requires its filesystem owner')
+    }
     const runtime = new ScriptedDshFixtureRuntime(options)
-    await runtime.#start()
-    return runtime
+    runtime.#releaseOwner = options.owner[ADOPT_DSH_RUNTIME](runtime)
+    try {
+      await runtime.#start()
+      return runtime
+    } catch (error) {
+      try {
+        await runtime.close()
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'scripted DSH fixture runtime startup and cleanup failed',
+        )
+      }
+      throw error
+    }
   }
 
   get calls() {
@@ -251,6 +272,10 @@ export class ScriptedDshFixtureRuntime {
 
   get remainingResponses() {
     return this.#adapter.remainingResponses
+  }
+
+  get closed() {
+    return this.#closed
   }
 
   async #start() {
@@ -318,10 +343,35 @@ export class ScriptedDshFixtureRuntime {
   }
 
   async close() {
-    for (const handle of this.#handles) await handle.dispose().catch(() => undefined)
-    this.#handles.clear()
-    await this.#context.fiber.dispose().catch(() => undefined)
-    return this.#kernel?.shutdown().catch(() => undefined)
+    this.#closePromise ??= this.#close()
+    return this.#closePromise
+  }
+
+  async #close() {
+    const failures = []
+    for (const handle of [...this.#handles]) {
+      try {
+        await handle.dispose()
+        this.#handles.delete(handle)
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    try {
+      await this.#context.fiber.dispose()
+    } catch (error) {
+      failures.push(error)
+    }
+    try {
+      await this.#kernel?.shutdown()
+    } catch (error) {
+      failures.push(error)
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'scripted DSH fixture runtime cleanup failed')
+    }
+    this.#closed = true
+    this.#releaseOwner?.()
   }
 }
 
@@ -418,7 +468,7 @@ async function createCandidateCommit(repository, options = {}) {
     env: Object.fromEntries(Object.entries(keylessFixtureEnvironment()).filter(([name]) => (
       name !== 'NODE_TEST_CONTEXT'
     ))),
-    timeout: 30_000,
+    timeout: CANDIDATE_TEST_TIMEOUT_MILLIS,
   })
   if (verification.error !== undefined) throw verification.error
   if (verification.signal !== null || verification.status === null) {
@@ -736,6 +786,7 @@ export async function renderFixtureDeliveryProjection(input) {
     {
       delivery: input.delivery,
       diagramExecution: input.diagramExecution ?? null,
+      runtimeExecution: input.runtimeExecution ?? null,
       sessionId: input.sessionId,
       refreshing: false,
       onRefresh() {},
@@ -751,6 +802,8 @@ export async function renderFixtureDeliveryProjection(input) {
  * projection, embedded kernel bridge, StrongFlow service, store, and UI bundle.
  */
 export class DeliveryServiceFixtureTestkit {
+  #cleanupPromise
+  #dshRuntimes = new Set()
   #ownsRoot
   #runtimeEvents = []
 
@@ -790,6 +843,17 @@ export class DeliveryServiceFixtureTestkit {
     })
   }
 
+  [ADOPT_DSH_RUNTIME](runtime) {
+    if (this.#cleanupPromise !== undefined) {
+      throw new Error('Delivery testkit cleanup already started')
+    }
+    if (runtime.home !== this.home || runtime.workspace !== this.repository) {
+      throw new TypeError('scripted DSH runtime must use its owning testkit paths')
+    }
+    this.#dshRuntimes.add(runtime)
+    return () => this.#dshRuntimes.delete(runtime)
+  }
+
   #replaceService() {
     this.authenticator = createStrongFlowDeliveryLocalProofAuthenticator({
       localSessionProof: DELIVERY_FIXTURE_UI_PROOF,
@@ -801,7 +865,7 @@ export class DeliveryServiceFixtureTestkit {
       home: this.home,
       authenticator: this.authenticator,
       clock: this.clock.now,
-      diagramExecutionSource: {
+      executionSource: {
         read: async () => this.diagramFacts,
       },
     })
@@ -1521,6 +1585,15 @@ export class DeliveryServiceFixtureTestkit {
   }
 
   async cleanup() {
+    this.#cleanupPromise ??= this.#cleanup()
+    return this.#cleanupPromise
+  }
+
+  async #cleanup() {
+    for (const runtime of [...this.#dshRuntimes]) await runtime.close()
+    if (this.#dshRuntimes.size !== 0) {
+      throw new Error('Delivery testkit still owns an active DSH runtime')
+    }
     if (this.#ownsRoot) await rm(this.root, { recursive: true, force: true })
   }
 }

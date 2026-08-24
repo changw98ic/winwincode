@@ -36,8 +36,14 @@ import {
   parseStrongFlowDiagramExecutionProjection,
   type StrongFlowDiagramExecutionProjection,
 } from './strongflow-diagram-execution.js'
+import {
+  parseStrongFlowRuntimeExecutionProjection,
+  type StrongFlowRuntimeEventReference,
+  type StrongFlowRuntimeExecutionProjection,
+  type StrongFlowRuntimeSessionProjection,
+} from './strongflow-runtime-execution.js'
 
-export const STRONGFLOW_DELIVERY_API_SCHEMA_VERSION = 6 as const
+export const STRONGFLOW_DELIVERY_API_SCHEMA_VERSION = 7 as const
 
 export const STRONGFLOW_DELIVERY_REMEDIATION_PROTOCOL =
   'winwincode.delivery-remediation.v1' as const
@@ -133,7 +139,8 @@ export interface StrongFlowRemediationAnnotation {
 export interface StrongFlowDeliveryRemediation {
   readonly schemaVersion: typeof STRONGFLOW_DELIVERY_API_SCHEMA_VERSION
   readonly protocol: typeof STRONGFLOW_DELIVERY_REMEDIATION_PROTOCOL
-  readonly deliveryTaskId: DeliveryTaskIdentifier
+  /** Null keeps a taskless Delivery on its canonical Delivery-scoped rework path. */
+  readonly deliveryTaskId: DeliveryTaskIdentifier | null
   readonly candidate: FrozenDeliveryCandidate
   readonly annotations: readonly StrongFlowRemediationAnnotation[]
 }
@@ -204,6 +211,7 @@ export interface StrongFlowDeliverySuccessResponse<
   readonly result: {
     readonly delivery: Delivery
     readonly diagramExecution: StrongFlowDiagramExecutionProjection | null
+    readonly runtimeExecution: StrongFlowRuntimeExecutionProjection | null
   }
 }
 
@@ -390,46 +398,34 @@ function remediationSha256(value: unknown, path: string): string {
   return value
 }
 
-/** Parse the request-only annotation bundle that authorizes one bounded rework. */
-export function parseStrongFlowDeliveryRemediation(
+/** Parse the exact bounded annotations stored after a human approves one rework. */
+export function parseStrongFlowRemediationAnnotations(
   value: unknown,
-  path = 'deliveryRemediation',
-): StrongFlowDeliveryRemediation {
-  const input = record(value, path, 'INVALID_REQUEST')
-  exactKeys(input, [
-    'schemaVersion',
-    'protocol',
-    'deliveryTaskId',
-    'candidate',
-    'annotations',
-  ], path, 'INVALID_REQUEST')
-  if (input.schemaVersion !== STRONGFLOW_DELIVERY_API_SCHEMA_VERSION
-    || input.protocol !== STRONGFLOW_DELIVERY_REMEDIATION_PROTOCOL) {
-    apiError('INVALID_REQUEST', path, `${path} protocol is unsupported`)
-  }
-  if (!Array.isArray(input.annotations)
-    || input.annotations.length === 0
-    || input.annotations.length > MAX_REMEDIATION_ANNOTATIONS) {
-    apiError('INVALID_REQUEST', `${path}.annotations`, 'annotations must be a bounded non-empty array')
+  path = 'remediationAnnotations',
+): readonly StrongFlowRemediationAnnotation[] {
+  if (!Array.isArray(value)
+    || value.length === 0
+    || value.length > MAX_REMEDIATION_ANNOTATIONS) {
+    apiError('INVALID_REQUEST', path, 'annotations must be a bounded non-empty array')
   }
   let annotationJson: string
   try {
-    annotationJson = JSON.stringify(input.annotations)
+    annotationJson = JSON.stringify(value)
   } catch (error) {
     apiError(
       'INVALID_REQUEST',
-      `${path}.annotations`,
+      path,
       'annotations must be JSON serializable',
       { cause: error },
     )
   }
   if (annotationJson.length > MAX_REMEDIATION_ANNOTATION_JSON_LENGTH) {
-    apiError('INVALID_REQUEST', `${path}.annotations`, 'annotations exceed the request size limit')
+    apiError('INVALID_REQUEST', path, 'annotations exceed the request size limit')
   }
   const annotationIds = new Set<string>()
-  const annotations = input.annotations.map((value, index): StrongFlowRemediationAnnotation => {
-    const annotationPath = `${path}.annotations[${String(index)}]`
-    const annotation = record(value, annotationPath, 'INVALID_REQUEST')
+  const annotations = value.map((entry, index): StrongFlowRemediationAnnotation => {
+    const annotationPath = `${path}[${String(index)}]`
+    const annotation = record(entry, annotationPath, 'INVALID_REQUEST')
     exactKeys(annotation, [
       'schemaVersion',
       'id',
@@ -498,15 +494,41 @@ export function parseStrongFlowDeliveryRemediation(
       note: boundedText(annotation.note, `${annotationPath}.note`),
     })
   })
-  let deliveryTaskId: DeliveryTaskIdentifier
-  try {
-    deliveryTaskId = DeliveryTaskId(
-      remediationIdentifier(input.deliveryTaskId, `${path}.deliveryTaskId`),
-    )
-  } catch (error) {
-    apiError('INVALID_REQUEST', `${path}.deliveryTaskId`, 'deliveryTaskId is invalid', {
-      cause: error,
-    })
+  return Object.freeze(annotations)
+}
+
+/** Parse the request-only annotation bundle that authorizes one bounded rework. */
+export function parseStrongFlowDeliveryRemediation(
+  value: unknown,
+  path = 'deliveryRemediation',
+): StrongFlowDeliveryRemediation {
+  const input = record(value, path, 'INVALID_REQUEST')
+  exactKeys(input, [
+    'schemaVersion',
+    'protocol',
+    'deliveryTaskId',
+    'candidate',
+    'annotations',
+  ], path, 'INVALID_REQUEST')
+  if (input.schemaVersion !== STRONGFLOW_DELIVERY_API_SCHEMA_VERSION
+    || input.protocol !== STRONGFLOW_DELIVERY_REMEDIATION_PROTOCOL) {
+    apiError('INVALID_REQUEST', path, `${path} protocol is unsupported`)
+  }
+  const annotations = parseStrongFlowRemediationAnnotations(
+    input.annotations,
+    `${path}.annotations`,
+  )
+  let deliveryTaskId: DeliveryTaskIdentifier | null = null
+  if (input.deliveryTaskId !== null) {
+    try {
+      deliveryTaskId = DeliveryTaskId(
+        remediationIdentifier(input.deliveryTaskId, `${path}.deliveryTaskId`),
+      )
+    } catch (error) {
+      apiError('INVALID_REQUEST', `${path}.deliveryTaskId`, 'deliveryTaskId is invalid', {
+        cause: error,
+      })
+    }
   }
   return immutable({
     schemaVersion: STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
@@ -572,6 +594,97 @@ function parseResponseDiagramExecution(
       'response diagram execution projection is invalid',
       { cause: error },
     )
+  }
+}
+
+function parseResponseRuntimeExecution(
+  value: unknown,
+): StrongFlowRuntimeExecutionProjection {
+  try {
+    return parseStrongFlowRuntimeExecutionProjection(
+      value,
+      'response.result.runtimeExecution',
+    )
+  } catch (error) {
+    apiError(
+      'INVALID_RESPONSE',
+      'response.result.runtimeExecution',
+      'response runtime execution projection is invalid',
+      { cause: error },
+    )
+  }
+}
+
+function runtimeEventReferences(
+  session: StrongFlowRuntimeSessionProjection,
+): readonly StrongFlowRuntimeEventReference[] {
+  return [
+    ...(session.plan === null ? [] : [session.plan.latestEvent]),
+    ...session.agents.map(agent => agent.latestEvent),
+    ...session.activities.map(activity => activity.latestEvent),
+    ...session.interactions.flatMap(interaction => [
+      interaction.requestedEvent,
+      ...(interaction.resolvedEvent === null ? [] : [interaction.resolvedEvent]),
+    ]),
+    ...session.failures.map(failure => failure.event),
+    ...(session.recovery.lastFailureEvent === null
+      ? []
+      : [session.recovery.lastFailureEvent]),
+    ...(session.recovery.latestRecoveryEvent === null
+      ? []
+      : [session.recovery.latestRecoveryEvent]),
+    ...(session.diffSummary === null ? [] : [session.diffSummary.event]),
+    ...(session.usage === null ? [] : [session.usage.event]),
+  ]
+}
+
+function assertRuntimeExecutionMatchesDelivery(
+  delivery: Delivery,
+  runtime: StrongFlowRuntimeExecutionProjection,
+): void {
+  if (runtime.deliveryId !== delivery.id || runtime.deliveryRevision !== delivery.revision) {
+    apiError(
+      'RELATIONSHIP_MISMATCH',
+      'response.result.runtimeExecution',
+      'response runtime execution projection does not match the Delivery',
+    )
+  }
+  const bindings = new Map(delivery.sessionBindings.map(binding => [binding.id, binding]))
+  for (const [index, session] of runtime.sessions.entries()) {
+    const path = `response.result.runtimeExecution.sessions[${String(index)}]`
+    const binding = bindings.get(session.sessionBindingId)
+    if (binding === undefined
+      || binding.stageRunId !== session.stageRunId
+      || binding.dshSessionId !== session.dshSessionId
+      || binding.codexSessionId !== session.codexSessionId) {
+      apiError(
+        'RELATIONSHIP_MISMATCH',
+        path,
+        'runtime session does not match an exact Delivery SessionBinding',
+      )
+    }
+    const asOfSequence = BigInt(session.asOfSequence)
+    const references = runtimeEventReferences(session)
+    const foreignReference = references.some(reference => (
+      BigInt(reference.sequence) > asOfSequence
+      || (session.dshSessionId !== null
+        && reference.eventId !== `${session.dshSessionId}@${reference.sequence}`)
+    ))
+    const foreignEvidence = session.evidence.some((evidence) => {
+      const separator = evidence.eventId.lastIndexOf('@')
+      const evidenceSequence = separator < 0 ? '' : evidence.eventId.slice(separator + 1)
+      return !/^(?:0|[1-9][0-9]{0,39})$/u.test(evidenceSequence)
+        || BigInt(evidenceSequence) > asOfSequence
+        || (session.dshSessionId !== null
+          && evidence.eventId !== `${session.dshSessionId}@${evidenceSequence}`)
+    })
+    if (foreignReference || foreignEvidence) {
+      apiError(
+        'RELATIONSHIP_MISMATCH',
+        path,
+        'runtime event identities do not match their SessionBinding or cursor',
+      )
+    }
   }
 }
 
@@ -843,6 +956,7 @@ export function materializeStrongFlowDeliverySuccess<
   request: StrongFlowDeliveryRequestFor<Operation>,
   deliveryValue: Delivery,
   diagramExecutionValue: StrongFlowDiagramExecutionProjection | null = null,
+  runtimeExecutionValue: StrongFlowRuntimeExecutionProjection | null = null,
 ): StrongFlowDeliverySuccessResponse<Operation> {
   const delivery = parseResponseDelivery(deliveryValue)
   if (delivery.id !== requestDeliveryId(request as StrongFlowDeliveryRequest)) {
@@ -864,12 +978,18 @@ export function materializeStrongFlowDeliverySuccess<
       'response diagram execution projection does not match the Delivery',
     )
   }
+  const runtimeExecution = runtimeExecutionValue === null
+    ? null
+    : parseResponseRuntimeExecution(runtimeExecutionValue)
+  if (runtimeExecution !== null) {
+    assertRuntimeExecutionMatchesDelivery(delivery, runtimeExecution)
+  }
   return Object.freeze({
     schemaVersion: STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
     requestId: request.requestId,
     operation: request.operation,
     ok: true,
-    result: Object.freeze({ delivery, diagramExecution }),
+    result: Object.freeze({ delivery, diagramExecution, runtimeExecution }),
   })
 }
 
@@ -948,7 +1068,12 @@ export function parseStrongFlowDeliveryResponse(value: unknown): StrongFlowDeliv
   if (input.ok !== true) apiError('INVALID_RESPONSE', 'response.ok', 'response ok is invalid')
   const selectedOperation = operation(input.operation, 'response.operation', 'INVALID_RESPONSE')
   const result = record(input.result, 'response.result', 'INVALID_RESPONSE')
-  exactKeys(result, ['delivery', 'diagramExecution'], 'response.result', 'INVALID_RESPONSE')
+  exactKeys(
+    result,
+    ['delivery', 'diagramExecution', 'runtimeExecution'],
+    'response.result',
+    'INVALID_RESPONSE',
+  )
   const delivery = parseResponseDelivery(result.delivery)
   const diagramExecution = result.diagramExecution === null
     ? null
@@ -962,6 +1087,12 @@ export function parseStrongFlowDeliveryResponse(value: unknown): StrongFlowDeliv
       'response diagram execution projection does not match the Delivery',
     )
   }
+  const runtimeExecution = result.runtimeExecution === null
+    ? null
+    : parseResponseRuntimeExecution(result.runtimeExecution)
+  if (runtimeExecution !== null) {
+    assertRuntimeExecutionMatchesDelivery(delivery, runtimeExecution)
+  }
   return Object.freeze({
     schemaVersion: STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
     requestId: portableRequestId(input.requestId, 'response.requestId', 'INVALID_RESPONSE'),
@@ -970,6 +1101,7 @@ export function parseStrongFlowDeliveryResponse(value: unknown): StrongFlowDeliv
     result: Object.freeze({
       delivery,
       diagramExecution,
+      runtimeExecution,
     }),
   }) as StrongFlowDeliverySuccessResponse
 }

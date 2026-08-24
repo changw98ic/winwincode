@@ -6,6 +6,8 @@ import {
   STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
   STRONGFLOW_DIAGRAM_EXECUTION_PROTOCOL,
   STRONGFLOW_DIAGRAM_EXECUTION_SCHEMA_VERSION,
+  STRONGFLOW_RUNTIME_EXECUTION_PROTOCOL,
+  STRONGFLOW_RUNTIME_EXECUTION_SCHEMA_VERSION,
   StrongFlowDeliveryApiValidationError,
   materializeStrongFlowDeliveryFailure,
   materializeStrongFlowDeliveryRequest,
@@ -82,6 +84,147 @@ function draftDelivery() {
   }
 }
 
+function runtimeDelivery() {
+  return {
+    ...draftDelivery(),
+    revision: 2,
+    status: 'executing',
+    tasks: [{ ...task(), status: 'active' }],
+    stageRuns: [{
+      schemaVersion: DELIVERY_SCHEMA_VERSION,
+      id: 'stage-api-executor',
+      deliveryId,
+      deliveryTaskId: 'delivery-task-api',
+      stage: 'executing',
+      actorType: 'codex',
+      role: 'executor',
+      status: 'running',
+      attempt: 1,
+      startedAtMillis: now + 1,
+      finishedAtMillis: null,
+    }],
+    sessionBindings: [{
+      schemaVersion: DELIVERY_SCHEMA_VERSION,
+      id: 'binding-api-executor',
+      deliveryId,
+      stageRunId: 'stage-api-executor',
+      dshSessionId: 'dsh-api-executor',
+      codexSessionId: 'codex-api-executor',
+      boundAtMillis: now + 2,
+    }],
+    updatedAtMillis: now + 2,
+  }
+}
+
+function runtimeReference(sequence, kind) {
+  return {
+    eventId: `dsh-api-executor@${String(sequence)}`,
+    sourceRef: `runtime_event:dsh-api-executor@${String(sequence)}`,
+    sequence: String(sequence),
+    kind,
+  }
+}
+
+function runtimeExecution() {
+  return {
+    schemaVersion: STRONGFLOW_RUNTIME_EXECUTION_SCHEMA_VERSION,
+    protocol: STRONGFLOW_RUNTIME_EXECUTION_PROTOCOL,
+    deliveryId,
+    deliveryRevision: 2,
+    sessions: [{
+      stageRunId: 'stage-api-executor',
+      sessionBindingId: 'binding-api-executor',
+      dshSessionId: 'dsh-api-executor',
+      codexSessionId: 'codex-api-executor',
+      asOfSequence: '8',
+      plan: {
+        itemId: 'plan-api-executor',
+        explanation: 'Execute the approved DeliverySpec.',
+        items: [
+          { step: 'Implement the requested change', status: 'in_progress' },
+          { step: 'Run focused verification', status: 'pending' },
+        ],
+        text: null,
+        complete: false,
+        latestEvent: runtimeReference(2, 'plan.updated'),
+      },
+      agents: [{
+        threadId: 'codex-api-executor',
+        path: '/root',
+        parentThreadId: null,
+        nickname: null,
+        role: 'executor',
+        status: 'running',
+        latestEvent: runtimeReference(1, 'turn.started'),
+      }, {
+        threadId: 'codex-api-reviewer',
+        path: '/root/reviewer',
+        parentThreadId: 'codex-api-executor',
+        nickname: 'reviewer',
+        role: 'review',
+        status: 'waiting',
+        latestEvent: runtimeReference(3, 'subagent.started'),
+      }],
+      agentEdges: [{
+        parentThreadId: 'codex-api-executor',
+        childThreadId: 'codex-api-reviewer',
+      }],
+      activities: [{
+        callId: 'call-api-tests',
+        activityType: 'test',
+        command: 'pnpm test',
+        status: 'completed',
+        outcome: 'succeeded',
+        exitCode: 0,
+        latestEvent: runtimeReference(4, 'tool.completed'),
+      }],
+      interactions: [{
+        id: 'input-api-scope',
+        interactionType: 'user-input',
+        blocking: true,
+        status: 'pending',
+        questions: [{
+          id: 'question-api-scope',
+          header: 'Scope',
+          question: 'Keep the approved scope?',
+          isSecret: false,
+        }],
+        requestedEvent: runtimeReference(5, 'input.requested'),
+        resolvedEvent: null,
+      }],
+      failures: [{
+        message: 'The first request disconnected.',
+        code: 'response-stream-disconnected',
+        event: runtimeReference(6, 'failure'),
+      }],
+      recovery: {
+        state: 'required',
+        failureCount: 1,
+        recoveryCount: 0,
+        lastFailureEvent: runtimeReference(6, 'failure'),
+        latestRecoveryEvent: null,
+      },
+      diffSummary: {
+        changedFileCount: 1,
+        additions: 2,
+        deletions: 1,
+        detailsVisible: false,
+        event: runtimeReference(7, 'diff.updated'),
+      },
+      usage: {
+        totals: { input_tokens: 20, output_tokens: 8, total_tokens: 28 },
+        event: runtimeReference(8, 'usage.updated'),
+      },
+      evidence: [{
+        type: 'diff',
+        outcome: 'observed',
+        sourceRef: 'runtime_event:dsh-api-executor@7',
+        eventId: 'dsh-api-executor@7',
+      }],
+    }],
+  }
+}
+
 function candidate() {
   return {
     schemaVersion: 1,
@@ -141,11 +284,11 @@ function liveDiagramExecution() {
   }
 }
 
-function remediation() {
+function remediation(deliveryTaskId = 'delivery-task-api') {
   return {
     schemaVersion: STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
     protocol: 'winwincode.delivery-remediation.v1',
-    deliveryTaskId: 'delivery-task-api',
+    deliveryTaskId,
     candidate: candidate(),
     annotations: [{
       schemaVersion: STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
@@ -360,6 +503,12 @@ test('Delivery API accepts only bounded candidate-bound diagram remediation', ()
   )
   assert.equal(parsed.payload.remediation.candidate.diffSha256, 'e'.repeat(64))
   assert.equal(parsed.payload.remediation.annotations[0].filePath, 'src/result.ts')
+  const deliveryScoped = materializeStrongFlowDeliveryRequest(
+    'resolveAttention',
+    'request-valid-delivery-scoped-remediation',
+    { ...payload, remediation: remediation(null) },
+  )
+  assert.equal(deliveryScoped.payload.remediation.deliveryTaskId, null)
 
   expectApiError('INVALID_REQUEST', 'request.payload', () => (
     parseStrongFlowDeliveryRequest({
@@ -472,6 +621,114 @@ test('Delivery API keeps live diagram details absent and rejects stale or expose
       {
         ...liveDiagramExecution(),
         details: { filePath: 'src/result.ts', hunk: '@@ -1 +1 @@' },
+      },
+    )
+  ))
+})
+
+test('Delivery API returns a bounded runtime view for exact SessionBindings only', () => {
+  const request = materializeStrongFlowDeliveryRequest(
+    'getDeliveryProjection',
+    'request-runtime-response',
+    { deliveryId },
+  )
+  const response = materializeStrongFlowDeliverySuccess(
+    request,
+    runtimeDelivery(),
+    null,
+    runtimeExecution(),
+  )
+  const serialized = JSON.stringify(response)
+  assert.deepEqual(
+    parseStrongFlowDeliveryResponseForRequest(
+      request,
+      JSON.parse(serialized),
+    ),
+    response,
+  )
+  assert.equal(response.result.runtimeExecution.sessions[0].plan.items.length, 2)
+  assert.equal(response.result.runtimeExecution.sessions[0].agents.length, 2)
+  assert.equal(response.result.runtimeExecution.sessions[0].diffSummary.detailsVisible, false)
+  assert.doesNotMatch(serialized, /unifiedDiff|changedFiles|src\/result\.ts|@@ -1 \+1 @@/u)
+
+  expectApiError('RELATIONSHIP_MISMATCH', 'response.result.runtimeExecution', () => (
+    materializeStrongFlowDeliverySuccess(
+      request,
+      runtimeDelivery(),
+      null,
+      { ...runtimeExecution(), deliveryRevision: 1 },
+    )
+  ))
+  expectApiError(
+    'RELATIONSHIP_MISMATCH',
+    'response.result.runtimeExecution.sessions[0]',
+    () => materializeStrongFlowDeliverySuccess(
+      request,
+      runtimeDelivery(),
+      null,
+      {
+        ...runtimeExecution(),
+        sessions: [{
+          ...runtimeExecution().sessions[0],
+          sessionBindingId: 'binding-api-foreign',
+        }],
+      },
+    ),
+  )
+  expectApiError('INVALID_RESPONSE', 'response.result.runtimeExecution', () => (
+    materializeStrongFlowDeliverySuccess(
+      request,
+      runtimeDelivery(),
+      null,
+      {
+        ...runtimeExecution(),
+        sessions: [{
+          ...runtimeExecution().sessions[0],
+          diffSummary: {
+            ...runtimeExecution().sessions[0].diffSummary,
+            unifiedDiff: '@@ -1 +1 @@',
+          },
+        }],
+      },
+    )
+  ))
+  expectApiError(
+    'RELATIONSHIP_MISMATCH',
+    'response.result.runtimeExecution.sessions[0]',
+    () => materializeStrongFlowDeliverySuccess(
+      request,
+      runtimeDelivery(),
+      null,
+      {
+        ...runtimeExecution(),
+        sessions: [{
+          ...runtimeExecution().sessions[0],
+          plan: {
+            ...runtimeExecution().sessions[0].plan,
+            latestEvent: {
+              ...runtimeExecution().sessions[0].plan.latestEvent,
+              eventId: 'dsh-api-foreign@2',
+              sourceRef: 'runtime_event:dsh-api-foreign@2',
+            },
+          },
+        }],
+      },
+    ),
+  )
+  expectApiError('INVALID_RESPONSE', 'response.result.runtimeExecution', () => (
+    materializeStrongFlowDeliverySuccess(
+      request,
+      runtimeDelivery(),
+      null,
+      {
+        ...runtimeExecution(),
+        sessions: [{
+          ...runtimeExecution().sessions[0],
+          activities: Array.from({ length: 101 }, (_, index) => ({
+            ...runtimeExecution().sessions[0].activities[0],
+            callId: `call-api-tests-${String(index + 1)}`,
+          })),
+        }],
       },
     )
   ))

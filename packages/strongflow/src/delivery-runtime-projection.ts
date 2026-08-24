@@ -625,7 +625,7 @@ export class DeliveryRuntimeProjection {
       const claimedDshSessions = new Set<string>()
       const claimedCodexSessions = new Set<string>()
       for (const binding of this.delivery.sessionBindings) {
-        if (binding.dshSessionId !== null) {
+        if (binding.dshSessionId !== null && binding.codexSessionId !== null) {
           if (claimedDshSessions.has(binding.dshSessionId)) {
             throw new Error(`DSH session ${binding.dshSessionId} is bound more than once`)
           }

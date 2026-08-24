@@ -2,31 +2,34 @@
 
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const
 
-export type RuntimeEventKind =
-  | 'session.configured'
-  | 'turn.started'
-  | 'turn.completed'
-  | 'turn.aborted'
-  | 'item.started'
-  | 'item.completed'
-  | 'plan.updated'
-  | 'message.delta'
-  | 'message.completed'
-  | 'reasoning.delta'
-  | 'reasoning.completed'
-  | 'tool.started'
-  | 'tool.output'
-  | 'tool.completed'
-  | 'approval.requested'
-  | 'input.requested'
-  | 'diff.updated'
-  | 'usage.updated'
-  | 'subagent.started'
-  | 'subagent.updated'
-  | 'subagent.completed'
-  | 'failure'
-  | 'warning'
-  | 'notice'
+export const RUNTIME_EVENT_KINDS = Object.freeze([
+  'session.configured',
+  'turn.started',
+  'turn.completed',
+  'turn.aborted',
+  'item.started',
+  'item.completed',
+  'plan.updated',
+  'message.delta',
+  'message.completed',
+  'reasoning.delta',
+  'reasoning.completed',
+  'tool.started',
+  'tool.output',
+  'tool.completed',
+  'approval.requested',
+  'input.requested',
+  'diff.updated',
+  'usage.updated',
+  'subagent.started',
+  'subagent.updated',
+  'subagent.completed',
+  'failure',
+  'warning',
+  'notice',
+] as const)
+
+export type RuntimeEventKind = typeof RUNTIME_EVENT_KINDS[number]
 
 export type RuntimeTerminalReason =
   | 'completed'

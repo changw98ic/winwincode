@@ -41,6 +41,7 @@ import z from '@deepseek-ai/schemastery'
 import {
   STRONGFLOW_ROLE_IDS,
   strongFlowRoleSessionPolicy,
+  type FrozenDeliveryCandidate,
   type RuntimeEvent,
   type StrongFlowRoleId,
   type StrongFlowRoleSessionPolicy,
@@ -73,7 +74,12 @@ import {
 import {
   RuntimeSessionLedger,
   type RuntimeKernelLifecycle,
+  type RuntimeSessionManifest,
 } from './session-ledger.js'
+import {
+  reconcileDeliveryAfterRestart,
+  type DeliveryRecoverySnapshot,
+} from './delivery-recovery.js'
 
 const DEFAULT_ROLE_ID = 'chat'
 
@@ -112,6 +118,7 @@ export interface EmbeddedKernelPort extends KernelEventSource {
   steer(options: SteerOptions): Promise<SubmissionInfo>
   interrupt(sessionId: string): Promise<string>
   resolveApproval(response: ApprovalResponse): Promise<string>
+  listSessions(): Promise<readonly string[]>
   closeSession(sessionId: string): Promise<void>
   shutdown(): Promise<ShutdownInfo>
   events(sessionId: string, options?: EventStreamOptions): AsyncIterable<KernelEvent>
@@ -862,6 +869,26 @@ export class WinWinCodeAgentFactory extends Service implements AgentFactory {
     return (await RuntimeSessionLedger.open(this.config.home, dshSessionId).then(
       ledger => ledger.read(),
     )).events
+  }
+
+  /** Read the exact persisted route and native-session owner for one DSH Session. */
+  async readRuntimeSessionManifest(dshSessionId: string): Promise<RuntimeSessionManifest> {
+    return RuntimeSessionLedger.open(this.config.home, dshSessionId).then(
+      ledger => ledger.manifest,
+    )
+  }
+
+  /** Rebuild one Delivery and select its one legal next action without executing it. */
+  async reconcileDelivery(
+    deliveryId: string,
+    candidate: FrozenDeliveryCandidate | null = null,
+  ): Promise<DeliveryRecoverySnapshot> {
+    return reconcileDeliveryAfterRestart({
+      home: this.config.home,
+      deliveryId,
+      codex: { listSessions: () => this.kernel.listSessions() },
+      candidate,
+    })
   }
 
   async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {

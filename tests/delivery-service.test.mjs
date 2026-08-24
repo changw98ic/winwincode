@@ -161,7 +161,7 @@ async function fixture(t, name) {
       home,
       authenticator,
       clock: () => ++now,
-      diagramExecutionSource: {
+      executionSource: {
         async read() { return diagramFacts },
       },
     }),
@@ -513,7 +513,7 @@ test('StrongFlowService completes the reviewed Delivery lifecycle through atomic
     expectedRevision: 5,
     bindingId: 'reviewed-binding-plan-review',
     stageRunId: 'reviewed-stage-plan-review',
-    dshSessionId: 'reviewed-dsh-plan-review',
+    dshSessionId: 'reviewed-dsh-human-review',
     codexSessionId: null,
   })
   const approvedPlan = await current.service.resolveAttention({
@@ -668,7 +668,7 @@ test('StrongFlowService completes the reviewed Delivery lifecycle through atomic
     expectedRevision: 15,
     bindingId: 'reviewed-binding-delivery-review',
     stageRunId: 'reviewed-stage-delivery-review',
-    dshSessionId: 'reviewed-dsh-delivery-review',
+    dshSessionId: 'reviewed-dsh-human-review',
     codexSessionId: null,
   })
   const delivered = await current.service.resolveAttention({
@@ -687,6 +687,12 @@ test('StrongFlowService completes the reviewed Delivery lifecycle through atomic
   assert.equal(delivered.verdict.status, 'pass')
   assert.equal(delivered.stageRuns.every(run => run.status === 'succeeded'), true)
   assert.equal(delivered.attentionItems.every(item => item.status === 'resolved'), true)
+  assert.deepEqual(
+    delivered.sessionBindings
+      .filter(binding => binding.codexSessionId === null)
+      .map(binding => binding.dshSessionId),
+    ['reviewed-dsh-human-review', 'reviewed-dsh-human-review'],
+  )
 
   const restarted = new StrongFlowService({ home: current.home, authenticator })
   assert.deepEqual((await restarted.getDeliveryProjection(deliveryId)).delivery, delivered)
@@ -1426,6 +1432,20 @@ test('StrongFlowService can hand a failed verdict through rework into a new veri
   }
   await assert.rejects(
     current.service.resolveAttention({
+      requestId: 'dismiss-review-with-broadened-task-scope',
+      deliveryId,
+      expectedRevision: 12,
+      attentionItemId: deliveryReviewAttention.id,
+      status: 'dismissed',
+      resolution: 'This annotation removes the reviewed DeliveryTask boundary.',
+      remediation: { ...remediation, deliveryTaskId: null },
+      channel: 'local-ui',
+      authentication: { scheme: 'local-session', proof: 'fixture-proof-value' },
+    }),
+    expectServiceError('DELIVERY_CONFLICT'),
+  )
+  await assert.rejects(
+    current.service.resolveAttention({
       requestId: 'dismiss-review-with-stale-candidate',
       deliveryId,
       expectedRevision: 12,
@@ -1523,6 +1543,12 @@ test('StrongFlowService can hand a failed verdict through rework into a new veri
   const executingDiagram = await current.service.getDeliveryProjection(deliveryId)
   assert.equal(executingDiagram.diagramExecution.state, 'executing')
   assert.equal(executingDiagram.diagramExecution.details, null)
+  assert.equal(executingDiagram.runtimeExecution.deliveryId, deliveryId)
+  assert.equal(executingDiagram.runtimeExecution.deliveryRevision, executingDiagram.delivery.revision)
+  assert.equal(executingDiagram.runtimeExecution.sessions.some(session => (
+    session.sessionBindingId === freshSubmission.candidate.producerSessionBindingId
+      && session.diffSummary?.detailsVisible === false
+  )), true)
   assert.equal(
     executingDiagram.diagramExecution.architecture.nodes.find(node => (
       node.nodeId === remediation.annotations[0].nodeId
@@ -1532,12 +1558,13 @@ test('StrongFlowService can hand a failed verdict through rework into a new veri
   const restartedService = new StrongFlowService({
     home: current.home,
     authenticator,
-    diagramExecutionSource: {
+    executionSource: {
       async read() { return current.readDiagramFacts() },
     },
   })
   const restartedDiagram = await restartedService.getDeliveryProjection(deliveryId)
   assert.deepEqual(restartedDiagram.diagramExecution, executingDiagram.diagramExecution)
+  assert.deepEqual(restartedDiagram.runtimeExecution, executingDiagram.runtimeExecution)
   assert.equal(
     JSON.parse(restartedDiagram.delivery.attentionItems.at(-1).resolution)
       .annotations[0].nodeId,

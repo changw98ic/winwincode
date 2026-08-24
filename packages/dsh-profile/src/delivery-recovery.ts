@@ -172,8 +172,10 @@ function validateBindingShape(
   const grouped = bindingsByRun(delivery)
   const dshOwners = new Map<string, string>()
   const codexOwners = new Map<string, string>()
+  const runs = new Map(delivery.stageRuns.map(run => [run.id, run]))
   for (const binding of delivery.sessionBindings) {
-    if (binding.dshSessionId !== null) {
+    if (binding.dshSessionId !== null
+      && runs.get(binding.stageRunId)?.actorType === 'codex') {
       const owner = dshOwners.get(binding.dshSessionId)
       if (owner !== undefined) {
         recoveryError(

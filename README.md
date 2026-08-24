@@ -109,15 +109,18 @@ corepack pnpm start
 
 命令会启动 DSH Web，并默认打开 Chat。需要真实模型时，在 DSH 原有设置中选择 Provider、模型和凭据；这些内容不会写入 Delivery。
 
+GitHub 发布凭据也由 DSH 保存。需要运行显式 `live` 发布时，在 DSH 凭据文件 `$DSH_HOME/.credentials.yaml` 中配置 `GITHUB_TOKEN`；StrongFlow 只在每次 GitHub 请求开始时解析该引用，不会把 token 写入 Delivery、审核包、发布 journal 或响应。未选择 `live` 时仍执行零远端写入的 dry-run。
+
 在会话界面主动切换到 **StrongFlow**，即可进入高级工作台。当前页面支持：
 
 - 创建或按 ID 跟踪 Delivery；
+- 确认当前 `DeliverySpec`，并用一个“推进下一阶段”操作建立、绑定和驱动当前合法的角色 Session；
 - 查看 `DeliverySpec`、范围、约束和验收条件；
 - 在独立方案区查看系统架构图、流程图、风险和未决事项；
 - 只允许绑定的人工 DSH Session 提交方案或交付决定；
 - 查看执行前、执行中和执行结束图；
-- 在执行结束图上把返工意见绑定到当前黄色节点和 Diff hunk；
-- 跳回绑定的 DSH Session 查看 Codex Plan、Agent Graph 和工具活动。
+- 在执行结束图上把返工意见绑定到当前黄色节点和 Diff hunk，并自动交给有次数上限的 `remediator` Session；
+- 直接查看绑定 Session 的 Codex Plan、Agent Graph、命令、测试、待处理交互、失败恢复、变更数量和用量，并可继续打开原始 Chat Session。
 
 ### 5. 检查发布包体验
 
@@ -148,7 +151,9 @@ installed host package passed DSH Web, keyless chat, CLI, signal, restart, Atten
 - 支持独立 Reviewer、Verifier 和可选 Adversarial Verifier；
 - 从当前 Spec、候选和运行事实计算 Evidence、逐项结果与 Verdict；
 - 支持有限返工、旧候选失效、重启恢复和最终人工交付审核；
+- 从 StrongFlow 浏览器完成需求确认、方案生成与审核、候选执行、独立验证、黄色节点返工和最终交付审核；
 - 生成确定性的 GitHub Review Package，并以 dry-run 作为默认发布模式；
+- 随安装 profile 提供使用 DSH `GITHUB_TOKEN` 引用的 GitHub 适配器，可对账 branch、Pull Request、Issue comment 和 commit status；
 - 为四个 macOS/Linux 目标生成独立原生包和发布证据；
 - 从来源事实派生完整度、可信度、稳定性、人工依赖度和效率，不生成黑盒总分。
 
@@ -156,9 +161,8 @@ installed host package passed DSH Web, keyless chat, CLI, signal, restart, Atten
 
 - Windows 尚未进入首发平台。
 - 当前运行方式是本机单用户 Host；Organization、共享数据库、RBAC、SSO、多租户隔离和跨机器调度尚未进入这一版本。
-- StrongFlow 浏览器目前负责 Delivery 创建、跟踪和人工审核；完整的阶段驱动通过 Host API、CLI 和确定性 Delivery fixture 验证，浏览器还没有“一次点击后自动建立全部真实仓库阶段 Session”的入口。
 - 真实模型执行需要用户在 DSH 中配置可用 Provider。无密钥 fixture 证明流程和边界，不代表某个模型在真实项目中的质量。
-- GitHub 远端写入需要显式 live 模式、当前人工批准和提供商适配器；默认流程只生成本地审核包和 dry-run 记录。
+- GitHub 远端写入需要显式 live 模式、当前人工批准和 DSH 中已配置的 `GITHUB_TOKEN`；默认流程只生成本地审核包和 dry-run 记录。
 - Jira、Linear、Slack 和 Teams 仍是外部协作系统；当前仓库没有这些连接器。
 
 ## 开发与验证

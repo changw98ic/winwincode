@@ -71,6 +71,8 @@ const packages = [
       'package/dist/agent-factory.d.ts',
       'package/dist/delivery-recovery.js',
       'package/dist/delivery-recovery.d.ts',
+      'package/dist/github-publication-provider.js',
+      'package/dist/github-publication-provider.d.ts',
     ],
     forbidden: ['package/dist/strongflow-approval.js'],
     allowedRootFiles: ['package/cordis.patch.yml'],

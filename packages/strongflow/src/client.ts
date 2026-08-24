@@ -13,6 +13,7 @@ import {
   STRONGFLOW_GITHUB_PUBLICATION_SCHEMA_VERSION,
   STRONGFLOW_PLAN_REVIEW_DECISION_PROTOCOL,
   STRONGFLOW_PLAN_REVIEW_SCHEMA_VERSION,
+  materializeStrongFlowDeliveryAdvanceRequest,
   materializeStrongFlowDeliveryRequest,
   deliveryIdForGitHubIssueSource,
   parseGitHubIssueSourceRef,
@@ -29,8 +30,11 @@ import {
   type Delivery,
   type DeliveryStatus,
   type StrongFlowDeliveryRequest,
+  type StrongFlowDeliveryAdvanceOutcome,
+  type StrongFlowDeliveryAdvanceRequest,
   type StrongFlowDiagramExecutionProjection,
   type StrongFlowDiagramExecutionDiagram,
+  type StrongFlowRuntimeExecutionProjection,
   type StrongFlowRemediationDiagramKind,
   type StrongFlowPlanReviewAction,
   type StrongFlowPlanReviewContext,
@@ -86,8 +90,16 @@ type StrongFlowRemoteResult = Awaited<ReturnType<
   TypertClientRemote['strongflow']['invoke']
 >>
 
+type StrongFlowAdvanceRemoteResult = Awaited<ReturnType<
+  TypertClientRemote['strongflow']['advance']
+>>
+
 interface StrongFlowScopedRemote {
   readonly strongflow: {
+    advance(
+      request: StrongFlowDeliveryAdvanceRequest,
+      signal?: AbortSignal,
+    ): Promise<StrongFlowAdvanceRemoteResult>
     invoke(
       request: StrongFlowDeliveryRequest,
       signal?: AbortSignal,
@@ -109,6 +121,10 @@ interface StrongFlowClientContext {
 
 export interface StrongFlowViewInjected {
   readonly defaultRepository: string
+  readonly invokeAdvance: (
+    request: StrongFlowDeliveryAdvanceRequest,
+    signal?: AbortSignal,
+  ) => Promise<StrongFlowDeliveryAdvanceInvocation>
   readonly invokeDelivery: (
     request: StrongFlowDeliveryRequest,
     signal?: AbortSignal,
@@ -116,9 +132,15 @@ export interface StrongFlowViewInjected {
   readonly openSession: (sessionId: string) => void
 }
 
+export interface StrongFlowDeliveryAdvanceInvocation {
+  readonly delivery: Delivery
+  readonly outcome: StrongFlowDeliveryAdvanceOutcome
+}
+
 export interface StrongFlowDeliveryInvocation {
   readonly delivery: Delivery
   readonly diagramExecution: StrongFlowDiagramExecutionProjection | null
+  readonly runtimeExecution: StrongFlowRuntimeExecutionProjection | null
 }
 
 export interface StrongFlowViewProps extends StrongFlowViewInjected {
@@ -143,7 +165,10 @@ export interface StrongFlowCreateDraft {
   readonly githubHeadBranch: string
 }
 
-export type StrongFlowClientErrorCode = 'REMOTE_FAILURE' | 'DELIVERY_FAILURE'
+export type StrongFlowClientErrorCode =
+  | 'REMOTE_FAILURE'
+  | 'DELIVERY_FAILURE'
+  | 'ADVANCE_FAILURE'
 
 export class StrongFlowClientError extends Error {
   readonly code: StrongFlowClientErrorCode
@@ -287,6 +312,53 @@ export function createDeliveryRequestFromDraft(
   })
 }
 
+/** Confirm the exact draft on screen as the next immutable DeliverySpec revision. */
+export function createRequirementsApprovalRequest(
+  delivery: Delivery,
+  requestIdValue: string,
+): StrongFlowDeliveryRequest {
+  if (delivery.status !== 'draft' && delivery.status !== 'clarifying') {
+    throw new TypeError('只有草稿或需求澄清状态可以确认交付定义')
+  }
+  const nextRevision = delivery.spec.revision + 1
+  const suffix = `:approved:${String(nextRevision)}`
+  const nextSpecId = DeliverySpecId(
+    `${delivery.spec.id.slice(0, 200 - suffix.length)}${suffix}`,
+  )
+  return materializeStrongFlowDeliveryRequest('updateDeliverySpec', requestIdValue, {
+    deliveryId: delivery.id,
+    expectedRevision: delivery.revision,
+    spec: {
+      schemaVersion: delivery.spec.schemaVersion,
+      id: nextSpecId,
+      deliveryId: delivery.spec.deliveryId,
+      revision: nextRevision,
+      title: delivery.spec.title,
+      goal: delivery.spec.goal,
+      scope: [...delivery.spec.scope],
+      outOfScope: [...delivery.spec.outOfScope],
+      constraints: [...delivery.spec.constraints],
+      acceptanceCriteria: delivery.spec.acceptanceCriteria.map(criterion => ({
+        schemaVersion: criterion.schemaVersion,
+        id: criterion.id,
+        description: criterion.description,
+        verificationMethod: criterion.verificationMethod,
+        required: criterion.required,
+      })),
+      sourceRef: delivery.spec.sourceRef === null
+        ? null
+        : { ...delivery.spec.sourceRef },
+      publicationTarget: delivery.spec.publicationTarget === null
+        ? null
+        : { ...delivery.spec.publicationTarget },
+      repository: { ...delivery.spec.repository },
+      baseRevision: delivery.spec.baseRevision,
+      maxReworkAttempts: delivery.spec.maxReworkAttempts,
+      createdAtMillis: delivery.spec.createdAtMillis,
+    },
+  })
+}
+
 function requestId(operation: string, identity: string): string {
   requestSequence += 1
   const compactIdentity = identity.slice(0, 160)
@@ -410,6 +482,64 @@ export function createGitHubPublicationDecisionRequest(
   })
 }
 
+export interface StrongFlowLocalDeliveryApprovalRequestInput {
+  readonly delivery: Delivery
+  readonly attentionItemId: string
+  readonly comments: string
+  readonly requestId: string
+}
+
+/** Approve one exact local candidate and passing verdict from its bound review Session. */
+export function createLocalDeliveryApprovalRequest(
+  input: StrongFlowLocalDeliveryApprovalRequestInput,
+): StrongFlowDeliveryRequest {
+  const item = input.delivery.attentionItems.find(entry => (
+    entry.id === input.attentionItemId
+    && entry.type === 'delivery_approval'
+    && entry.status === 'open'
+    && entry.stageRunId !== null
+  ))
+  const run = item === undefined
+    ? undefined
+    : input.delivery.stageRuns.find(entry => (
+      entry.id === item.stageRunId
+      && entry.stage === 'delivery-review'
+      && entry.actorType === 'human'
+      && entry.status === 'waiting'
+    ))
+  const verdict = input.delivery.verdict
+  let context: unknown
+  try {
+    context = item === undefined ? null : JSON.parse(item.context) as unknown
+  } catch {
+    context = null
+  }
+  if (item === undefined
+    || run === undefined
+    || verdict?.status !== 'pass'
+    || typeof context !== 'object'
+    || context === null
+    || Array.isArray(context)
+    || Reflect.get(context, 'candidateRef') !== verdict.candidateRef
+    || Reflect.get(context, 'deliveryVerdictId') !== verdict.id
+    || input.comments.trim().length === 0) {
+    throw new TypeError('当前本地交付审核集合与通过的候选版本不一致')
+  }
+  return materializeStrongFlowDeliveryRequest('resolveAttention', input.requestId, {
+    deliveryId: input.delivery.id,
+    expectedRevision: input.delivery.revision,
+    attentionItemId: item.id,
+    status: 'resolved',
+    resolution: input.comments.trim(),
+    remediation: null,
+    channel: 'local-ui',
+    authentication: {
+      scheme: 'local-session',
+      proof: STRONGFLOW_LOCAL_SESSION_AUTH_REFERENCE,
+    },
+  })
+}
+
 export interface StrongFlowDiagramAnnotationDraft {
   readonly diagramKind: StrongFlowRemediationDiagramKind
   readonly nodeId: string
@@ -451,9 +581,6 @@ export function createDiagramRemediationRequest(
   }
   if (input.annotations.length === 0) throw new TypeError('至少标注一个具体变更 hunk')
   const details = input.projection.details
-  if (details.provenance.deliveryTaskId === null) {
-    throw new TypeError('当前候选没有可返工的 DeliveryTask')
-  }
   if (details.provenance.evidenceRefIds.length === 0) {
     throw new TypeError('当前候选还没有可绑定的验收依据')
   }
@@ -508,6 +635,30 @@ export function createDiagramRemediationRequest(
       proof: STRONGFLOW_LOCAL_SESSION_AUTH_REFERENCE,
     },
   })
+}
+
+export interface StrongFlowResolvedRemediationAdvanceInput {
+  readonly request: StrongFlowDeliveryRequest
+  readonly delivery: Delivery
+  readonly requestId: string
+  readonly invokeAdvance: (
+    request: StrongFlowDeliveryAdvanceRequest,
+  ) => Promise<StrongFlowDeliveryAdvanceInvocation>
+}
+
+/** Continue a validated diagram decision through its one remediator stage. */
+export async function advanceResolvedDiagramRemediation(
+  input: StrongFlowResolvedRemediationAdvanceInput,
+): Promise<StrongFlowDeliveryAdvanceInvocation | null> {
+  if (input.request.operation !== 'resolveAttention'
+    || input.request.payload.remediation === null
+    || input.delivery.id !== input.request.payload.deliveryId
+    || input.delivery.status !== 'reworking') return null
+  return input.invokeAdvance(materializeStrongFlowDeliveryAdvanceRequest(
+    input.requestId,
+    input.delivery.id,
+    input.delivery.revision,
+  ))
 }
 
 function selectionStorageKey(sessionId: string): string {
@@ -827,9 +978,14 @@ function EmptyState(props: EmptyStateProps): ReactElement {
 interface DeliveryProjectionProps {
   readonly delivery: Delivery
   readonly diagramExecution?: StrongFlowDiagramExecutionProjection | null
+  readonly runtimeExecution?: StrongFlowRuntimeExecutionProjection | null
   readonly sessionId: string
   readonly refreshing: boolean
+  readonly advancing: boolean
+  readonly advanceMessage: string
   readonly onRefresh: () => void
+  readonly onAdvance: () => void
+  readonly onRequirementsApproval: () => void
   readonly onClose: () => void
   readonly openSession: (sessionId: string) => void
   readonly onPlanReviewDecision: (request: StrongFlowDeliveryRequest) => Promise<void>
@@ -844,6 +1000,212 @@ function Metric(props: { readonly label: string; readonly value: ReactNode }): R
 
 function EmptyRow(props: { readonly children: ReactNode }): ReactElement {
   return createElement('p', { className: 'wwc-empty-row' }, props.children)
+}
+
+const RUNTIME_PLAN_STATUS_LABELS = Object.freeze({
+  pending: '待执行',
+  in_progress: '执行中',
+  completed: '已完成',
+} as const)
+
+const RUNTIME_RECOVERY_LABELS = Object.freeze({
+  none: '未发生故障',
+  required: '等待恢复',
+  'in-progress': '恢复中',
+  recovered: '已恢复',
+} as const)
+
+function RuntimeExecutionPanel(props: {
+  readonly delivery: Delivery
+  readonly projection: StrongFlowRuntimeExecutionProjection | null
+  readonly openSession: (sessionId: string) => void
+}): ReactElement {
+  const runs = new Map(props.delivery.stageRuns.map(run => [run.id, run]))
+  const sessions = props.projection?.sessions ?? []
+  return createElement('section', { className: 'wwc-panel wwc-runtime-execution' },
+    createElement('div', { className: 'wwc-panel__heading' },
+      createElement('div', null,
+        createElement('p', { className: 'wwc-eyebrow' }, 'Codex Runtime'),
+        createElement('h2', null, 'Codex 执行视图'),
+        createElement('p', { className: 'wwc-muted' },
+          '这里按绑定的 Session 重建当前计划、Agent 关系和执行活动；实时变更只显示数量。',
+        ),
+      ),
+    ),
+    sessions.length === 0
+      ? createElement(EmptyRow, null, '当前还没有可展示的 Codex 运行事件。')
+      : createElement('div', { className: 'wwc-stack' }, sessions.map((session) => {
+        const run = runs.get(session.stageRunId)
+        const pendingInteractions = session.interactions.filter(entry => entry.status === 'pending')
+        return createElement('article', {
+          className: 'wwc-runtime-session',
+          key: session.sessionBindingId,
+        },
+        createElement('div', { className: 'wwc-row__title' },
+          createElement('strong', null,
+            run === undefined
+              ? '已绑定 Codex Session'
+              : `${STAGE_LABELS[run.stage]} · ${run.role}`,
+          ),
+          createElement('span', { className: 'wwc-code' },
+            `事件 ${session.asOfSequence}`,
+          ),
+        ),
+        createElement('div', { className: 'wwc-binding' },
+          session.dshSessionId === null
+            ? null
+            : createElement('button', {
+              className: 'wwc-session-link',
+              type: 'button',
+              onClick: () => props.openSession(session.dshSessionId!),
+            }, `打开 Chat Session · ${session.dshSessionId}`),
+          session.codexSessionId === null
+            ? null
+            : createElement('span', { className: 'wwc-code' },
+              `Codex · ${session.codexSessionId}`,
+            ),
+        ),
+        createElement('div', { className: 'wwc-runtime-grid' },
+          createElement('section', { className: 'wwc-runtime-block' },
+            createElement('h3', null, '当前 Plan'),
+            session.plan === null
+              ? createElement(EmptyRow, null, '当前 Session 尚未发布 Plan。')
+              : createElement(Fragment, null,
+                session.plan.explanation === null
+                  ? null
+                  : createElement('p', null, session.plan.explanation),
+                session.plan.items.length === 0
+                  ? createElement('pre', { className: 'wwc-runtime-text' },
+                    session.plan.text ?? 'Plan 尚未形成结构化步骤。',
+                  )
+                  : createElement('ol', { className: 'wwc-runtime-list' },
+                    session.plan.items.map((item, index) => createElement('li', {
+                      key: `${item.step}:${String(index)}`,
+                    },
+                    createElement('span', {
+                      className: `wwc-pill wwc-pill--${item.status}`,
+                    }, RUNTIME_PLAN_STATUS_LABELS[item.status]),
+                    createElement('span', null, item.step),
+                    )),
+                  ),
+              ),
+          ),
+          createElement('section', { className: 'wwc-runtime-block' },
+            createElement('h3', null, 'Agent Graph'),
+            session.agents.length === 0
+              ? createElement(EmptyRow, null, '当前还没有 Agent 节点。')
+              : createElement('ul', { className: 'wwc-runtime-list' },
+                session.agents.map(agent => createElement('li', { key: agent.threadId },
+                  createElement('div', { className: 'wwc-row__title' },
+                    createElement('strong', null, agent.nickname ?? agent.threadId),
+                    createElement('span', {
+                      className: `wwc-pill wwc-pill--${agent.status}`,
+                    }, agent.status),
+                  ),
+                  agent.nickname === null
+                    ? null
+                    : createElement('p', { className: 'wwc-code' }, agent.threadId),
+                  createElement('p', { className: 'wwc-muted' }, [
+                    agent.role === null ? null : `角色：${agent.role}`,
+                    agent.parentThreadId === null
+                      ? '根节点'
+                      : `父节点：${agent.parentThreadId}`,
+                    agent.path === null ? null : `路径：${agent.path}`,
+                  ].filter(Boolean).join(' · ')),
+                )),
+              ),
+          ),
+          createElement('section', { className: 'wwc-runtime-block' },
+            createElement('h3', null, '最近命令与验证'),
+            session.activities.length === 0
+              ? createElement(EmptyRow, null, '当前还没有命令或测试活动。')
+              : createElement('ul', { className: 'wwc-runtime-list' },
+                session.activities.map(activity => createElement('li', { key: activity.callId },
+                  createElement('div', { className: 'wwc-row__title' },
+                    createElement('strong', null,
+                      activity.activityType === 'test' ? '测试' : '命令',
+                    ),
+                    createElement('span', {
+                      className: `wwc-pill wwc-pill--${activity.status}`,
+                    }, `${activity.status} · ${activity.outcome}`),
+                  ),
+                  createElement('code', null, activity.command ?? '命令内容已隐藏'),
+                  createElement('p', { className: 'wwc-muted' },
+                    activity.exitCode === null
+                      ? activity.callId
+                      : `${activity.callId} · exit ${String(activity.exitCode)}`,
+                  ),
+                )),
+              ),
+          ),
+          createElement('section', { className: 'wwc-runtime-block' },
+            createElement('h3', null, '待处理交互'),
+            pendingInteractions.length === 0
+              ? createElement(EmptyRow, null, '当前没有等待处理的问题或执行审批。')
+              : createElement('ul', { className: 'wwc-runtime-list' },
+                pendingInteractions.map(interaction => createElement('li', { key: interaction.id },
+                  createElement('div', { className: 'wwc-row__title' },
+                    createElement('strong', null,
+                      interaction.interactionType === 'user-input' ? 'Agent 提问' : '执行审批',
+                    ),
+                    interaction.blocking
+                      ? createElement('span', { className: 'wwc-pill wwc-pill--blocking' },
+                        '阻止当前 Turn',
+                      )
+                      : null,
+                  ),
+                  interaction.questions.length === 0
+                    ? createElement('p', null, '等待用户处理。')
+                    : createElement('ul', null, interaction.questions.map(question => (
+                      createElement('li', { key: question.id },
+                        createElement('strong', null, question.header),
+                        createElement('p', null, question.question),
+                      )
+                    ))),
+                )),
+              ),
+          ),
+          createElement('section', { className: 'wwc-runtime-block' },
+            createElement('h3', null, '失败与恢复'),
+            createElement('p', null,
+              `${RUNTIME_RECOVERY_LABELS[session.recovery.state]} · ${String(session.recovery.failureCount)} 次失败 · ${String(session.recovery.recoveryCount)} 次恢复`,
+            ),
+            session.failures.length === 0
+              ? createElement(EmptyRow, null, '当前没有失败记录。')
+              : createElement('ul', null, session.failures.map(failure => (
+                createElement('li', { key: failure.event.eventId },
+                  failure.code === null
+                    ? failure.message
+                    : `${failure.message}（${failure.code}）`,
+                )
+              ))),
+          ),
+          createElement('section', { className: 'wwc-runtime-block' },
+            createElement('h3', null, '变更与用量摘要'),
+            session.diffSummary === null
+              ? createElement('p', null, '当前还没有代码变更摘要。')
+              : createElement(Fragment, null,
+                createElement('p', null,
+                  `${String(session.diffSummary.changedFileCount)} 个文件 · +${String(session.diffSummary.additions)} / -${String(session.diffSummary.deletions)}`,
+                ),
+                createElement('p', { className: 'wwc-muted' },
+                  '执行中不展示文件路径和具体变更；候选冻结后从黄色图节点进入审核。',
+                ),
+              ),
+            session.usage === null
+              ? createElement('p', { className: 'wwc-muted' }, '当前还没有模型用量。')
+              : createElement('div', { className: 'wwc-runtime-usage' },
+                Object.entries(session.usage.totals).map(([key, value]) => (
+                  createElement('span', { className: 'wwc-code', key },
+                    `${key}：${String(value)}`,
+                  )
+                )),
+              ),
+          ),
+        ),
+        )
+      })),
+  )
 }
 
 function domToken(value: string): string {
@@ -1657,9 +2019,111 @@ function GitHubPublicationPanel(props: {
   )
 }
 
+function LocalDeliveryReviewPanel(props: {
+  readonly delivery: Delivery
+  readonly item: AttentionItem
+  readonly sessionId: string
+  readonly openSession: (sessionId: string) => void
+  readonly onDecision: (request: StrongFlowDeliveryRequest) => Promise<void>
+}): ReactElement {
+  const [comments, setComments] = useState('已核对当前冻结候选、独立验证结果和验收依据。')
+  const [submitting, setSubmitting] = useState(false)
+  const [message, setMessage] = useState('')
+  const reviewBinding = props.delivery.sessionBindings.find(binding => (
+    binding.stageRunId === props.item.stageRunId
+    && binding.dshSessionId !== null
+    && binding.codexSessionId === null
+  ))
+  const ownsReview = reviewBinding?.dshSessionId === props.sessionId
+
+  const approve = async (): Promise<void> => {
+    setSubmitting(true)
+    setMessage('')
+    try {
+      await props.onDecision(createLocalDeliveryApprovalRequest({
+        delivery: props.delivery,
+        attentionItemId: props.item.id,
+        comments,
+        requestId: requestId('local-delivery-approval', props.item.id),
+      }))
+      setMessage('当前本地候选已批准交付。')
+    } catch (error) {
+      setMessage(errorText(error))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return createElement('section', { className: 'wwc-panel wwc-local-delivery-review' },
+    createElement('div', { className: 'wwc-panel__heading' },
+      createElement('div', null,
+        createElement('p', { className: 'wwc-eyebrow' }, 'Local Delivery Review'),
+        createElement('h2', null, '本地交付审核'),
+        createElement('p', { className: 'wwc-muted' },
+          '审核冻结候选、黄色变更节点和通过的独立验收结论。',
+        ),
+      ),
+      createElement('span', {
+        className: `wwc-pill wwc-pill--${props.item.status}`,
+      }, props.item.status === 'open' ? '等待决定' : props.item.status),
+    ),
+    props.item.status !== 'open'
+      ? createElement('section', { className: 'wwc-review-decision' },
+        createElement('h3', null, '已记录的人工决定'),
+        createElement('p', null, props.item.resolution ?? '已批准当前本地候选。'),
+      )
+      : !ownsReview
+        ? createElement('section', { className: 'wwc-review-session-notice', role: 'status' },
+          createElement('strong', null, '当前页面为只读交付审核视图'),
+          createElement('p', null,
+            reviewBinding === undefined
+              ? '这项审核尚未绑定人工 DSH Session。'
+              : '请进入绑定的交付审核 Session 后再批准候选。',
+          ),
+          reviewBinding?.dshSessionId === null || reviewBinding === undefined
+            ? null
+            : createElement('button', {
+              className: 'wwc-session-link',
+              type: 'button',
+              onClick: () => props.openSession(reviewBinding.dshSessionId!),
+            }, `打开交付审核 Session · ${shortReference(reviewBinding.dshSessionId)}`),
+        )
+        : createElement('form', {
+          className: 'wwc-review-form',
+          'aria-busy': submitting,
+          onSubmit: (event: FormEvent<HTMLFormElement>) => {
+            event.preventDefault()
+            void approve()
+          },
+        },
+        createElement('label', { className: 'wwc-field' },
+          createElement('span', { className: 'wwc-field__label' }, '交付审核意见'),
+          createElement('textarea', {
+            value: comments,
+            rows: 3,
+            maxLength: 65_536,
+            onChange: (event: ChangeEvent<HTMLTextAreaElement>) => {
+              setComments(inputValue(event))
+            },
+          }),
+        ),
+        createElement('button', {
+          type: 'submit',
+          disabled: submitting || comments.trim().length === 0,
+        }, submitting ? '正在批准…' : '批准当前本地候选'),
+        createElement('p', {
+          className: 'wwc-review-result',
+          role: message.length === 0 ? undefined : 'status',
+          'aria-live': 'polite',
+        }, message),
+        ),
+  )
+}
+
 /** Pure rendering of the ten canonical Delivery facts; it owns no execution state. */
 export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): ReactElement {
   const delivery = props.delivery
+  const advanceMessage = props.advanceMessage ?? ''
   const bindingsByRun = useMemo(() => new Map(
     delivery.sessionBindings.map(binding => [binding.stageRunId, binding]),
   ), [delivery.sessionBindings])
@@ -1675,11 +2139,31 @@ export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): Re
     const context = githubPublicationContext(item)
     return context === null ? [] : [{ item, context }]
   })
+  const localDeliveryReviews = delivery.attentionItems.filter(item => (
+    item.type === 'delivery_approval'
+    && item.stageRunId !== null
+    && delivery.spec.publicationTarget === null
+    && delivery.stageRuns.some(run => (
+      run.id === item.stageRunId && run.stage === 'delivery-review'
+    ))
+  ))
   const planReviewIds = new Set(planReviews.map(review => review.item.id))
   const publicationReviewIds = new Set(publicationReviews.map(review => review.item.id))
+  const localDeliveryReviewIds = new Set(localDeliveryReviews.map(item => item.id))
   const otherAttentionItems = delivery.attentionItems.filter(item => (
-    !planReviewIds.has(item.id) && !publicationReviewIds.has(item.id)
+    !planReviewIds.has(item.id)
+    && !publicationReviewIds.has(item.id)
+    && !localDeliveryReviewIds.has(item.id)
   ))
+  const openBlockingAttention = delivery.attentionItems.some(item => (
+    item.blocking && item.status === 'open'
+  ))
+  const requirementsNeedApproval = delivery.status === 'draft'
+    || delivery.status === 'clarifying'
+  const canAdvance = !requirementsNeedApproval
+    && delivery.status !== 'needs-attention'
+    && delivery.status !== 'delivered'
+    && !openBlockingAttention
 
   return createElement('main', { className: 'wwc-delivery' },
     createElement('section', { className: 'wwc-hero' },
@@ -1695,6 +2179,19 @@ export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): Re
         createElement('p', { className: 'wwc-hero__goal' }, delivery.spec.goal),
       ),
       createElement('div', { className: 'wwc-hero__actions' },
+        requirementsNeedApproval
+          ? createElement('button', {
+            className: 'wwc-button',
+            type: 'button',
+            disabled: props.advancing,
+            onClick: props.onRequirementsApproval,
+          }, props.advancing ? '正在确认…' : '确认需求定义')
+          : createElement('button', {
+            className: 'wwc-button',
+            type: 'button',
+            disabled: props.advancing || !canAdvance,
+            onClick: props.onAdvance,
+          }, props.advancing ? '正在推进…' : '推进下一阶段'),
         createElement('button', {
           className: 'wwc-button wwc-button--quiet',
           type: 'button',
@@ -1706,6 +2203,13 @@ export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): Re
           type: 'button',
           onClick: props.onClose,
         }, '打开其他 Delivery'),
+        advanceMessage.length === 0
+          ? null
+          : createElement('p', {
+            className: 'wwc-advance-result',
+            role: 'status',
+            'aria-live': 'polite',
+          }, advanceMessage),
       ),
     ),
     createElement('section', { className: 'wwc-metrics', 'aria-label': 'Delivery 摘要' },
@@ -1836,6 +2340,14 @@ export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): Re
           openSession: props.openSession,
           onDecision: props.onPlanReviewDecision,
         })),
+        ...localDeliveryReviews.map(item => createElement(LocalDeliveryReviewPanel, {
+          key: item.id,
+          delivery,
+          item,
+          sessionId: props.sessionId,
+          openSession: props.openSession,
+          onDecision: props.onPlanReviewDecision,
+        })),
         createElement('section', { className: 'wwc-panel' },
           createElement('div', { className: 'wwc-panel__heading' },
             createElement('div', null,
@@ -1869,7 +2381,7 @@ export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): Re
               createElement('p', { className: 'wwc-eyebrow' }, 'StageRun + SessionBinding'),
               createElement('h2', null, '交付阶段'),
               createElement('p', { className: 'wwc-muted' },
-                '阶段由 WinWinCode 记录；Plan、Agent Graph 和工具活动仍从绑定的 Codex Session 读取。',
+                '阶段由 WinWinCode 记录；下方视图从绑定的 Codex Session 只读重建执行事实。',
               ),
             ),
           ),
@@ -1908,6 +2420,11 @@ export function StrongFlowDeliveryProjection(props: DeliveryProjectionProps): Re
               )
             })),
         ),
+        createElement(RuntimeExecutionPanel, {
+          delivery,
+          projection: props.runtimeExecution ?? null,
+          openSession: props.openSession,
+        }),
         createElement('section', { className: 'wwc-panel' },
           createElement('div', { className: 'wwc-panel__heading' },
             createElement('div', null,
@@ -1995,8 +2512,12 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
   const [delivery, setDelivery] = useState<Delivery | null>(null)
   const [diagramExecution, setDiagramExecution] =
     useState<StrongFlowDiagramExecutionProjection | null>(null)
+  const [runtimeExecution, setRuntimeExecution] =
+    useState<StrongFlowRuntimeExecutionProjection | null>(null)
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [advancing, setAdvancing] = useState(false)
+  const [advanceMessage, setAdvanceMessage] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   const fetchDelivery = useCallback(async (
@@ -2015,6 +2536,7 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
     if (selectedDeliveryId.length === 0) {
       setDelivery(null)
       setDiagramExecution(null)
+      setRuntimeExecution(null)
       return undefined
     }
     const controller = new AbortController()
@@ -2028,6 +2550,7 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
           ? previous
           : next.delivery)
         setDiagramExecution(next.diagramExecution)
+        setRuntimeExecution(next.runtimeExecution)
         setError(null)
       } catch (cause) {
         if (!active || controller.signal.aborted) return
@@ -2053,6 +2576,7 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
     const deliveryId = loadValue.trim()
     if (deliveryId.length === 0) return
     setError(null)
+    setAdvanceMessage('')
     setLoading(true)
     setSelectedDeliveryId(deliveryId)
     writeSelection(props.sessionId, deliveryId)
@@ -2071,8 +2595,10 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
       const next = await props.invokeDelivery(request)
       setDelivery(next.delivery)
       setDiagramExecution(next.diagramExecution)
+      setRuntimeExecution(next.runtimeExecution)
       setLoadValue(next.delivery.id)
       setSelectedDeliveryId(next.delivery.id)
+      setAdvanceMessage('Delivery 草稿已创建，请确认需求定义。')
       writeSelection(props.sessionId, next.delivery.id)
     } catch (cause) {
       setError(errorText(cause))
@@ -2088,6 +2614,7 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
       const next = await fetchDelivery(selectedDeliveryId)
       setDelivery(next.delivery)
       setDiagramExecution(next.diagramExecution)
+      setRuntimeExecution(next.runtimeExecution)
       setError(null)
     } catch (cause) {
       setError(errorText(cause))
@@ -2097,14 +2624,92 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
   }
 
   const decidePlanReview = async (request: StrongFlowDeliveryRequest): Promise<void> => {
+    const startsDiagramRemediation = request.operation === 'resolveAttention'
+      && request.payload.remediation !== null
     setError(null)
+    if (startsDiagramRemediation) {
+      setAdvanceMessage('正在确认候选绑定的返工标注…')
+      setAdvancing(true)
+    }
     try {
       const next = await props.invokeDelivery(request)
       setDelivery(next.delivery)
       setDiagramExecution(next.diagramExecution)
+      setRuntimeExecution(next.runtimeExecution)
+      if (startsDiagramRemediation) {
+        setAdvanceMessage('返工标注已确认，remediator 正在执行。')
+        const advanced = await advanceResolvedDiagramRemediation({
+          request,
+          delivery: next.delivery,
+          requestId: requestId('advance-remediation', next.delivery.id),
+          invokeAdvance: props.invokeAdvance,
+        })
+        if (advanced === null) {
+          throw new StrongFlowClientError(
+            'ADVANCE_FAILURE',
+            '返工标注已记录，但 Delivery 尚未进入可执行的返工状态。',
+            next.delivery.revision,
+          )
+        }
+        setDelivery(advanced.delivery)
+        setAdvanceMessage(advanced.outcome.message)
+        const refreshed = await fetchDelivery(advanced.delivery.id)
+        setDelivery(refreshed.delivery)
+        setDiagramExecution(refreshed.diagramExecution)
+        setRuntimeExecution(refreshed.runtimeExecution)
+      }
     } catch (cause) {
       setError(errorText(cause))
       throw cause
+    } finally {
+      if (startsDiagramRemediation) setAdvancing(false)
+    }
+  }
+
+  const approveRequirements = async (): Promise<void> => {
+    if (delivery === null) return
+    setError(null)
+    setAdvanceMessage('')
+    setAdvancing(true)
+    try {
+      const next = await props.invokeDelivery(createRequirementsApprovalRequest(
+        delivery,
+        requestId('approve-requirements', delivery.id),
+      ))
+      setDelivery(next.delivery)
+      setDiagramExecution(next.diagramExecution)
+      setRuntimeExecution(next.runtimeExecution)
+      setAdvanceMessage('需求定义已确认，可以生成实施方案。')
+    } catch (cause) {
+      setError(errorText(cause))
+    } finally {
+      setAdvancing(false)
+    }
+  }
+
+  const advance = async (): Promise<void> => {
+    if (delivery === null) return
+    setError(null)
+    setAdvanceMessage('')
+    setAdvancing(true)
+    try {
+      const advanced = await props.invokeAdvance(
+        materializeStrongFlowDeliveryAdvanceRequest(
+          requestId('advance', delivery.id),
+          delivery.id,
+          delivery.revision,
+        ),
+      )
+      setDelivery(advanced.delivery)
+      setAdvanceMessage(advanced.outcome.message)
+      const next = await fetchDelivery(advanced.delivery.id)
+      setDelivery(next.delivery)
+      setDiagramExecution(next.diagramExecution)
+      setRuntimeExecution(next.runtimeExecution)
+    } catch (cause) {
+      setError(errorText(cause))
+    } finally {
+      setAdvancing(false)
     }
   }
 
@@ -2113,6 +2718,8 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
     setLoadValue('')
     setDelivery(null)
     setDiagramExecution(null)
+    setRuntimeExecution(null)
+    setAdvanceMessage('')
     setError(null)
     writeSelection(props.sessionId, '')
   }
@@ -2149,9 +2756,14 @@ export function StrongFlowView(props: StrongFlowViewProps): ReactElement {
       : createElement(StrongFlowDeliveryProjection, {
         delivery,
         diagramExecution,
+        runtimeExecution,
         sessionId: props.sessionId,
         refreshing,
+        advancing,
+        advanceMessage,
         onRefresh: () => { void refresh() },
+        onAdvance: () => { void advance() },
+        onRequirementsApproval: () => { void approveRequirements() },
         onClose: close,
         openSession,
         onPlanReviewDecision: decidePlanReview,
@@ -2171,6 +2783,25 @@ async function invokeDeliveryRemote(
   if (!result.value.ok) {
     throw new StrongFlowClientError(
       'DELIVERY_FAILURE',
+      result.value.error.message,
+      result.value.error.currentRevision,
+    )
+  }
+  return result.value.result
+}
+
+async function invokeAdvanceRemote(
+  remote: StrongFlowScopedRemote,
+  request: StrongFlowDeliveryAdvanceRequest,
+  signal?: AbortSignal,
+): Promise<StrongFlowDeliveryAdvanceInvocation> {
+  const result = await remote.strongflow.advance(request, signal)
+  if (!result.ok) {
+    throw new StrongFlowClientError('REMOTE_FAILURE', result.error.message)
+  }
+  if (!result.value.ok) {
+    throw new StrongFlowClientError(
+      'ADVANCE_FAILURE',
       result.value.error.message,
       result.value.error.currentRevision,
     )
@@ -2301,7 +2932,8 @@ const STRONGFLOW_STYLES = `
 .wwc-hero { display: flex; justify-content: space-between; gap: 28px; padding: 24px; }
 .wwc-hero h1 { margin-top: 10px; font-size: clamp(24px, 4vw, 38px); letter-spacing: -.035em; }
 .wwc-hero__goal { max-width: 820px; margin: 10px 0 0; color: var(--dsw-alias-label-secondary, #657086); line-height: 1.6; }
-.wwc-hero__actions { align-self: flex-start; flex: 0 0 auto; }
+.wwc-hero__actions { display: grid; gap: 8px; align-self: flex-start; flex: 0 0 auto; min-width: 190px; }
+.wwc-advance-result { max-width: 300px; margin: 3px 0 0; color: var(--dsw-alias-label-secondary, #657086); font-size: 12px; line-height: 1.45; }
 .wwc-button--quiet, .wwc-session-link {
   color: var(--dsw-alias-label-primary, #172033) !important;
   background: var(--dsw-alias-interactive-bg-hover, #f0f3f8) !important;
@@ -2370,6 +3002,15 @@ const STRONGFLOW_STYLES = `
 .wwc-timeline__content { min-width: 0; padding-bottom: 18px; }
 .wwc-timeline__content p { margin: 5px 0 0; }
 .wwc-binding { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.wwc-runtime-session { display: grid; gap: 14px; padding: 14px; border: 1px solid var(--dsw-alias-border-l1, #e3e8f0); border-radius: 12px; }
+.wwc-runtime-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.wwc-runtime-block { min-width: 0; padding: 12px; border: 1px solid var(--dsw-alias-border-l1, #e3e8f0); border-radius: 10px; background: var(--dsw-alias-bg-base, #fff); }
+.wwc-runtime-block h3 { margin: 0 0 9px; font-size: 13px; }
+.wwc-runtime-block p { margin: 6px 0; overflow-wrap: anywhere; }
+.wwc-runtime-list { display: grid; gap: 9px; margin: 0; padding-left: 20px; }
+.wwc-runtime-list code { overflow-wrap: anywhere; }
+.wwc-runtime-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wwc-runtime-usage { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
 .wwc-session-link { padding: 6px 9px !important; font-size: 12px !important; }
 .wwc-success-copy { color: var(--dsw-alias-state-success-primary, #23845d); }
 .wwc-plan-review { display: grid; gap: 20px; }
@@ -2440,6 +3081,7 @@ const STRONGFLOW_STYLES = `
   .wwc-form-grid--repository { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wwc-list-groups { grid-template-columns: 1fr; }
   .wwc-solution__grid { grid-template-columns: 1fr; }
+  .wwc-runtime-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 680px) {
   .wwc-workbench__bar { align-items: flex-start; flex-direction: column; }
@@ -2495,6 +3137,9 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
         }
         return {
           defaultRepository: product.sessions.list.getSnapshot().byId[sessionId]?.cwd ?? '',
+          invokeAdvance: (request, signal) => (
+            invokeAdvanceRemote({ strongflow: remoteNamespace }, request, signal)
+          ),
           invokeDelivery: (request, signal) => (
             invokeDeliveryRemote({ strongflow: remoteNamespace }, request, signal)
           ),

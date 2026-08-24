@@ -635,3 +635,71 @@ test('conflicting SessionBindings fail visibly instead of selecting an action', 
       && error.message.includes(runId),
   )
 })
+
+test('restart recovery accepts one DSH review Session reused by settled human stages', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-human-reuse-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const deliveryId = 'delivery-recovery-human-reuse'
+  const sharedSessionId = 'dsh-recovery-human-review'
+  const delivery = deliveryFixture({
+    id: deliveryId,
+    status: 'ready',
+    taskStatus: 'pending',
+    stageRuns: ({ deliveryId: ownerId }) => [
+      stageRun({
+        id: 'stage-recovery-human-plan-review',
+        deliveryId: ownerId,
+        taskId: null,
+        stage: 'plan-review',
+        actorType: 'human',
+        role: 'reviewer',
+        status: 'succeeded',
+        startedAtMillis: now + 10,
+        finishedAtMillis: now + 20,
+      }),
+      stageRun({
+        id: 'stage-recovery-human-delivery-review',
+        deliveryId: ownerId,
+        taskId: null,
+        stage: 'delivery-review',
+        actorType: 'human',
+        role: 'approver',
+        status: 'succeeded',
+        startedAtMillis: now + 30,
+        finishedAtMillis: now + 40,
+      }),
+    ],
+    sessionBindings: ({ deliveryId: ownerId }) => [
+      sessionBinding({
+        id: 'binding-recovery-human-plan-review',
+        deliveryId: ownerId,
+        stageRunId: 'stage-recovery-human-plan-review',
+        dshSessionId: sharedSessionId,
+        codexSessionId: null,
+      }),
+      sessionBinding({
+        id: 'binding-recovery-human-delivery-review',
+        deliveryId: ownerId,
+        stageRunId: 'stage-recovery-human-delivery-review',
+        dshSessionId: sharedSessionId,
+        codexSessionId: null,
+        boundAtMillis: now + 31,
+      }),
+    ],
+  })
+  await createDeliveryStore(home, delivery)
+
+  const recovered = await reconcileDeliveryAfterRestart({
+    home,
+    deliveryId,
+    codex: { async listSessions() { return [] } },
+  })
+
+  assert.deepEqual(recovered.nextAction, {
+    kind: 'start-stage',
+    stage: 'planning',
+    deliveryTaskId: null,
+  })
+  assert.deepEqual(recovered.sessions, [])
+  assert.equal(recovered.strongFlow.stages.length, 2)
+})

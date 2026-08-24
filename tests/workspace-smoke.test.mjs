@@ -88,6 +88,7 @@ test('native release workflow exposes separate manual Linux and macOS lanes', ()
   for (const command of [
     "['pnpm', 'format:check']",
     "['pnpm', 'lint']",
+    "['pnpm', 'verify:fixture-cleanup']",
     "['pnpm', 'test']",
     "['scripts/verify-cpb-boundary.mjs']",
     "['scripts/verify-upstream-lock.mjs']",

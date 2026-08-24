@@ -77,6 +77,7 @@ run('corepack', ['pnpm', 'format:check'], 'format and Rust formatting')
 run('corepack', ['pnpm', 'lint'], 'source lint, typecheck, and Clippy')
 run(process.execPath, ['scripts/verify-cpb-boundary.mjs'], 'CPB design-only boundary')
 run('corepack', ['pnpm', 'test'], 'TypeScript and Rust product tests')
+run('corepack', ['pnpm', 'verify:fixture-cleanup'], 'Delivery testkit runtime cleanup')
 run(process.execPath, ['scripts/verify-upstream-lock.mjs'], 'pinned upstream source')
 run('corepack', ['pnpm', 'build:ts'], 'TypeScript release packages')
 run(

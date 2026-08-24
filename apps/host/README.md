@@ -15,6 +15,8 @@ The launcher creates the `winwincode` DSH profile with the stock DSH base and We
 
 DSH and the Delivery CLI share `$DSH_HOME/winwincode` as their durable home. Set `WINWINCODE_CLI_AUTH_PROOF` to the local peer proof used for a business Attention decision; the proof is checked in memory and is not written to the Delivery record.
 
+The installed DSH profile also mounts the WinWinCode GitHub publication adapter. It resolves `GITHUB_TOKEN` through DSH credentials for each request. Publication stays in zero-write dry-run mode unless the caller explicitly requests `live`; live mode still requires the exact current human publication approval. The token is never written to Delivery state, review packages, publication journals, or responses.
+
 Delivery commands emit one versioned JSON response. Their process exit codes are:
 
 | Code | Meaning |

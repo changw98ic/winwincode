@@ -6,8 +6,12 @@ import type {
   TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
 import {
+  parseStrongFlowDeliveryAdvanceRequest,
+  parseStrongFlowDeliveryAdvanceResponse,
   parseStrongFlowDeliveryRequest,
   parseStrongFlowDeliveryResponse,
+  type StrongFlowDeliveryAdvanceRequest,
+  type StrongFlowDeliveryAdvanceResponse,
   type StrongFlowDeliveryRequest,
   type StrongFlowDeliveryResponse,
 } from '@winwincode/contracts'
@@ -15,6 +19,7 @@ import {
 export const STRONGFLOW_DELIVERY_REMOTE_SERVICE = 'strongFlowDelivery' as const
 export const STRONGFLOW_DELIVERY_REMOTE_NAMESPACE = 'strongflow' as const
 export const STRONGFLOW_DELIVERY_REMOTE_METHOD = 'invoke' as const
+export const STRONGFLOW_DELIVERY_ADVANCE_REMOTE_METHOD = 'advance' as const
 export const STRONGFLOW_LOCAL_SESSION_AUTH_REFERENCE = 'dsh-reference-only' as const
 
 type StrongFlowDeliveryRemoteInvoke = (
@@ -28,13 +33,26 @@ type StrongFlowDeliveryScopedRemoteInvoke = (
   signal?: AbortSignal,
 ) => Promise<RemoteResult<StrongFlowDeliveryResponse>>
 
+type StrongFlowDeliveryRemoteAdvance = (
+  agentId: string,
+  request: StrongFlowDeliveryAdvanceRequest,
+  signal?: AbortSignal,
+) => Promise<RemoteResult<StrongFlowDeliveryAdvanceResponse>>
+
+type StrongFlowDeliveryScopedRemoteAdvance = (
+  request: StrongFlowDeliveryAdvanceRequest,
+  signal?: AbortSignal,
+) => Promise<RemoteResult<StrongFlowDeliveryAdvanceResponse>>
+
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$7374726f6e67666c6f77 {
+    advance: StrongFlowDeliveryRemoteAdvance
     invoke: StrongFlowDeliveryRemoteInvoke
   }
 
   interface TypertRemoteMap {
     'strongflow/invoke': StrongFlowDeliveryRemoteInvoke
+    'strongflow/advance': StrongFlowDeliveryRemoteAdvance
   }
 
   interface TypertRemoteNamespaceMap {
@@ -43,6 +61,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 
   interface TypertRemoteScopeMap {
     'agent:strongflow/invoke': StrongFlowDeliveryScopedRemoteInvoke
+    'agent:strongflow/advance': StrongFlowDeliveryScopedRemoteAdvance
   }
 }
 
@@ -62,6 +81,14 @@ const requestSchema = Object.freeze({
 
 const responseSchema = Object.freeze({
   parse: parseStrongFlowDeliveryResponse,
+})
+
+const advanceRequestSchema = Object.freeze({
+  parse: parseStrongFlowDeliveryAdvanceRequest,
+})
+
+const advanceResponseSchema = Object.freeze({
+  parse: parseStrongFlowDeliveryAdvanceResponse,
 })
 
 /** Strict Client contribution mounted only by the StrongFlow advanced surface. */
@@ -106,6 +133,46 @@ export const STRONGFLOW_DELIVERY_REMOTE: TypertRemoteContribution = Object.freez
         mode: 'strict' as const,
         typeSymbol: '@winwincode/contracts#StrongFlowDeliveryResponse',
         schema: responseSchema,
+      }),
+    }),
+    Object.freeze({
+      id: '@winwincode/strongflow#strongflow/advance',
+      service: STRONGFLOW_DELIVERY_REMOTE_SERVICE,
+      namespace: STRONGFLOW_DELIVERY_REMOTE_NAMESPACE,
+      method: STRONGFLOW_DELIVERY_ADVANCE_REMOTE_METHOD,
+      invocation: Object.freeze({ kind: 'direct' as const }),
+      scope: Object.freeze({
+        context: 'agent',
+        wire: 'agentId',
+      }),
+      parameters: Object.freeze([
+        Object.freeze({
+          name: 'agent',
+          wire: 'agentId',
+          source: 'lookup' as const,
+          lookup: 'agent',
+          codec: Object.freeze({
+            mode: 'strict' as const,
+            typeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
+            schema: dshSessionIdSchema,
+          }),
+        }),
+        Object.freeze({
+          name: 'request',
+          wire: 'request',
+          source: 'json' as const,
+          codec: Object.freeze({
+            mode: 'strict' as const,
+            typeSymbol: '@winwincode/contracts#StrongFlowDeliveryAdvanceRequest',
+            schema: advanceRequestSchema,
+          }),
+        }),
+      ]),
+      cancellation: Object.freeze({ parameter: 'signal' as const }),
+      result: Object.freeze({
+        mode: 'strict' as const,
+        typeSymbol: '@winwincode/contracts#StrongFlowDeliveryAdvanceResponse',
+        schema: advanceResponseSchema,
       }),
     }),
   ]),

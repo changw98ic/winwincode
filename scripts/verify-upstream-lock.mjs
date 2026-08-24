@@ -224,6 +224,10 @@ if (lock) {
         !== '@winwincode/dsh-profile/agent-factory') {
         fail('WinWinCode DSH profile does not insert its canonical AgentFactory row')
       }
+      if (inserted.get('winwincode-github-publication-provider')?.name
+        !== '@winwincode/dsh-profile/github-publication-provider') {
+        fail('WinWinCode DSH profile does not insert its DSH GitHub publication provider')
+      }
       if (inserted.get('winwincode-strongflow')?.name !== '@winwincode/strongflow') {
         fail('WinWinCode DSH profile does not insert its canonical StrongFlow row')
       }
