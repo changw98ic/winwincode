@@ -637,7 +637,7 @@
       },
       "rust": {
         "module": "domain/verdict.rs",
-        "testName": "delivery_verdict_covers_every_current_criterion_exactly_once"
+        "testName": "rejects_missing_duplicate_and_foreign_criterion_results"
       }
     },
     {

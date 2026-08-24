@@ -333,6 +333,7 @@ fn validate_verification_is_current(
     candidate: &FrozenDeliveryCandidate,
     verification: &IndependentVerification,
 ) -> Result<(), DeliveryValidationError> {
+    verification.validate_source_delivery(delivery)?;
     for settlement in verification.settlements() {
         let Some(assignment) = settlement.assignment() else {
             continue;
@@ -1429,6 +1430,32 @@ mod tests {
             PRODUCED_AT_MILLIS,
         )
         .expect_err("older settled projection must be stale after a later role attempt");
+
+        assert_eq!(
+            error.code(),
+            crate::domain::DeliveryValidationErrorCode::RelationshipMismatch
+        );
+    }
+
+    #[test]
+    fn missing_projection_cannot_outlive_its_source_delivery_state() {
+        let delivery = verdict_delivery();
+        let candidate = candidate(&delivery);
+        let verification = independent_verification(
+            &delivery,
+            &candidate,
+            VerificationFixtureState::Missing,
+            VerificationFixtureState::SettledPass,
+        );
+        let changed = with_role_stage_status(
+            &delivery,
+            VerificationRole::Reviewer,
+            StageRunStatus::Failed,
+        );
+
+        let error =
+            compute_delivery_verdict(&changed, &candidate, &verification, &[], PRODUCED_AT_MILLIS)
+                .expect_err("a missing projection must be rebuilt after canonical state changes");
 
         assert_eq!(
             error.code(),

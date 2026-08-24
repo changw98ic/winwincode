@@ -20,6 +20,7 @@
 use std::collections::HashSet;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, ExecutionAckSequence, ExecutionJobId, ExecutionSequence, FencingToken, LeaseId,
     ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
@@ -600,6 +601,8 @@ impl VerificationRoleSettlement {
 pub struct IndependentVerification {
     candidate_ref: String,
     settlements: Vec<VerificationRoleSettlement>,
+    #[serde(skip)]
+    source_delivery_seal: [u8; 32],
 }
 
 impl IndependentVerification {
@@ -609,6 +612,20 @@ impl IndependentVerification {
 
     pub fn settlements(&self) -> &[VerificationRoleSettlement] {
         &self.settlements
+    }
+
+    pub(crate) fn validate_source_delivery(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<(), DeliveryValidationError> {
+        if self.source_delivery_seal == seal_source_delivery(delivery)? {
+            Ok(())
+        } else {
+            Err(relationship_mismatch(
+                "verification.sourceDelivery",
+                "independent verification was projected from another Delivery state",
+            ))
+        }
     }
 }
 
@@ -759,7 +776,18 @@ pub fn validate_independent_verification(
     Ok(IndependentVerification {
         candidate_ref: candidate.candidate_ref().into(),
         settlements,
+        source_delivery_seal: seal_source_delivery(delivery)?,
     })
+}
+
+fn seal_source_delivery(delivery: &Delivery) -> Result<[u8; 32], DeliveryValidationError> {
+    let encoded = serde_json::to_vec(delivery).map_err(|error| {
+        invalid_verification(
+            "verification.sourceDelivery",
+            &format!("current Delivery cannot be sealed: {error}"),
+        )
+    })?;
+    Ok(Sha256::digest(encoded).into())
 }
 
 fn validate_required_roles(roles: &[VerificationRole]) -> Result<(), DeliveryValidationError> {
@@ -1472,6 +1500,8 @@ pub(crate) mod test_support {
                     verifier,
                 ),
             ],
+            source_delivery_seal: seal_source_delivery(delivery)
+                .expect("verification fixture source Delivery seal"),
         }
     }
 
