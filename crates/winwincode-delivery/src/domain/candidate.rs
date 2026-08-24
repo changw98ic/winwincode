@@ -865,7 +865,7 @@ fn stale_candidate(message: &str) -> DeliveryValidationError {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     use super::*;
     use crate::application::stage::{

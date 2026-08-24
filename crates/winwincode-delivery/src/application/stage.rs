@@ -166,7 +166,7 @@ impl VerifiedTerminalOutcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fixture_verified_terminal_outcome(
     stage_run_id: StageRunId,
     lease_identity: ActiveLeaseIdentity,

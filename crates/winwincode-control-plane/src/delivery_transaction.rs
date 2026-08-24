@@ -263,11 +263,13 @@ fn strict_execution_job(payload: &[u8]) -> Result<ExecutionJob, DeliveryExecutio
     Ok(job)
 }
 
-fn delivery_stream_id(delivery_id: &DeliveryId) -> String {
+pub(crate) fn delivery_stream_id(delivery_id: &DeliveryId) -> String {
     format!("delivery:{}", delivery_id.0)
 }
 
-fn delivery_journal_key(delivery_id: &DeliveryId) -> Result<AggregateJournalKey, StorageError> {
+pub(crate) fn delivery_journal_key(
+    delivery_id: &DeliveryId,
+) -> Result<AggregateJournalKey, StorageError> {
     AggregateJournalKey::new(DELIVERY_AGGREGATE_TYPE, &delivery_id.0)
 }
 
@@ -279,14 +281,14 @@ fn port_error(error: impl std::fmt::Display) -> DeliveryExecutionPortError {
     DeliveryExecutionPortError::new(error.to_string())
 }
 
-struct StagedDeliveryJournal {
+pub(crate) struct StagedDeliveryJournal {
     delivery_id: DeliveryId,
     loaded: Option<LoadedAggregateJournal>,
     publication: Mutex<Option<AggregateJournalPublication>>,
 }
 
 impl StagedDeliveryJournal {
-    fn new(delivery_id: DeliveryId, loaded: Option<LoadedAggregateJournal>) -> Self {
+    pub(crate) fn new(delivery_id: DeliveryId, loaded: Option<LoadedAggregateJournal>) -> Self {
         Self {
             delivery_id,
             loaded,
@@ -294,7 +296,7 @@ impl StagedDeliveryJournal {
         }
     }
 
-    fn into_publication(
+    pub(crate) fn into_publication(
         self,
     ) -> Result<Option<AggregateJournalPublication>, DeliveryExecutionPortError> {
         self.publication

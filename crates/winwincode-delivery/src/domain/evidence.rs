@@ -5,6 +5,7 @@
 use std::{error::Error, fmt};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, DeliveryId, EvidenceId, ExecutionEventId, ExecutionJobId, FencingToken, LeaseId,
     ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
@@ -127,7 +128,7 @@ pub(crate) struct AcceptedRuntimeSourceFact {
 /// Fenced execution identity shared by the terminal outcome, source ledger,
 /// and checkout attestation. Comparing this value in one place prevents one
 /// boundary from accidentally omitting an identity component.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct FencedExecutionIdentity {
     product_session_id: ProductSessionId,
     execution_job_id: ExecutionJobId,
@@ -169,7 +170,6 @@ pub(crate) enum EvidenceSource<'facts> {
 
 #[derive(Debug)]
 pub(crate) struct ResolveDeliveryEvidenceInput<'facts> {
-    pub evidence_id: EvidenceId,
     pub stage_run_id: StageRunId,
     pub session_binding_id: SessionBindingId,
     pub source: EvidenceSource<'facts>,
@@ -185,7 +185,7 @@ struct ResolvedEvidenceSource {
 }
 
 /// Exact identity that was checked before an `EvidenceRef` became canonical.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum VerifiedEvidenceSourceIdentity {
     Runtime(Box<VerifiedRuntimeEvidenceSourceIdentity>),
     CandidateCommit {
@@ -205,7 +205,7 @@ pub(crate) enum VerifiedEvidenceSourceIdentity {
 }
 
 /// Read-only runtime provenance retained beside canonical bounded Evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct VerifiedRuntimeEvidenceSourceIdentity {
     execution: FencedExecutionIdentity,
     source_sequence: u64,
@@ -225,6 +225,20 @@ pub struct ResolvedDeliveryEvidence {
     evidence: EvidenceRef,
     outcome: VerifiedEvidenceOutcome,
     source_identity: VerifiedEvidenceSourceIdentity,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceIdentity<'identity> {
+    delivery_id: &'identity DeliveryId,
+    delivery_spec_id: &'identity DeliverySpecId,
+    delivery_spec_revision: u64,
+    candidate_ref: &'identity str,
+    stage_run_id: &'identity StageRunId,
+    session_binding_id: &'identity SessionBindingId,
+    evidence_type: EvidenceRefType,
+    source_ref: &'identity str,
+    source_identity: &'identity VerifiedEvidenceSourceIdentity,
 }
 
 impl ResolvedDeliveryEvidence {
@@ -255,13 +269,7 @@ impl ResolvedDeliveryEvidence {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "verdict consumes the verified source identity after branch integration"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn source_identity(&self) -> &VerifiedEvidenceSourceIdentity {
         &self.source_identity
     }
@@ -376,9 +384,20 @@ pub(crate) fn resolve_delivery_evidence(
         )?,
     };
 
+    let evidence_id = deterministic_evidence_id(&EvidenceIdentity {
+        delivery_id: delivery.id(),
+        delivery_spec_id: &delivery.snapshot().spec.id,
+        delivery_spec_revision: delivery.snapshot().spec.revision,
+        candidate_ref: candidate.candidate_ref(),
+        stage_run_id: &stage_run.id,
+        session_binding_id: &binding.id,
+        evidence_type: source.evidence_type,
+        source_ref: &source.source_ref,
+        source_identity: &source.identity,
+    })?;
     let evidence = EvidenceRef {
         schema_version: super::DELIVERY_SCHEMA_VERSION,
-        id: input.evidence_id,
+        id: evidence_id,
         delivery_id: delivery.id().clone(),
         delivery_spec_id: delivery.snapshot().spec.id.clone(),
         delivery_spec_revision: delivery.snapshot().spec.revision,
@@ -401,6 +420,21 @@ pub(crate) fn resolve_delivery_evidence(
         outcome: source.outcome,
         source_identity: source.identity,
     })
+}
+
+fn deterministic_evidence_id(
+    identity: &EvidenceIdentity<'_>,
+) -> Result<EvidenceId, EvidenceResolutionError> {
+    let encoded = serde_json::to_vec(identity).map_err(|error| {
+        resolution_error(
+            EvidenceResolutionErrorCode::InvalidEvidence,
+            format!("failed to encode the canonical Evidence identity: {error}"),
+        )
+    })?;
+    Ok(EvidenceId(format!(
+        "evidence:sha256:{:x}",
+        Sha256::digest(encoded)
+    )))
 }
 
 fn resolve_direct_candidate_source(
@@ -895,7 +929,7 @@ pub(crate) fn validate(evidence: &EvidenceRef, path: &str) -> Result<(), Deliver
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     use super::*;
     use crate::domain::verification::test_support::{
@@ -1010,7 +1044,6 @@ pub(crate) mod test_support {
             delivery,
             candidate,
             ResolveDeliveryEvidenceInput {
-                evidence_id,
                 stage_run_id: stage_run.id.clone(),
                 session_binding_id: binding.id.clone(),
                 source: EvidenceSource::Runtime {
@@ -1229,7 +1262,6 @@ mod tests {
         checkout: &'facts ValidatedCheckoutAttestationFact,
     ) -> ResolveDeliveryEvidenceInput<'facts> {
         ResolveDeliveryEvidenceInput {
-            evidence_id: EvidenceId("evidence-runtime-1".into()),
             stage_run_id: StageRunId("stage-verifier-1".into()),
             session_binding_id: SessionBindingId("binding-verifier-1".into()),
             source: EvidenceSource::Runtime {
@@ -1245,7 +1277,6 @@ mod tests {
 
     fn direct_input(source: EvidenceSource<'static>) -> ResolveDeliveryEvidenceInput<'static> {
         ResolveDeliveryEvidenceInput {
-            evidence_id: EvidenceId("evidence-direct-1".into()),
             stage_run_id: StageRunId("stage-executor-1".into()),
             session_binding_id: SessionBindingId("binding-executor-1".into()),
             source,
@@ -1368,6 +1399,46 @@ mod tests {
         assert_eq!(evidence.evidence_type, EvidenceRefType::Test);
         assert_eq!(evidence.source_ref, "runtime_event:event-verifier-test-7");
         assert_eq!(resolved.outcome(), VerifiedEvidenceOutcome::Succeeded);
+    }
+
+    #[test]
+    fn same_sealed_source_reuses_deterministic_evidence_identity() {
+        let delivery = evidence_delivery();
+        let candidate = candidate(&delivery);
+        let first = resolve_delivery_evidence(
+            &delivery,
+            &candidate,
+            direct_input(EvidenceSource::CandidateCommit),
+        )
+        .expect("first candidate commit evidence");
+        let replay = resolve_delivery_evidence(
+            &delivery,
+            &candidate,
+            direct_input(EvidenceSource::CandidateCommit),
+        )
+        .expect("replayed candidate commit evidence");
+
+        assert_eq!(first.evidence().id, replay.evidence().id);
+    }
+
+    #[test]
+    fn changed_sealed_source_changes_deterministic_evidence_identity() {
+        let delivery = evidence_delivery();
+        let candidate = candidate(&delivery);
+        let commit = resolve_delivery_evidence(
+            &delivery,
+            &candidate,
+            direct_input(EvidenceSource::CandidateCommit),
+        )
+        .expect("candidate commit evidence");
+        let diff = resolve_delivery_evidence(
+            &delivery,
+            &candidate,
+            direct_input(EvidenceSource::CandidateDiff),
+        )
+        .expect("candidate diff evidence");
+
+        assert_ne!(commit.evidence().id, diff.evidence().id);
     }
 
     #[test]

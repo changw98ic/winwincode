@@ -19,7 +19,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{DeliveryId, RequestId};
 
-use crate::domain::{Delivery, portable_identifier, request_identifier, safe_non_negative};
+use crate::{
+    application::{CoordinationErrorCode, verdict::ComputedVerdictTransition},
+    domain::{
+        Delivery, portable_identifier, request_identifier,
+        rework::{ValidatedReworkHistoryFact, derive_validated_rework_history},
+        safe_non_negative,
+    },
+};
 
 pub const DELIVERY_STORE_SCHEMA_VERSION: u8 = 1;
 
@@ -196,15 +203,30 @@ pub struct AppendDelivery {
     pub snapshot: Delivery,
 }
 
+/// Specialized verdict append that can be created only by the application
+/// service from sealed candidate, verification, and Evidence facts.
+#[derive(Debug, Clone)]
+pub struct SubmitDeliveryVerdict {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub transition: ComputedVerdictTransition,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeliveryCommand {
     Create(CreateDelivery),
     Append(AppendDelivery),
+    SubmitVerdict(SubmitDeliveryVerdict),
 }
 
 #[derive(Debug, Clone)]
 pub enum DeliveryQuery {
     Get(DeliveryId),
+    GetRevision {
+        delivery_id: DeliveryId,
+        revision: u64,
+    },
 }
 
 /// One-method write interface for the Control Plane application layer.
@@ -234,6 +256,23 @@ pub trait DeliveryQueryPort: Send + Sync {
     /// Returns [`DeliveryStoreError`] when the Delivery is absent, corrupt, or
     /// cannot be loaded from the backend.
     fn query(&self, query: DeliveryQuery) -> Result<Delivery, DeliveryStoreError>;
+}
+
+/// Sealed append-only history projection used by the rework application path.
+///
+/// The adapter verifies the complete Delivery journal and returns only the
+/// derived fact. Callers cannot omit or rewrite prior verdict snapshots.
+pub trait DeliveryReworkHistoryPort: Send + Sync {
+    /// Derives the current rework history from one verified journal tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeliveryStoreError`] when the supplied Delivery is not the
+    /// exact current tail or its append-only history is corrupt or incomplete.
+    fn validated_rework_history(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<ValidatedReworkHistoryFact, DeliveryStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +540,37 @@ impl<'journal> DeliveryStore<'journal> {
         &self,
         command: AppendDelivery,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        if command.operation == DeliveryMutationOperation::VerdictSubmitted {
+            return Err(store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "verdict.submitted requires the sealed specialized Delivery command",
+            ));
+        }
+        self.append_authorized(command, None)
+    }
+
+    fn submit_verdict(
+        &self,
+        command: SubmitDeliveryVerdict,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        let delivery_id = command.transition.delivery().id().clone();
+        let append = AppendDelivery {
+            delivery_id,
+            request_id: command.request_id,
+            request_digest: command.request_digest,
+            operation: DeliveryMutationOperation::VerdictSubmitted,
+            expected_revision: command.expected_revision,
+            snapshot: command.transition.delivery().clone(),
+        };
+        self.append_authorized(append, Some(&command.transition))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn append_authorized(
+        &self,
+        command: AppendDelivery,
+        verdict_transition: Option<&ComputedVerdictTransition>,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
         validate_request(&command.request_id, &command.request_digest)?;
         if command.operation == DeliveryMutationOperation::DeliveryCreated {
             return Err(store_error(
@@ -543,6 +613,31 @@ impl<'journal> DeliveryStore<'journal> {
                 snapshot: prior.snapshot.clone(),
                 replayed: true,
             });
+        }
+        if let Some(transition) = verdict_transition {
+            transition
+                .validate_source(&stored.snapshot)
+                .map_err(|error| {
+                    if error.code() == CoordinationErrorCode::RevisionConflict {
+                        revision_conflict(
+                            command.expected_revision,
+                            stored.snapshot.revision(),
+                            error.to_string(),
+                        )
+                    } else {
+                        store_error(
+                            DeliveryStoreErrorCode::InvalidStoreOptions,
+                            error.to_string(),
+                        )
+                    }
+                })?;
+        } else if command.operation == DeliveryMutationOperation::VerdictSubmitted {
+            return Err(store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "verdict.submitted is missing its sealed computed transition",
+            ));
+        } else {
+            validate_generic_append_delta(&stored.snapshot, &command.snapshot)?;
         }
         if command.expected_revision != stored.snapshot.revision()
             || command.snapshot.revision() != stored.snapshot.revision() + 1
@@ -637,6 +732,21 @@ impl<'journal> DeliveryStore<'journal> {
     }
 }
 
+fn validate_generic_append_delta(
+    before: &Delivery,
+    after: &Delivery,
+) -> Result<(), DeliveryStoreError> {
+    let before = before.snapshot();
+    let after = after.snapshot();
+    if before.evidence != after.evidence || before.verdict != after.verdict {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "Evidence and Verdict can change only through the sealed verdict command",
+        ));
+    }
+    Ok(())
+}
+
 impl DeliveryCommandPort for DeliveryStore<'_> {
     fn execute(
         &self,
@@ -645,6 +755,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
         match command {
             DeliveryCommand::Create(create) => self.create(create),
             DeliveryCommand::Append(append) => self.append(append),
+            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(submit),
         }
     }
 }
@@ -655,7 +766,54 @@ impl DeliveryQueryPort for DeliveryStore<'_> {
             DeliveryQuery::Get(delivery_id) => {
                 self.read(&delivery_id).map(|stored| stored.snapshot)
             }
+            DeliveryQuery::GetRevision {
+                delivery_id,
+                revision,
+            } => self.read(&delivery_id).and_then(|stored| {
+                stored
+                    .records
+                    .into_iter()
+                    .find(|record| record.snapshot.revision() == revision)
+                    .map(|record| record.snapshot)
+                    .ok_or_else(|| {
+                        store_error(
+                            DeliveryStoreErrorCode::DeliveryNotFound,
+                            format!(
+                                "Delivery {} revision {revision} was not found",
+                                delivery_id.0
+                            ),
+                        )
+                    })
+            }),
         }
+    }
+}
+
+impl DeliveryReworkHistoryPort for DeliveryStore<'_> {
+    fn validated_rework_history(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<ValidatedReworkHistoryFact, DeliveryStoreError> {
+        let stored = self.read(delivery.id())?;
+        if stored.snapshot != *delivery {
+            return Err(revision_conflict(
+                delivery.revision(),
+                stored.snapshot.revision(),
+                "rework history requires the exact current Delivery journal tail",
+            ));
+        }
+        let history = stored
+            .records
+            .iter()
+            .filter(|record| record.snapshot.revision() < delivery.revision())
+            .map(|record| record.snapshot.snapshot().clone())
+            .collect::<Vec<_>>();
+        derive_validated_rework_history(delivery, &history).map_err(|error| {
+            store_error(
+                DeliveryStoreErrorCode::StoreCorrupt,
+                format!("Delivery rework history is invalid: {error}"),
+            )
+        })
     }
 }
 
@@ -1025,6 +1183,10 @@ impl DeliveryJournalPort for InMemoryDeliveryJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::verdict::{
+        SubmitVerdictFacts, compute_verdict_transition,
+        test_support::{VerdictFixtureOutcome, verdict_fixture},
+    };
 
     const REQUEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const REQUEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1051,6 +1213,108 @@ mod tests {
             }))
             .expect("create");
         (backend, store)
+    }
+
+    fn create_store_with_failed_verdict() -> (DeliveryStore<'static>, Delivery) {
+        let fixture = verdict_fixture(
+            DeliveryId("delivery-store-verdict".into()),
+            VerdictFixtureOutcome::Fail,
+        );
+        let backend = Arc::new(InMemoryDeliveryJournal::new());
+        let store = DeliveryStore::new(backend);
+        store
+            .execute(DeliveryCommand::Create(CreateDelivery {
+                request_id: RequestId("create-delivery-verdict".into()),
+                request_digest: REQUEST_A.into(),
+                snapshot: fixture.delivery.clone(),
+            }))
+            .expect("create verifying Delivery");
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: &fixture.verification,
+                evidence: &fixture.evidence,
+                produced_at_millis: 1_800_000_000_100,
+            },
+        )
+        .expect("computed failing verdict");
+        let failed = store
+            .execute(DeliveryCommand::SubmitVerdict(SubmitDeliveryVerdict {
+                request_id: RequestId("submit-failed-verdict".into()),
+                request_digest: REQUEST_B.into(),
+                expected_revision: fixture.delivery.revision(),
+                transition,
+            }))
+            .expect("submit failing verdict")
+            .snapshot;
+        (store, failed)
+    }
+
+    #[test]
+    fn store_derives_rework_history_from_verified_append_only_records() {
+        let (store, current) = create_store_with_failed_verdict();
+        let stale = store
+            .query(DeliveryQuery::GetRevision {
+                delivery_id: current.id().clone(),
+                revision: 1,
+            })
+            .expect("prior journal revision");
+
+        store
+            .validated_rework_history(&current)
+            .expect("sealed rework history from verified journal");
+        assert_eq!(
+            store
+                .validated_rework_history(&stale)
+                .expect_err("stale current Delivery")
+                .code(),
+            DeliveryStoreErrorCode::RevisionConflict
+        );
+    }
+
+    #[test]
+    fn non_verdict_append_cannot_change_evidence_verdict_attention_or_status() {
+        for operation in [
+            DeliveryMutationOperation::DeliverySpecUpdated,
+            DeliveryMutationOperation::StageStarted,
+            DeliveryMutationOperation::SessionBound,
+            DeliveryMutationOperation::AttentionResolved,
+        ] {
+            let (store, failed) = create_store_with_failed_verdict();
+            let passing_fixture = verdict_fixture(
+                DeliveryId("delivery-store-verdict".into()),
+                VerdictFixtureOutcome::Pass,
+            );
+            let passing = compute_verdict_transition(
+                &passing_fixture.delivery,
+                SubmitVerdictFacts {
+                    expected_revision: passing_fixture.delivery.revision(),
+                    candidate: &passing_fixture.candidate,
+                    verification: &passing_fixture.verification,
+                    evidence: &passing_fixture.evidence,
+                    produced_at_millis: 1_800_000_000_100,
+                },
+            )
+            .expect("computed passing verdict");
+            let mut forged = passing.delivery().snapshot().clone();
+            forged.revision = failed.revision() + 1;
+            forged.updated_at_millis += 1;
+            let forged = Delivery::try_from_snapshot(forged).expect("valid forged snapshot");
+
+            let error = store
+                .execute(DeliveryCommand::Append(AppendDelivery {
+                    delivery_id: failed.id().clone(),
+                    request_id: RequestId(format!("raw-protected-{operation:?}")),
+                    request_digest: "c".repeat(64),
+                    operation,
+                    expected_revision: failed.revision(),
+                    snapshot: forged,
+                }))
+                .expect_err("non-verdict append cannot replace verdict facts");
+            assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+        }
     }
 
     #[test]
@@ -1090,6 +1354,23 @@ mod tests {
         assert_eq!(error.code(), DeliveryStoreErrorCode::RevisionConflict);
         assert_eq!(error.expected_revision(), Some(0));
         assert_eq!(error.current_revision(), Some(1));
+    }
+
+    #[test]
+    fn generic_append_rejects_raw_verdict_submitted_snapshot() {
+        let (_, store) = create_store();
+        let error = store
+            .append(AppendDelivery {
+                delivery_id: DeliveryId("delivery-store-main".into()),
+                request_id: RequestId("raw-verdict".into()),
+                request_digest: REQUEST_B.into(),
+                operation: DeliveryMutationOperation::VerdictSubmitted,
+                expected_revision: 1,
+                snapshot: snapshot(2, "ready"),
+            })
+            .expect_err("raw VerdictSubmitted append");
+
+        assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
     }
 
     #[test]
