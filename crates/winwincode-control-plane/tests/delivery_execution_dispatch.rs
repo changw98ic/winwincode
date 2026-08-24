@@ -94,7 +94,7 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef".into(),
             repository_id: RepositoryId(canonical_id("rep", seed)),
-            write_mode: "candidate".into(),
+            write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
         },
         limits: ExecutionLimits {
             deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
@@ -338,7 +338,7 @@ fn new_commit_rejects_a_foreign_durable_job_without_dispatch() {
 fn corrupted_durable_receipt_job_stays_committed_and_is_not_dispatched() {
     let pending = pending_execution(10, false);
     let mut corrupted_job = pending.job().clone();
-    corrupted_job.workspace.write_mode = "worktree".into();
+    corrupted_job.workspace.checkout_revision.clear();
     let trace = Arc::new(Mutex::new(Vec::new()));
     let mut transaction = DurableReceiptTransaction {
         receipt: Some(DeliveryExecutionCommitReceipt {
@@ -380,7 +380,10 @@ fn delivery_stage_scope_carries_exact_product_delivery_task_and_run_identity() {
         panic!("Delivery stage dispatch must use the Delivery scope");
     };
 
-    assert_eq!(kind, "delivery-stage");
+    assert_eq!(
+        kind,
+        &winwincode_api::generated::DeliveryStageExecutionScopeKind::DeliveryStage
+    );
     assert_eq!(delivery_id.0, canonical_id("dlv", 3));
     assert_eq!(
         delivery_task_id.as_ref().map(|id| id.0.as_str()),
@@ -412,7 +415,7 @@ fn job_cancel_ack_does_not_settle_stage_before_terminal_outcome() {
     );
     let ack = JobCancelAckMessage {
         error: None,
-        kind: "job.cancel_ack".into(),
+        kind: winwincode_api::generated::JobCancelAckMessageKind::JobCancelAck,
         lease: ExecutionLeaseStamp {
             attempt: i64::try_from(lease.attempt()).expect("attempt"),
             expires_at: Instant("2026-08-25T12:10:00.000Z".into()),
@@ -518,15 +521,12 @@ fn malformed_execution_job_config_fails_before_pending_publication() {
 }
 
 fn assert_invalid_config_values(seed: u64, request_id: &RequestId) {
-    let config_mutations: [(&str, ConfigMutation); 6] = [
+    let config_mutations: [(&str, ConfigMutation); 5] = [
         ("repositoryId", |config| {
             config.workspace.repository_id = RepositoryId("repository-legacy".into());
         }),
         ("checkoutRevision", |config| {
             config.workspace.checkout_revision.clear();
-        }),
-        ("writeMode", |config| {
-            config.workspace.write_mode = "worktree".into();
         }),
         ("deadlineAt", |config| {
             config.limits.deadline_at = Instant("2026-08-25T12:00:00Z".into());

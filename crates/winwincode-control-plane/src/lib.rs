@@ -428,7 +428,7 @@ impl ControlPlane {
     }
 
     /// Installs the trusted runtime-ledger and publication read adapters before
-    /// the typed StrongFlow query port is exposed to a transport.
+    /// the typed `StrongFlow` query port is exposed to a transport.
     ///
     /// # Errors
     ///

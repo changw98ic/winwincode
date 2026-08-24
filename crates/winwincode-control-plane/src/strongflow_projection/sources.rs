@@ -4,6 +4,7 @@
 
 use std::{error::Error, fmt};
 
+use serde::Serialize;
 use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     domain::{DeliverySpecId, DeliveryVerdictId, FrozenDeliveryCandidate},
@@ -95,7 +96,7 @@ impl DeliveryRuntimeReadRequest {
 }
 
 /// Adapter-neutral failure from a trusted source owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustedProjectionReadError {
     Unavailable,
     TemporarilyUnavailable,
@@ -228,7 +229,8 @@ pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
 }
 
 /// Immutable identity stored with one trusted publication intent/result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicationFactBinding {
     delivery_id: DeliveryId,
     delivery_revision: u64,
@@ -242,7 +244,69 @@ pub struct PublicationFactBinding {
     target_sha256: String,
 }
 
+/// Closed remote resource identity accepted from the trusted publication owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationResourceKind {
+    GitHubIssue,
+    GitHubPullRequest,
+}
+
+/// Secret-safe remote publication identity. It never contains a URL or payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationResourceFact {
+    kind: PublicationResourceKind,
+    repository: String,
+    number: u64,
+}
+
+impl PublicationResourceFact {
+    /// Builds a closed GitHub resource identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed repository slug or unsafe issue/PR number.
+    pub fn try_new(
+        kind: PublicationResourceKind,
+        repository: impl Into<String>,
+        number: u64,
+    ) -> Result<Self, TrustedProjectionReadError> {
+        let fact = Self {
+            kind,
+            repository: repository.into(),
+            number,
+        };
+        let mut segments = fact.repository.split('/');
+        let canonical_repository = segments.next().is_some_and(|value| portable(value, 100))
+            && segments.next().is_some_and(|value| portable(value, 100))
+            && segments.next().is_none();
+        if !canonical_repository || number == 0 || number > MAX_SAFE_INTEGER {
+            return Err(TrustedProjectionReadError::Invalid);
+        }
+        Ok(fact)
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> PublicationResourceKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    #[must_use]
+    pub const fn number(&self) -> u64 {
+        self.number
+    }
+}
+
 impl PublicationFactBinding {
+    /// Builds the complete immutable publication fact binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete identities, revisions, references, or digests.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         delivery_id: DeliveryId,
@@ -345,15 +409,22 @@ pub struct PublicationResultFact {
     state: String,
     updated_at: Instant,
     binding: PublicationFactBinding,
+    resource: Option<PublicationResourceFact>,
 }
 
 impl PublicationResultFact {
+    /// Builds one safe publication result bound to an authorized fact set.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed identity, state, time, or resource facts.
     pub fn try_new(
         publication_id: winwincode_domain::PublicationId,
         revision: Revision,
         state: impl Into<String>,
         updated_at: Instant,
         binding: PublicationFactBinding,
+        resource: Option<PublicationResourceFact>,
     ) -> Result<Self, TrustedProjectionReadError> {
         let fact = Self {
             publication_id,
@@ -361,6 +432,7 @@ impl PublicationResultFact {
             state: state.into(),
             updated_at,
             binding,
+            resource,
         };
         if !portable(&fact.publication_id.0, 200)
             || fact.revision.0 < 1
@@ -399,6 +471,11 @@ impl PublicationResultFact {
     pub const fn binding(&self) -> &PublicationFactBinding {
         &self.binding
     }
+
+    #[must_use]
+    pub const fn resource(&self) -> Option<&PublicationResourceFact> {
+        self.resource.as_ref()
+    }
 }
 
 /// Candidate and publication facts read from one durable publication cut.
@@ -412,6 +489,11 @@ pub struct TrustedPublicationProjectionRead {
 }
 
 impl TrustedPublicationProjectionRead {
+    /// Builds one sealed publication-ledger read.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsafe revisions, source seals, or a mismatched result revision.
     pub fn try_new(
         delivery_revision: u64,
         publication_revision: Revision,

@@ -249,14 +249,14 @@ fn command(
 fn user_actor(value: &str) -> Actor {
     Actor::UserActor(UserActor {
         id: UserId(value.to_owned()),
-        kind: "user".to_owned(),
+        kind: winwincode_api::generated::UserActorKind::User,
     })
 }
 
 fn service_actor(value: &str) -> Actor {
     Actor::ServiceAccountActor(ServiceAccountActor {
         id: ServiceAccountId(value.to_owned()),
-        kind: "service_account".to_owned(),
+        kind: winwincode_api::generated::ServiceAccountActorKind::ServiceAccount,
     })
 }
 
@@ -267,7 +267,7 @@ fn repository_scope(
     repository_id: &str,
 ) -> Scope {
     Scope::RepositoryScope(RepositoryScope {
-        kind: "repository".to_owned(),
+        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
         organization_id: OrganizationId(organization_id.to_owned()),
         workspace_id: WorkspaceId(workspace_id.to_owned()),
         project_id: ProjectId(project_id.to_owned()),
@@ -277,14 +277,14 @@ fn repository_scope(
 
 fn organization_scope(organization_id: &str) -> Scope {
     Scope::OrganizationScope(OrganizationScope {
-        kind: "organization".to_owned(),
+        kind: winwincode_api::generated::OrganizationScopeKind::Organization,
         organization_id: OrganizationId(organization_id.to_owned()),
     })
 }
 
 fn workspace_scope(organization_id: &str, workspace_id: &str) -> Scope {
     Scope::WorkspaceScope(WorkspaceScope {
-        kind: "workspace".to_owned(),
+        kind: winwincode_api::generated::WorkspaceScopeKind::Workspace,
         organization_id: OrganizationId(organization_id.to_owned()),
         workspace_id: WorkspaceId(workspace_id.to_owned()),
     })
@@ -292,7 +292,7 @@ fn workspace_scope(organization_id: &str, workspace_id: &str) -> Scope {
 
 fn project_scope(organization_id: &str, workspace_id: &str, project_id: &str) -> Scope {
     Scope::ProjectScope(ProjectScope {
-        kind: "project".to_owned(),
+        kind: winwincode_api::generated::ProjectScopeKind::Project,
         organization_id: OrganizationId(organization_id.to_owned()),
         workspace_id: WorkspaceId(workspace_id.to_owned()),
         project_id: ProjectId(project_id.to_owned()),
