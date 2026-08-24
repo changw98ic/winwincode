@@ -9,6 +9,7 @@ const schemaRoot = join(root, 'schema', 'winwincode', 'v1')
 const COMMANDS = Object.freeze([
   'session.create',
   'chat.submit',
+  'input.respond',
   'session.cancel',
   'session.close',
   'delivery.create',
@@ -30,6 +31,8 @@ const COMMANDS = Object.freeze([
 const QUERIES = Object.freeze([
   'session.list',
   'session.get',
+  'session.messages.list',
+  'runtime.projection.get',
   'delivery.list',
   'delivery.get',
   'settings.get',
@@ -108,6 +111,8 @@ test('HTTP contract specializes every accepted command without copying domain pr
     'ProjectId',
     'RepositoryId',
     'DeliveryId',
+    'ExecutionJobId',
+    'InputRequestId',
     'ProductSessionId',
     'WorkerId',
   ]
@@ -159,12 +164,14 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     [
       '#/$defs/ProductSessionProjection',
       './domain.schema.json#/$defs/DeliveryProjection',
+      './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
       '#/$defs/SettingsProjection',
       '#/$defs/CredentialReferenceProjection',
       '#/$defs/ApprovalProjection',
       '#/$defs/WorkerProjection',
       '#/$defs/PublicationProjection',
       '#/$defs/ProductSessionPage',
+      '#/$defs/ChatMessagePage',
       '#/$defs/DeliveryPage',
       '#/$defs/CredentialReferencePage',
       '#/$defs/ApprovalPage',
@@ -195,6 +202,56 @@ test('HTTP query contract covers every current read surface with an opaque stabl
   assert.equal(pagination.order, 'snapshot_then_updated_at_then_id')
   assert.equal(pagination.cursor, 'opaque_scope_query_filter_bound')
   assert.equal(pagination.invalidCursorError, 'INVALID_REQUEST')
+})
+
+test('HTTP input responses are bound and cannot inject an ExecutionPort message', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const input = schema.$defs.InputRespondPayload
+
+  assert.deepEqual(input.required, [
+    'productSessionId',
+    'workerSessionId',
+    'executionJobId',
+    'inputRequestId',
+    'status',
+    'value',
+  ])
+  assert.equal(
+    input.properties.productSessionId.$ref,
+    './domain.schema.json#/$defs/ProductSessionId',
+  )
+  assert.equal(
+    input.properties.workerSessionId.$ref,
+    './domain.schema.json#/$defs/WorkerSessionId',
+  )
+  assert.equal(
+    input.properties.executionJobId.$ref,
+    './domain.schema.json#/$defs/ExecutionJobId',
+  )
+  assert.equal(
+    input.properties.inputRequestId.$ref,
+    './domain.schema.json#/$defs/InputRequestId',
+  )
+  assert.equal(
+    input.properties.value.oneOf[0].$ref,
+    './domain.schema.json#/$defs/InteractiveInputValue',
+  )
+  assert.deepEqual(schema['x-winwincode-semantics'].inputResponse, {
+    binding: [
+      'actor',
+      'scope',
+      'expectedRevision',
+      'productSessionId',
+      'workerSessionId',
+      'executionJobId',
+      'inputRequestId',
+    ],
+    mapsAfterValidationTo: 'execution-port:input.response',
+    rejectsArbitraryExecutionMessages: true,
+  })
+  assert.equal(JSON.stringify(input).includes('messageId'), false)
+  assert.equal(JSON.stringify(input).includes('lease'), false)
+  assert.equal(JSON.stringify(input).includes('kind'), false)
 })
 
 test('HTTP command retry, revision conflict, and errors have stable machine semantics', async () => {
@@ -315,4 +372,11 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
     assert.equal(serialized.includes(forbidden), false)
   }
   assert.equal(examples.responses.credentialReference.secretState, 'available')
+  assert.equal(examples.positive.inputRespond.command, 'input.respond')
+  assert.equal(examples.positive.inputRespond.payload.status, 'provided')
+  assert.equal(examples.positive.sessionMessagesList.query, 'session.messages.list')
+  assert.equal(examples.positive.runtimeProjectionGet.query, 'runtime.projection.get')
+  assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
+  assert.equal(examples.responses.runtimeProjection.result.kind, 'runtime_projection')
+  assert.equal(examples.responses.runtimeProjection.result.items[0].projectionSequence, 42)
 })

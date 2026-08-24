@@ -46,7 +46,11 @@ const domainDefinitions = [
   'CodexThreadId',
   'DeliveryId',
   'DeliveryTaskId',
+  'ExecutionJobId',
+  'InputRequestId',
   'Instant',
+  'InteractiveInputMode',
+  'InteractiveInputValue',
   'LeaseId',
   'ProductSessionId',
   'RepositoryId',
@@ -200,6 +204,71 @@ test('ExecutionPort makes every job-scoped Worker write lease-bound', () => {
     assert.ok(definition.required.includes('lease'))
     assert.equal(definition.properties.lease.$ref, '#/$defs/ExecutionLeaseStamp')
   }
+})
+
+test('ExecutionPort supports default Chat jobs without inventing a Delivery', () => {
+  const schema = json(schemaPath)
+  const scope = schema.$defs.ExecutionScope
+  const fixture = json(validFixturePath)
+
+  assert.deepEqual(scope.oneOf.map(branch => branch.$ref), [
+    '#/$defs/ProductSessionExecutionScope',
+    '#/$defs/DeliveryStageExecutionScope',
+  ])
+  assert.deepEqual(schema.$defs.ProductSessionExecutionScope.required, [
+    'kind',
+    'productSessionId',
+  ])
+  assert.equal(
+    schema.$defs.ProductSessionExecutionScope.properties.kind.const,
+    'product-session',
+  )
+  assert.equal(schema.$defs.ProductSessionExecutionScope.properties.deliveryId, undefined)
+  assert.equal(schema.$defs.ProductSessionExecutionScope.properties.stageRunId, undefined)
+  assert.deepEqual(schema.$defs.DeliveryStageExecutionScope.required, [
+    'kind',
+    'productSessionId',
+    'deliveryId',
+    'stageRunId',
+  ])
+  assert.equal(
+    schema.$defs.DeliveryStageExecutionScope.properties.kind.const,
+    'delivery-stage',
+  )
+
+  const scopeSchema = {
+    ...schema,
+    $id: 'https://schemas.winwincode.dev/winwincode/v1/execution-scope.test.schema.json',
+    $ref: '#/$defs/ExecutionScope',
+  }
+  const validate = validator(scopeSchema)
+  assert.deepEqual(fixture.executionScopes.map(entry => entry.kind), [
+    'product-session',
+    'delivery-stage',
+  ])
+  for (const sample of fixture.executionScopes) {
+    assert.equal(validate(sample), true, `${sample.kind}: ${JSON.stringify(validate.errors)}`)
+  }
+})
+
+test('ExecutionPort input response maps provided and empty terminal values exactly', () => {
+  const schema = json(schemaPath)
+  const fixture = json(validFixturePath)
+  const validate = validator(schema)
+  const provided = fixture.messages.find(message => message.kind === 'input.response')
+
+  assert.ok(provided)
+  assert.ok(schema.$defs.InputResponseMessage.required.includes('value'))
+  assert.deepEqual(schema.$defs.InputResponseMessage.properties.value.oneOf, [
+    { $ref: './domain.schema.json#/$defs/InteractiveInputValue' },
+    { type: 'null' },
+  ])
+  assert.equal(validate(provided), true, JSON.stringify(validate.errors))
+  assert.equal(validate({ ...provided, status: 'cancelled', value: null }), true)
+  assert.equal(validate({ ...provided, status: 'expired', value: null }), true)
+  assert.equal(validate({ ...provided, status: 'provided', value: null }), false)
+  assert.equal(validate({ ...provided, status: 'cancelled' }), false)
+  assert.equal(validate({ ...provided, status: 'cancelled', value: provided.value }), false)
 })
 
 test('ExecutionPort freezes retry, replay, restart, and fencing outcomes', () => {

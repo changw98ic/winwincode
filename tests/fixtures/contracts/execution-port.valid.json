@@ -108,6 +108,7 @@
         "attempt": 1,
         "payloadDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         "scope": {
+          "kind": "delivery-stage",
           "productSessionId": "psn_00000000000000000000000006",
           "deliveryId": "dlv_00000000000000000000000007",
           "deliveryTaskId": "dtk_00000000000000000000000008",
@@ -567,6 +568,19 @@
       },
       "workerSessionId": "wsn_00000000000000000000000005",
       "status": "accepted"
+    }
+  ],
+  "executionScopes": [
+    {
+      "kind": "product-session",
+      "productSessionId": "psn_00000000000000000000000006"
+    },
+    {
+      "kind": "delivery-stage",
+      "productSessionId": "psn_00000000000000000000000006",
+      "deliveryId": "dlv_00000000000000000000000007",
+      "deliveryTaskId": "dtk_00000000000000000000000008",
+      "stageRunId": "run_00000000000000000000000009"
     }
   ]
 }

@@ -163,7 +163,10 @@ test('strict validation covers every canonical domain sample and keeps IDs disti
   }
 
   const idValues = Object.freeze({
+    ChatMessageId: 'msg_01J00000000000000000000000',
     DeliveryId: 'dlv_01J00000000000000000000000',
+    ExecutionJobId: 'job_01J00000000000000000000000',
+    InputRequestId: 'inp_01J00000000000000000000000',
     ProductSessionId: 'psn_01J00000000000000000000000',
     StageRunId: 'run_01J00000000000000000000000',
     WorkerId: 'wrk_01J00000000000000000000000',
@@ -189,13 +192,19 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   const command = validator(ajv, httpId, 'CommandRequest')
   const query = validator(ajv, httpId, 'QueryRequest')
 
+  for (const [name, value] of Object.entries(examples.positive)) {
+    assertValidation(
+      value.command === undefined ? query : command,
+      value,
+      true,
+      name,
+    )
+  }
   for (const [name, value] of Object.entries({
-    sessionCreate: examples.positive.sessionCreate,
     workerDrain: examples.idempotency.original,
     workerDrainRetry: examples.idempotency.retry,
     workerDrainConflictShape: examples.idempotency.conflict,
   })) assertValidation(command, value, true, name)
-  assertValidation(query, examples.positive.deliveryList, true, 'deliveryList')
 
   assertValidation(
     validator(ajv, domainId, 'ErrorEnvelope'),
@@ -226,6 +235,14 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     true,
     'queryPage',
   )
+  for (const name of ['chatMessagesPage', 'runtimeProjection']) {
+    assertValidation(
+      validator(ajv, httpId, 'QueryResultResponse'),
+      examples.responses[name],
+      true,
+      name,
+    )
+  }
   assertValidation(
     validator(ajv, httpId, 'CredentialReferenceProjection'),
     examples.responses.credentialReference,

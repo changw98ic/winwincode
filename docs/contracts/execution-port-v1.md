@@ -16,6 +16,18 @@
 - 消息只引用公开 ID 和投影，不包含数据库表、存储记录、长期 Provider Credential，
   也不包含 Codex 的 Turn、Plan 或 Agent 内部对象。`codexThreadId` 只是会话绑定引用。
 
+## Chat 与 Delivery 使用不同执行 Scope
+
+`ExecutionScope` 是两个严格分支：
+
+| `kind` | 必需身份 | 用途 |
+| --- | --- | --- |
+| `product-session` | `productSessionId` | 默认 Chat；不创建隐藏 Delivery 或 StageRun |
+| `delivery-stage` | `productSessionId`、`deliveryId`、`stageRunId` | StrongFlow 阶段执行；可附加 `deliveryTaskId` |
+
+两种分支都经过相同的 Job、Attempt、Lease 和 Fencing 校验。ProductSession Chat 不能伪造
+Delivery 身份，Delivery 阶段也不能省略当前 StageRun。
+
 ## 一份合同，两种 Adapter
 
 本地同进程 Adapter 与远程进程 Adapter 必须接受同一份 `ExecutionPortMessage` union，
@@ -89,12 +101,16 @@ Heartbeat 只更新存活、容量和当前 Lease 进度，不隐式派发 Job�
   `ModelGatewayRoute` 解析模型与长期 Credential。Worker 只收到有 sequence 的编码响应块。
 - Input 和 Approval 都带 WorkerSession、Lease 和独立请求身份。产品会话、审批队列、
   决策人和审计记录仍由 Control Plane 管理。
+- 浏览器通过 HTTP `input.respond` 提交有 Actor 和 revision 的业务命令。Control Plane 核对
+  ProductSession、WorkerSession、ExecutionJob 和 InputRequest 的绑定后，才生成
+  `input.response`；HTTP 负载不能直接构造 ExecutionPort 消息。
 - Cancel 是 Control Plane 发出的协作式请求。最终状态以租约内 `job.outcome` 为准，
   `job.cancel_ack` 本身不等同于执行已经结束。
 
 ## 可执行样本
 
-- `tests/fixtures/contracts/execution-port.valid.json` 为 25 种消息各提供一个合法样本。
+- `tests/fixtures/contracts/execution-port.valid.json` 为 25 种消息各提供一个合法样本，并为
+  默认 Chat 与 Delivery Stage 各提供一个合法 `ExecutionScope`。
 - `tests/fixtures/contracts/execution-port.invalid.json` 固定缺失 Lease、越权写 Delivery、
   泄露 Credential、非法 sequence/fence、缺失重放点和传输字段泄露等拒绝样本。
 - `tests/execution-port-contract.test.mjs` 使用 Draft 2020-12 validator 验证 schema、样本、

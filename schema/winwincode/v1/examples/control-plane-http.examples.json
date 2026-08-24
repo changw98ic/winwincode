@@ -53,6 +53,83 @@
         "cursor": null,
         "limit": 50
       }
+    },
+    "inputRespond": {
+      "schemaVersion": "winwincode/v1",
+      "command": "input.respond",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "requestId": "req_01J00000000000000000000006",
+      "expectedRevision": 11,
+      "payload": {
+        "productSessionId": "psn_00000000000000000000000000",
+        "workerSessionId": "wsn_00000000000000000000000000",
+        "executionJobId": "job_00000000000000000000000000",
+        "inputRequestId": "inp_00000000000000000000000000",
+        "status": "provided",
+        "value": {
+          "mode": "single_choice",
+          "value": "run-focused-tests"
+        }
+      }
+    },
+    "sessionMessagesList": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000007",
+      "query": "session.messages.list",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "parameters": {
+        "productSessionId": "psn_00000000000000000000000000"
+      },
+      "page": {
+        "cursor": null,
+        "limit": 50
+      }
+    },
+    "runtimeProjectionGet": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000008",
+      "query": "runtime.projection.get",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "parameters": {
+        "kind": "delivery-stage",
+        "productSessionId": "psn_00000000000000000000000000",
+        "deliveryId": "dlv_00000000000000000000000000",
+        "stageRunId": "run_00000000000000000000000000"
+      },
+      "page": {
+        "cursor": null,
+        "limit": 1
+      }
     }
   },
   "idempotency": {
@@ -193,6 +270,63 @@
       "secretState": "available",
       "revision": 3,
       "updatedAt": "2026-08-24T10:00:00.000Z"
+    },
+    "chatMessagesPage": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000007",
+      "query": "session.messages.list",
+      "result": {
+        "kind": "chat_message_page",
+        "items": [
+          {
+            "id": "msg_00000000000000000000000000",
+            "productSessionId": "psn_00000000000000000000000000",
+            "sequence": 1,
+            "role": "assistant",
+            "state": "completed",
+            "content": "The focused tests passed.",
+            "createdAt": "2026-08-24T10:00:00.000Z",
+            "updatedAt": "2026-08-24T10:00:01.000Z"
+          }
+        ]
+      },
+      "page": {
+        "nextCursor": null,
+        "hasMore": false
+      }
+    },
+    "runtimeProjection": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000008",
+      "query": "runtime.projection.get",
+      "result": {
+        "kind": "runtime_projection",
+        "revision": 11,
+        "productSessionId": "psn_00000000000000000000000000",
+        "deliveryId": "dlv_00000000000000000000000000",
+        "stageRunId": "run_00000000000000000000000000",
+        "lastProjectionSequence": 42,
+        "items": [
+          {
+            "productSessionId": "psn_00000000000000000000000000",
+            "workerSessionId": "wsn_00000000000000000000000000",
+            "codexThreadId": "cdx_00000000000000000000000000",
+            "leaseId": "lse_00000000000000000000000000",
+            "deliveryId": "dlv_00000000000000000000000000",
+            "stageRunId": "run_00000000000000000000000000",
+            "projectionSequence": 42,
+            "projectionKind": "test",
+            "summary": "The focused contract tests passed.",
+            "sourceRef": "runtime-event:42",
+            "occurredAt": "2026-08-24T10:00:00.000Z"
+          }
+        ],
+        "rebuiltAt": "2026-08-24T10:00:02.000Z"
+      },
+      "page": {
+        "nextCursor": null,
+        "hasMore": false
+      }
     }
   }
 }

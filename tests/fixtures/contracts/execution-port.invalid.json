@@ -276,6 +276,57 @@
         },
         "socketPath": "/tmp/private.sock"
       }
+    },
+    {
+      "name": "provided input response uses null instead of a typed value",
+      "message": {
+        "kind": "input.response",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000K",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "inputRequestId": "inp_0000000000000000000000000E",
+        "status": "provided",
+        "value": null,
+        "respondedAt": "2026-08-24T12:00:00.000Z"
+      }
+    },
+    {
+      "name": "cancelled input response retains a typed value",
+      "message": {
+        "kind": "input.response",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000K",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "inputRequestId": "inp_0000000000000000000000000E",
+        "status": "cancelled",
+        "value": {
+          "mode": "single_choice",
+          "value": "candidate"
+        },
+        "respondedAt": "2026-08-24T12:00:00.000Z"
+      }
     }
   ]
 }

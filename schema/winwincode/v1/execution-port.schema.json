@@ -65,11 +65,6 @@
       "pattern": "^xmsg_[0-9A-HJKMNP-TV-Z]{26}$",
       "description": "Unique identity of one ExecutionPort message envelope."
     },
-    "ExecutionJobId": {
-      "type": "string",
-      "pattern": "^job_[0-9A-HJKMNP-TV-Z]{26}$",
-      "description": "Identity of one scheduler-owned execution job."
-    },
     "WorkerInstanceId": {
       "type": "string",
       "pattern": "^wki_[0-9A-HJKMNP-TV-Z]{26}$",
@@ -89,11 +84,6 @@
       "type": "string",
       "pattern": "^mdl_[0-9A-HJKMNP-TV-Z]{26}$",
       "description": "Identity of one provider-neutral model stream exchange."
-    },
-    "InputRequestId": {
-      "type": "string",
-      "pattern": "^inp_[0-9A-HJKMNP-TV-Z]{26}$",
-      "description": "Identity of one interactive input request."
     },
     "FencingToken": {
       "type": "string",
@@ -161,7 +151,7 @@
           "$ref": "./domain.schema.json#/$defs/LeaseId"
         },
         "jobId": {
-          "$ref": "#/$defs/ExecutionJobId"
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
         },
         "workerId": {
           "$ref": "./domain.schema.json#/$defs/WorkerId"
@@ -273,7 +263,7 @@
           "$ref": "./domain.schema.json#/$defs/LeaseId"
         },
         "jobId": {
-          "$ref": "#/$defs/ExecutionJobId"
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
         },
         "attempt": {
           "type": "integer",
@@ -299,10 +289,29 @@
         "lastEventSequence"
       ]
     },
-    "ExecutionScope": {
+    "ProductSessionExecutionScope": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "kind": {
+          "const": "product-session"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      },
+      "required": [
+        "kind",
+        "productSessionId"
+      ]
+    },
+    "DeliveryStageExecutionScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "delivery-stage"
+        },
         "productSessionId": {
           "$ref": "./domain.schema.json#/$defs/ProductSessionId"
         },
@@ -317,9 +326,20 @@
         }
       },
       "required": [
+        "kind",
         "productSessionId",
         "deliveryId",
         "stageRunId"
+      ]
+    },
+    "ExecutionScope": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionExecutionScope"
+        },
+        {
+          "$ref": "#/$defs/DeliveryStageExecutionScope"
+        }
       ]
     },
     "ExecutionWorkspace": {
@@ -373,7 +393,7 @@
       "additionalProperties": false,
       "properties": {
         "jobId": {
-          "$ref": "#/$defs/ExecutionJobId"
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
         },
         "attempt": {
           "type": "integer",
@@ -570,14 +590,6 @@
         "capability"
       ]
     },
-    "InteractiveInputMode": {
-      "type": "string",
-      "enum": [
-        "confirmation",
-        "single_choice",
-        "text"
-      ]
-    },
     "InteractiveInputChoice": {
       "type": "object",
       "additionalProperties": false,
@@ -596,23 +608,6 @@
       "required": [
         "value",
         "label"
-      ]
-    },
-    "InteractiveInputValue": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/InteractiveInputMode"
-        },
-        "value": {
-          "type": "string",
-          "maxLength": 20000
-        }
-      },
-      "required": [
-        "mode",
-        "value"
       ]
     },
     "ApprovalActionCategory": {
@@ -1051,7 +1046,7 @@
           "$ref": "./domain.schema.json#/$defs/RequestId"
         },
         "jobId": {
-          "$ref": "#/$defs/ExecutionJobId"
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
         },
         "lease": {
           "$ref": "#/$defs/ExecutionLeaseStamp"
@@ -1749,10 +1744,10 @@
           "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
         },
         "inputRequestId": {
-          "$ref": "#/$defs/InputRequestId"
+          "$ref": "./domain.schema.json#/$defs/InputRequestId"
         },
         "mode": {
-          "$ref": "#/$defs/InteractiveInputMode"
+          "$ref": "./domain.schema.json#/$defs/InteractiveInputMode"
         },
         "prompt": {
           "type": "string",
@@ -1817,7 +1812,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
         },
         "inputRequestId": {
-          "$ref": "#/$defs/InputRequestId"
+          "$ref": "./domain.schema.json#/$defs/InputRequestId"
         },
         "status": {
           "type": "string",
@@ -1828,7 +1823,14 @@
           ]
         },
         "value": {
-          "$ref": "#/$defs/InteractiveInputValue"
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/InteractiveInputValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "respondedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -1843,12 +1845,38 @@
         "workerSessionId",
         "inputRequestId",
         "status",
+        "value",
         "respondedAt"
       ],
       "title": "input.response",
       "description": "Returns a typed input result without exposing product-session storage.",
       "x-direction": "control-plane-to-worker",
-      "x-authority": "control-command"
+      "x-authority": "control-command",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "provided"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "./domain.schema.json#/$defs/InteractiveInputValue"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "ApprovalRequestMessage": {
       "type": "object",

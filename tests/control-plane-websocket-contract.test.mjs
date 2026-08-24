@@ -37,6 +37,7 @@ const eventTypes = Object.freeze([
   'delivery.changed.v1',
   'delivery-task.changed.v1',
   'presence.changed.v1',
+  'product-session.message.appended.v1',
   'product-session.changed.v1',
   'runtime-projection.appended.v1',
   'worker-health.changed.v1',
@@ -317,6 +318,24 @@ test('client frames only subscribe, resume, acknowledge, or answer a heartbeat',
   assert.equal(JSON.stringify(schema.$defs.ControlPlaneWebSocketClientFrame).includes('command'), false)
   assert.match(contract, /主要业务写入只走 HTTP/u)
   assert.match(contract, /WebSocket[^\n]+不接受主要业务 command/u)
+})
+
+test('Chat event exposes only the canonical secret-safe message projection', () => {
+  const event = schema.$defs.ControlPlaneWebSocketProductSessionMessageAppendedEvent
+
+  assert.deepEqual(event.required, ['type', 'productSessionId', 'message'])
+  assert.equal(event.properties.type.const, 'product-session.message.appended.v1')
+  assert.equal(
+    event.properties.message.$ref,
+    './domain.schema.json#/$defs/ChatMessageProjection',
+  )
+  for (const forbidden of [
+    'apiKey',
+    'credential',
+    'providerRequest',
+    'providerResponse',
+    'toolPayload',
+  ]) assert.equal(event.properties[forbidden], undefined, forbidden)
 })
 
 test('resume, authorization recheck, and slow-client rules are machine visible', () => {
