@@ -263,7 +263,7 @@ function validateTranscript(transcript) {
 test('event schema has one stable source and reuses canonical domain IDs', () => {
   assert.equal(
     schema.$id,
-    'https://schemas.winwincode.dev/v1/control-plane-events.schema.json',
+    'https://schemas.winwincode.dev/winwincode/v1/control-plane-events.schema.json',
   )
   assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema')
   assert.deepEqual(Object.keys(schema.$defs).filter(name => (
