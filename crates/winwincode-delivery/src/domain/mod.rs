@@ -33,9 +33,7 @@ pub use spec::{
 pub use stage_run::{DeliveryStage, StageRun, StageRunActorType, StageRunStatus};
 pub use task::{DeliveryTask, DeliveryTaskStatus};
 pub use verdict::{CriterionResult, CriterionVerdict, DeliveryVerdict, DeliveryVerdictStatus};
-pub use winwincode_api::generated::{
-    AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId as EvidenceRefId, StageRunId,
-};
+pub use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId, StageRunId};
 
 pub const DELIVERY_SCHEMA_VERSION: u8 = 3;
 pub const MAX_DELIVERY_REWORK_ATTEMPTS: u64 = 100;
@@ -191,7 +189,7 @@ pub(crate) fn bounded_text(
         let code = u32::from(character);
         matches!(code, 0..=8 | 11..=12 | 14..=31 | 127)
     });
-    if !value.trim().is_empty() && value.chars().count() <= maximum && !invalid_control {
+    if !value.trim().is_empty() && value.encode_utf16().count() <= maximum && !invalid_control {
         Ok(())
     } else {
         Err(validation_error(

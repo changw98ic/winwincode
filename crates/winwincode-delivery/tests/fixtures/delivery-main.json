@@ -10,9 +10,15 @@
     "revision": 1,
     "title": "Implement invitation flow",
     "goal": "Users can invite a teammate and verify the result.",
-    "scope": ["Invitation data and API"],
-    "outOfScope": ["Organization billing"],
-    "constraints": ["Keep the existing authentication boundary"],
+    "scope": [
+      "Invitation data and API"
+    ],
+    "outOfScope": [
+      "Organization billing"
+    ],
+    "constraints": [
+      "Keep the existing authentication boundary"
+    ],
     "acceptanceCriteria": [
       {
         "schemaVersion": 3,
@@ -47,7 +53,9 @@
       "deliveryId": "delivery-main",
       "title": "Invitation API",
       "goal": "Deliver the independently verifiable invitation endpoint.",
-      "acceptanceCriterionIds": ["criterion-required"],
+      "acceptanceCriterionIds": [
+        "criterion-required"
+      ],
       "blockedByTaskIds": [],
       "owner": "backend-owner",
       "status": "completed"
@@ -111,7 +119,9 @@
         "criterionId": "criterion-required",
         "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "verdict": "pass",
-        "evidenceRefs": ["evidence-test-1"],
+        "evidenceRefs": [
+          "evidence-test-1"
+        ],
         "explanation": "The direct integration test passed.",
         "evaluatedAtMillis": 1800000000021
       },

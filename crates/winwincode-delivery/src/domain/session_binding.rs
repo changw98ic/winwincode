@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use winwincode_api::generated::{DeliveryId, StageRunId};
+use winwincode_domain::{DeliveryId, StageRunId};
 
 use super::{
     DeliveryValidationError, DeliveryValidationErrorCode, SessionBindingId, portable_identifier,
@@ -52,7 +52,7 @@ pub(crate) fn validate(
 
 #[cfg(test)]
 mod tests {
-    use winwincode_api::generated::DeliveryId;
+    use winwincode_domain::DeliveryId;
 
     use crate::domain::{Delivery, test_fixture};
 

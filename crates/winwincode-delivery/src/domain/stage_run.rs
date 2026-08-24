@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use winwincode_api::generated::{DeliveryId, DeliveryTaskId, StageRunId};
+use winwincode_domain::{DeliveryId, DeliveryTaskId, StageRunId};
 
 use super::{
     DeliveryValidationError, DeliveryValidationErrorCode, portable_identifier, positive,

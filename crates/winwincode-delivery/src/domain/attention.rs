@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use winwincode_api::generated::{AttentionItemId, DeliveryId, StageRunId};
+use winwincode_domain::{AttentionItemId, DeliveryId, StageRunId};
 
 use super::{
     DeliverySpecId, DeliveryValidationError, DeliveryValidationErrorCode, MAX_TEXT_LENGTH,
@@ -139,7 +139,7 @@ pub(crate) fn validate(item: &AttentionItem, path: &str) -> Result<(), DeliveryV
 
 #[cfg(test)]
 mod tests {
-    use winwincode_api::generated::AttentionItemId;
+    use winwincode_domain::AttentionItemId;
 
     use crate::domain::{
         AttentionItem, AttentionItemStatus, AttentionItemType, Delivery, DeliveryStatus,

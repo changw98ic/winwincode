@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use winwincode_api::generated::RequestId;
 use winwincode_delivery::{
     domain::Delivery,
     store::{
@@ -8,6 +7,7 @@ use winwincode_delivery::{
         DeliveryQueryPort, DeliveryStore, DeliveryStoreErrorCode, InMemoryDeliveryJournal,
     },
 };
+use winwincode_domain::RequestId;
 
 const REQUEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const REQUEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

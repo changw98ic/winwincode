@@ -12614,10 +12614,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-domain"
+name = "winwincode-delivery"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-domain",
 ]
 
 [[package]]
@@ -12625,6 +12628,13 @@ name = "winwincode-control-plane"
 version = "0.0.0"
 dependencies = [
  "winwincode-storage",
+]
+
+[[package]]
+name = "winwincode-domain"
+version = "0.0.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

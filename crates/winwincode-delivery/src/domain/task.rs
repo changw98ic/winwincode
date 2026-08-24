@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use winwincode_api::generated::{DeliveryId, DeliveryTaskId};
+use winwincode_domain::{DeliveryId, DeliveryTaskId};
 
 use super::{
     AcceptanceCriterionId, DeliveryValidationError, DeliveryValidationErrorCode, MAX_TEXT_LENGTH,
@@ -144,7 +144,7 @@ fn visit_task<'a>(
 
 #[cfg(test)]
 mod tests {
-    use winwincode_api::generated::DeliveryTaskId;
+    use winwincode_domain::DeliveryTaskId;
 
     use crate::domain::{AcceptanceCriterionId, Delivery, test_fixture};
 

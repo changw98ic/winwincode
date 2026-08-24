@@ -10,19 +10,31 @@
     "revision": 1,
     "title": "Durable delivery",
     "goal": "Persist one canonical Delivery without copying runtime state.",
-    "scope": ["Delivery state"],
-    "outOfScope": ["Codex runtime events"],
-    "constraints": ["Append only"],
-    "acceptanceCriteria": [{
-      "schemaVersion": 3,
-      "id": "criterion-durable",
-      "description": "Restart reconstructs the same delivery.",
-      "verificationMethod": "Reopen the store and compare the projection.",
-      "required": true
-    }],
+    "scope": [
+      "Delivery state"
+    ],
+    "outOfScope": [
+      "Codex runtime events"
+    ],
+    "constraints": [
+      "Append only"
+    ],
+    "acceptanceCriteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-durable",
+        "description": "Restart reconstructs the same delivery.",
+        "verificationMethod": "Reopen the store and compare the projection.",
+        "required": true
+      }
+    ],
     "sourceRef": null,
     "publicationTarget": null,
-    "repository": {"schemaVersion": 3, "kind": "local-git", "locator": "/workspace/repository"},
+    "repository": {
+      "schemaVersion": 3,
+      "kind": "local-git",
+      "locator": "/workspace/repository"
+    },
     "baseRevision": "0123456789012345678901234567890123456789",
     "maxReworkAttempts": 2,
     "createdAtMillis": 1800000000000

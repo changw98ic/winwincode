@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use winwincode_api::generated::DeliveryId;
+use winwincode_domain::DeliveryId;
 
 use super::{
     AcceptanceCriterionId, DeliverySpecId, DeliveryValidationError, DeliveryValidationErrorCode,
@@ -311,7 +311,7 @@ fn validate_git_branch(value: &str, path: &str) -> Result<(), DeliveryValidation
             || matches!(character, '~' | '^' | ':' | '?' | '*' | '\\' | '[')
     });
     let valid = !value.is_empty()
-        && value.len() <= 255
+        && value.encode_utf16().count() <= 255
         && value != "@"
         && !value.starts_with('/')
         && !value.ends_with('/')

@@ -14,6 +14,11 @@ the expected tail before appending. Domain validation, request replay,
 `expectedRevision`, record digests, recovery, and corruption rejection remain in
 this crate.
 
+Phase 2.1 connects its transaction through `DeliveryStore::borrowed`. The
+transaction stages `AtomicPublication` and the matching outbox event, then makes
+both authoritative in one outer `ProductStateStorage` commit. A long-lived local
+module can use `DeliveryStore::new` with a shared adapter.
+
 `InMemoryDeliveryJournal` is deterministic test infrastructure. It is not the
 local or enterprise persistence choice.
 

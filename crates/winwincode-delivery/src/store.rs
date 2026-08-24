@@ -17,7 +17,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{DeliveryId, RequestId};
+use winwincode_domain::{DeliveryId, RequestId};
 
 use crate::domain::{Delivery, request_identifier};
 
@@ -263,9 +263,11 @@ impl JournalBackendError {
 
 /// Backend seam for `SQLite` (local) and `PostgreSQL` (enterprise) adapters.
 ///
-/// `publish` must atomically compare the expected tail and make the new
-/// record authoritative. A pending record is never authoritative and may be
-/// returned by `load`; recovery ignores it.
+/// `publish` must atomically compare the expected tail and publish or stage the
+/// new record in its current transaction. A long-lived adapter makes it
+/// authoritative before returning. A transaction-scoped adapter makes it
+/// authoritative with the containing state-and-outbox commit. A pending record
+/// is never authoritative and may be returned by `load`; recovery ignores it.
 pub trait DeliveryJournalPort: Send + Sync {
     /// Loads the opaque manifest and all published or pending record bytes.
     ///
@@ -348,16 +350,44 @@ impl DeliveryJournalCodec {
     }
 }
 
-pub struct DeliveryStore {
-    journal: Arc<dyn DeliveryJournalPort>,
+enum DeliveryJournalHandle<'journal> {
+    Borrowed(&'journal dyn DeliveryJournalPort),
+    Shared(Arc<dyn DeliveryJournalPort>),
 }
 
-impl DeliveryStore {
+pub struct DeliveryStore<'journal> {
+    journal: DeliveryJournalHandle<'journal>,
+}
+
+impl DeliveryStore<'static> {
+    /// Builds a long-lived command/query module from a shared journal adapter.
     pub fn new<J>(journal: Arc<J>) -> Self
     where
         J: DeliveryJournalPort + 'static,
     {
-        Self { journal }
+        Self {
+            journal: DeliveryJournalHandle::Shared(journal),
+        }
+    }
+}
+
+impl<'journal> DeliveryStore<'journal> {
+    /// Builds a transaction-scoped module over a borrowed journal adapter.
+    ///
+    /// Phase 2.1 can use this constructor inside a `ProductStateStorage`
+    /// transaction, stage [`AtomicPublication`] together with its outbox event,
+    /// and make both authoritative in the outer transaction commit.
+    pub fn borrowed(journal: &'journal dyn DeliveryJournalPort) -> Self {
+        Self {
+            journal: DeliveryJournalHandle::Borrowed(journal),
+        }
+    }
+
+    fn journal(&self) -> &dyn DeliveryJournalPort {
+        match &self.journal {
+            DeliveryJournalHandle::Borrowed(journal) => *journal,
+            DeliveryJournalHandle::Shared(journal) => journal.as_ref(),
+        }
     }
 
     fn create(
@@ -386,7 +416,7 @@ impl DeliveryStore {
             created_at_millis: record.snapshot.snapshot().created_at_millis,
             first_record_digest: record.digest.clone(),
         };
-        self.journal
+        self.journal()
             .publish(AtomicPublication::Create {
                 delivery_id: record.delivery_id.clone(),
                 manifest: encode_manifest(&manifest)?,
@@ -481,7 +511,7 @@ impl DeliveryStore {
                 bytes: encode_record(&record)?,
             },
         };
-        match self.journal.publish(publication) {
+        match self.journal().publish(publication) {
             Ok(()) => Ok(DeliveryStoreMutationResult {
                 snapshot: record.snapshot,
                 replayed: false,
@@ -511,7 +541,7 @@ impl DeliveryStore {
 
     fn read(&self, delivery_id: &DeliveryId) -> Result<StoredDelivery, DeliveryStoreError> {
         let loaded = self
-            .journal
+            .journal()
             .load(delivery_id)
             .map_err(map_backend_error)?
             .ok_or_else(|| {
@@ -524,7 +554,7 @@ impl DeliveryStore {
     }
 }
 
-impl DeliveryCommandPort for DeliveryStore {
+impl DeliveryCommandPort for DeliveryStore<'_> {
     fn execute(
         &self,
         command: DeliveryCommand,
@@ -536,7 +566,7 @@ impl DeliveryCommandPort for DeliveryStore {
     }
 }
 
-impl DeliveryQueryPort for DeliveryStore {
+impl DeliveryQueryPort for DeliveryStore<'_> {
     fn query(&self, query: DeliveryQuery) -> Result<StoredDelivery, DeliveryStoreError> {
         match query {
             DeliveryQuery::Get(delivery_id) => self.read(&delivery_id),
@@ -896,20 +926,17 @@ mod tests {
     const REQUEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn snapshot(revision: u64, status: &str) -> Delivery {
-        let text = include_str!("../tests/fixtures/delivery-store.json")
-            .replace("\"revision\": 1", &format!("\"revision\": {revision}"))
-            .replace(
-                "\"status\": \"draft\"",
-                &format!("\"status\": \"{status}\""),
-            )
-            .replace(
-                "\"updatedAtMillis\": 1800000000001",
-                &format!("\"updatedAtMillis\": {}", 1_800_000_000_000_u64 + revision),
-            );
-        Delivery::decode_json(text.as_bytes()).expect("store fixture")
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/delivery-store.json"))
+                .expect("store fixture JSON");
+        value["revision"] = revision.into();
+        value["status"] = status.into();
+        value["updatedAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+        Delivery::decode_json(&serde_json::to_vec(&value).expect("store fixture bytes"))
+            .expect("store fixture")
     }
 
-    fn create_store() -> (Arc<InMemoryDeliveryJournal>, DeliveryStore) {
+    fn create_store() -> (Arc<InMemoryDeliveryJournal>, DeliveryStore<'static>) {
         let backend = Arc::new(InMemoryDeliveryJournal::new());
         let store = DeliveryStore::new(Arc::clone(&backend));
         store
@@ -976,6 +1003,33 @@ mod tests {
         assert_eq!(
             stored.records[1].previous_digest.as_deref(),
             Some(stored.records[0].digest.as_str())
+        );
+    }
+
+    #[test]
+    fn delivery_record_digest_matches_typescript_fixture() {
+        let (_, store) = create_store();
+        store
+            .append(AppendDelivery {
+                delivery_id: DeliveryId("delivery-store-main".into()),
+                request_id: RequestId("update-spec".into()),
+                request_digest: REQUEST_B.into(),
+                operation: DeliveryMutationOperation::DeliverySpecUpdated,
+                expected_revision: 1,
+                snapshot: snapshot(2, "ready"),
+            })
+            .expect("append");
+        let stored = store.read(snapshot(1, "draft").id()).expect("read");
+        assert_eq!(
+            stored
+                .records
+                .iter()
+                .map(|record| record.digest.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "59f1408d8139a10759060bdf3fe30c938448b5cd37d08fc9e70ee3897c0d02fa",
+                "54434ed54bf23eda55e7fcf1704a16ed6373bd0746f858a6070d123481f89852",
+            ]
         );
     }
 
@@ -1062,5 +1116,19 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn borrowed_journal_supports_transaction_scoped_storage_adapter() {
+        let backend = InMemoryDeliveryJournal::new();
+        let store = DeliveryStore::borrowed(&backend);
+        let result = store
+            .execute(DeliveryCommand::Create(CreateDelivery {
+                request_id: RequestId("create-delivery".into()),
+                request_digest: REQUEST_A.into(),
+                snapshot: snapshot(1, "draft"),
+            }))
+            .expect("transaction-scoped create");
+        assert_eq!(result.snapshot.revision(), 1);
     }
 }
