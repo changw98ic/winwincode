@@ -57,6 +57,21 @@
       "condition": "worker_message",
       "result": "runtime_fact_or_lease_scoped_artifact_only",
       "effect": "canonical_product_state_remains_control_plane_owned"
+    },
+    "sessionBinding": {
+      "authority": "accepted_session.binding",
+      "exactIdentity": [
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "executionJobId",
+        "attempt",
+        "leaseId",
+        "fencingToken"
+      ],
+      "duplicate": "same_identity_is_idempotent_changed_identity_is_conflict",
+      "runtimeBeforeBinding": "reject_before_persist_and_projection",
+      "runtimeThreadMismatch": "reject_before_persist_and_projection"
     }
   },
   "$defs": {
@@ -1157,6 +1172,9 @@
         },
         "event": {
           "$ref": "#/$defs/ExecutionEventRecord"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
         }
       },
       "required": [
@@ -1166,6 +1184,7 @@
         "sentAt",
         "lease",
         "workerSessionId",
+        "codexThreadId",
         "event"
       ],
       "title": "runtime.event",
@@ -2227,6 +2246,9 @@
           "$ref": "#/$defs/JobDispatchResultMessage"
         },
         {
+          "$ref": "#/$defs/SessionBindingMessage"
+        },
+        {
           "$ref": "#/$defs/LeaseRenewMessage"
         },
         {
@@ -2375,6 +2397,54 @@
         "requiresFullReverification",
         "targets"
       ]
+    },
+    "SessionBindingMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "boundAt"
+      ],
+      "properties": {
+        "kind": {
+          "const": "session.binding"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "boundAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease.",
+      "title": "session.binding",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
     }
   }
 }

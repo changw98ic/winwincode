@@ -79,10 +79,14 @@ Job、attempt、Lease 和 fencing 身份的终态结果后，Control Plane 才�
 
 ## DeliveryTask 图和状态
 
-`delivery.create` 的 tasks 必须为空。规划结果提出可独立交付的任务后，当前人工方案
-审核通过，再由 `delivery.approve_task_breakdown` 一次性写入当前 Spec revision 的任务
-图。Codex Plan 不会被复制成 DeliveryTask。已经批准的图不能用普通看板编辑改写；要换
-图，先提交新的 Spec revision 并重新规划、审核。
+`delivery.create` 的 tasks 必须为空。规划结果在当前 `SolutionReviewProjection` 中提出非空、
+有序的 `taskProposals`，并把完整任务内容和顺序纳入 `reviewSetSha256`。人工审核状态变成
+`approved` 后，调用方只向 `delivery.approve_task_breakdown` 提交 `deliveryId` 和同一个
+`reviewSetSha256`；Control Plane 从可信 review set 逐字段提升任务，一次性写入当前 Spec
+revision 的任务图。Planner proposal 不含 owner，提升后 owner 固定为 `null`、状态固定为
+`pending`；后续责任人只能通过已认证的 assignment command 设置。调用方不能在该 command 中
+另交或替换 tasks。Codex Plan 不会被复制成 DeliveryTask。已经批准的图不能用普通看板编辑
+改写；要换图，先提交新的 Spec revision 并重新规划、审核。
 
 批准的图至少有一个任务，并同时满足：
 

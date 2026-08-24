@@ -21,6 +21,7 @@ const expectedKinds = [
   'worker.heartbeat_ack',
   'job.dispatch',
   'job.dispatch_result',
+  'session.binding',
   'lease.renew',
   'runtime.event',
   'runtime.ack',
@@ -198,6 +199,7 @@ test('ExecutionPort makes every job-scoped Worker write lease-bound', () => {
       'model.ack',
       'model.open',
       'runtime.event',
+      'session.binding',
     ],
   )
   for (const definition of workerLeaseWrites) {
@@ -334,6 +336,21 @@ test('ExecutionPort freezes retry, replay, restart, and fencing outcomes', () =>
       condition: 'fencing_token_below_current_job_token',
       result: 'rejected_stale_fencing_token',
       effect: 'persist_nothing',
+    },
+    sessionBinding: {
+      authority: 'accepted_session.binding',
+      exactIdentity: [
+        'productSessionId',
+        'workerSessionId',
+        'codexThreadId',
+        'executionJobId',
+        'attempt',
+        'leaseId',
+        'fencingToken',
+      ],
+      duplicate: 'same_identity_is_idempotent_changed_identity_is_conflict',
+      runtimeBeforeBinding: 'reject_before_persist_and_projection',
+      runtimeThreadMismatch: 'reject_before_persist_and_projection',
     },
     transportParity: {
       condition: 'local_or_remote_adapter',

@@ -399,6 +399,11 @@ function tsType(schema, document, context) {
   if (type === 'boolean') return 'boolean'
   if (type === 'null') return 'null'
   if (type === 'array') {
+    if (Array.isArray(schema.prefixItems)) {
+      return `readonly [${schema.prefixItems.map(item => (
+        tsType(isObject(item) ? item : {}, document, context)
+      )).join(', ')}]`
+    }
     return `ReadonlyArray<${tsType(isObject(schema.items) ? schema.items : {}, document, context)}>`
   }
   if (type === 'object' || schema.properties !== undefined || schema.additionalProperties !== undefined) {
@@ -490,6 +495,9 @@ function renderTypescript(context, digest) {
     '// SPDX-License-Identifier: Apache-2.0',
     `// ${GENERATED_MARKER}`,
     `// Source digest: sha256:${digest}`,
+    '',
+    '/** Canonical Control Plane routes and projection refresh behavior for the generated Web client. */',
+    `export const WINWINCODE_CLIENT_METADATA = ${JSON.stringify(context.clientMetadata, null, 2)} as const`,
     '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
@@ -609,6 +617,14 @@ function rustType(schema, document, context, qualifyShared = false) {
   }
   const [type] = types
   if (type === 'array') {
+    if (Array.isArray(schema.prefixItems)) {
+      const items = schema.prefixItems.map(item => (
+        rustType(isObject(item) ? item : {}, document, context, qualifyShared)
+      ))
+      const tuple = `(${items.join(', ')}${items.length === 1 ? ',' : ''})`
+      if (tuple.length <= 88) return tuple
+      return `(\n        ${items.join(',\n        ')},\n    )`
+    }
     return `Vec<${rustType(isObject(schema.items) ? schema.items : {}, document, context, qualifyShared)}>`
   }
   if (type === 'object' || schema.additionalProperties !== undefined || schema.properties !== undefined) {
@@ -630,6 +646,7 @@ function rustObjectFields(
   context,
   existingNames = new Set(),
   qualifyShared = false,
+  typeOverrides = new Map(),
 ) {
   const required = new Set(Array.isArray(schema.required) ? schema.required : [])
   const properties = new Map(Object.entries(schema.properties ?? {}).map(([name, propertySchema]) => [
@@ -646,6 +663,7 @@ function rustObjectFields(
     context,
     existingNames,
     qualifyShared,
+    typeOverrides,
   )
 }
 
@@ -699,6 +717,18 @@ function rustObjectShapeFields(
 
 function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
+  const constTypes = new Map()
+  for (const [jsonName, property] of Object.entries(entry.schema.properties ?? {})) {
+    if (!isObject(property) || typeof property.const !== 'string') continue
+    const typeName = `${entry.name}${rustVariantName(jsonName)}`
+    constTypes.set(jsonName, typeName)
+    lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+    lines.push(`pub enum ${typeName} {`)
+    lines.push(`    #[serde(rename = ${JSON.stringify(property.const)})]`)
+    lines.push(`    ${rustVariantName(property.const)},`)
+    lines.push('}')
+    lines.push('')
+  }
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
   if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
   const fields = rustObjectFields(
@@ -707,6 +737,7 @@ function renderRustObject(entry, context, qualifyShared) {
     context,
     new Set(),
     qualifyShared,
+    constTypes,
   )
   if (fields.length === 0) {
     lines.push(`pub struct ${entry.name} {}`)
@@ -853,6 +884,9 @@ function renderRustApi(context, digest) {
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared scalar value objects are defined once in `winwincode-domain`.',
     '',
+    '/// Canonical Control Plane routes and projection refresh behavior for generated clients.',
+    `pub const WINWINCODE_CLIENT_METADATA_JSON: &str = ${rustRawString(JSON.stringify(context.clientMetadata))};`,
+    '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
 }
@@ -906,6 +940,7 @@ function renderSchemaCollection(documents, context, digest) {
     $defs: definitions,
     'x-generated-from': documents.map(document => document.id).sort((left, right) => left.localeCompare(right)),
     'x-source-digest': `sha256:${digest}`,
+    'x-winwincode-client-metadata': context.clientMetadata,
     'x-winwincode-license': APACHE_LICENSE,
   })
 }
@@ -947,7 +982,37 @@ function renderOpenApi(documents, context, digest) {
     components: { schemas },
     'x-generated-from': documents.map(document => document.id).sort((left, right) => left.localeCompare(right)),
     'x-source-digest': `sha256:${digest}`,
+    'x-winwincode-client-metadata': context.clientMetadata,
   })
+}
+
+function generatedClientMetadata(documents) {
+  const metadata = {}
+  for (const document of documents) {
+    const extension = document.schema['x-winwincode-transports']
+    if (extension === undefined) continue
+    if (!isObject(extension)) {
+      throw new Error(`${document.path}: x-winwincode-transports must be an object`)
+    }
+    const client = extension.generatedClient
+    if (client === undefined) continue
+    if (!isObject(client) || !['http', 'websocket'].includes(client.transport)) {
+      throw new Error(
+        `${document.path}: x-winwincode-transports.generatedClient needs http or websocket transport`,
+      )
+    }
+    if (Object.hasOwn(metadata, client.transport)) {
+      throw new Error(`${document.path}: duplicate generated client metadata for ${client.transport}`)
+    }
+    metadata[client.transport] = canonicalValue(client)
+  }
+  return canonicalValue(metadata)
+}
+
+function rustRawString(value) {
+  let hashes = ''
+  while (value.includes(`"${hashes}`)) hashes += '#'
+  return `r${hashes}"${value}"${hashes}`
 }
 
 function sourceDigest(documents) {
@@ -979,6 +1044,7 @@ function writeAtomically(path, content) {
 function generate(options) {
   const documents = loadDocuments(options.schemaDirectory)
   const context = definitionRegistry(documents)
+  context.clientMetadata = generatedClientMetadata(documents)
   context.rustSharedDefinitionNames = new Set(
     [...context.registry.values()]
       .filter(isRustSharedScalarDefinition)
