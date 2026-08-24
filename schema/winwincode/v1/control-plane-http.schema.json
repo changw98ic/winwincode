@@ -1,0 +1,2252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/winwincode/v1/control-plane-http.schema.json",
+  "title": "WinWinCode Control Plane HTTP Command and Query Contract",
+  "description": "Canonical browser and external-client HTTP boundary. Business writes use CommandRequest; WebSocket is projection-only.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/CommandRequest"
+    },
+    {
+      "$ref": "#/$defs/QueryRequest"
+    }
+  ],
+  "x-winwincode-semantics": {
+    "writeTransport": {
+      "accepted": "HTTP_POST_COMMAND",
+      "rejected": [
+        "HTTP_WEBSOCKET_COMMAND",
+        "HTTP_ROUTE_ALIAS"
+      ]
+    },
+    "idempotency": {
+      "identity": "actor+scope+requestId",
+      "sameRequest": "return_original_status_and_body_without_reexecution",
+      "changedRequest": "IDEMPOTENCY_CONFLICT"
+    },
+    "revision": {
+      "checkedBeforeMutation": true,
+      "conflict": "REVISION_CONFLICT",
+      "reports": [
+        "expectedRevision",
+        "currentRevision"
+      ]
+    },
+    "pagination": {
+      "order": "snapshot_then_updated_at_then_id",
+      "cursor": "opaque_scope_query_filter_bound",
+      "invalidCursorError": "INVALID_REQUEST"
+    },
+    "errors": {
+      "INVALID_REQUEST": {
+        "httpStatus": 400,
+        "retryable": false
+      },
+      "AUTHENTICATION_REQUIRED": {
+        "httpStatus": 401,
+        "retryable": false
+      },
+      "PERMISSION_DENIED": {
+        "httpStatus": 403,
+        "retryable": false
+      },
+      "RESOURCE_NOT_FOUND": {
+        "httpStatus": 404,
+        "retryable": false
+      },
+      "IDEMPOTENCY_CONFLICT": {
+        "httpStatus": 409,
+        "retryable": false
+      },
+      "REVISION_CONFLICT": {
+        "httpStatus": 409,
+        "retryable": false
+      },
+      "WRONG_STATE": {
+        "httpStatus": 409,
+        "retryable": false
+      },
+      "RATE_LIMITED": {
+        "httpStatus": 429,
+        "retryable": true
+      },
+      "INTERNAL_ERROR": {
+        "httpStatus": 500,
+        "retryable": false
+      },
+      "SERVICE_UNAVAILABLE": {
+        "httpStatus": 503,
+        "retryable": true
+      }
+    }
+  },
+  "$defs": {
+    "CommandRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionCreateCommand"
+        },
+        {
+          "$ref": "#/$defs/ChatSubmitCommand"
+        },
+        {
+          "$ref": "#/$defs/SessionCancelCommand"
+        },
+        {
+          "$ref": "#/$defs/SessionCloseCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryCreateCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryUpdateSpecCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryAdvanceCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliveryResolveAttentionCommand"
+        },
+        {
+          "$ref": "#/$defs/DeliverySubmitVerdictCommand"
+        },
+        {
+          "$ref": "#/$defs/SettingsUpdateCommand"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceCreateCommand"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceDeleteCommand"
+        },
+        {
+          "$ref": "#/$defs/ApprovalDecideCommand"
+        },
+        {
+          "$ref": "#/$defs/WorkerDrainCommand"
+        },
+        {
+          "$ref": "#/$defs/WorkerEnableCommand"
+        },
+        {
+          "$ref": "#/$defs/PublicationPublishCommand"
+        },
+        {
+          "$ref": "#/$defs/PublicationCancelCommand"
+        }
+      ]
+    },
+    "QueryRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionListQuery"
+        },
+        {
+          "$ref": "#/$defs/SessionGetQuery"
+        },
+        {
+          "$ref": "#/$defs/DeliveryListQuery"
+        },
+        {
+          "$ref": "#/$defs/DeliveryGetQuery"
+        },
+        {
+          "$ref": "#/$defs/SettingsGetQuery"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceListQuery"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceGetQuery"
+        },
+        {
+          "$ref": "#/$defs/ApprovalListQuery"
+        },
+        {
+          "$ref": "#/$defs/ApprovalGetQuery"
+        },
+        {
+          "$ref": "#/$defs/WorkerListQuery"
+        },
+        {
+          "$ref": "#/$defs/WorkerGetQuery"
+        },
+        {
+          "$ref": "#/$defs/PublicationListQuery"
+        },
+        {
+          "$ref": "#/$defs/PublicationGetQuery"
+        }
+      ]
+    },
+    "QueryName": {
+      "type": "string",
+      "enum": [
+        "session.list",
+        "session.get",
+        "delivery.list",
+        "delivery.get",
+        "settings.get",
+        "credential.reference.list",
+        "credential.reference.get",
+        "approval.list",
+        "approval.get",
+        "worker.list",
+        "worker.get",
+        "publication.list",
+        "publication.get"
+      ]
+    },
+    "OpaqueCursor": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 2048,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Opaque cursor bound to scope, query, filters, and one stable snapshot."
+    },
+    "PageRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cursor",
+        "limit"
+      ],
+      "properties": {
+        "cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/OpaqueCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      }
+    },
+    "PageInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nextCursor",
+        "hasMore"
+      ],
+      "properties": {
+        "nextCursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/OpaqueCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hasMore": {
+          "type": "boolean"
+        }
+      }
+    },
+    "QueryEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "query",
+        "actor",
+        "scope",
+        "parameters",
+        "page"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "query": {
+          "$ref": "#/$defs/QueryName"
+        },
+        "actor": {
+          "$ref": "./domain.schema.json#/$defs/Actor"
+        },
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/Scope"
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "page": {
+          "$ref": "#/$defs/PageRequest"
+        }
+      },
+      "description": "Side-effect-free query. Authenticated identity must equal actor and authorize scope."
+    },
+    "CommandCompletedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "command",
+        "outcome",
+        "previousRevision",
+        "currentRevision",
+        "result"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "command": {
+          "$ref": "./domain.schema.json#/$defs/CommandName"
+        },
+        "outcome": {
+          "const": "completed"
+        },
+        "previousRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "currentRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "result": {
+          "$ref": "#/$defs/CommandResult"
+        }
+      }
+    },
+    "CommandAcceptedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "command",
+        "outcome",
+        "currentRevision",
+        "acceptedAt"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "command": {
+          "$ref": "./domain.schema.json#/$defs/CommandName"
+        },
+        "outcome": {
+          "const": "accepted"
+        },
+        "currentRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "acceptedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "QueryResultResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "query",
+        "result",
+        "page"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "query": {
+          "$ref": "#/$defs/QueryName"
+        },
+        "result": {
+          "$ref": "#/$defs/QueryResult"
+        },
+        "page": {
+          "$ref": "#/$defs/PageInfo"
+        }
+      }
+    },
+    "ScopedResourceLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "organizationId",
+        "workspaceId",
+        "projectId",
+        "repositoryId"
+      ],
+      "properties": {
+        "organizationId": {
+          "$ref": "./domain.schema.json#/$defs/OrganizationId"
+        },
+        "workspaceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkspaceId"
+        },
+        "projectId": {
+          "$ref": "./domain.schema.json#/$defs/ProjectId"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        }
+      }
+    },
+    "ModelRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "modelId",
+        "credentialReferenceId"
+      ],
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialReferenceId": {
+          "$ref": "./domain.schema.json#/$defs/CredentialReferenceId"
+        }
+      }
+    },
+    "PublicationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "repository",
+        "baseBranch",
+        "headBranch"
+      ],
+      "properties": {
+        "provider": {
+          "const": "github"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/[^/\\s]+$",
+          "maxLength": 256
+        },
+        "baseBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "headBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "AcceptanceCriterionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "required"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "maxLength": 200
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "DeliverySpecInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "goal",
+        "repositoryId",
+        "baseRevision",
+        "acceptanceCriteria",
+        "publicationTarget"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "baseRevision": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{7,128}$"
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionInput"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "publicationTarget": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicationTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DeliveryTaskInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "goal",
+        "acceptanceCriterionIds",
+        "blockedByTaskIds",
+        "ownerActorId"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "acceptanceCriterionIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "blockedByTaskIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "ownerActorId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CriterionVerdictInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criterionId",
+        "verdict",
+        "evidenceIds"
+      ],
+      "properties": {
+        "criterionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ]
+        },
+        "evidenceIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/EvidenceId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      }
+    },
+    "RemediationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryTaskId",
+        "candidateDigest",
+        "instructions"
+      ],
+      "properties": {
+        "deliveryTaskId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidateDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      }
+    },
+    "SettingsPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultModelRoute",
+        "workerConcurrencyLimit"
+      ],
+      "properties": {
+        "defaultModelRoute": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ModelRoute"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workerConcurrencyLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      },
+      "minProperties": 1
+    },
+    "CredentialReferenceProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "providerId",
+        "displayName",
+        "secretState",
+        "revision",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/CredentialReferenceId"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "secretState": {
+          "type": "string",
+          "enum": [
+            "available",
+            "missing",
+            "revoked"
+          ]
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "description": "Secret-safe: responses never include secret material or vault locator."
+    },
+    "SessionCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "projectId",
+        "repositoryId",
+        "title",
+        "modelRoute"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "projectId": {
+          "$ref": "./domain.schema.json#/$defs/ProjectId"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "modelRoute": {
+          "$ref": "#/$defs/ModelRoute"
+        }
+      }
+    },
+    "ChatSubmitPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "message"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1048576
+        }
+      }
+    },
+    "SessionCancelPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "reason"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "SessionClosePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "DeliveryCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "spec",
+        "tasks"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "spec": {
+          "$ref": "#/$defs/DeliverySpecInput"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryTaskInput"
+          },
+          "maxItems": 1000
+        }
+      }
+    },
+    "DeliveryUpdateSpecPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "spec"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "spec": {
+          "$ref": "#/$defs/DeliverySpecInput"
+        }
+      }
+    },
+    "DeliveryApproveTaskBreakdownPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "tasks"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryTaskInput"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        }
+      }
+    },
+    "DeliveryAdvancePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        }
+      }
+    },
+    "DeliveryResolveAttentionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "attentionItemId",
+        "decision",
+        "resolution",
+        "remediation"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "attentionItemId": {
+          "$ref": "./domain.schema.json#/$defs/AttentionItemId"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "resolve",
+            "dismiss"
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "remediation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RemediationInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DeliverySubmitVerdictPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "candidateDigest",
+        "criterionResults"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "candidateDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "criterionResults": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CriterionVerdictInput"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        }
+      }
+    },
+    "SettingsUpdatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "patch"
+      ],
+      "properties": {
+        "patch": {
+          "$ref": "#/$defs/SettingsPatch"
+        }
+      }
+    },
+    "CredentialReferenceCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentialReferenceId",
+        "providerId",
+        "displayName",
+        "vaultLocator"
+      ],
+      "properties": {
+        "credentialReferenceId": {
+          "$ref": "./domain.schema.json#/$defs/CredentialReferenceId"
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "vaultLocator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "writeOnly": true
+        }
+      }
+    },
+    "CredentialReferenceDeletePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentialReferenceId"
+      ],
+      "properties": {
+        "credentialReferenceId": {
+          "$ref": "./domain.schema.json#/$defs/CredentialReferenceId"
+        }
+      }
+    },
+    "ApprovalDecidePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approvalId",
+        "decision",
+        "reason"
+      ],
+      "properties": {
+        "approvalId": {
+          "$ref": "./domain.schema.json#/$defs/ApprovalId"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "reject"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "WorkerDrainPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workerId",
+        "reason"
+      ],
+      "properties": {
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "WorkerEnablePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workerId"
+      ],
+      "properties": {
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        }
+      }
+    },
+    "PublicationPublishPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicationId",
+        "deliveryId",
+        "candidateDigest",
+        "target"
+      ],
+      "properties": {
+        "publicationId": {
+          "$ref": "./domain.schema.json#/$defs/PublicationId"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "candidateDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "target": {
+          "$ref": "#/$defs/PublicationTarget"
+        }
+      }
+    },
+    "PublicationCancelPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicationId",
+        "reason"
+      ],
+      "properties": {
+        "publicationId": {
+          "$ref": "./domain.schema.json#/$defs/PublicationId"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "EmptyParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "SessionListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "states"
+      ],
+      "properties": {
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "waiting_for_input",
+              "waiting_for_approval",
+              "cancelled",
+              "closed",
+              "failed"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "SessionGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "DeliveryListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "states"
+      ],
+      "properties": {
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "DeliveryGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        }
+      }
+    },
+    "CredentialReferenceListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId"
+      ],
+      "properties": {
+        "providerId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CredentialReferenceGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentialReferenceId"
+      ],
+      "properties": {
+        "credentialReferenceId": {
+          "$ref": "./domain.schema.json#/$defs/CredentialReferenceId"
+        }
+      }
+    },
+    "ApprovalListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "states"
+      ],
+      "properties": {
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "expired"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "ApprovalGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approvalId"
+      ],
+      "properties": {
+        "approvalId": {
+          "$ref": "./domain.schema.json#/$defs/ApprovalId"
+        }
+      }
+    },
+    "WorkerListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "states"
+      ],
+      "properties": {
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "enabled",
+              "draining",
+              "offline"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "WorkerGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workerId"
+      ],
+      "properties": {
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        }
+      }
+    },
+    "PublicationListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "states"
+      ],
+      "properties": {
+        "deliveryId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/DeliveryId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "publishing",
+              "published",
+              "cancelled",
+              "failed"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "PublicationGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicationId"
+      ],
+      "properties": {
+        "publicationId": {
+          "$ref": "./domain.schema.json#/$defs/PublicationId"
+        }
+      }
+    },
+    "SessionCreateCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "session.create"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionCreatePayload"
+            }
+          }
+        }
+      ]
+    },
+    "ChatSubmitCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "chat.submit"
+            },
+            "payload": {
+              "$ref": "#/$defs/ChatSubmitPayload"
+            }
+          }
+        }
+      ]
+    },
+    "SessionCancelCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "session.cancel"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionCancelPayload"
+            }
+          }
+        }
+      ]
+    },
+    "SessionCloseCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "session.close"
+            },
+            "payload": {
+              "$ref": "#/$defs/SessionClosePayload"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryCreateCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.create"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryCreatePayload"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryUpdateSpecCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.update_spec"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryUpdateSpecPayload"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryApproveTaskBreakdownCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.approve_task_breakdown"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryApproveTaskBreakdownPayload"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryAdvanceCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.advance"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryAdvancePayload"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryResolveAttentionCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.resolve_attention"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliveryResolveAttentionPayload"
+            }
+          }
+        }
+      ]
+    },
+    "DeliverySubmitVerdictCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "delivery.submit_verdict"
+            },
+            "payload": {
+              "$ref": "#/$defs/DeliverySubmitVerdictPayload"
+            }
+          }
+        }
+      ]
+    },
+    "SettingsUpdateCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "settings.update"
+            },
+            "payload": {
+              "$ref": "#/$defs/SettingsUpdatePayload"
+            }
+          }
+        }
+      ]
+    },
+    "CredentialReferenceCreateCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "credential.reference.create"
+            },
+            "payload": {
+              "$ref": "#/$defs/CredentialReferenceCreatePayload"
+            }
+          }
+        }
+      ]
+    },
+    "CredentialReferenceDeleteCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "credential.reference.delete"
+            },
+            "payload": {
+              "$ref": "#/$defs/CredentialReferenceDeletePayload"
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalDecideCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "approval.decide"
+            },
+            "payload": {
+              "$ref": "#/$defs/ApprovalDecidePayload"
+            }
+          }
+        }
+      ]
+    },
+    "WorkerDrainCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "worker.drain"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkerDrainPayload"
+            }
+          }
+        }
+      ]
+    },
+    "WorkerEnableCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "worker.enable"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkerEnablePayload"
+            }
+          }
+        }
+      ]
+    },
+    "PublicationPublishCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "publication.publish"
+            },
+            "payload": {
+              "$ref": "#/$defs/PublicationPublishPayload"
+            }
+          }
+        }
+      ]
+    },
+    "PublicationCancelCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "publication.cancel"
+            },
+            "payload": {
+              "$ref": "#/$defs/PublicationCancelPayload"
+            }
+          }
+        }
+      ]
+    },
+    "SessionListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "session.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/SessionListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "SessionGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "session.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/SessionGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "delivery.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/DeliveryListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "delivery.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/DeliveryGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "SettingsGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "settings.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/EmptyParameters"
+            }
+          }
+        }
+      ]
+    },
+    "CredentialReferenceListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "credential.reference.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CredentialReferenceListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "CredentialReferenceGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "credential.reference.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CredentialReferenceGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "approval.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/ApprovalListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "approval.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/ApprovalGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "WorkerListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "worker.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/WorkerListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "WorkerGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "worker.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/WorkerGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "PublicationListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "publication.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/PublicationListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "PublicationGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "publication.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/PublicationGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "ProductSessionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "projectId",
+        "repositoryId",
+        "title",
+        "state",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "projectId": {
+          "$ref": "./domain.schema.json#/$defs/ProjectId"
+        },
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "running",
+            "waiting_for_input",
+            "waiting_for_approval",
+            "cancelled",
+            "closed",
+            "failed"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "SettingsProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "defaultModelRoute",
+        "workerConcurrencyLimit"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "defaultModelRoute": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ModelRoute"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workerConcurrencyLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      }
+    },
+    "ApprovalProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "state",
+        "requestedAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/ApprovalId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "rejected",
+            "expired"
+          ]
+        },
+        "requestedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "WorkerProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "state",
+        "capacity",
+        "lastHeartbeatAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "draining",
+            "offline"
+          ]
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "lastHeartbeatAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PublicationProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "deliveryId",
+        "state",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/PublicationId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "publishing",
+            "published",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "ProductSessionPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProductSessionProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "DeliveryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "CredentialReferencePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CredentialReferenceProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "ApprovalPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "WorkerPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkerProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "PublicationPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicationProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "QueryResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionProjection"
+        },
+        {
+          "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+        },
+        {
+          "$ref": "#/$defs/SettingsProjection"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceProjection"
+        },
+        {
+          "$ref": "#/$defs/ApprovalProjection"
+        },
+        {
+          "$ref": "#/$defs/WorkerProjection"
+        },
+        {
+          "$ref": "#/$defs/PublicationProjection"
+        },
+        {
+          "$ref": "#/$defs/ProductSessionPage"
+        },
+        {
+          "$ref": "#/$defs/DeliveryPage"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferencePage"
+        },
+        {
+          "$ref": "#/$defs/ApprovalPage"
+        },
+        {
+          "$ref": "#/$defs/WorkerPage"
+        },
+        {
+          "$ref": "#/$defs/PublicationPage"
+        }
+      ]
+    },
+    "MutationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resourceKind",
+        "revision"
+      ],
+      "properties": {
+        "resourceKind": {
+          "type": "string",
+          "enum": [
+            "product_session",
+            "delivery",
+            "settings",
+            "credential_reference",
+            "approval",
+            "worker",
+            "publication"
+          ]
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      }
+    },
+    "CommandResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionProjection"
+        },
+        {
+          "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+        },
+        {
+          "$ref": "#/$defs/SettingsProjection"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceProjection"
+        },
+        {
+          "$ref": "#/$defs/ApprovalProjection"
+        },
+        {
+          "$ref": "#/$defs/WorkerProjection"
+        },
+        {
+          "$ref": "#/$defs/PublicationProjection"
+        },
+        {
+          "$ref": "#/$defs/MutationReceipt"
+        }
+      ]
+    }
+  }
+}
