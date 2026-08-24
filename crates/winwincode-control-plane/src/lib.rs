@@ -12,11 +12,42 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use winwincode_storage::SqliteStorage;
+use sha2::{Digest, Sha256};
+use winwincode_api::generated::{Actor, CommandEnvelope, Scope};
+use winwincode_domain::Sha256Digest;
 pub use winwincode_storage::{
-    CommitReceipt, NewOutboxEvent, OutboxEvent, ProductStateStorage, StateCommit, StorageError,
+    CommitReceipt, NewOutboxEvent, OutboxEvent, ProductStateStorage, StorageError,
     StorageErrorKind, StoredState,
 };
+use winwincode_storage::{
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+};
+
+const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
+const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
+
+/// Canonical state and outbox values produced by one validated application command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateChange {
+    pub stream_id: String,
+    pub state: Vec<u8>,
+    pub events: Vec<NewOutboxEvent>,
+}
+
+impl StateChange {
+    #[must_use]
+    pub fn new(
+        stream_id: impl Into<String>,
+        state: impl Into<Vec<u8>>,
+        events: Vec<NewOutboxEvent>,
+    ) -> Self {
+        Self {
+            stream_id: stream_id.into(),
+            state: state.into(),
+            events,
+        }
+    }
+}
 
 /// Local Control Plane process configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,17 +180,17 @@ pub enum CommitError {
     Storage(StorageError),
     /// State and outbox were committed, but the event remains pending.
     PublicationPending {
-        receipt: CommitReceipt,
+        receipt: Box<CommitReceipt>,
         source: OutboxError,
     },
 }
 
 impl CommitError {
     #[must_use]
-    pub const fn committed_receipt(&self) -> Option<&CommitReceipt> {
+    pub fn committed_receipt(&self) -> Option<&CommitReceipt> {
         match self {
             Self::Storage(_) => None,
-            Self::PublicationPending { receipt, .. } => Some(receipt),
+            Self::PublicationPending { receipt, .. } => Some(receipt.as_ref()),
         }
     }
 }
@@ -337,14 +368,20 @@ impl ControlPlane {
             .path()
     }
 
-    /// Commits canonical state and its outbox first, then publishes pending events.
+    /// Commits one canonical HTTP command's state and outbox first, then
+    /// publishes pending events.
     ///
     /// # Errors
     ///
     /// Returns [`CommitError::Storage`] when nothing was committed, or
     /// [`CommitError::PublicationPending`] when state is durable and its event
     /// must be replayed.
-    pub fn commit(&mut self, commit: StateCommit) -> Result<CommitReceipt, CommitError> {
+    pub fn commit(
+        &mut self,
+        command: &CommandEnvelope,
+        change: StateChange,
+    ) -> Result<CommitReceipt, CommitError> {
+        let commit = storage_commit(command, change).map_err(CommitError::Storage)?;
         let receipt = self
             .storage_mut()
             .map_err(CommitError::Storage)?
@@ -353,7 +390,7 @@ impl ControlPlane {
         drop(commit);
         self.flush_outbox()
             .map_err(|source| CommitError::PublicationPending {
-                receipt: receipt.clone(),
+                receipt: Box::new(receipt.clone()),
                 source,
             })?;
         Ok(receipt)
@@ -452,6 +489,191 @@ impl ControlPlane {
         }
         failures
     }
+}
+
+fn storage_commit(
+    command: &CommandEnvelope,
+    change: StateChange,
+) -> Result<StateCommit, StorageError> {
+    let actor_key = receipt_actor_key(&command.actor)?;
+    let scope_key = receipt_scope_key(&command.scope)?;
+    require_canonical_id(&command.request_id.0, "req_", "command requestId")?;
+    let receipt_identity = ReceiptIdentity::new(actor_key, scope_key, command.request_id.clone())?;
+    let expected_revision = u64::try_from(command.expected_revision.0).map_err(|_| {
+        StorageError::invalid_input("command expectedRevision must not be negative")
+    })?;
+    let serialized = serde_json::to_vec(command).map_err(|error| {
+        StorageError::adapter(format!(
+            "failed to encode the canonical command digest: {error}"
+        ))
+    })?;
+    let digest = Sha256::digest(serialized);
+    let command_digest = Sha256Digest(format!("sha256:{digest:x}"));
+
+    Ok(StateCommit::new(
+        receipt_identity,
+        command_digest,
+        change.stream_id,
+        expected_revision,
+        change.state,
+        change.events,
+    ))
+}
+
+fn receipt_actor_key(actor: &Actor) -> Result<ReceiptActorKey, StorageError> {
+    let (kind, id) = match actor {
+        Actor::UserActor(actor) => (actor.kind.as_str(), actor.id.0.as_str()),
+        Actor::ServiceAccountActor(actor) => (actor.kind.as_str(), actor.id.0.as_str()),
+        Actor::SystemActor(actor) => (actor.kind.as_str(), actor.id.0.as_str()),
+    };
+    let tag = match kind {
+        "user" => {
+            require_canonical_id(id, "usr_", "command user actor id")?;
+            b"user".as_slice()
+        }
+        "service_account" => {
+            require_canonical_id(id, "svc_", "command service account actor id")?;
+            b"service_account".as_slice()
+        }
+        "system" => {
+            require_canonical_id(id, "sys_", "command system actor id")?;
+            b"system".as_slice()
+        }
+        _ => {
+            return Err(StorageError::invalid_input(
+                "command actor kind is not canonical",
+            ));
+        }
+    };
+    ReceiptActorKey::from_encoded(encode_key(ACTOR_KEY_PREFIX, tag, &[id]))
+}
+
+fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
+    let encoded = match scope {
+        Scope::OrganizationScope(scope) => {
+            require_kind(&scope.kind, "organization")?;
+            require_canonical_id(
+                &scope.organization_id.0,
+                "org_",
+                "command scope organizationId",
+            )?;
+            encode_key(
+                SCOPE_KEY_PREFIX,
+                b"organization",
+                &[scope.organization_id.0.as_str()],
+            )
+        }
+        Scope::WorkspaceScope(scope) => {
+            require_kind(&scope.kind, "workspace")?;
+            require_canonical_id(
+                &scope.organization_id.0,
+                "org_",
+                "command scope organizationId",
+            )?;
+            require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
+            encode_key(
+                SCOPE_KEY_PREFIX,
+                b"workspace",
+                &[
+                    scope.organization_id.0.as_str(),
+                    scope.workspace_id.0.as_str(),
+                ],
+            )
+        }
+        Scope::ProjectScope(scope) => {
+            require_kind(&scope.kind, "project")?;
+            require_canonical_id(
+                &scope.organization_id.0,
+                "org_",
+                "command scope organizationId",
+            )?;
+            require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
+            require_canonical_id(&scope.project_id.0, "prj_", "command scope projectId")?;
+            encode_key(
+                SCOPE_KEY_PREFIX,
+                b"project",
+                &[
+                    scope.organization_id.0.as_str(),
+                    scope.workspace_id.0.as_str(),
+                    scope.project_id.0.as_str(),
+                ],
+            )
+        }
+        Scope::RepositoryScope(scope) => {
+            require_kind(&scope.kind, "repository")?;
+            require_canonical_id(
+                &scope.organization_id.0,
+                "org_",
+                "command scope organizationId",
+            )?;
+            require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
+            require_canonical_id(&scope.project_id.0, "prj_", "command scope projectId")?;
+            require_canonical_id(&scope.repository_id.0, "rep_", "command scope repositoryId")?;
+            encode_key(
+                SCOPE_KEY_PREFIX,
+                b"repository",
+                &[
+                    scope.organization_id.0.as_str(),
+                    scope.workspace_id.0.as_str(),
+                    scope.project_id.0.as_str(),
+                    scope.repository_id.0.as_str(),
+                ],
+            )
+        }
+    };
+    ReceiptScopeKey::from_encoded(encoded)
+}
+
+fn require_kind(actual: &str, expected: &str) -> Result<(), StorageError> {
+    if actual != expected {
+        return Err(StorageError::invalid_input(format!(
+            "command scope kind must be {expected}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_canonical_id(value: &str, prefix: &str, label: &str) -> Result<(), StorageError> {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return Err(StorageError::invalid_input(format!(
+            "{label} is not canonical"
+        )));
+    };
+    if suffix.len() != 26 || !suffix.bytes().all(is_crockford_base32) {
+        return Err(StorageError::invalid_input(format!(
+            "{label} is not canonical"
+        )));
+    }
+    Ok(())
+}
+
+const fn is_crockford_base32(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9'
+            | b'A'..=b'H'
+            | b'J'
+            | b'K'
+            | b'M'
+            | b'N'
+            | b'P'..=b'T'
+            | b'V'..=b'Z'
+    )
+}
+
+fn encode_key(prefix: &[u8], tag: &[u8], values: &[&str]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    append_key_field(&mut encoded, prefix);
+    append_key_field(&mut encoded, tag);
+    for value in values {
+        append_key_field(&mut encoded, value.as_bytes());
+    }
+    encoded
+}
+
+fn append_key_field(encoded: &mut Vec<u8>, value: &[u8]) {
+    encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    encoded.extend_from_slice(value);
 }
 
 const OWNERSHIP_MARKER: &str = ".winwincode-control-plane-owner";

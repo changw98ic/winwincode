@@ -72,6 +72,9 @@ const expectedLifecycleTests = [
   'shutdown_flushes_outbox_then_closes_publisher_and_storage',
   'shutdown_publish_failure_still_closes_storage_and_releases_temporary_directory',
   'shutdown_releases_the_sqlite_connection_and_temporary_directory',
+  'command_receipts_use_canonical_actor_full_scope_request_and_payload_digest',
+  'command_digest_is_stable_when_json_object_keys_arrive_in_another_order',
+  'invalid_scope_ids_fail_before_the_storage_port_is_called',
 ]
 
 function json(path) {
@@ -166,6 +169,37 @@ test('canonical state and its outbox event commit atomically before publication'
     outboxEvent: 'remain-pending',
     commandResult: 'committed-publication-pending',
     recovery: 'retry-without-reexecuting-command',
+  })
+})
+
+test('command receipt identity is actor and full scope aware without persisting secrets', () => {
+  const identity = json(rulesPath).receiptIdentity
+
+  assert.deepEqual(identity, {
+    keyFields: [
+      'actor.kind',
+      'actor.id',
+      'scope.kind',
+      'scope.organizationId',
+      'scope.workspaceId-when-present',
+      'scope.projectId-when-present',
+      'scope.repositoryId-when-present',
+      'requestId',
+    ],
+    sameIdentitySameDigest: 'replay-durable-receipt',
+    sameIdentityDifferentDigest: 'idempotency-conflict',
+    differentActorOrScopeSameRequestId: 'independent-command',
+    commandDigest: 'sha256-of-canonical-command-envelope',
+    semanticJsonObjectKeyOrderAffectsDigest: false,
+    replayEventIdsSource: 'durable-outbox',
+    persistedSecretsAllowed: false,
+    persistedActorProofAllowed: false,
+    legacyV1Migration: {
+      targetSchemaVersion: 2,
+      receiptIdentity: 'reserved-legacy-v1-migration-identity',
+      preserves: ['canonical-state', 'outbox-sequence', 'outbox-publication-state'],
+      legacyRuntimeLookupPath: false,
+    },
   })
 })
 
@@ -319,7 +353,7 @@ test('future phase 2.1 crates must expose and pass the frozen Rust black-box sea
       'ControlPlane',
       'ControlPlaneConfig',
       'EventPublisher',
-      'StateCommit',
+      'StateChange',
       'CommitReceipt',
       'ShutdownReport',
       'StartError',
@@ -330,6 +364,10 @@ test('future phase 2.1 crates must expose and pass the frozen Rust black-box sea
       'ControlPlane::shutdown',
     ],
     'winwincode-storage': [
+      'ReceiptActorKey',
+      'ReceiptScopeKey',
+      'ReceiptIdentity',
+      'StateCommit',
       'ProductStateStorage',
       'SqliteStorage',
       'SqliteStorage::open',

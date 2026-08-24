@@ -14,9 +14,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
+use winwincode_domain::{RequestId, Sha256Digest};
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+const LEGACY_V1_ACTOR_KEY: &[u8] = b"winwincode.command-receipt.actor.legacy-v1";
+const LEGACY_V1_SCOPE_KEY: &[u8] = b"winwincode.command-receipt.scope.legacy-v1";
 
 /// One event to append atomically with a canonical state change.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,10 +45,105 @@ impl NewOutboxEvent {
     }
 }
 
-/// One atomic canonical-state and outbox commit.
+/// Opaque canonical actor identity encoded by the Control Plane adapter.
+///
+/// The storage adapter never receives authentication proof or credentials. It
+/// only receives the stable actor identity fields from `CommandEnvelope`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptActorKey(Vec<u8>);
+
+impl ReceiptActorKey {
+    /// Builds a typed storage key from the canonical actor fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::InvalidInput`] for an empty encoding.
+    pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, StorageError> {
+        if encoded.is_empty() {
+            return Err(StorageError::invalid("receipt actor key must not be empty"));
+        }
+        Ok(Self(encoded))
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Opaque canonical organization/workspace/project/repository scope encoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptScopeKey(Vec<u8>);
+
+impl ReceiptScopeKey {
+    /// Builds a typed storage key from every canonical scope field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::InvalidInput`] for an empty encoding.
+    pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, StorageError> {
+        if encoded.is_empty() {
+            return Err(StorageError::invalid("receipt scope key must not be empty"));
+        }
+        Ok(Self(encoded))
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The complete idempotency identity of one canonical HTTP command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptIdentity {
+    actor_key: ReceiptActorKey,
+    scope_key: ReceiptScopeKey,
+    request_id: RequestId,
+}
+
+impl ReceiptIdentity {
+    /// Combines actor, full scope, and request id into one receipt identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::InvalidInput`] for an empty request id.
+    pub fn new(
+        actor_key: ReceiptActorKey,
+        scope_key: ReceiptScopeKey,
+        request_id: RequestId,
+    ) -> Result<Self, StorageError> {
+        if request_id.0.is_empty() {
+            return Err(StorageError::invalid("request_id must not be empty"));
+        }
+        Ok(Self {
+            actor_key,
+            scope_key,
+            request_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn actor_key(&self) -> &ReceiptActorKey {
+        &self.actor_key
+    }
+
+    #[must_use]
+    pub const fn scope_key(&self) -> &ReceiptScopeKey {
+        &self.scope_key
+    }
+
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+}
+
+/// One atomic canonical-state and outbox commit at the storage port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateCommit {
-    pub request_id: String,
+    pub receipt_identity: ReceiptIdentity,
+    pub command_digest: Sha256Digest,
     pub stream_id: String,
     pub expected_revision: u64,
     pub state: Vec<u8>,
@@ -54,14 +153,16 @@ pub struct StateCommit {
 impl StateCommit {
     #[must_use]
     pub fn new(
-        request_id: impl Into<String>,
+        receipt_identity: ReceiptIdentity,
+        command_digest: Sha256Digest,
         stream_id: impl Into<String>,
         expected_revision: u64,
         state: impl Into<Vec<u8>>,
         events: Vec<NewOutboxEvent>,
     ) -> Self {
         Self {
-            request_id: request_id.into(),
+            receipt_identity,
+            command_digest,
             stream_id: stream_id.into(),
             expected_revision,
             state: state.into(),
@@ -70,9 +171,7 @@ impl StateCommit {
     }
 
     fn validate(&self) -> Result<(), StorageError> {
-        if self.request_id.is_empty() {
-            return Err(StorageError::invalid("request_id must not be empty"));
-        }
+        validate_sha256_digest(&self.command_digest)?;
         if self.stream_id.is_empty() {
             return Err(StorageError::invalid("stream_id must not be empty"));
         }
@@ -125,7 +224,7 @@ pub struct OutboxEvent {
 /// The durable result of one state commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitReceipt {
-    pub request_id: String,
+    pub receipt_identity: ReceiptIdentity,
     pub stream_id: String,
     pub revision: u64,
     pub event_ids: Vec<String>,
@@ -158,11 +257,16 @@ impl StorageError {
         }
     }
 
-    fn invalid(message: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn invalid_input(message: impl Into<String>) -> Self {
         Self {
             kind: StorageErrorKind::InvalidInput,
             message: message.into(),
         }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::invalid_input(message)
     }
 
     fn closed() -> Self {
@@ -179,10 +283,13 @@ impl StorageError {
         }
     }
 
-    fn request_conflict(request_id: &str) -> Self {
+    fn request_conflict(request_id: &RequestId) -> Self {
         Self {
             kind: StorageErrorKind::RequestConflict,
-            message: format!("request id {request_id} was already used for another commit"),
+            message: format!(
+                "request id {} was already used for another command in this actor and scope",
+                request_id.0
+            ),
         }
     }
 
@@ -304,105 +411,20 @@ impl SqliteStorage {
 impl ProductStateStorage for SqliteStorage {
     fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         commit.validate()?;
-        let signature = command_signature(commit);
-        let expected_revision = i64::try_from(commit.expected_revision)
-            .map_err(|_| StorageError::invalid("expected_revision is out of range"))?;
         let connection = self.connection_mut()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
 
-        let prior = transaction
-            .query_row(
-                "SELECT command_signature, revision FROM command_receipts WHERE request_id = ?1",
-                [&commit.request_id],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?;
-        if let Some((prior_signature, revision)) = prior {
-            if prior_signature != signature {
-                return Err(StorageError::request_conflict(&commit.request_id));
-            }
-            let revision = u64::try_from(revision)
-                .map_err(|_| StorageError::adapter("stored revision is negative"))?;
+        if let Some(prior) = prior_receipt(&transaction, &commit.receipt_identity)? {
+            let receipt = replay_receipt(&transaction, commit, prior)?;
             transaction.commit().map_err(sql_error)?;
-            return Ok(CommitReceipt {
-                request_id: commit.request_id.clone(),
-                stream_id: commit.stream_id.clone(),
-                revision,
-                event_ids: commit
-                    .events
-                    .iter()
-                    .map(|event| event.event_id.clone())
-                    .collect(),
-                idempotent_replay: true,
-            });
+            return Ok(receipt);
         }
 
-        let actual_revision = transaction
-            .query_row(
-                "SELECT revision FROM product_state WHERE stream_id = ?1",
-                [&commit.stream_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(sql_error)?
-            .unwrap_or(0);
-        let actual_revision = u64::try_from(actual_revision)
-            .map_err(|_| StorageError::adapter("stored revision is negative"))?;
-        if actual_revision != commit.expected_revision {
-            return Err(StorageError::revision_conflict(
-                commit.expected_revision,
-                actual_revision,
-            ));
-        }
-
-        let revision = expected_revision
-            .checked_add(1)
-            .ok_or_else(|| StorageError::invalid("revision is out of range"))?;
-        transaction
-            .execute(
-                "INSERT INTO product_state (stream_id, revision, payload) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(stream_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload",
-                params![commit.stream_id, revision, commit.state],
-            )
-            .map_err(sql_error)?;
-        for event in &commit.events {
-            transaction
-                .execute(
-                    "INSERT INTO outbox (event_id, request_id, topic, payload, published) \
-                     VALUES (?1, ?2, ?3, ?4, 0)",
-                    params![
-                        event.event_id,
-                        commit.request_id,
-                        event.topic,
-                        event.payload
-                    ],
-                )
-                .map_err(sql_error)?;
-        }
-        transaction
-            .execute(
-                "INSERT INTO command_receipts (request_id, command_signature, stream_id, revision) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![commit.request_id, signature, commit.stream_id, revision],
-            )
-            .map_err(sql_error)?;
+        let receipt = append_state_commit(&transaction, commit)?;
         transaction.commit().map_err(sql_error)?;
-
-        Ok(CommitReceipt {
-            request_id: commit.request_id.clone(),
-            stream_id: commit.stream_id.clone(),
-            revision: u64::try_from(revision)
-                .map_err(|_| StorageError::adapter("committed revision is negative"))?,
-            event_ids: commit
-                .events
-                .iter()
-                .map(|event| event.event_id.clone())
-                .collect(),
-            idempotent_replay: false,
-        })
+        Ok(receipt)
     }
 
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError> {
@@ -482,11 +504,169 @@ impl ProductStateStorage for SqliteStorage {
     }
 }
 
+struct StoredReceipt {
+    command_digest: String,
+    stream_id: String,
+    revision: i64,
+}
+
+fn prior_receipt(
+    transaction: &rusqlite::Transaction<'_>,
+    identity: &ReceiptIdentity,
+) -> Result<Option<StoredReceipt>, StorageError> {
+    transaction
+        .query_row(
+            "SELECT command_digest, stream_id, revision FROM command_receipts \
+             WHERE actor_key = ?1 AND scope_key = ?2 AND request_id = ?3",
+            params![
+                identity.actor_key().as_bytes(),
+                identity.scope_key().as_bytes(),
+                identity.request_id().0,
+            ],
+            |row| {
+                Ok(StoredReceipt {
+                    command_digest: row.get(0)?,
+                    stream_id: row.get(1)?,
+                    revision: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
+fn replay_receipt(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+    prior: StoredReceipt,
+) -> Result<CommitReceipt, StorageError> {
+    if prior.command_digest != commit.command_digest.0 {
+        return Err(StorageError::request_conflict(
+            commit.receipt_identity.request_id(),
+        ));
+    }
+    Ok(CommitReceipt {
+        receipt_identity: commit.receipt_identity.clone(),
+        stream_id: prior.stream_id,
+        revision: u64::try_from(prior.revision)
+            .map_err(|_| StorageError::adapter("stored revision is negative"))?,
+        event_ids: receipt_event_ids(transaction, &commit.receipt_identity)?,
+        idempotent_replay: true,
+    })
+}
+
+fn append_state_commit(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+) -> Result<CommitReceipt, StorageError> {
+    let actual_revision = transaction
+        .query_row(
+            "SELECT revision FROM product_state WHERE stream_id = ?1",
+            [&commit.stream_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .unwrap_or(0);
+    let actual_revision = u64::try_from(actual_revision)
+        .map_err(|_| StorageError::adapter("stored revision is negative"))?;
+    if actual_revision != commit.expected_revision {
+        return Err(StorageError::revision_conflict(
+            commit.expected_revision,
+            actual_revision,
+        ));
+    }
+
+    let expected_revision = i64::try_from(commit.expected_revision)
+        .map_err(|_| StorageError::invalid("expected_revision is out of range"))?;
+    let revision = expected_revision
+        .checked_add(1)
+        .ok_or_else(|| StorageError::invalid("revision is out of range"))?;
+    append_state(transaction, commit, revision)?;
+    append_outbox_events(transaction, commit)?;
+    append_receipt(transaction, commit, revision)?;
+
+    Ok(CommitReceipt {
+        receipt_identity: commit.receipt_identity.clone(),
+        stream_id: commit.stream_id.clone(),
+        revision: u64::try_from(revision)
+            .map_err(|_| StorageError::adapter("committed revision is negative"))?,
+        event_ids: commit
+            .events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect(),
+        idempotent_replay: false,
+    })
+}
+
+fn append_state(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+    revision: i64,
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO product_state (stream_id, revision, payload) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(stream_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload",
+            params![commit.stream_id, revision, commit.state],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+fn append_outbox_events(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+) -> Result<(), StorageError> {
+    for event in &commit.events {
+        transaction
+            .execute(
+                "INSERT INTO outbox \
+                 (event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload, published) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![
+                    event.event_id,
+                    commit.receipt_identity.actor_key().as_bytes(),
+                    commit.receipt_identity.scope_key().as_bytes(),
+                    commit.receipt_identity.request_id().0,
+                    event.topic,
+                    event.payload
+                ],
+            )
+            .map_err(sql_error)?;
+    }
+    Ok(())
+}
+
+fn append_receipt(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+    revision: i64,
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO command_receipts \
+             (actor_key, scope_key, request_id, command_digest, stream_id, revision) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                commit.receipt_identity.actor_key().as_bytes(),
+                commit.receipt_identity.scope_key().as_bytes(),
+                commit.receipt_identity.request_id().0,
+                commit.command_digest.0,
+                commit.stream_id,
+                revision,
+            ],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | SCHEMA_VERSION) {
         return Err(StorageError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -495,36 +675,18 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
-    transaction
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS product_state (
-                 stream_id TEXT PRIMARY KEY NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0),
-                 payload BLOB NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS command_receipts (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 command_signature BLOB NOT NULL,
-                 stream_id TEXT NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0)
-             );
-             CREATE TABLE IF NOT EXISTS outbox (
-                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                 event_id TEXT UNIQUE NOT NULL,
-                 request_id TEXT NOT NULL,
-                 topic TEXT NOT NULL,
-                 payload BLOB NOT NULL,
-                 published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1))
-             );
-             CREATE INDEX IF NOT EXISTS outbox_pending_sequence
-                 ON outbox (published, sequence);",
-        )
-        .map_err(sql_error)?;
-    if version == 0 {
-        transaction
-            .pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(sql_error)?;
+    match version {
+        0 | SCHEMA_VERSION => create_schema_v2(&transaction)?,
+        1 => migrate_v1_to_v2(&transaction)?,
+        unsupported => {
+            return Err(StorageError::adapter(format!(
+                "unsupported schema version {unsupported}"
+            )));
+        }
     }
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(sql_error)?;
     transaction.commit().map_err(sql_error)?;
 
     let migrated_version = connection
@@ -538,23 +700,153 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn command_signature(commit: &StateCommit) -> Vec<u8> {
-    let mut signature = Vec::new();
-    append_signature_field(&mut signature, commit.stream_id.as_bytes());
-    signature.extend_from_slice(&commit.expected_revision.to_le_bytes());
-    append_signature_field(&mut signature, &commit.state);
-    signature.extend_from_slice(&(commit.events.len() as u64).to_le_bytes());
-    for event in &commit.events {
-        append_signature_field(&mut signature, event.event_id.as_bytes());
-        append_signature_field(&mut signature, event.topic.as_bytes());
-        append_signature_field(&mut signature, &event.payload);
-    }
-    signature
+fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS product_state (
+                 stream_id TEXT PRIMARY KEY NOT NULL,
+                 revision INTEGER NOT NULL CHECK (revision > 0),
+                 payload BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS command_receipts (
+                 actor_key BLOB NOT NULL,
+                 scope_key BLOB NOT NULL,
+                 request_id TEXT NOT NULL,
+                 command_digest TEXT NOT NULL,
+                 stream_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL CHECK (revision > 0),
+                 PRIMARY KEY (actor_key, scope_key, request_id)
+             );
+             CREATE TABLE IF NOT EXISTS outbox (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 event_id TEXT UNIQUE NOT NULL,
+                 receipt_actor_key BLOB NOT NULL,
+                 receipt_scope_key BLOB NOT NULL,
+                 request_id TEXT NOT NULL,
+                 topic TEXT NOT NULL,
+                 payload BLOB NOT NULL,
+                 published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
+                 FOREIGN KEY (receipt_actor_key, receipt_scope_key, request_id)
+                     REFERENCES command_receipts (actor_key, scope_key, request_id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );
+             CREATE INDEX IF NOT EXISTS outbox_pending_sequence
+                 ON outbox (published, sequence);",
+        )
+        .map_err(sql_error)
 }
 
-fn append_signature_field(signature: &mut Vec<u8>, value: &[u8]) {
-    signature.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    signature.extend_from_slice(value);
+fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE command_receipts RENAME TO command_receipts_v1;
+             ALTER TABLE outbox RENAME TO outbox_v1;",
+        )
+        .map_err(sql_error)?;
+    create_schema_v2(transaction)?;
+
+    let legacy_receipts = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT request_id, command_signature, stream_id, revision \
+                 FROM command_receipts_v1 ORDER BY request_id",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
+    };
+    for (request_id, signature, stream_id, revision) in legacy_receipts {
+        transaction
+            .execute(
+                "INSERT INTO command_receipts \
+                 (actor_key, scope_key, request_id, command_digest, stream_id, revision) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    LEGACY_V1_ACTOR_KEY,
+                    LEGACY_V1_SCOPE_KEY,
+                    request_id,
+                    sha256_digest(&signature).0,
+                    stream_id,
+                    revision,
+                ],
+            )
+            .map_err(sql_error)?;
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO outbox \
+             (sequence, event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload, published) \
+             SELECT sequence, event_id, ?1, ?2, request_id, topic, payload, published \
+             FROM outbox_v1 ORDER BY sequence",
+            params![LEGACY_V1_ACTOR_KEY, LEGACY_V1_SCOPE_KEY],
+        )
+        .map_err(sql_error)?;
+    transaction
+        .execute_batch(
+            "DROP TABLE outbox_v1;
+             DROP TABLE command_receipts_v1;
+             CREATE INDEX IF NOT EXISTS outbox_pending_sequence
+                 ON outbox (published, sequence);",
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+fn receipt_event_ids(
+    transaction: &rusqlite::Transaction<'_>,
+    identity: &ReceiptIdentity,
+) -> Result<Vec<String>, StorageError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT event_id FROM outbox \
+             WHERE receipt_actor_key = ?1 AND receipt_scope_key = ?2 AND request_id = ?3 \
+             ORDER BY sequence",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(
+            params![
+                identity.actor_key().as_bytes(),
+                identity.scope_key().as_bytes(),
+                identity.request_id().0,
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sql_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+}
+
+fn validate_sha256_digest(digest: &Sha256Digest) -> Result<(), StorageError> {
+    let Some(hex) = digest.0.strip_prefix("sha256:") else {
+        return Err(StorageError::invalid(
+            "command_digest must be a sha256 digest",
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(StorageError::invalid(
+            "command_digest must contain 64 lowercase hexadecimal digits",
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_digest(bytes: &[u8]) -> Sha256Digest {
+    let digest = Sha256::digest(bytes);
+    Sha256Digest(format!("sha256:{digest:x}"))
 }
 
 fn sql_error(error: rusqlite::Error) -> StorageError {
