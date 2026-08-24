@@ -3,6 +3,7 @@ members = [
   "crates/helper",
   "crates/kernel",
   "crates/native",
+  "crates/winwincode-api",
 ]
 exclude = ["third_party/codex/codex-rs"]
 resolver = "2"

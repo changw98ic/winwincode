@@ -98,7 +98,7 @@ Heartbeat 只更新存活、容量和当前 Lease 进度，不隐式派发 Job�
 - Artifact 使用 `artifact.open` 建立不可变摘要和长度，再用有 sequence 的
   `artifact.chunk` 传输。合同不暴露本地路径、对象存储键或上传 URL。
 - Model 使用 `model.open` 提交 Provider 中立的编码请求，由 Control Plane 根据
-  `ModelRoute` 解析模型与长期 Credential。Worker 只收到有 sequence 的编码响应块。
+  `ModelGatewayRoute` 解析模型与长期 Credential。Worker 只收到有 sequence 的编码响应块。
 - Input 和 Approval 都带 WorkerSession、Lease 和独立请求身份。产品会话、审批队列、
   决策人和审计记录仍由 Control Plane 管理。
 - 浏览器通过 HTTP `input.respond` 提交有 Actor 和 revision 的业务命令。Control Plane 核对

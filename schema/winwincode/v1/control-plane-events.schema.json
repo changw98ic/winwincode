@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.winwincode.dev/v1/control-plane-events.schema.json",
+  "$id": "https://schemas.winwincode.dev/winwincode/v1/control-plane-events.schema.json",
   "title": "WinWinCode Control Plane WebSocket Protocol v1",
   "description": "Server event delivery and transport-only client frames. Product commands are deliberately absent and use the HTTP command contract.",
   "oneOf": [

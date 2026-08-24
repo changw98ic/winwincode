@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/fixtures/v1/events.schema.json",
+  "title": "Contract code generation fixture events",
+  "$defs": {
+    "ControlPlaneWebSocketProductSessionChangedEvent": {
+      "description": "Long-name fixture branch for Rust formatting.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/FailedEvent"
+        }
+      ]
+    },
+    "ControlPlaneWebSocketRuntimeProjectionAppendedEvent": {
+      "description": "Second long-name fixture branch for Rust formatting.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/CreatedEvent"
+        }
+      ]
+    },
+    "ControlPlaneWebSocketLongNamedEvent": {
+      "description": "Long-name fixture event union.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketProductSessionChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketRuntimeProjectionAppendedEvent"
+        }
+      ]
+    },
+    "ContractEvent": {
+      "description": "Fixture event union.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CreatedEvent"
+        },
+        {
+          "$ref": "#/$defs/FailedEvent"
+        }
+      ],
+      "discriminator": {
+        "propertyName": "type"
+      }
+    },
+    "CreatedEvent": {
+      "description": "A fixture projection was created.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "organizationId",
+        "projection",
+        "requestId",
+        "type"
+      ],
+      "properties": {
+        "organizationId": {
+          "$ref": "./domain.schema.json#/$defs/OrganizationId"
+        },
+        "projection": {
+          "$ref": "./domain.schema.json#/$defs/WidgetProjection"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "type": {
+          "const": "created"
+        }
+      }
+    },
+    "FailedEvent": {
+      "description": "A fixture command was rejected.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "organizationId",
+        "requestId",
+        "type"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "./domain.schema.json#/$defs/ErrorCode"
+        },
+        "organizationId": {
+          "$ref": "./domain.schema.json#/$defs/OrganizationId"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "retryAfterSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "failed"
+        }
+      }
+    }
+  },
+  "x-winwincode-openapi": {
+    "paths": {
+      "/fixtures/{organizationId}/widgets": {
+        "get": {
+          "operationId": "getFixtureWidget",
+          "parameters": [
+            {
+              "name": "organizationId",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "$ref": "./domain.schema.json#/$defs/OrganizationId"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Current fixture widget.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "./domain.schema.json#/$defs/WidgetProjection"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

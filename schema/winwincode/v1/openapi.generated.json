@@ -1,0 +1,6353 @@
+{
+  "components": {
+    "schemas": {
+      "AcceptanceCriterionInput": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "required"
+        ],
+        "type": "object"
+      },
+      "ActiveLeaseSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "fencingToken": {
+            "$ref": "#/components/schemas/FencingToken"
+          },
+          "jobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "lastEventSequence": {
+            "$ref": "#/components/schemas/ExecutionAckSequence"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          }
+        },
+        "required": [
+          "leaseId",
+          "jobId",
+          "attempt",
+          "fencingToken",
+          "expiresAt",
+          "lastEventSequence"
+        ],
+        "type": "object"
+      },
+      "Actor": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UserActor"
+          },
+          {
+            "$ref": "#/components/schemas/ServiceAccountActor"
+          },
+          {
+            "$ref": "#/components/schemas/SystemActor"
+          }
+        ]
+      },
+      "ActorId": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UserId"
+          },
+          {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          },
+          {
+            "$ref": "#/components/schemas/SystemActorId"
+          }
+        ]
+      },
+      "ApprovalAction": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/ApprovalActionCategory"
+          },
+          "details": {
+            "$ref": "#/components/schemas/EncodedPayload"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ApprovalActionCategory": {
+        "enum": [
+          "filesystem_write",
+          "mcp",
+          "network",
+          "shell"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecideCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "approval.decide"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/ApprovalDecidePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalDecidePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalId": {
+            "$ref": "#/components/schemas/ApprovalId"
+          },
+          "decision": {
+            "enum": [
+              "approve",
+              "reject"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "approvalId",
+          "decision",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ApprovalDecisionMessage": {
+        "additionalProperties": false,
+        "description": "Returns the resolved execution approval decision.",
+        "properties": {
+          "approvalId": {
+            "$ref": "#/components/schemas/ApprovalId"
+          },
+          "decidedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "decision": {
+            "enum": [
+              "approved",
+              "cancelled",
+              "denied",
+              "expired"
+            ],
+            "type": "string"
+          },
+          "kind": {
+            "const": "approval.decision"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "scope": {
+            "enum": [
+              "once",
+              "worker_session"
+            ],
+            "type": "string"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "approvalId",
+          "decision",
+          "scope",
+          "decidedAt"
+        ],
+        "title": "approval.decision",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "ApprovalGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalId": {
+            "$ref": "#/components/schemas/ApprovalId"
+          }
+        },
+        "required": [
+          "approvalId"
+        ],
+        "type": "object"
+      },
+      "ApprovalGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/ApprovalGetParameters"
+              },
+              "query": {
+                "const": "approval.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalId": {
+        "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ApprovalListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "enum": [
+                "pending",
+                "approved",
+                "rejected",
+                "expired"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "ApprovalListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/ApprovalListParameters"
+              },
+              "query": {
+                "const": "approval.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "approval_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "ApprovalProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ApprovalId"
+          },
+          "requestedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "expired"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "state",
+          "requestedAt"
+        ],
+        "type": "object"
+      },
+      "ApprovalRequestMessage": {
+        "additionalProperties": false,
+        "description": "Requests a decision for one execution action; business approval state remains Control Plane owned.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ApprovalAction"
+          },
+          "approvalId": {
+            "$ref": "#/components/schemas/ApprovalId"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "kind": {
+            "const": "approval.request"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "approvalId",
+          "action",
+          "expiresAt"
+        ],
+        "title": "approval.request",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "ArtifactAckMessage": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "gap"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "replayFromSequence": true
+              },
+              "required": [
+                "replayFromSequence"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "gap"
+                  }
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "not": {
+                "properties": {
+                  "replayFromSequence": true
+                },
+                "required": [
+                  "replayFromSequence"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Acknowledges the highest contiguous artifact chunk.",
+        "properties": {
+          "ackSequence": {
+            "$ref": "#/components/schemas/ExecutionAckSequence"
+          },
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "kind": {
+            "const": "artifact.ack"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "replayFromSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LeaseWriteStatus"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "artifactId",
+          "status",
+          "ackSequence"
+        ],
+        "title": "artifact.ack",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "ArtifactChunkMessage": {
+        "additionalProperties": false,
+        "description": "Transfers one ordered artifact chunk through either local or remote adapters.",
+        "properties": {
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "isFinal": {
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "artifact.chunk"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EncodedPayload"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "artifactId",
+          "sequence",
+          "payload",
+          "isFinal"
+        ],
+        "title": "artifact.chunk",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "ArtifactDescriptor": {
+        "additionalProperties": false,
+        "properties": {
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "digest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "fileName": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ArtifactKind"
+          },
+          "mediaType": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sizeBytes": {
+            "maximum": 1099511627776,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifactId",
+          "kind",
+          "mediaType",
+          "digest",
+          "sizeBytes"
+        ],
+        "type": "object"
+      },
+      "ArtifactId": {
+        "description": "Identity of one lease-scoped execution artifact.",
+        "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ArtifactKind": {
+        "enum": [
+          "candidate",
+          "command_output",
+          "diff",
+          "log",
+          "report",
+          "test_output",
+          "usage"
+        ],
+        "type": "string"
+      },
+      "ArtifactOpenMessage": {
+        "additionalProperties": false,
+        "description": "Begins a lease-scoped artifact stream without exposing an object-store implementation.",
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/ArtifactDescriptor"
+          },
+          "kind": {
+            "const": "artifact.open"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "artifact"
+        ],
+        "title": "artifact.open",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "ArtifactReference": {
+        "additionalProperties": false,
+        "properties": {
+          "artifactId": {
+            "$ref": "#/components/schemas/ArtifactId"
+          },
+          "digest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "artifactId",
+          "digest"
+        ],
+        "type": "object"
+      },
+      "AttentionItemId": {
+        "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ChatSubmitCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "chat.submit"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/ChatSubmitPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ChatSubmitPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "maxLength": 1048576,
+            "minLength": 1,
+            "type": "string"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "message"
+        ],
+        "type": "object"
+      },
+      "CodexThreadId": {
+        "pattern": "^cdx_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "CommandAcceptedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "command": {
+            "$ref": "#/components/schemas/CommandName"
+          },
+          "currentRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "outcome": {
+            "const": "accepted"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "requestId",
+          "command",
+          "outcome",
+          "currentRevision",
+          "acceptedAt"
+        ],
+        "type": "object"
+      },
+      "CommandCompletedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/CommandName"
+          },
+          "currentRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "outcome": {
+            "const": "completed"
+          },
+          "previousRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "result": {
+            "$ref": "#/components/schemas/CommandResult"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "requestId",
+          "command",
+          "outcome",
+          "previousRevision",
+          "currentRevision",
+          "result"
+        ],
+        "type": "object"
+      },
+      "CommandEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "command": {
+            "$ref": "#/components/schemas/CommandName"
+          },
+          "expectedRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "command",
+          "actor",
+          "scope",
+          "requestId",
+          "expectedRevision",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "CommandName": {
+        "enum": [
+          "session.create",
+          "chat.submit",
+          "session.cancel",
+          "session.close",
+          "delivery.create",
+          "delivery.update_spec",
+          "delivery.approve_task_breakdown",
+          "delivery.advance",
+          "delivery.resolve_attention",
+          "delivery.submit_verdict",
+          "settings.update",
+          "credential.reference.create",
+          "credential.reference.delete",
+          "approval.decide",
+          "worker.drain",
+          "worker.enable",
+          "publication.publish",
+          "publication.cancel"
+        ],
+        "type": "string"
+      },
+      "CommandRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionCreateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/ChatSubmitCommand"
+          },
+          {
+            "$ref": "#/components/schemas/SessionCancelCommand"
+          },
+          {
+            "$ref": "#/components/schemas/SessionCloseCommand"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryCreateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryUpdateSpecCommand"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryApproveTaskBreakdownCommand"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryAdvanceCommand"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryResolveAttentionCommand"
+          },
+          {
+            "$ref": "#/components/schemas/DeliverySubmitVerdictCommand"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceCreateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceDeleteCommand"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalDecideCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerDrainCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerEnableCommand"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationPublishCommand"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationCancelCommand"
+          }
+        ]
+      },
+      "CommandResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProductSessionProjection"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryProjection"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsProjection"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceProjection"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalProjection"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerProjection"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationProjection"
+          },
+          {
+            "$ref": "#/components/schemas/MutationReceipt"
+          }
+        ]
+      },
+      "ControlPlaneWebSocketAckFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAcknowledgedCursor"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.ack.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "cursor"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketAcknowledgedCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "eventId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventId"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketStreamPosition"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "sequence",
+          "eventId"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketActivityRecordedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "category": {
+            "enum": [
+              "product",
+              "runtime",
+              "approval",
+              "publication",
+              "collaboration",
+              "security"
+            ],
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "summary": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "activity.recorded.v1"
+          }
+        },
+        "required": [
+          "type",
+          "actor",
+          "category",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketApprovalChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalId": {
+            "$ref": "#/components/schemas/ApprovalId"
+          },
+          "decidedBy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decisionReason": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "requestedBy": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "approved",
+              "denied",
+              "expired",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "subject": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "approval.changed.v1"
+          }
+        },
+        "required": [
+          "type",
+          "approvalId",
+          "productSessionId",
+          "state",
+          "subject",
+          "requestedBy",
+          "decidedBy"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketAttentionChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "assignedTo": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActorId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attentionItemId": {
+            "$ref": "#/components/schemas/AttentionItemId"
+          },
+          "category": {
+            "enum": [
+              "credential",
+              "execution-approval",
+              "user-input",
+              "provider",
+              "verification",
+              "business"
+            ],
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          },
+          "status": {
+            "enum": [
+              "blocking",
+              "resolved",
+              "obsolete"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "attention.changed.v1"
+          }
+        },
+        "required": [
+          "type",
+          "attentionItemId",
+          "deliveryId",
+          "revision",
+          "status",
+          "category",
+          "summary",
+          "assignedTo"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketAuthorizationEpoch": {
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "ControlPlaneWebSocketAuthorizationRevokedFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "authorizationEpoch": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationEpoch"
+          },
+          "closeCode": {
+            "const": 4403
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.authorization-revoked.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "authorizationEpoch",
+          "closeCode"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketBackpressureFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "ackRequiredThrough": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAcknowledgedCursor"
+          },
+          "closeCode": {
+            "const": 4408
+          },
+          "disconnectAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "pendingEventCount": {
+            "minimum": 256,
+            "type": "integer"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.backpressure.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "pendingEventCount",
+          "ackRequiredThrough",
+          "disconnectAt",
+          "closeCode"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketClientFrame": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscribeFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketResumeFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAckFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketPongFrame"
+          }
+        ]
+      },
+      "ControlPlaneWebSocketControlPlaneSource": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "component": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "control-plane"
+          }
+        },
+        "required": [
+          "kind",
+          "component",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "eventId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEventId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketStreamPosition"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "sequence",
+          "eventId"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketDeliveryChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "changeKind": {
+            "enum": [
+              "created",
+              "advanced",
+              "reworked",
+              "cancelled",
+              "published"
+            ],
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "delivery.changed.v1"
+          }
+        },
+        "required": [
+          "type",
+          "deliveryId",
+          "revision",
+          "changeKind"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketDeliveryStream": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "kind": {
+            "const": "delivery"
+          }
+        },
+        "required": [
+          "kind",
+          "deliveryId"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketDeliveryTaskChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "changeKind": {
+            "enum": [
+              "created",
+              "assigned",
+              "blocked",
+              "started",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "deliveryTaskId": {
+            "$ref": "#/components/schemas/DeliveryTaskId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "delivery-task.changed.v1"
+          }
+        },
+        "required": [
+          "type",
+          "deliveryId",
+          "deliveryTaskId",
+          "revision",
+          "changeKind"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEventFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "authorizationEpoch": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationEpoch"
+          },
+          "event": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventPayload"
+          },
+          "eventId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventSequence"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventSource"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "event.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "eventId",
+          "scope",
+          "stream",
+          "sequence",
+          "occurredAt",
+          "source",
+          "authorizationEpoch",
+          "event"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEventId": {
+        "pattern": "^evt_[A-Za-z0-9_-]{16,128}$",
+        "type": "string"
+      },
+      "ControlPlaneWebSocketEventPayload": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketProductSessionChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketRuntimeProjectionAppendedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketApprovalChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAttentionChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryTaskChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketPresenceChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketWorkerHealthChangedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketActivityRecordedEvent"
+          }
+        ]
+      },
+      "ControlPlaneWebSocketEventSequence": {
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "ControlPlaneWebSocketEventSource": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketControlPlaneSource"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketExecutionWorkerSource"
+          }
+        ]
+      },
+      "ControlPlaneWebSocketEventStream": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketScopeStream"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryStream"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketProductSessionStream"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketLeaseStream"
+          }
+        ]
+      },
+      "ControlPlaneWebSocketEventType": {
+        "enum": [
+          "activity.recorded.v1",
+          "approval.changed.v1",
+          "attention.changed.v1",
+          "delivery.changed.v1",
+          "delivery-task.changed.v1",
+          "presence.changed.v1",
+          "product-session.changed.v1",
+          "runtime-projection.appended.v1",
+          "worker-health.changed.v1"
+        ],
+        "type": "string"
+      },
+      "ControlPlaneWebSocketExecutionWorkerSource": {
+        "additionalProperties": false,
+        "properties": {
+          "codexThreadId": {
+            "$ref": "#/components/schemas/CodexThreadId"
+          },
+          "kind": {
+            "const": "execution-worker"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "workerId",
+          "workerSessionId",
+          "leaseId",
+          "codexThreadId"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketLeaseStream": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "lease"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "kind",
+          "workerId",
+          "leaseId"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketPingFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "nonce": {
+            "maxLength": 128,
+            "minLength": 16,
+            "type": "string"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "type": {
+            "const": "transport.ping.v1"
+          }
+        },
+        "required": [
+          "type",
+          "nonce",
+          "sentAt"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketPongFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "nonce": {
+            "maxLength": 128,
+            "minLength": 16,
+            "type": "string"
+          },
+          "type": {
+            "const": "transport.pong.v1"
+          }
+        },
+        "required": [
+          "type",
+          "nonce"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketPresenceChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "observedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "state": {
+            "enum": [
+              "online",
+              "away",
+              "offline"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "const": "presence.changed.v1"
+          },
+          "userId": {
+            "$ref": "#/components/schemas/UserId"
+          }
+        },
+        "required": [
+          "type",
+          "userId",
+          "state",
+          "observedAt"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketProductSessionChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "waiting-input",
+              "waiting-approval",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "product-session.changed.v1"
+          }
+        },
+        "required": [
+          "type",
+          "productSessionId",
+          "revision",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketProductSessionStream": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "product-session"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketProtocolErrorFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorEnvelope"
+          },
+          "type": {
+            "const": "transport.error.v1"
+          }
+        },
+        "required": [
+          "type",
+          "error"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketResetRequiredFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "closeCode": {
+            "const": 4409
+          },
+          "earliestAvailable": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketCursor"
+          },
+          "reason": {
+            "enum": [
+              "cursor-expired",
+              "stream-rebuilt",
+              "authorization-boundary"
+            ],
+            "type": "string"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.reset-required.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "reason",
+          "earliestAvailable",
+          "closeCode"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketResumeAcceptedFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAcknowledgedCursor"
+          },
+          "authorizationEpoch": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationEpoch"
+          },
+          "replayThrough": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketCursor"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.resume-accepted.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "after",
+          "replayThrough",
+          "authorizationEpoch"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketResumeFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAcknowledgedCursor"
+          },
+          "subscription": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscription"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.resume.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "subscription",
+          "after"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketRuntimeProjectionAppendedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "codexThreadId": {
+            "$ref": "#/components/schemas/CodexThreadId"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "projectionKind": {
+            "enum": [
+              "plan",
+              "agent-graph",
+              "activity",
+              "command",
+              "test",
+              "recovery",
+              "failure",
+              "diff",
+              "usage",
+              "evidence",
+              "input-request",
+              "execution-approval"
+            ],
+            "type": "string"
+          },
+          "projectionSequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sourceRef": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          },
+          "summary": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "runtime-projection.appended.v1"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "type",
+          "productSessionId",
+          "workerSessionId",
+          "codexThreadId",
+          "leaseId",
+          "projectionSequence",
+          "projectionKind",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketScopeStream": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "scope"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketServerFrame": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionAcceptedFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketResumeAcceptedFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketBackpressureFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationRevokedFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketResetRequiredFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketPingFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketProtocolErrorFrame"
+          }
+        ]
+      },
+      "ControlPlaneWebSocketStreamPosition": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ControlPlaneWebSocketSubscribeFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "startAt": {
+            "enum": [
+              "latest",
+              "earliest-available"
+            ],
+            "type": "string"
+          },
+          "subscription": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscription"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.subscribe.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "subscription",
+          "startAt"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketSubscription": {
+        "additionalProperties": false,
+        "properties": {
+          "eventTypes": {
+            "items": {
+              "$ref": "#/components/schemas/ControlPlaneWebSocketEventType"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "eventTypes"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketSubscriptionAcceptedFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "authorizationEpoch": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationEpoch"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketCursor"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketTransportLimits"
+          },
+          "subscriptionId": {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
+          },
+          "type": {
+            "const": "transport.subscription-accepted.v1"
+          }
+        },
+        "required": [
+          "type",
+          "subscriptionId",
+          "cursor",
+          "authorizationEpoch",
+          "limits"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketSubscriptionId": {
+        "pattern": "^sub_[A-Za-z0-9_-]{16,128}$",
+        "type": "string"
+      },
+      "ControlPlaneWebSocketTransportLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "ackDeadlineMillis": {
+            "const": 30000
+          },
+          "backpressureCloseCode": {
+            "const": 4408
+          },
+          "hardUnackedEvents": {
+            "const": 1024
+          },
+          "maxUnackedEvents": {
+            "const": 256
+          }
+        },
+        "required": [
+          "maxUnackedEvents",
+          "hardUnackedEvents",
+          "ackDeadlineMillis",
+          "backpressureCloseCode"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketWorkerHealthChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "activeLeaseCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "availableCapacity": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "capabilityLabels": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "registering",
+              "healthy",
+              "degraded",
+              "draining",
+              "offline"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "const": "worker-health.changed.v1"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "type",
+          "workerId",
+          "status",
+          "observedAt",
+          "activeLeaseCount",
+          "availableCapacity"
+        ],
+        "type": "object"
+      },
+      "Count": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "CredentialReferenceCreateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.create"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CredentialReferenceCreatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceCreatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "credentialReferenceId": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          },
+          "displayName": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "vaultLocator": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "credentialReferenceId",
+          "providerId",
+          "displayName",
+          "vaultLocator"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceDeleteCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.delete"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CredentialReferenceDeletePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceDeletePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "credentialReferenceId": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          }
+        },
+        "required": [
+          "credentialReferenceId"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "credentialReferenceId": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          }
+        },
+        "required": [
+          "credentialReferenceId"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CredentialReferenceGetParameters"
+              },
+              "query": {
+                "const": "credential.reference.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceId": {
+        "pattern": "^crd_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "CredentialReferenceListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "providerId": {
+            "oneOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "providerId"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CredentialReferenceListParameters"
+              },
+              "query": {
+                "const": "credential.reference.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferencePage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialReferenceProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "credential_reference_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceProjection": {
+        "additionalProperties": false,
+        "description": "Secret-safe: responses never include secret material or vault locator.",
+        "properties": {
+          "displayName": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "secretState": {
+            "enum": [
+              "available",
+              "missing",
+              "revoked"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "providerId",
+          "displayName",
+          "secretState",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "CriterionVerdictInput": {
+        "additionalProperties": false,
+        "properties": {
+          "criterionId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "evidenceIds": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceId"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "verdict": {
+            "enum": [
+              "pass",
+              "fail",
+              "inconclusive",
+              "infra_error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "criterionId",
+          "verdict",
+          "evidenceIds"
+        ],
+        "type": "object"
+      },
+      "DeliveryAdvanceCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.advance"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DeliveryAdvancePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryAdvancePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          }
+        },
+        "required": [
+          "deliveryId"
+        ],
+        "type": "object"
+      },
+      "DeliveryApproveTaskBreakdownCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.approve_task_breakdown"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DeliveryApproveTaskBreakdownPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryApproveTaskBreakdownPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryTaskInput"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "DeliveryCreateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.create"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DeliveryCreatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryCreatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/DeliverySpecInput"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryTaskInput"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "spec",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "DeliveryGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          }
+        },
+        "required": [
+          "deliveryId"
+        ],
+        "type": "object"
+      },
+      "DeliveryGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/DeliveryGetParameters"
+              },
+              "query": {
+                "const": "delivery.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryId": {
+        "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "DeliveryListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "DeliveryListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/DeliveryListParameters"
+              },
+              "query": {
+                "const": "delivery.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryOwnershipProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        },
+        "required": [
+          "organizationId",
+          "workspaceId",
+          "projectId",
+          "repositoryId"
+        ],
+        "type": "object"
+      },
+      "DeliveryPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "delivery_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "DeliveryProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "activeStageRunId": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StageRunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "openAttentionCount": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "ownership": {
+            "$ref": "#/components/schemas/DeliveryOwnershipProjection"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeliveryStatus"
+          },
+          "taskCounts": {
+            "$ref": "#/components/schemas/DeliveryTaskCountsProjection"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "deliveryId",
+          "revision",
+          "ownership",
+          "title",
+          "status",
+          "taskCounts",
+          "activeStageRunId",
+          "openAttentionCount",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "DeliveryResolveAttentionCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.resolve_attention"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DeliveryResolveAttentionPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryResolveAttentionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attentionItemId": {
+            "$ref": "#/components/schemas/AttentionItemId"
+          },
+          "decision": {
+            "enum": [
+              "resolve",
+              "dismiss"
+            ],
+            "type": "string"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "remediation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RemediationInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resolution": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "attentionItemId",
+          "decision",
+          "resolution",
+          "remediation"
+        ],
+        "type": "object"
+      },
+      "DeliverySpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptanceCriteria": {
+            "items": {
+              "$ref": "#/components/schemas/AcceptanceCriterionInput"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "baseRevision": {
+            "pattern": "^[A-Fa-f0-9]{7,128}$",
+            "type": "string"
+          },
+          "goal": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "publicationTarget": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PublicationTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "goal",
+          "repositoryId",
+          "baseRevision",
+          "acceptanceCriteria",
+          "publicationTarget"
+        ],
+        "type": "object"
+      },
+      "DeliveryStatus": {
+        "enum": [
+          "draft",
+          "clarifying",
+          "ready",
+          "planning",
+          "plan-review",
+          "executing",
+          "verifying",
+          "reworking",
+          "needs-attention",
+          "ready-to-deliver",
+          "delivered"
+        ],
+        "type": "string"
+      },
+      "DeliverySubmitVerdictCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.submit_verdict"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DeliverySubmitVerdictPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliverySubmitVerdictPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "candidateDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "criterionResults": {
+            "items": {
+              "$ref": "#/components/schemas/CriterionVerdictInput"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "candidateDigest",
+          "criterionResults"
+        ],
+        "type": "object"
+      },
+      "DeliveryTaskCountsProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "blocked": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "completed": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "failed": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "pending": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "total": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "verifying": {
+            "$ref": "#/components/schemas/Count"
+          }
+        },
+        "required": [
+          "total",
+          "pending",
+          "active",
+          "blocked",
+          "verifying",
+          "completed",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "DeliveryTaskId": {
+        "pattern": "^dtk_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "DeliveryTaskInput": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptanceCriterionIds": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "blockedByTaskIds": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryTaskId"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "goal": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/DeliveryTaskId"
+          },
+          "ownerActorId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActorId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "goal",
+          "acceptanceCriterionIds",
+          "blockedByTaskIds",
+          "ownerActorId"
+        ],
+        "type": "object"
+      },
+      "DeliveryTaskStatus": {
+        "enum": [
+          "pending",
+          "active",
+          "blocked",
+          "verifying",
+          "completed",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "DeliveryUpdateSpecCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.update_spec"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/DeliveryUpdateSpecPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryUpdateSpecPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/DeliverySpecInput"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "spec"
+        ],
+        "type": "object"
+      },
+      "EmptyParameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "EncodedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "contentType": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+\\-/]*$",
+            "type": "string"
+          },
+          "dataBase64": {
+            "maxLength": 16777216,
+            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+            "type": "string"
+          },
+          "payloadDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "contentType",
+          "dataBase64",
+          "payloadDigest"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TerminalError"
+          },
+          {
+            "$ref": "#/components/schemas/RetryableError"
+          }
+        ]
+      },
+      "ErrorCode": {
+        "enum": [
+          "INVALID_REQUEST",
+          "AUTHENTICATION_REQUIRED",
+          "PERMISSION_DENIED",
+          "RESOURCE_NOT_FOUND",
+          "IDEMPOTENCY_CONFLICT",
+          "REVISION_CONFLICT",
+          "WRONG_STATE",
+          "RATE_LIMITED",
+          "SERVICE_UNAVAILABLE",
+          "INTERNAL_ERROR"
+        ],
+        "type": "string"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "requestId",
+          "error"
+        ],
+        "type": "object"
+      },
+      "EvidenceId": {
+        "pattern": "^evd_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ExecutionAckSequence": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ExecutionEventCategory": {
+        "enum": [
+          "lifecycle",
+          "activity",
+          "command",
+          "test",
+          "diff",
+          "usage",
+          "attention",
+          "diagnostic"
+        ],
+        "type": "string"
+      },
+      "ExecutionEventId": {
+        "description": "Stable identity retained when a runtime event is replayed.",
+        "pattern": "^xevt_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ExecutionEventRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/ExecutionEventCategory"
+          },
+          "eventId": {
+            "$ref": "#/components/schemas/ExecutionEventId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EncodedPayload"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "eventId",
+          "sequence",
+          "occurredAt",
+          "category",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ExecutionJob": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "executionProfile": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "goal": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "jobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/ExecutionLimits"
+          },
+          "payloadDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ExecutionScope"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/ExecutionWorkspace"
+          }
+        },
+        "required": [
+          "jobId",
+          "attempt",
+          "payloadDigest",
+          "scope",
+          "workspace",
+          "executionProfile",
+          "goal",
+          "limits"
+        ],
+        "type": "object"
+      },
+      "ExecutionJobId": {
+        "description": "Identity of one scheduler-owned execution job.",
+        "pattern": "^job_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ExecutionLeaseStamp": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "fencingToken": {
+            "$ref": "#/components/schemas/FencingToken"
+          },
+          "issuedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "jobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          }
+        },
+        "required": [
+          "leaseId",
+          "jobId",
+          "workerId",
+          "workerInstanceId",
+          "attempt",
+          "fencingToken",
+          "issuedAt",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "ExecutionLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "deadlineAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "maxArtifactBytes": {
+            "maximum": 1099511627776,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxRuntimeSeconds": {
+            "maximum": 604800,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deadlineAt",
+          "maxRuntimeSeconds",
+          "maxArtifactBytes"
+        ],
+        "type": "object"
+      },
+      "ExecutionMessageId": {
+        "description": "Unique identity of one ExecutionPort message envelope.",
+        "pattern": "^xmsg_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ExecutionOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactReference"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "codexThreadId": {
+            "$ref": "#/components/schemas/CodexThreadId"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "finishedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "lastEventSequence": {
+            "$ref": "#/components/schemas/ExecutionAckSequence"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExecutionOutcomeStatus"
+          },
+          "summary": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "summary",
+          "finishedAt",
+          "lastEventSequence",
+          "artifacts"
+        ],
+        "type": "object"
+      },
+      "ExecutionOutcomeStatus": {
+        "enum": [
+          "cancelled",
+          "failed",
+          "infrastructure_error",
+          "succeeded"
+        ],
+        "type": "string"
+      },
+      "ExecutionPortError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ExecutionPortErrorCode"
+          },
+          "message": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "ExecutionPortErrorCode": {
+        "enum": [
+          "PROTOCOL_VERSION_UNSUPPORTED",
+          "WORKER_NOT_REGISTERED",
+          "CAPABILITY_MISMATCH",
+          "JOB_DISPATCH_CONFLICT",
+          "LEASE_EXPIRED",
+          "STALE_FENCING_TOKEN",
+          "WORKER_INSTANCE_CHANGED",
+          "SEQUENCE_GAP",
+          "MESSAGE_CONFLICT",
+          "ARTIFACT_DIGEST_MISMATCH",
+          "MODEL_STREAM_FAILED",
+          "INPUT_CLOSED",
+          "APPROVAL_DENIED",
+          "CANCELLED",
+          "EXECUTION_FAILED",
+          "INFRASTRUCTURE_ERROR"
+        ],
+        "type": "string"
+      },
+      "ExecutionPortMessage": {
+        "description": "The single versioned message union shared by local and remote ExecutionPort adapters.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WorkerRegisterMessage"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerRegistrationResultMessage"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerCapabilitiesMessage"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerHeartbeatMessage"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerHeartbeatAckMessage"
+          },
+          {
+            "$ref": "#/components/schemas/JobDispatchMessage"
+          },
+          {
+            "$ref": "#/components/schemas/JobDispatchResultMessage"
+          },
+          {
+            "$ref": "#/components/schemas/LeaseRenewMessage"
+          },
+          {
+            "$ref": "#/components/schemas/RuntimeEventMessage"
+          },
+          {
+            "$ref": "#/components/schemas/RuntimeAckMessage"
+          },
+          {
+            "$ref": "#/components/schemas/RuntimeReplayRequestMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactOpenMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactChunkMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactAckMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ModelOpenMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ModelChunkMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ModelAckMessage"
+          },
+          {
+            "$ref": "#/components/schemas/InputRequestMessage"
+          },
+          {
+            "$ref": "#/components/schemas/InputResponseMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalRequestMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalDecisionMessage"
+          },
+          {
+            "$ref": "#/components/schemas/JobCancelMessage"
+          },
+          {
+            "$ref": "#/components/schemas/JobCancelAckMessage"
+          },
+          {
+            "$ref": "#/components/schemas/JobOutcomeMessage"
+          },
+          {
+            "$ref": "#/components/schemas/JobOutcomeAckMessage"
+          }
+        ],
+        "title": "ExecutionPortMessage"
+      },
+      "ExecutionScope": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "deliveryTaskId": {
+            "$ref": "#/components/schemas/DeliveryTaskId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "deliveryId",
+          "stageRunId"
+        ],
+        "type": "object"
+      },
+      "ExecutionSequence": {
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "ExecutionWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "checkoutRevision": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "writeMode": {
+            "const": "candidate"
+          }
+        },
+        "required": [
+          "repositoryId",
+          "checkoutRevision",
+          "writeMode"
+        ],
+        "type": "object"
+      },
+      "FencingToken": {
+        "description": "Monotonically increasing decimal token encoded as a string to preserve 64-bit precision.",
+        "pattern": "^[1-9][0-9]{0,19}$",
+        "type": "string"
+      },
+      "InputRequestId": {
+        "description": "Identity of one interactive input request.",
+        "pattern": "^inp_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "InputRequestMessage": {
+        "additionalProperties": false,
+        "description": "Requests one typed user input through the Control Plane product session.",
+        "properties": {
+          "allowEmpty": {
+            "type": "boolean"
+          },
+          "choices": {
+            "items": {
+              "$ref": "#/components/schemas/InteractiveInputChoice"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "inputRequestId": {
+            "$ref": "#/components/schemas/InputRequestId"
+          },
+          "kind": {
+            "const": "input.request"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/InteractiveInputMode"
+          },
+          "prompt": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "inputRequestId",
+          "mode",
+          "prompt",
+          "allowEmpty",
+          "expiresAt"
+        ],
+        "title": "input.request",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "InputResponseMessage": {
+        "additionalProperties": false,
+        "description": "Returns a typed input result without exposing product-session storage.",
+        "properties": {
+          "inputRequestId": {
+            "$ref": "#/components/schemas/InputRequestId"
+          },
+          "kind": {
+            "const": "input.response"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "respondedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "cancelled",
+              "expired",
+              "provided"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/InteractiveInputValue"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "inputRequestId",
+          "status",
+          "respondedAt"
+        ],
+        "title": "input.response",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "Instant": {
+        "format": "date-time",
+        "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+        "type": "string"
+      },
+      "InteractiveInputChoice": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "type": "object"
+      },
+      "InteractiveInputMode": {
+        "enum": [
+          "confirmation",
+          "single_choice",
+          "text"
+        ],
+        "type": "string"
+      },
+      "InteractiveInputValue": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/InteractiveInputMode"
+          },
+          "value": {
+            "maxLength": 20000,
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "value"
+        ],
+        "type": "object"
+      },
+      "JobCancelAckMessage": {
+        "additionalProperties": false,
+        "description": "Acknowledges cancellation without declaring a Delivery result.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "kind": {
+            "const": "job.cancel_ack"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "already_cancelling",
+              "already_terminal",
+              "rejected_expired_lease",
+              "rejected_stale_fencing_token",
+              "rejected_worker_instance"
+            ],
+            "type": "string"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "status"
+        ],
+        "title": "job.cancel_ack",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "JobCancelMessage": {
+        "additionalProperties": false,
+        "description": "Requests cooperative cancellation for the currently fenced attempt.",
+        "properties": {
+          "kind": {
+            "const": "job.cancel"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "reason": {
+            "enum": [
+              "deadline",
+              "policy",
+              "shutdown",
+              "superseded",
+              "user_requested"
+            ],
+            "type": "string"
+          },
+          "requestedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "reason",
+          "requestedAt"
+        ],
+        "title": "job.cancel",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "JobDispatchMessage": {
+        "additionalProperties": false,
+        "description": "Dispatches one immutable job payload under one attempt and lease.",
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/ExecutionJob"
+          },
+          "kind": {
+            "const": "job.dispatch"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "job",
+          "lease"
+        ],
+        "title": "job.dispatch",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "JobDispatchResultMessage": {
+        "additionalProperties": false,
+        "description": "Returns the idempotent result of accepting or rejecting a job dispatch.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "jobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "kind": {
+            "const": "job.dispatch_result"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "payloadDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "duplicate",
+              "conflict",
+              "rejected_capacity",
+              "rejected_capability",
+              "rejected_expired_lease",
+              "rejected_stale_fencing_token",
+              "rejected_worker_instance"
+            ],
+            "type": "string"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "jobId",
+          "lease",
+          "payloadDigest",
+          "status"
+        ],
+        "title": "job.dispatch_result",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "JobOutcomeAckMessage": {
+        "additionalProperties": false,
+        "description": "Accepts or rejects one lease-fenced execution outcome idempotently.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "kind": {
+            "const": "job.outcome_ack"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "duplicate",
+              "rejected_conflict",
+              "rejected_expired_lease",
+              "rejected_stale_fencing_token",
+              "rejected_worker_instance"
+            ],
+            "type": "string"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "status"
+        ],
+        "title": "job.outcome_ack",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "JobOutcomeMessage": {
+        "additionalProperties": false,
+        "description": "Reports an execution outcome; Control Plane alone derives canonical Delivery state and verdicts.",
+        "properties": {
+          "kind": {
+            "const": "job.outcome"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ExecutionOutcome"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "outcome"
+        ],
+        "title": "job.outcome",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "LeaseId": {
+        "pattern": "^lse_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "LeaseRenewMessage": {
+        "additionalProperties": false,
+        "description": "Extends one lease for the same Worker instance, attempt, and fencing token.",
+        "properties": {
+          "kind": {
+            "const": "lease.renew"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "priorExpiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "priorExpiresAt"
+        ],
+        "title": "lease.renew",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "LeaseWriteStatus": {
+        "enum": [
+          "accepted",
+          "duplicate",
+          "gap",
+          "rejected_conflict",
+          "rejected_expired_lease",
+          "rejected_stale_fencing_token",
+          "rejected_worker_instance"
+        ],
+        "type": "string"
+      },
+      "LocalDefaultScope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RepositoryScope"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "repository"
+              },
+              "organizationId": {
+                "const": "org_00000000000000000000000000"
+              },
+              "projectId": {
+                "const": "prj_00000000000000000000000000"
+              },
+              "repositoryId": {
+                "const": "rep_00000000000000000000000000"
+              },
+              "workspaceId": {
+                "const": "wsp_00000000000000000000000000"
+              }
+            }
+          }
+        ]
+      },
+      "ModelAckMessage": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "gap"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "replayFromSequence": true
+              },
+              "required": [
+                "replayFromSequence"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "gap"
+                  }
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "not": {
+                "properties": {
+                  "replayFromSequence": true
+                },
+                "required": [
+                  "replayFromSequence"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Acknowledges model chunks and requests replay after a stream interruption.",
+        "properties": {
+          "ackSequence": {
+            "$ref": "#/components/schemas/ExecutionAckSequence"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "kind": {
+            "const": "model.ack"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "modelExchangeId": {
+            "$ref": "#/components/schemas/ModelExchangeId"
+          },
+          "replayFromSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LeaseWriteStatus"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "modelExchangeId",
+          "status",
+          "ackSequence"
+        ],
+        "title": "model.ack",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "ModelChunkMessage": {
+        "additionalProperties": false,
+        "description": "Streams one opaque provider-neutral model response chunk.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "isFinal": {
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "model.chunk"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "modelExchangeId": {
+            "$ref": "#/components/schemas/ModelExchangeId"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EncodedPayload"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "modelExchangeId",
+          "sequence",
+          "isFinal"
+        ],
+        "title": "model.chunk",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "ModelExchangeId": {
+        "description": "Identity of one provider-neutral model stream exchange.",
+        "pattern": "^mdl_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ModelGatewayRoute": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          },
+          "route": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "route",
+          "capability"
+        ],
+        "type": "object"
+      },
+      "ModelOpenMessage": {
+        "additionalProperties": false,
+        "description": "Opens one provider-neutral model exchange through the Control Plane gateway.",
+        "properties": {
+          "kind": {
+            "const": "model.open"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "modelExchangeId": {
+            "$ref": "#/components/schemas/ModelExchangeId"
+          },
+          "request": {
+            "$ref": "#/components/schemas/EncodedPayload"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "route": {
+            "$ref": "#/components/schemas/ModelGatewayRoute"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "modelExchangeId",
+          "route",
+          "request"
+        ],
+        "title": "model.open",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "ModelRoute": {
+        "additionalProperties": false,
+        "properties": {
+          "credentialReferenceId": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          },
+          "modelId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "providerId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "providerId",
+          "modelId",
+          "credentialReferenceId"
+        ],
+        "type": "object"
+      },
+      "MutationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "resourceKind": {
+            "enum": [
+              "product_session",
+              "delivery",
+              "settings",
+              "credential_reference",
+              "approval",
+              "worker",
+              "publication"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "resourceKind",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "OpaqueCursor": {
+        "description": "Opaque cursor bound to scope, query, filters, and one stable snapshot.",
+        "maxLength": 2048,
+        "minLength": 16,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "type": "string"
+      },
+      "OrganizationId": {
+        "pattern": "^org_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "OrganizationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "organization"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          }
+        },
+        "required": [
+          "kind",
+          "organizationId"
+        ],
+        "type": "object"
+      },
+      "PageInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "hasMore": {
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OpaqueCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "nextCursor",
+          "hasMore"
+        ],
+        "type": "object"
+      },
+      "PageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OpaqueCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cursor",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "ProductSessionId": {
+        "pattern": "^psn_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ProductSessionPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ProductSessionProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "product_session_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "ProductSessionProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "waiting_for_input",
+              "waiting_for_approval",
+              "cancelled",
+              "closed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "projectId",
+          "repositoryId",
+          "title",
+          "state",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "ProjectId": {
+        "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ProjectScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "project"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        },
+        "required": [
+          "kind",
+          "organizationId",
+          "workspaceId",
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "PublicationCancelCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "publication.cancel"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/PublicationCancelPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationCancelPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "publicationId": {
+            "$ref": "#/components/schemas/PublicationId"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "publicationId",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "PublicationGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "publicationId": {
+            "$ref": "#/components/schemas/PublicationId"
+          }
+        },
+        "required": [
+          "publicationId"
+        ],
+        "type": "object"
+      },
+      "PublicationGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/PublicationGetParameters"
+              },
+              "query": {
+                "const": "publication.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationId": {
+        "pattern": "^pub_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "PublicationListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "pending",
+                "publishing",
+                "published",
+                "cancelled",
+                "failed"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "deliveryId",
+          "states"
+        ],
+        "type": "object"
+      },
+      "PublicationListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/PublicationListParameters"
+              },
+              "query": {
+                "const": "publication.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublicationProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "publication_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "PublicationProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "id": {
+            "$ref": "#/components/schemas/PublicationId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "publishing",
+              "published",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "deliveryId",
+          "state",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "PublicationPublishCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "publication.publish"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/PublicationPublishPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationPublishPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "candidateDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "publicationId": {
+            "$ref": "#/components/schemas/PublicationId"
+          },
+          "target": {
+            "$ref": "#/components/schemas/PublicationTarget"
+          }
+        },
+        "required": [
+          "publicationId",
+          "deliveryId",
+          "candidateDigest",
+          "target"
+        ],
+        "type": "object"
+      },
+      "PublicationTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "baseBranch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "headBranch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "const": "github"
+          },
+          "repository": {
+            "maxLength": 256,
+            "pattern": "^[^/\\s]+/[^/\\s]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "repository",
+          "baseBranch",
+          "headBranch"
+        ],
+        "type": "object"
+      },
+      "QueryEnvelope": {
+        "additionalProperties": false,
+        "description": "Side-effect-free query. Authenticated identity must equal actor and authorize scope.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageRequest"
+          },
+          "parameters": {
+            "type": "object"
+          },
+          "query": {
+            "$ref": "#/components/schemas/QueryName"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "requestId",
+          "query",
+          "actor",
+          "scope",
+          "parameters",
+          "page"
+        ],
+        "type": "object"
+      },
+      "QueryName": {
+        "enum": [
+          "session.list",
+          "session.get",
+          "delivery.list",
+          "delivery.get",
+          "settings.get",
+          "credential.reference.list",
+          "credential.reference.get",
+          "approval.list",
+          "approval.get",
+          "worker.list",
+          "worker.get",
+          "publication.list",
+          "publication.get"
+        ],
+        "type": "string"
+      },
+      "QueryRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/SessionGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationGetQuery"
+          }
+        ]
+      },
+      "QueryResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProductSessionProjection"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryProjection"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsProjection"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceProjection"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalProjection"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerProjection"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationProjection"
+          },
+          {
+            "$ref": "#/components/schemas/ProductSessionPage"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryPage"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferencePage"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalPage"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerPage"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationPage"
+          }
+        ]
+      },
+      "QueryResultResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/PageInfo"
+          },
+          "query": {
+            "$ref": "#/components/schemas/QueryName"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "result": {
+            "$ref": "#/components/schemas/QueryResult"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "requestId",
+          "query",
+          "result",
+          "page"
+        ],
+        "type": "object"
+      },
+      "RemediationInput": {
+        "additionalProperties": false,
+        "properties": {
+          "candidateDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "deliveryTaskId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryTaskId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "instructions": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "deliveryTaskId",
+          "candidateDigest",
+          "instructions"
+        ],
+        "type": "object"
+      },
+      "RepositoryId": {
+        "pattern": "^rep_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "RepositoryScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "repository"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        },
+        "required": [
+          "kind",
+          "organizationId",
+          "workspaceId",
+          "projectId",
+          "repositoryId"
+        ],
+        "type": "object"
+      },
+      "RequestId": {
+        "pattern": "^req_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "RetryableError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/RetryableErrorCode"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "message": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "retryable": {
+            "const": true
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "details"
+        ],
+        "type": "object"
+      },
+      "RetryableErrorCode": {
+        "enum": [
+          "RATE_LIMITED",
+          "SERVICE_UNAVAILABLE"
+        ],
+        "type": "string"
+      },
+      "Revision": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RuntimeAckMessage": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "gap"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "replayFromSequence": true
+              },
+              "required": [
+                "replayFromSequence"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "gap"
+                  }
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "not": {
+                "properties": {
+                  "replayFromSequence": true
+                },
+                "required": [
+                  "replayFromSequence"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Acknowledges the highest contiguous runtime event and requests a gap replay when needed.",
+        "properties": {
+          "ackSequence": {
+            "$ref": "#/components/schemas/ExecutionAckSequence"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "kind": {
+            "const": "runtime.ack"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "replayFromSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LeaseWriteStatus"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "status",
+          "ackSequence"
+        ],
+        "title": "runtime.ack",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "RuntimeEventMessage": {
+        "additionalProperties": false,
+        "description": "Publishes one ordered, replayable, provider-neutral runtime fact.",
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/ExecutionEventRecord"
+          },
+          "kind": {
+            "const": "runtime.event"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "lease",
+          "workerSessionId",
+          "event"
+        ],
+        "title": "runtime.event",
+        "type": "object",
+        "x-authority": "lease-write",
+        "x-direction": "worker-to-control-plane"
+      },
+      "RuntimeReplayRequestMessage": {
+        "additionalProperties": false,
+        "description": "Requests original runtime events strictly after the acknowledged sequence.",
+        "properties": {
+          "afterSequence": {
+            "$ref": "#/components/schemas/ExecutionAckSequence"
+          },
+          "kind": {
+            "const": "runtime.replay_request"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "maxEvents": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "lease",
+          "workerSessionId",
+          "afterSequence",
+          "maxEvents"
+        ],
+        "title": "runtime.replay_request",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "SchemaVersion": {
+        "const": "winwincode/v1",
+        "type": "string"
+      },
+      "Scope": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OrganizationScope"
+          },
+          {
+            "$ref": "#/components/schemas/WorkspaceScope"
+          },
+          {
+            "$ref": "#/components/schemas/ProjectScope"
+          },
+          {
+            "$ref": "#/components/schemas/RepositoryScope"
+          }
+        ]
+      },
+      "ScopedResourceLocator": {
+        "additionalProperties": false,
+        "properties": {
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        },
+        "required": [
+          "organizationId",
+          "workspaceId",
+          "projectId",
+          "repositoryId"
+        ],
+        "type": "object"
+      },
+      "ServiceAccountActor": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          },
+          "kind": {
+            "const": "service_account"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "ServiceAccountId": {
+        "pattern": "^svc_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "SessionCancelCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.cancel"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/SessionCancelPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionCancelPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SessionCloseCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.close"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/SessionClosePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionClosePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "productSessionId"
+        ],
+        "type": "object"
+      },
+      "SessionCreateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.create"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/SessionCreatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionCreatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "modelRoute": {
+            "$ref": "#/components/schemas/ModelRoute"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "projectId",
+          "repositoryId",
+          "title",
+          "modelRoute"
+        ],
+        "type": "object"
+      },
+      "SessionGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "productSessionId"
+        ],
+        "type": "object"
+      },
+      "SessionGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/SessionGetParameters"
+              },
+              "query": {
+                "const": "session.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "enum": [
+                "idle",
+                "running",
+                "waiting_for_input",
+                "waiting_for_approval",
+                "cancelled",
+                "closed",
+                "failed"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "SessionListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/SessionListParameters"
+              },
+              "query": {
+                "const": "session.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SettingsGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EmptyParameters"
+              },
+              "query": {
+                "const": "settings.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SettingsPatch": {
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "defaultModelRoute": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelRoute"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workerConcurrencyLimit": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "defaultModelRoute",
+          "workerConcurrencyLimit"
+        ],
+        "type": "object"
+      },
+      "SettingsProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "defaultModelRoute": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelRoute"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "workerConcurrencyLimit": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "defaultModelRoute",
+          "workerConcurrencyLimit"
+        ],
+        "type": "object"
+      },
+      "SettingsUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "settings.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/SettingsUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SettingsUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "patch": {
+            "$ref": "#/components/schemas/SettingsPatch"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      },
+      "Sha256Digest": {
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "StageRunId": {
+        "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "SystemActor": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/SystemActorId"
+          },
+          "kind": {
+            "const": "system"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "SystemActorId": {
+        "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "TerminalError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/TerminalErrorCode"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "message": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "retryable": {
+            "const": false
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "details"
+        ],
+        "type": "object"
+      },
+      "TerminalErrorCode": {
+        "enum": [
+          "INVALID_REQUEST",
+          "AUTHENTICATION_REQUIRED",
+          "PERMISSION_DENIED",
+          "RESOURCE_NOT_FOUND",
+          "IDEMPOTENCY_CONFLICT",
+          "REVISION_CONFLICT",
+          "WRONG_STATE",
+          "INTERNAL_ERROR"
+        ],
+        "type": "string"
+      },
+      "UserActor": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UserId"
+          },
+          "kind": {
+            "const": "user"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "UserId": {
+        "pattern": "^usr_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "WorkerCapabilitiesMessage": {
+        "additionalProperties": false,
+        "description": "Replaces the registered capability snapshot for the current Worker instance.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/WorkerCapabilitySet"
+          },
+          "kind": {
+            "const": "worker.capabilities"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "workerId",
+          "workerInstanceId",
+          "observedAt",
+          "capabilities"
+        ],
+        "title": "worker.capabilities",
+        "type": "object",
+        "x-authority": "worker-registry",
+        "x-direction": "worker-to-control-plane"
+      },
+      "WorkerCapabilityFeature": {
+        "enum": [
+          "artifact_stream",
+          "approval",
+          "git",
+          "interactive_input",
+          "mcp",
+          "model_proxy",
+          "sandbox",
+          "shell"
+        ],
+        "type": "string"
+      },
+      "WorkerCapabilitySet": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilityDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerCapabilityFeature"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "maxConcurrentJobs": {
+            "maximum": 1024,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "enum": [
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-unknown-linux-gnu"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "maxConcurrentJobs",
+          "features",
+          "capabilityDigest"
+        ],
+        "type": "object"
+      },
+      "WorkerCapacity": {
+        "additionalProperties": false,
+        "properties": {
+          "availableSlots": {
+            "maximum": 1024,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "runningJobs": {
+            "maximum": 1024,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runningJobs",
+          "availableSlots"
+        ],
+        "type": "object"
+      },
+      "WorkerDrainCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "worker.drain"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/WorkerDrainPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerDrainPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "workerId",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "WorkerEnableCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "worker.enable"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/WorkerEnablePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerEnablePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "workerId"
+        ],
+        "type": "object"
+      },
+      "WorkerGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "workerId"
+        ],
+        "type": "object"
+      },
+      "WorkerGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/WorkerGetParameters"
+              },
+              "query": {
+                "const": "worker.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerHeartbeatAckMessage": {
+        "additionalProperties": false,
+        "description": "Acknowledges exactly one heartbeat without dispatching jobs as a side effect.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "heartbeatSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "kind": {
+            "const": "worker.heartbeat_ack"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "nextHeartbeatWithinMs": {
+            "maximum": 300000,
+            "minimum": 1000,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "serverTime": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "duplicate",
+              "rejected_worker_instance"
+            ],
+            "type": "string"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "workerId",
+          "workerInstanceId",
+          "heartbeatSequence",
+          "status",
+          "serverTime",
+          "nextHeartbeatWithinMs"
+        ],
+        "title": "worker.heartbeat_ack",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "WorkerHeartbeatMessage": {
+        "additionalProperties": false,
+        "description": "Reports liveness, capacity, and lease progress for one Worker instance.",
+        "properties": {
+          "activeLeases": {
+            "items": {
+              "$ref": "#/components/schemas/ActiveLeaseSummary"
+            },
+            "maxItems": 1024,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/WorkerCapacity"
+          },
+          "heartbeatSequence": {
+            "$ref": "#/components/schemas/ExecutionSequence"
+          },
+          "kind": {
+            "const": "worker.heartbeat"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "workerId",
+          "workerInstanceId",
+          "heartbeatSequence",
+          "observedAt",
+          "capacity",
+          "activeLeases"
+        ],
+        "title": "worker.heartbeat",
+        "type": "object",
+        "x-authority": "worker-registry",
+        "x-direction": "worker-to-control-plane"
+      },
+      "WorkerId": {
+        "pattern": "^wrk_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "WorkerInstanceId": {
+        "description": "Identity of one Worker process boot; changes after every restart.",
+        "pattern": "^wki_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "WorkerListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "enum": [
+                "enabled",
+                "draining",
+                "offline"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "WorkerListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/WorkerListParameters"
+              },
+              "query": {
+                "const": "worker.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "worker_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "WorkerProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "lastHeartbeatAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "enabled",
+              "draining",
+              "offline"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "state",
+          "capacity",
+          "lastHeartbeatAt"
+        ],
+        "type": "object"
+      },
+      "WorkerRegisterMessage": {
+        "additionalProperties": false,
+        "description": "Registers one stable Worker identity and one process-boot identity.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/WorkerCapabilitySet"
+          },
+          "kind": {
+            "const": "worker.register"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "startedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "workerId",
+          "workerInstanceId",
+          "startedAt",
+          "capabilities"
+        ],
+        "title": "worker.register",
+        "type": "object",
+        "x-authority": "worker-registry",
+        "x-direction": "worker-to-control-plane"
+      },
+      "WorkerRegistrationResultMessage": {
+        "additionalProperties": false,
+        "description": "Returns the idempotent registration result and restart lease recovery rule.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ExecutionPortError"
+          },
+          "heartbeatIntervalMs": {
+            "maximum": 300000,
+            "minimum": 1000,
+            "type": "integer"
+          },
+          "kind": {
+            "const": "worker.registration_result"
+          },
+          "leaseRecovery": {
+            "enum": [
+              "no_active_leases",
+              "reacquire_required"
+            ],
+            "type": "string"
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "serverTime": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "duplicate",
+              "rejected"
+            ],
+            "type": "string"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "workerId",
+          "workerInstanceId",
+          "status",
+          "leaseRecovery",
+          "heartbeatIntervalMs",
+          "serverTime"
+        ],
+        "title": "worker.registration_result",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "WorkerSessionId": {
+        "pattern": "^wsn_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "WorkspaceId": {
+        "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "WorkspaceScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "workspace"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "workspaceId": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        },
+        "required": [
+          "kind",
+          "organizationId",
+          "workspaceId"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "license": {
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    },
+    "title": "WinWinCode Control Plane and Execution Port",
+    "version": "1.0.0"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/commands": {
+      "post": {
+        "description": "Checks authentication, scope, requestId replay identity, and expectedRevision before mutation. Identical retries return the stored original status and body; changed input with the same requestId returns IDEMPOTENCY_CONFLICT.",
+        "operationId": "submitControlPlaneCommand",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandCompletedResponse"
+                }
+              }
+            },
+            "description": "Completed or identical replay."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAcceptedResponse"
+                }
+              }
+            },
+            "description": "Durably accepted."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "INVALID_REQUEST"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "AUTHENTICATION_REQUIRED"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "PERMISSION_DENIED"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "RESOURCE_NOT_FOUND"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "IDEMPOTENCY_CONFLICT, REVISION_CONFLICT, or WRONG_STATE"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "RATE_LIMITED"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "INTERNAL_ERROR"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "SERVICE_UNAVAILABLE"
+          }
+        }
+      }
+    },
+    "/api/v1/queries": {
+      "post": {
+        "description": "Side-effect free. List cursors bind scope, query, filters, and snapshot; results order by snapshot, updatedAt, then ID.",
+        "operationId": "submitControlPlaneQuery",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResultResponse"
+                }
+              }
+            },
+            "description": "Scoped query projection."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "INVALID_REQUEST, including an invalid or mismatched cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "AUTHENTICATION_REQUIRED"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "PERMISSION_DENIED"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "RESOURCE_NOT_FOUND"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "RATE_LIMITED"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "INTERNAL_ERROR"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "SERVICE_UNAVAILABLE"
+          }
+        }
+      }
+    }
+  },
+  "x-generated-from": [
+    "https://schemas.winwincode.dev/winwincode/v1/control-plane-events.schema.json",
+    "https://schemas.winwincode.dev/winwincode/v1/control-plane-http.schema.json",
+    "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
+    "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
+  ],
+  "x-source-digest": "sha256:36a78e0bfa4b5a35ceae76e9800158ee08067c9654fd3820ddee5a26d88672e6"
+}
