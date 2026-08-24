@@ -7,8 +7,8 @@ use winwincode_domain::{
 };
 
 use super::{
-    DeliveryValidationError, SessionBindingId, portable_identifier, safe_non_negative,
-    schema_version,
+    DeliveryValidationError, DeliveryValidationErrorCode, SessionBindingId, portable_identifier,
+    safe_non_negative, schema_version, validation_error,
 };
 
 /// Exact link between a Codex-backed Delivery stage and separately owned sessions.
@@ -59,6 +59,13 @@ pub(crate) fn validate(
     }
     if let Some(thread_id) = &binding.codex_thread_id {
         portable_identifier(&thread_id.0, &format!("{path}.codexThreadId"))?;
+        if binding.worker_session_id.is_none() {
+            return Err(validation_error(
+                DeliveryValidationErrorCode::RelationshipMismatch,
+                format!("{path}.codexThreadId"),
+                "CodexThread requires an accepted WorkerSession",
+            ));
+        }
     }
     safe_non_negative(binding.bound_at_millis, &format!("{path}.boundAtMillis"))
 }
@@ -68,6 +75,15 @@ mod tests {
     use winwincode_domain::{DeliveryId, DeliveryTaskId};
 
     use crate::domain::{Delivery, test_fixture};
+
+    #[test]
+    fn codex_thread_requires_an_accepted_worker_session() {
+        let mut fixture = test_fixture();
+        fixture.session_bindings[0].worker_session_id = None;
+        assert!(fixture.session_bindings[0].codex_thread_id.is_some());
+
+        assert!(Delivery::try_from_snapshot(fixture).is_err());
+    }
 
     #[test]
     fn session_binding_matches_delivery_stage_run_and_task() {

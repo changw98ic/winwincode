@@ -292,7 +292,7 @@
   "rules": [
     {
       "id": "stage.legal_next",
-      "statement": "Delivery status, active StageRun, task state, review result, and verification progress determine one legal next delivery stage; callers cannot choose another stage.",
+      "statement": "Delivery status, active StageRun, task state, review result, and verification progress determine one legal next delivery stage; callers cannot choose another stage or force the optional adversarial verifier after the required reviewer and verifier finish.",
       "refs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "packages/strongflow/src/delivery-service.ts",
@@ -454,12 +454,12 @@
       },
       "rust": {
         "module": "crates/winwincode-delivery/src/application/session_binding.rs",
-        "testName": "active_stage_run_resumes_without_new_run_or_attempt"
+        "testName": "active_stage_run_resumes_before_worker_acceptance_without_new_identity"
       }
     },
     {
       "id": "stage.cancel_terminal_outcome",
-      "statement": "A job.cancel acknowledgement does not settle a StageRun; only the current leased job.outcome cancelled result settles that exact run.",
+      "statement": "A job.cancel acknowledgement does not settle a StageRun; only a terminal job.outcome that still matches the complete current lease, fencing token, Worker, instance, job, attempt, and SessionBinding settles that exact run.",
       "refs": [
         "docs/decisions/0028-control-plane-worker-migration.md",
         "docs/contracts/execution-port-v1.md",
@@ -473,12 +473,12 @@
       },
       "rust": {
         "module": "crates/winwincode-delivery/src/application/stage.rs",
-        "testName": "cancel_request_waits_for_terminal_job_outcome"
+        "testName": "terminal_outcome_rejects_a_lease_that_changed_after_verification"
       }
     },
     {
       "id": "task.breakdown_approval",
-      "statement": "Delivery creation begins with no task graph; one current human plan approval promotes a non-empty proposed graph once for that DeliverySpec revision.",
+      "statement": "Delivery creation begins with no task graph; one current human plan approval promotes a non-empty proposed graph once for that DeliverySpec revision, and execution cannot start before that graph exists.",
       "refs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "schema/winwincode/v1/control-plane-http.schema.json"
@@ -783,9 +783,11 @@
           "starting_next_stage_settles_bound_previous_run_atomically",
           "review_stage_opens_linked_blocking_attention_atomically",
           "active_stage_run_resumes_without_new_run_or_attempt",
+          "active_stage_run_resumes_before_worker_acceptance_without_new_identity",
           "cancel_request_waits_for_terminal_job_outcome",
           "cancelled_outcome_settles_the_same_stage_run",
           "task_breakdown_approval_replaces_empty_graph_once",
+          "approved_plan_without_a_frozen_task_graph_cannot_start_execution",
           "task_breakdown_rejects_missing_self_and_cyclic_dependencies",
           "blocked_task_never_becomes_runnable",
           "task_status_tracks_execution_verification_rework_and_cancel",
@@ -794,7 +796,14 @@
           "open_blocking_attention_prevents_stage_advance",
           "stale_attention_resolution_is_rejected_without_state_change",
           "resolving_one_of_multiple_blockers_keeps_delivery_blocked",
-          "replayed_advance_returns_original_stage_run_without_new_state"
+          "replayed_advance_returns_original_stage_run_without_new_state",
+          "recovery_rejects_stage_with_foreign_actor_or_role",
+          "stage_advance_rejects_time_before_current_delivery_state",
+          "verification_progress_stops_after_required_roles_without_optional_adversary",
+          "ordinary_success_must_use_the_atomic_stage_handoff",
+          "terminal_outcome_rejects_a_lease_that_changed_after_verification",
+          "unsuccessful_terminal_outcome_settles_without_advancing_delivery",
+          "worker_can_cancel_and_finish_before_reporting_a_codex_thread"
         ]
       },
       {
@@ -804,6 +813,7 @@
         "requiredTests": [
           "delivery_advance_dispatches_one_execution_job_after_commit",
           "replayed_delivery_advance_does_not_dispatch_a_second_execution_job",
+          "new_commit_rejects_a_foreign_durable_job_without_dispatch",
           "delivery_stage_scope_carries_exact_product_delivery_task_and_run_identity",
           "job_cancel_ack_does_not_settle_stage_before_terminal_outcome",
           "delivery_dispatch_does_not_persist_codex_plan_agent_or_tool_state"

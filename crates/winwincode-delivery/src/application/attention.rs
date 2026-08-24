@@ -5,11 +5,11 @@
 use winwincode_domain::{AttentionItemId, StageRunId};
 
 use crate::domain::{
-    AttentionItemStatus, AttentionItemType, Delivery, DeliveryStage, DeliveryStatus,
-    StageRunActorType, StageRunStatus,
+    AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot, DeliveryStage,
+    DeliveryStatus, StageRunActorType, StageRunStatus,
 };
 
-use super::{CoordinationError, CoordinationErrorCode};
+use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttentionDecision {
@@ -45,6 +45,7 @@ pub fn resolve_attention(
             "Delivery revision changed before Attention resolution",
         ));
     }
+    require_mutation_time(delivery, input.now_millis)?;
     let item_index = delivery
         .snapshot()
         .attention_items
@@ -102,8 +103,23 @@ pub fn resolve_attention(
             "human review StageRun is no longer waiting for this Attention decision",
         ));
     }
-    let next_status = next_delivery_status(item.item_type, run.stage, input.decision)?;
-    let mut snapshot = delivery.clone().into_snapshot();
+    apply_resolution(
+        delivery.clone().into_snapshot(),
+        input,
+        item_index,
+        run_index,
+    )
+}
+
+fn apply_resolution(
+    mut snapshot: DeliverySnapshot,
+    input: ResolveAttentionInput,
+    item_index: usize,
+    run_index: usize,
+) -> Result<Delivery, CoordinationError> {
+    let item_type = snapshot.attention_items[item_index].item_type;
+    let run_stage = snapshot.stage_runs[run_index].stage;
+    let run_actor_type = snapshot.stage_runs[run_index].actor_type;
     let stored_item = &mut snapshot.attention_items[item_index];
     stored_item.status = match input.decision {
         AttentionDecision::Resolved => AttentionItemStatus::Resolved,
@@ -112,14 +128,32 @@ pub fn resolve_attention(
     stored_item.resolution = Some(input.resolution);
     stored_item.resolved_by = Some(input.actor);
     stored_item.resolved_at_millis = Some(input.now_millis);
-    if run.actor_type == StageRunActorType::Human {
+
+    let linked_review_still_open = snapshot.attention_items.iter().any(|item| {
+        item.stage_run_id.as_ref() == Some(&input.stage_run_id)
+            && item.blocking
+            && item.status == AttentionItemStatus::Open
+    });
+    let review_decision = if run_actor_type == StageRunActorType::Human && !linked_review_still_open
+    {
+        let decision = if snapshot.attention_items.iter().any(|item| {
+            item.stage_run_id.as_ref() == Some(&input.stage_run_id)
+                && item.status == AttentionItemStatus::Dismissed
+        }) {
+            AttentionDecision::Dismissed
+        } else {
+            AttentionDecision::Resolved
+        };
         let stored_run = &mut snapshot.stage_runs[run_index];
-        stored_run.status = match input.decision {
+        stored_run.status = match decision {
             AttentionDecision::Resolved => StageRunStatus::Succeeded,
             AttentionDecision::Dismissed => StageRunStatus::Failed,
         };
         stored_run.finished_at_millis = Some(input.now_millis);
-    }
+        decision
+    } else {
+        input.decision
+    };
     snapshot.status = if snapshot
         .attention_items
         .iter()
@@ -127,7 +161,7 @@ pub fn resolve_attention(
     {
         DeliveryStatus::NeedsAttention
     } else {
-        next_status
+        next_delivery_status(item_type, run_stage, review_decision)?
     };
     snapshot.revision += 1;
     snapshot.updated_at_millis = input.now_millis;

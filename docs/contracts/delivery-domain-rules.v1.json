@@ -223,8 +223,8 @@
       }
     },
     {
-      "id": "session_binding.has_session_identity",
-      "statement": "A SessionBinding contains at least one real session identity instead of an empty binding.",
+      "id": "session_binding.required_product_and_job_identities",
+      "statement": "A canonical SessionBinding starts with distinct ProductSession and ExecutionJob identities; WorkerSession and CodexThread are added only when their owners report them.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -236,18 +236,23 @@
             "name": "parseSessionBinding"
           }
         ],
-        "coverage": "implementation_only",
-        "tests": [],
-        "gap": "The TypeScript parser rejects both legacy session fields being null, but no public test isolates the empty binding."
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-contract.test.mjs",
+            "name": "Codex StageRuns require a Codex session binding and current relationships"
+          }
+        ],
+        "gap": "The legacy TypeScript binding only knows dshSessionId and codexSessionId. It cannot express the canonical ProductSession, ExecutionJob, WorkerSession, and CodexThread lifecycle; the Rust test is the new source of truth until the old TypeScript backend is removed."
       },
       "rust": {
         "module": "domain/session_binding.rs",
-        "testName": "session_binding_requires_at_least_one_session_identity"
+        "testName": "session_binding_matches_exact_delivery_task_stage_job_and_session_identities"
       }
     },
     {
-      "id": "session_binding.matches_delivery_run_and_actor",
-      "statement": "A SessionBinding belongs to the same Delivery and an existing StageRun; a Codex StageRun carries its Codex execution identity.",
+      "id": "session_binding.matches_delivery_stage_run_and_task",
+      "statement": "A SessionBinding belongs to the same Delivery, an existing Codex StageRun, and that StageRun’s exact optional DeliveryTask; its binding time cannot predate the StageRun.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -259,18 +264,18 @@
             "name": "parseDelivery"
           }
         ],
-        "coverage": "covered",
+        "coverage": "partial",
         "tests": [
           {
             "path": "tests/delivery-contract.test.mjs",
             "name": "Codex StageRuns require a Codex session binding and current relationships"
           }
         ],
-        "gap": ""
+        "gap": "The legacy TypeScript aggregate checks Delivery, StageRun, and Codex actor relationships, but its SessionBinding has no DeliveryTask, ProductSession, or ExecutionJob identity. The exact Rust relationship is canonical."
       },
       "rust": {
         "module": "domain/session_binding.rs",
-        "testName": "session_binding_matches_delivery_stage_run_and_actor"
+        "testName": "session_binding_matches_delivery_stage_run_and_task"
       }
     },
     {
@@ -878,9 +883,9 @@
     {
       "id": "contract.session_identities",
       "kind": "conflict",
-      "current": "TypeScript SessionBinding stores dshSessionId and codexSessionId, and codexSessionId is also used as a thread identity in fixtures.",
-      "target": "ADR-0028 and the phase-one schema keep ProductSessionId, WorkerSessionId, and CodexThreadId distinct and remove DSH from the final backend.",
-      "action": "Translate legacy fields only as internal migration identities; do not add them to the new public schema. Map the binding to the three accepted identities in the ProductSession and Worker migration phases.",
+      "current": "The legacy TypeScript SessionBinding still stores dshSessionId and codexSessionId, while the canonical Rust SessionBinding now keeps ProductSessionId, ExecutionJobId, WorkerSessionId, and CodexThreadId distinct.",
+      "target": "ADR-0028 requires the Rust SessionBinding to be the only backend contract and removes DSH identities when the TypeScript backend is cut over.",
+      "action": "Keep legacy fields only as one-time migration input, reject mixed old/new shapes, and delete the TypeScript backend binding after cutover; do not expose either legacy field through the new public schema.",
       "refs": [
         "packages/contracts/src/delivery.ts",
         "schema/winwincode/v1/domain.schema.json",

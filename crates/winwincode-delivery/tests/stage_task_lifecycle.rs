@@ -9,7 +9,7 @@ use winwincode_delivery::{
     application::stage::{
         ActiveLeaseIdentity, AdvanceStageInput, CancelAcknowledgement, NewStageIdentities,
         ReviewAttentionSeed, StageAdvanceEffect, TerminalOutcomeStatus, TerminalWorkerOutcome,
-        acknowledge_cancel, advance, apply_cancelled_outcome, request_cancel, resume_active,
+        acknowledge_cancel, advance, apply_terminal_outcome, request_cancel, resume_active,
         validate_stage_executor, verify_terminal_outcome,
     },
     application::task::{
@@ -149,15 +149,7 @@ fn verified_outcome(
         .worker_session_id
         .clone()
         .expect("completed worker binding");
-    let lease = ActiveLeaseIdentity {
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId(format!("lease-{}", run.id.0)),
-        fencing_token: FencingToken("1".into()),
-        worker_id: WorkerId("worker-one".into()),
-        worker_instance_id: WorkerInstanceId("worker-instance-one".into()),
-        worker_session_id: worker_session_id.clone(),
-    };
+    let lease = active_lease(delivery);
     verify_terminal_outcome(
         delivery,
         &lease,
@@ -174,6 +166,38 @@ fn verified_outcome(
         },
     )
     .expect("verified successful outcome")
+}
+
+fn active_lease(delivery: &Delivery) -> ActiveLeaseIdentity {
+    let run = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| {
+            matches!(
+                run.status,
+                winwincode_delivery::domain::StageRunStatus::Running
+            )
+        })
+        .expect("active run");
+    let binding = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.stage_run_id == run.id)
+        .expect("active binding");
+    ActiveLeaseIdentity {
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId(format!("lease-{}", run.id.0)),
+        fencing_token: FencingToken("1".into()),
+        worker_id: WorkerId("worker-one".into()),
+        worker_instance_id: WorkerInstanceId("worker-instance-one".into()),
+        worker_session_id: binding
+            .worker_session_id
+            .clone()
+            .expect("completed worker binding"),
+    }
 }
 
 fn successful_outcome(
@@ -206,6 +230,22 @@ fn advance_selects_only_the_legal_next_stage() {
         DeliveryStage::Planning
     );
     assert_eq!(result.delivery.snapshot().status, DeliveryStatus::Planning);
+}
+
+#[test]
+fn stage_advance_rejects_time_before_current_delivery_state() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let mut snapshot = ready.into_snapshot();
+    snapshot.updated_at_millis += 100;
+    let ready = Delivery::try_from_snapshot(snapshot).expect("Delivery with a later update");
+    let mut input = advance_input(1, "backdated-stage");
+    input.now_millis = ready.snapshot().updated_at_millis - 50;
+
+    let error =
+        advance(&ready, input).expect_err("stage start cannot move Delivery time backwards");
+
+    assert_eq!(error.code(), CoordinationErrorCode::InvalidRequest);
+    assert!(ready.snapshot().stage_runs.is_empty());
 }
 
 #[test]
@@ -271,6 +311,22 @@ fn stage_actor_and_role_policy_rejects_wrong_executor() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn recovery_rejects_stage_with_foreign_actor_or_role() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let started = advance(&ready, advance_input(1, "foreign-role"))
+        .expect("planning starts")
+        .delivery;
+    let mut snapshot = started.into_snapshot();
+    snapshot.stage_runs[0].role = "executor".into();
+    let corrupted = Delivery::try_from_snapshot(snapshot)
+        .expect("legacy snapshot reaches application policy validation");
+
+    let error = resume_active(&corrupted, corrupted.revision())
+        .expect_err("recovery must not resume a foreign stage role");
+    assert_eq!(error.code(), CoordinationErrorCode::InvalidRequest);
 }
 
 #[test]
@@ -373,6 +429,35 @@ fn active_stage_run_resumes_without_new_run_or_attempt() {
 }
 
 #[test]
+fn active_stage_run_resumes_before_worker_acceptance_without_new_identity() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = advance(&ready, advance_input(1, "resume-before-worker"))
+        .expect("planning starts")
+        .delivery;
+    let revision = planning.revision();
+    let run = planning.snapshot().stage_runs[0].clone();
+    let binding = planning.snapshot().session_bindings[0].clone();
+    assert!(binding.worker_session_id.is_none());
+    assert!(binding.codex_thread_id.is_none());
+
+    let resumed = resume_active(&planning, revision)
+        .expect("durable job resumes before Worker accepts dispatch");
+
+    assert_eq!(resumed.delivery, planning);
+    assert_eq!(resumed.delivery.revision(), revision);
+    assert_eq!(
+        resumed.delivery.snapshot().stage_runs.as_slice(),
+        std::slice::from_ref(&run)
+    );
+    let StageAdvanceEffect::Resume(intent) = resumed.effect else {
+        panic!("resume must return the original pending ExecutionIntent");
+    };
+    assert_eq!(intent.stage_run_id, run.id);
+    assert_eq!(intent.execution_job_id, binding.execution_job_id);
+    assert_eq!(intent.attempt, run.attempt);
+}
+
+#[test]
 fn cancel_request_waits_for_terminal_job_outcome() {
     let ready = delivery_with_status(DeliveryStatus::Ready);
     let planning = completed_active_binding(
@@ -418,10 +503,16 @@ fn cancelled_outcome_settles_the_same_stage_run() {
     );
     let original_run = planning.snapshot().stage_runs[0].clone();
     let outcome = verified_outcome(&planning, TerminalOutcomeStatus::Cancelled);
+    let lease = active_lease(&planning);
 
-    let cancelled =
-        apply_cancelled_outcome(&planning, planning.revision(), &outcome, 1_800_000_000_200)
-            .expect("terminal cancellation settles the run");
+    let cancelled = apply_terminal_outcome(
+        &planning,
+        planning.revision(),
+        &lease,
+        &outcome,
+        1_800_000_000_200,
+    )
+    .expect("terminal cancellation settles the run");
 
     assert_eq!(cancelled.snapshot().stage_runs.len(), 1);
     assert_eq!(cancelled.snapshot().stage_runs[0].id, original_run.id);
@@ -434,6 +525,83 @@ fn cancelled_outcome_settles_the_same_stage_run() {
         Some(1_800_000_000_200)
     );
     assert_eq!(cancelled.revision(), planning.revision() + 1);
+}
+
+#[test]
+fn unsuccessful_terminal_outcome_settles_without_advancing_delivery() {
+    let cases = [
+        (
+            "failed",
+            TerminalOutcomeStatus::Failed,
+            winwincode_delivery::domain::StageRunStatus::Failed,
+        ),
+        (
+            "infrastructure-error",
+            TerminalOutcomeStatus::InfrastructureError,
+            winwincode_delivery::domain::StageRunStatus::Failed,
+        ),
+        (
+            "cancelled",
+            TerminalOutcomeStatus::Cancelled,
+            winwincode_delivery::domain::StageRunStatus::Cancelled,
+        ),
+    ];
+
+    for (suffix, outcome_status, expected_run_status) in cases {
+        let ready = delivery_with_status(DeliveryStatus::Ready);
+        let planning = completed_active_binding(
+            advance(&ready, advance_input(1, suffix))
+                .expect("planning starts")
+                .delivery,
+            suffix,
+        );
+        let outcome = verified_outcome(&planning, outcome_status);
+        let lease = active_lease(&planning);
+        let settled = apply_terminal_outcome(
+            &planning,
+            planning.revision(),
+            &lease,
+            &outcome,
+            1_800_000_000_200,
+        )
+        .expect("current terminal outcome settles the run");
+
+        assert_eq!(settled.snapshot().stage_runs[0].status, expected_run_status);
+        assert_eq!(
+            settled.snapshot().stage_runs[0].finished_at_millis,
+            Some(1_800_000_000_200)
+        );
+        assert_eq!(settled.snapshot().status, DeliveryStatus::Planning);
+        assert_eq!(settled.revision(), planning.revision() + 1);
+    }
+}
+
+#[test]
+fn ordinary_success_must_use_the_atomic_stage_handoff() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = completed_active_binding(
+        advance(&ready, advance_input(1, "ordinary-success"))
+            .expect("planning starts")
+            .delivery,
+        "ordinary-success",
+    );
+    let outcome = successful_outcome(&planning);
+    let lease = active_lease(&planning);
+
+    let error = apply_terminal_outcome(
+        &planning,
+        planning.revision(),
+        &lease,
+        &outcome,
+        1_800_000_000_200,
+    )
+    .expect_err("ordinary success must settle through its atomic next-stage handoff");
+
+    assert_eq!(error.code(), CoordinationErrorCode::WrongState);
+    assert_eq!(
+        planning.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Running
+    );
 }
 
 #[test]
@@ -460,6 +628,28 @@ fn task_breakdown_approval_replaces_empty_graph_once() {
     )
     .expect_err("the same Spec revision cannot replace its task graph");
     assert_eq!(error.code(), CoordinationErrorCode::Conflict);
+}
+
+#[test]
+fn approved_plan_without_a_frozen_task_graph_cannot_start_execution() {
+    let approved_plan = approved_plan_without_tasks();
+    let mut input = advance_input(approved_plan.revision(), "empty-task-graph");
+    input.now_millis = 1_800_000_000_200;
+
+    let error = advance(&approved_plan, input)
+        .expect_err("execution must wait for a non-empty approved task graph");
+
+    assert_eq!(error.code(), CoordinationErrorCode::WrongState);
+    assert!(
+        approved_plan
+            .snapshot()
+            .stage_runs
+            .last()
+            .is_some_and(|run| {
+                run.stage == DeliveryStage::PlanReview
+                    && run.status == winwincode_delivery::domain::StageRunStatus::Succeeded
+            })
+    );
 }
 
 #[test]
@@ -692,7 +882,16 @@ fn conflicting_session_binding_stops_recovery() {
     let started = advance(&ready, advance_input(1, "binding-conflict"))
         .expect("planning starts")
         .delivery;
-    assert!(resume_active(&started, started.revision()).is_err());
+    let resumed = resume_active(&started, started.revision())
+        .expect("pending dispatch resumes before Worker acceptance");
+    let StageAdvanceEffect::Resume(intent) = resumed.effect else {
+        panic!("pending dispatch must resume the same execution intent");
+    };
+    assert_eq!(intent.stage_run_id, started.snapshot().stage_runs[0].id);
+    assert_eq!(
+        intent.execution_job_id,
+        started.snapshot().session_bindings[0].execution_job_id
+    );
 
     let binding = &started.snapshot().session_bindings[0];
     let wrong_identity = SessionBindingIdentity {
@@ -847,6 +1046,42 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
         1
     );
     assert_eq!(resolved.snapshot().stage_runs.len(), 2);
+
+    let remaining = resolved
+        .snapshot()
+        .attention_items
+        .iter()
+        .find(|item| item.status == winwincode_delivery::domain::AttentionItemStatus::Open)
+        .expect("second blocker remains")
+        .clone();
+    let completed = resolve_attention(
+        &resolved,
+        ResolveAttentionInput {
+            expected_revision: resolved.revision(),
+            attention_item_id: remaining.id,
+            stage_run_id: remaining.stage_run_id.expect("same review run"),
+            expected_context: remaining.context,
+            actor: "reviewer-one".into(),
+            decision: AttentionDecision::Resolved,
+            resolution: "second decision approved".into(),
+            now_millis: 1_800_000_000_300,
+        },
+    )
+    .expect("remaining current blocker can resolve");
+
+    assert_eq!(completed.snapshot().status, DeliveryStatus::Executing);
+    assert!(!completed.snapshot().attention_items.iter().any(|item| {
+        item.blocking && item.status == winwincode_delivery::domain::AttentionItemStatus::Open
+    }));
+    assert_eq!(
+        completed
+            .snapshot()
+            .stage_runs
+            .last()
+            .expect("review run")
+            .status,
+        winwincode_delivery::domain::StageRunStatus::Succeeded
+    );
 }
 
 #[test]
@@ -880,29 +1115,55 @@ fn replayed_advance_returns_original_stage_run_without_new_state() {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             operation: DeliveryMutationOperation::StageStarted,
+            expected_revision: 1,
+            snapshot: advanced.clone(),
+        }))
+        .expect("identical request replays");
+
+    let conflict = store
+        .execute(DeliveryCommand::Append(AppendDelivery {
+            delivery_id: draft.id().clone(),
+            request_id: RequestId("request-advance-replay".into()),
+            request_digest: "b".repeat(64),
+            operation: DeliveryMutationOperation::StageStarted,
             expected_revision: advanced.revision(),
             snapshot: advanced,
         }))
-        .expect("identical request replays");
+        .expect_err("different expectedRevision is conflicting request reuse");
 
     assert!(!first.replayed);
     assert!(replay.replayed);
     assert_eq!(replay.snapshot, first.snapshot);
     assert_eq!(replay.snapshot.snapshot().stage_runs.len(), 1);
     assert_eq!(replay.snapshot.snapshot().session_bindings.len(), 1);
+    assert_eq!(
+        conflict.code(),
+        winwincode_delivery::store::DeliveryStoreErrorCode::RequestConflict
+    );
 }
 
 #[test]
-fn verification_progress_selects_each_role_once_and_then_stops() {
-    let executing = delivery_with_status(DeliveryStatus::Executing);
+fn verification_progress_stops_after_required_roles_without_optional_adversary() {
+    let approved = approved_plan_without_tasks();
+    let approved_task = task(&approved, "task-verification-sequence", vec![]);
+    let executing = approve_task_breakdown(
+        &approved,
+        approved.revision(),
+        vec![approved_task],
+        1_800_000_000_200,
+    )
+    .expect("task graph approved");
+    let mut writer_input = advance_input(executing.revision(), "writer-sequence");
+    writer_input.now_millis = 1_800_000_000_300;
     let writer = completed_active_binding(
-        advance(&executing, advance_input(1, "writer-sequence"))
+        advance(&executing, writer_input)
             .expect("executor starts")
             .delivery,
         "writer-sequence",
     );
 
-    let mut reviewer_input = advance_input(2, "reviewer-sequence");
+    let mut reviewer_input = advance_input(writer.revision(), "reviewer-sequence");
+    reviewer_input.now_millis = 1_800_000_000_400;
     reviewer_input.previous_outcome = Some(successful_outcome(&writer));
     let reviewer = advance(&writer, reviewer_input)
         .expect("reviewer starts")
@@ -918,7 +1179,8 @@ fn verification_progress_selects_each_role_once_and_then_stops() {
     );
     let reviewer = completed_active_binding(reviewer, "reviewer-sequence");
 
-    let mut verifier_input = advance_input(3, "verifier-sequence");
+    let mut verifier_input = advance_input(reviewer.revision(), "verifier-sequence");
+    verifier_input.now_millis = 1_800_000_000_500;
     verifier_input.previous_outcome = Some(successful_outcome(&reviewer));
     let verifier = advance(&reviewer, verifier_input)
         .expect("verifier starts")
@@ -934,28 +1196,32 @@ fn verification_progress_selects_each_role_once_and_then_stops() {
     );
     let verifier = completed_active_binding(verifier, "verifier-sequence");
 
-    let mut adversarial_input = advance_input(4, "adversarial-sequence");
-    adversarial_input.previous_outcome = Some(successful_outcome(&verifier));
-    let adversarial = advance(&verifier, adversarial_input)
-        .expect("adversarial verifier starts")
-        .delivery;
+    let final_outcome = successful_outcome(&verifier);
+    let final_lease = active_lease(&verifier);
+    let settled = apply_terminal_outcome(
+        &verifier,
+        verifier.revision(),
+        &final_lease,
+        &final_outcome,
+        1_800_000_000_600,
+    )
+    .expect("final required verifier settles before DeliveryVerdict");
     assert_eq!(
-        adversarial
+        settled
             .snapshot()
             .stage_runs
             .last()
-            .expect("adversarial verifier")
-            .role,
-        "adversarial-verifier"
+            .expect("verifier")
+            .status,
+        winwincode_delivery::domain::StageRunStatus::Succeeded
     );
-    let adversarial = completed_active_binding(adversarial, "adversarial-sequence");
 
-    let mut beyond = advance_input(5, "verification-overrun");
-    beyond.previous_outcome = Some(successful_outcome(&adversarial));
-    let error = advance(&adversarial, beyond)
-        .expect_err("completed verification set must not loop forever");
+    let mut beyond = advance_input(settled.revision(), "verification-overrun");
+    beyond.now_millis = 1_800_000_000_700;
+    let error =
+        advance(&settled, beyond).expect_err("optional adversarial verifier must not be forced");
     assert_eq!(error.code(), CoordinationErrorCode::WrongState);
-    assert_eq!(adversarial.snapshot().stage_runs.len(), 4);
+    assert_eq!(settled.snapshot().stage_runs.len(), 5);
 }
 
 #[test]
@@ -1004,5 +1270,140 @@ fn active_stage_handoff_requires_exact_terminal_lease_and_fencing_fact() {
     assert_eq!(
         planning.snapshot().stage_runs[0].status,
         winwincode_delivery::domain::StageRunStatus::Running
+    );
+}
+
+#[test]
+fn terminal_outcome_rejects_a_lease_that_changed_after_verification() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = completed_active_binding(
+        advance(&ready, advance_input(1, "terminal-released"))
+            .expect("planning starts")
+            .delivery,
+        "terminal-released",
+    );
+    let run = &planning.snapshot().stage_runs[0];
+    let binding = &planning.snapshot().session_bindings[0];
+    let worker_session_id = binding.worker_session_id.clone().expect("worker session");
+    let verified_lease = ActiveLeaseIdentity {
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId("lease-before-reassignment".into()),
+        fencing_token: FencingToken("8".into()),
+        worker_id: WorkerId("worker-before-reassignment".into()),
+        worker_instance_id: WorkerInstanceId("instance-before-reassignment".into()),
+        worker_session_id: worker_session_id.clone(),
+    };
+    let verified = verify_terminal_outcome(
+        &planning,
+        &verified_lease,
+        TerminalWorkerOutcome {
+            stage_run_id: run.id.clone(),
+            execution_job_id: binding.execution_job_id.clone(),
+            attempt: run.attempt,
+            lease_id: verified_lease.lease_id.clone(),
+            fencing_token: verified_lease.fencing_token.clone(),
+            worker_id: verified_lease.worker_id.clone(),
+            worker_instance_id: verified_lease.worker_instance_id.clone(),
+            worker_session_id: worker_session_id.clone(),
+            status: TerminalOutcomeStatus::Succeeded,
+        },
+    )
+    .expect("current outcome verifies");
+    let reassigned_lease = ActiveLeaseIdentity {
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId("lease-after-reassignment".into()),
+        fencing_token: FencingToken("9".into()),
+        worker_id: WorkerId("worker-after-reassignment".into()),
+        worker_instance_id: WorkerInstanceId("instance-after-reassignment".into()),
+        worker_session_id,
+    };
+
+    let error = apply_terminal_outcome(
+        &planning,
+        planning.revision(),
+        &reassigned_lease,
+        &verified,
+        1_800_000_000_200,
+    )
+    .expect_err("a verified outcome cannot survive lease reassignment");
+
+    assert_eq!(error.code(), CoordinationErrorCode::BindingConflict);
+    assert_eq!(
+        planning.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Running
+    );
+}
+
+#[test]
+fn worker_can_cancel_and_finish_before_reporting_a_codex_thread() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let started = advance(&ready, advance_input(1, "terminal-before-thread"))
+        .expect("planning starts")
+        .delivery;
+    let run = &started.snapshot().stage_runs[0];
+    let binding = &started.snapshot().session_bindings[0];
+    let identity = SessionBindingIdentity {
+        delivery_id: started.id().clone(),
+        delivery_task_id: None,
+        stage_run_id: run.id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        execution_job_id: binding.execution_job_id.clone(),
+    };
+    let worker_session_id = WorkerSessionId("worker-session-before-thread".into());
+    let worker_bound = accept_worker_session(
+        &started,
+        started.revision(),
+        &identity,
+        worker_session_id.clone(),
+        1_800_000_000_120,
+    )
+    .expect("WorkerSession is accepted");
+    assert!(
+        worker_bound.snapshot().session_bindings[0]
+            .codex_thread_id
+            .is_none()
+    );
+
+    request_cancel(&worker_bound, worker_bound.revision())
+        .expect("cancel does not depend on a CodexThread");
+    let lease = ActiveLeaseIdentity {
+        execution_job_id: identity.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId("lease-before-thread".into()),
+        fencing_token: FencingToken("3".into()),
+        worker_id: WorkerId("worker-before-thread".into()),
+        worker_instance_id: WorkerInstanceId("instance-before-thread".into()),
+        worker_session_id: worker_session_id.clone(),
+    };
+    let verified = verify_terminal_outcome(
+        &worker_bound,
+        &lease,
+        TerminalWorkerOutcome {
+            stage_run_id: identity.stage_run_id,
+            execution_job_id: identity.execution_job_id,
+            attempt: run.attempt,
+            lease_id: lease.lease_id.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            worker_session_id,
+            status: TerminalOutcomeStatus::Cancelled,
+        },
+    )
+    .expect("terminal outcome does not depend on a CodexThread");
+    let cancelled = apply_terminal_outcome(
+        &worker_bound,
+        worker_bound.revision(),
+        &lease,
+        &verified,
+        1_800_000_000_200,
+    )
+    .expect("current cancellation settles the run");
+
+    assert_eq!(
+        cancelled.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Cancelled
     );
 }
