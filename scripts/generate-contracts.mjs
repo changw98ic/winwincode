@@ -504,7 +504,7 @@ function isRustSharedScalarDefinition(entry) {
 
 function rustNamedType(name, context, qualifyShared) {
   return qualifyShared && context.rustSharedDefinitionNames.has(name)
-    ? `winwincode_domain::generated::${name}`
+    ? `winwincode_domain::${name}`
     : name
 }
 

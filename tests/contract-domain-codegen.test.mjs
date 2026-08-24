@@ -57,9 +57,9 @@ test('Rust contract generation defines shared scalar value objects once in winwi
   assert.doesNotMatch(api, /pub (?:struct|type) (?:OrganizationId|RequestId|Revision)\b/u)
   assert.match(
     api,
-    /pub organization_id: winwincode_domain::generated::OrganizationId,/u,
+    /pub organization_id: winwincode_domain::OrganizationId,/u,
   )
-  assert.match(api, /pub revision: winwincode_domain::generated::Revision,/u)
+  assert.match(api, /pub revision: winwincode_domain::Revision,/u)
 
   const fixtureRoot = join(temporaryRoot, 'rust-workspace')
   mkdirSync(join(fixtureRoot, 'domain', 'src'), { recursive: true })
@@ -67,7 +67,7 @@ test('Rust contract generation defines shared scalar value objects once in winwi
   mkdirSync(join(fixtureRoot, 'api', 'tests'), { recursive: true })
   cpSync(domainPath, join(fixtureRoot, 'domain', 'src', 'generated.rs'))
   cpSync(apiPath, join(fixtureRoot, 'api', 'src', 'generated.rs'))
-  writeFileSync(join(fixtureRoot, 'domain', 'src', 'lib.rs'), 'pub mod generated;\n')
+  writeFileSync(join(fixtureRoot, 'domain', 'src', 'lib.rs'), 'mod generated;\npub use generated::*;\n')
   writeFileSync(join(fixtureRoot, 'api', 'src', 'lib.rs'), 'pub mod generated;\n')
   writeFileSync(join(fixtureRoot, 'Cargo.toml'), [
     '[workspace]',
@@ -101,7 +101,7 @@ test('Rust contract generation defines shared scalar value objects once in winwi
   ].join('\n'))
   writeFileSync(join(fixtureRoot, 'api', 'tests', 'wire.rs'), [
     'use winwincode_api_fixture::generated::WidgetProjection;',
-    'use winwincode_domain::generated::{OrganizationId, Revision};',
+    'use winwincode_domain::{OrganizationId, Revision};',
     '',
     'fn accepts_domain_id(_: &OrganizationId) {}',
     'fn accepts_domain_revision(_: &Revision) {}',
@@ -157,6 +157,10 @@ test('checked-in Rust contract crates expose domain values through the declared 
     'utf8',
   )
   assert.doesNotMatch(apiRust, /pub use .*winwincode_domain/gu)
+  assert.match(
+    readFileSync(join(root, 'crates', 'winwincode-domain', 'src', 'lib.rs'), 'utf8'),
+    /mod generated;\n\npub use generated::\*;/u,
+  )
 
   const schemaDirectory = join(root, 'schema', 'winwincode', 'v1')
   const scalarDefinitions = readdirSync(schemaDirectory)

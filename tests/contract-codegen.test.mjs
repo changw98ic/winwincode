@@ -104,7 +104,7 @@ test('one canonical schema generation is deterministic and compiles for Rust and
   cpSync(paths[0], join(rustFixture, 'src', 'generated.rs'))
   cpSync(paths[4], join(rustFixture, 'domain', 'src', 'generated.rs'))
   writeFileSync(join(rustFixture, 'src', 'lib.rs'), 'pub mod generated;\n')
-  writeFileSync(join(rustFixture, 'domain', 'src', 'lib.rs'), 'pub mod generated;\n')
+  writeFileSync(join(rustFixture, 'domain', 'src', 'lib.rs'), 'mod generated;\npub use generated::*;\n')
   writeFileSync(join(rustFixture, 'domain', 'Cargo.toml'), [
     '[package]',
     'name = "winwincode-domain"',
