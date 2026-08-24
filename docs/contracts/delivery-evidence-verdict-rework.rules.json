@@ -6,7 +6,73 @@
     "crate": "crates/winwincode-delivery",
     "markerModule": "domain/candidate.rs",
     "scanWhenMarkerPresent": true,
-    "note": "The rule and old-behavior audit always run. Named Rust modules and tests become mandatory once the phase 2.4 candidate module exists."
+    "note": "The rule and old-behavior audit always run. Named Rust modules and tests become mandatory once the phase 2.4 candidate module exists. Canonical Rust modules must use ProductSession, ExecutionJob, WorkerSession, and CodexThread identities and must not restore legacy DSH/Codex session fields.",
+    "prohibitedIdentityFields": [
+      "dshSessionId",
+      "codexSessionId",
+      "dsh_session_id",
+      "codex_session_id"
+    ]
+  },
+  "implementationBoundary": {
+    "phase24DomainPolicy": "Phase 2.4 is a pure fail-closed domain layer. It defines sealed validated fact types, checks their identity, ordering, candidate, role, outcome, and rework relationships, and derives CandidateRef, EvidenceRef, CriterionResult, DeliveryVerdict, and Attention. Public commands, API DTOs, and raw Worker messages cannot construct a sealed fact.",
+    "productionEnablementPolicy": "A domain unit test may create sealed fixtures through crate-private test support. Production candidate freeze, evidence resolution, verification settlement, verdict computation, and replacement-candidate acceptance remain unavailable until the owning adapters below produce the required sealed facts and pass their integration gates; a domain test is not proof that Git, an Artifact, a checkout, or a runtime event was actually verified.",
+    "adapterDependencies": [
+      {
+        "factType": "ValidatedGitSnapshotFact",
+        "owner": "GitSnapshotResolver and Artifact adapter",
+        "availability": "follow-up-adapter",
+        "produces": "A sealed base/candidate commit-to-tree resolution, exact diff digest, changed paths, path object IDs, and pre/post verification or rework snapshots read from the exact Job workspace or immutable Artifact.",
+        "integrationGate": "rejects_forged_or_cross_job_git_snapshot_artifacts",
+        "ruleIds": [
+          "candidate.freeze_exact_writer_facts",
+          "candidate.git_snapshot_is_rebuilt",
+          "candidate.producer_outcome_artifact_exact",
+          "verification.successful_candidate_write_rejected",
+          "rework.result_stays_within_approved_scope"
+        ]
+      },
+      {
+        "factType": "VerifiedTerminalOutcome",
+        "owner": "Phase 2.3 stage coordinator and Worker outcome adapter",
+        "availability": "phase-2.3-extension",
+        "produces": "A sealed terminal outcome matched to StageRun, ExecutionJob, attempt, Lease, fencing token, Worker, Worker instance, WorkerSession, CodexThread, status, and lastEventSequence.",
+        "integrationGate": "accepts_only_the_exact_fenced_terminal_outcome_with_last_event_sequence",
+        "ruleIds": [
+          "candidate.producer_outcome_artifact_exact",
+          "verification.stage_and_runtime_terminal_agree",
+          "evidence.source_identity_exact",
+          "evidence.source_time_within_stage_and_terminal"
+        ]
+      },
+      {
+        "factType": "AcceptedRuntimeSourceFact",
+        "owner": "ExecutionPort ingestion and append-only runtime ledger adapter",
+        "availability": "follow-up-adapter",
+        "produces": "A sealed durable source position plus its original type, identity, time, sequence, candidate provenance, and direct outcome loaded from the accepted runtime ledger.",
+        "integrationGate": "rejects_unpersisted_reordered_or_caller_supplied_runtime_facts",
+        "ruleIds": [
+          "evidence.source_identity_exact",
+          "evidence.source_time_within_stage_and_terminal",
+          "evidence.accepted_runtime_ledger_only",
+          "verdict.pass_or_fail_requires_evidence",
+          "verdict.agent_message_cannot_pass",
+          "verdict.direct_evidence_controls_classification",
+          "verdict.failed_check_cannot_pass"
+        ]
+      },
+      {
+        "factType": "ValidatedCheckoutAttestationFact",
+        "owner": "Execution Worker checkout and Artifact adapter",
+        "availability": "follow-up-adapter",
+        "produces": "A sealed ExecutionJob checkout commit/tree attestation matched to the current attempt, Lease, fence, Worker instance, WorkerSession, and immutable candidate Artifact.",
+        "integrationGate": "rejects_cross_checkout_and_cross_candidate_attestations",
+        "ruleIds": [
+          "candidate.producer_outcome_artifact_exact",
+          "evidence.runtime_checkout_matches_candidate"
+        ]
+      }
+    ]
   },
   "candidate": {
     "persistedAsDeliveryObject": false,
@@ -16,8 +82,16 @@
       "deliverySpecRevision",
       "repository",
       "baseRevision",
+      "producerDeliveryTaskId",
       "producerStageRunId",
+      "producerStage",
+      "producerRole",
+      "producerAttempt",
       "producerSessionBindingId",
+      "producerProductSessionId",
+      "producerExecutionJobId",
+      "producerWorkerSessionId",
+      "producerCodexThreadId",
       "baseCommitId",
       "baseTreeId",
       "candidateCommitId",
@@ -29,7 +103,8 @@
       "delivery-spec-revision-changed",
       "candidate-facts-changed",
       "later-executing-or-reworking-writer-started"
-    ]
+    ],
+    "factSourcePolicy": "The phase 2.4 domain freezes only a sealed ValidatedGitSnapshotFact and matching VerifiedTerminalOutcome/ValidatedCheckoutAttestationFact. The owning adapters rebuild and attest those facts for the exact SessionBinding and successful Worker outcome; the domain checks their complete bindings and cannot itself read Git, a Worker workspace, or an Artifact. Format-valid caller strings or an unmatched Worker artifact are not candidate facts."
   },
   "evidence": {
     "persistedBindings": [
@@ -44,13 +119,22 @@
     ],
     "runtimeSourceIdentity": [
       "productSessionId",
+      "executionJobId",
       "workerSessionId",
       "codexThreadId",
       "stageRunId",
       "roleId",
-      "sourceSequence"
+      "attempt",
+      "leaseId",
+      "fencingToken",
+      "workerId",
+      "workerInstanceId",
+      "sourceSequence",
+      "terminalLastEventSequence"
     ],
-    "sourcePolicy": "EvidenceRef stores a bounded source reference. Resolution must find one unique earlier source fact whose type, role, session identities, stage, and candidate all match; it never copies complete logs or command output."
+    "sourcePolicy": "EvidenceRef stores a bounded source reference. Resolution must find one unique earlier accepted source fact whose type, role, ProductSession, ExecutionJob, WorkerSession, CodexThread, StageRun, attempt, lease, fence, Worker instance, source sequence, and candidate all match canonical Control Plane state; it never copies complete logs or command output.",
+    "candidateCheckoutPolicy": "Runtime test, command, file, diff, commit, and review evidence can support a candidate only when the phase 2.4 domain receives a sealed ValidatedCheckoutAttestationFact whose commit and tree match that frozen candidate. The Worker/Artifact adapter creates that proof; Stage timing or an optional candidateRef string is not proof of the checkout.",
+    "ledgerPolicy": "Verdict commands reference already persisted source positions. They do not carry caller-provided runtime event bodies, timestamps, outcomes, or source sequences. The runtime-ledger adapter loads and seals AcceptedRuntimeSourceFact values; the phase 2.4 domain only validates and derives from those facts."
   },
   "verification": {
     "requiredRoles": [
@@ -58,7 +142,10 @@
       "verifier"
     ],
     "workspaceMode": "candidate-read-only",
-    "sessionPolicy": "Reviewer and Verifier each use their own role-scoped StageRun and SessionBinding, distinct from the candidate writer and from one another."
+    "assignmentPolicy": "For the current candidate, every required role resolves to exactly one current assignment consisting of one role-scoped StageRun and one complete SessionBinding. Zero or multiple assignments for a role fail closed before findings are considered.",
+    "sessionPolicy": "Reviewer and Verifier each use exactly one current role-scoped StageRun and exactly one complete SessionBinding, distinct from the candidate writer and from one another. Ambiguous current runs or bindings fail closed.",
+    "candidateIntegrityPolicy": "Every verification run starts and ends on the same frozen candidate commit, tree, and diff. The GitSnapshotResolver/Artifact adapter seals the pre/post facts; the phase 2.4 domain compares them and invalidates a changed snapshot even when no recognized file-write event was emitted.",
+    "terminalPolicy": "A role settles only when its canonical StageRun succeeded and the phase 2.4 domain receives a sealed VerifiedTerminalOutcome that matches its SessionBinding, ExecutionJob, attempt, lease, fence, Worker, instance, WorkerSession, and CodexThread. The structured result and every supporting source sequence must not exceed the outcome lastEventSequence. A runtime final message cannot settle a running StageRun."
   },
   "verdict": {
     "acceptedCriterionOutcomes": [
@@ -69,10 +156,16 @@
     ],
     "failClosedClassifications": {
       "missing_required_session": "inconclusive",
+      "missing_verification_method": "inconclusive",
       "insufficient_direct_evidence": "inconclusive",
+      "agent_message_only": "inconclusive",
       "reviewer_verifier_conflict": "inconclusive",
+      "required_role_product_outcome_disagreement": "inconclusive",
+      "stage_runtime_terminal_mismatch": "inconclusive",
       "runtime_environment_failure": "infra_error",
-      "failed_check_claimed_as_pass": "inconclusive"
+      "failed_check_claimed_as_pass": "inconclusive",
+      "unattested_candidate_checkout": "inconclusive",
+      "agent_claim_conflicts_with_direct_outcome": "inconclusive"
     },
     "requiredResultPrecedence": [
       "fail",
@@ -80,7 +173,15 @@
       "inconclusive",
       "pass"
     ],
-    "computedBy": "Rust Control Plane from current canonical Delivery state and exact Worker/Codex source facts; callers and Workers do not submit EvidenceRef, CriterionResult, or DeliveryVerdict objects."
+    "computedBy": "The Rust phase 2.4 domain computes from current canonical Delivery state and sealed validated facts supplied by trusted ports; it does not fetch Git or Worker data itself. Callers and Workers do not submit EvidenceRef, CriterionResult, DeliveryVerdict, or sealed fact objects.",
+    "directPassEvidenceTypes": [
+      "test",
+      "command",
+      "diff",
+      "file",
+      "commit"
+    ],
+    "requiredRoleAgreementPolicy": "Pass and product fail require current direct evidence from every required role and one consistent product outcome. A missing, incomplete, or inconclusive role keeps the criterion inconclusive; a required role infrastructure failure remains infra_error and is not overwritten by another role product-fail message."
   },
   "rework": {
     "writerRole": "remediator",
@@ -96,12 +197,14 @@
       "hunkSha256",
       "evidenceRefIds"
     ],
-    "afterWriterStarts": "The previous candidate immediately stops being current. Historical evidence may remain append-only, but it cannot authorize a new pass, review, or publication."
+    "afterWriterStarts": "The previous candidate immediately stops being current. Historical evidence may remain append-only, but it cannot authorize a new pass, review, or publication.",
+    "resultPolicy": "The remediator replacement candidate must remain inside the approved DeliveryTask, file, and hunk boundaries. The GitSnapshotResolver/Artifact adapter seals the resulting snapshot; the phase 2.4 domain compares it with the authorization and rejects any added path or out-of-bound hunk. Prompt wording alone is not enforcement.",
+    "attemptSequenceSource": "all current Delivery StageRuns whose stage is reworking"
   },
   "rules": [
     {
       "id": "candidate.freeze_exact_writer_facts",
-      "statement": "A frozen candidate is a deterministic derived value bound to the current DeliverySpec, repository baseline, one succeeded executor or remediator StageRun, its exact SessionBinding, and exact Git commit, tree, diff, and changed-path facts.",
+      "statement": "A frozen candidate is a deterministic derived value bound to the current DeliverySpec, repository baseline, one succeeded executor or remediator StageRun including task, stage, role, and attempt, its exact complete ProductSession/ExecutionJob/WorkerSession/CodexThread SessionBinding, and exact Git commit, tree, diff, and changed-path facts.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0025-live-delivery-evaluation.md",
@@ -118,18 +221,74 @@
             "name": "freezeDeliveryCandidate"
           }
         ],
-        "coverage": "covered",
+        "coverage": "partial",
         "tests": [
           {
             "path": "tests/candidate-evidence.test.mjs",
             "name": "freezes exact producer Git facts without creating another persisted domain object"
           }
         ],
-        "gap": ""
+        "gap": "The old candidate identity hashes the producer StageRun and SessionBinding IDs but not the writer task, stage, role, attempt, ProductSession, ExecutionJob, WorkerSession, or CodexThread values. Mutating a binding behind the same ID can therefore leave the old candidateRef unchanged; Rust must include the complete canonical writer identity."
       },
       "rust": {
         "module": "domain/candidate.rs",
         "testName": "freezes_candidate_from_exact_writer_facts"
+      }
+    },
+    {
+      "id": "candidate.git_snapshot_is_rebuilt",
+      "statement": "The candidate Git snapshot is rebuilt through a trusted resolver: base and candidate commits resolve to the stated trees, their exact diff hashes to diffSha256, and its paths and object IDs equal changedPaths. Format-valid caller strings cannot become a candidate.",
+      "adrRefs": [
+        "docs/decisions/0025-live-delivery-evaluation.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "freezeDeliveryCandidate"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "rejects malformed or internally inconsistent candidate facts"
+          }
+        ],
+        "gap": "The old function validates formats and relationships among supplied fields, but it does not ask Git to prove commit-to-tree, diff digest, changed-path, or object-ID consistency. The later GitSnapshotResolver/Artifact adapter must seal that proof; phase 2.4 must accept only the sealed value and cannot pretend a domain fixture proves the Git read."
+      },
+      "rust": {
+        "module": "domain/candidate.rs",
+        "testName": "candidate_requires_sealed_validated_git_snapshot"
+      }
+    },
+    {
+      "id": "candidate.producer_outcome_artifact_exact",
+      "statement": "Candidate freezing requires the exact accepted successful Worker outcome for the producer SessionBinding and a Git snapshot read from that outcome Job workspace. A succeeded StageRun flag, a caller snapshot, or an artifact from another job, attempt, lease, fence, Worker instance, or WorkerSession is insufficient.",
+      "adrRefs": [
+        "docs/decisions/0025-live-delivery-evaluation.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "freezeDeliveryCandidate"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "freezes exact producer Git facts without creating another persisted domain object"
+          }
+        ],
+        "gap": "The old freezer checks that the producer StageRun says succeeded and that a DSH/Codex binding exists, but its API has no accepted Worker outcome or job-scoped artifact proof. The Worker/Artifact adapter must seal the outcome-bound snapshot; phase 2.4 must reject a missing or mismatched sealed proof."
+      },
+      "rust": {
+        "module": "domain/candidate.rs",
+        "testName": "candidate_requires_sealed_matching_worker_job_snapshot"
       }
     },
     {
@@ -190,7 +349,7 @@
     },
     {
       "id": "verification.role_sessions_are_independent",
-      "statement": "Reviewer and Verifier each bind one role-scoped verification StageRun to a complete SessionBinding; both are distinct from the candidate writer and from one another.",
+      "statement": "Reviewer and Verifier each bind exactly one current role-scoped verification StageRun to exactly one complete SessionBinding; both are distinct from the candidate writer and from one another, and ambiguous duplicate runs or bindings fail closed.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -209,11 +368,11 @@
             "name": "binds exact approved inputs to separate existing reviewer and verifier sessions"
           }
         ],
-        "gap": "The old implementation rejects reuse of the producer SessionBinding and its DSH/Codex identities, but does not contain one direct negative test that reuses the same DSH/Codex identities across Reviewer and Verifier bindings. Rust must reject that cross-role reuse."
+        "gap": "The old implementation rejects reuse of the producer SessionBinding and its DSH/Codex identities, but it neither directly rejects Reviewer/Verifier cross-role identity reuse nor fails on multiple current bindings for one role. Rust must require one unambiguous ProductSession/ExecutionJob/WorkerSession/CodexThread binding per current role."
       },
       "rust": {
         "module": "domain/verification.rs",
-        "testName": "requires_distinct_role_scoped_verification_sessions"
+        "testName": "requires_exactly_one_current_assignment_and_distinct_session_per_role"
       }
     },
     {
@@ -250,7 +409,7 @@
     },
     {
       "id": "verification.successful_candidate_write_rejected",
-      "statement": "Any successful file or patch write observed in a verification Session invalidates that verification result; the candidate identity can only come from the original executor or remediator freeze.",
+      "statement": "Any candidate mutation during Reviewer, Verifier, or Adversarial Verifier execution invalidates that verification result. The pre/post commit, tree, and diff must remain exact even when the mutation came from a command or another event not classified as a file or patch write.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -262,7 +421,7 @@
             "name": "assertVerificationSessionReadOnly"
           }
         ],
-        "coverage": "covered",
+        "coverage": "partial",
         "tests": [
           {
             "path": "tests/independent-verification.test.mjs",
@@ -273,11 +432,39 @@
             "name": "requires a read-only verification role and rejects any successful verifier write"
           }
         ],
-        "gap": ""
+        "gap": "The old implementation recognizes successful FileChange and patch_apply events, but a successful command or an unrecognized tool can mutate the candidate without matching those event shapes. The GitSnapshotResolver/Artifact adapter must seal pre/post snapshots; phase 2.4 must compare them and reject a difference."
       },
       "rust": {
         "module": "domain/verification.rs",
-        "testName": "rejects_successful_candidate_write_from_verification_session"
+        "testName": "rejects_verification_when_sealed_pre_and_post_candidate_snapshots_differ"
+      }
+    },
+    {
+      "id": "verification.stage_and_runtime_terminal_agree",
+      "statement": "A verification role settles only after its canonical StageRun succeeded and one accepted terminal Worker outcome matches the complete current SessionBinding and fenced job attempt; a completed model turn cannot settle a still-running StageRun.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/independent-verification.ts",
+            "name": "projectIndependentVerification"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/independent-verification.test.mjs",
+            "name": "keeps missing, running, and optional adversarial settlements visible"
+          }
+        ],
+        "gap": "The old projector keeps a turn without a terminal event visible as running, but a turn.completed event can mark the session settled even while the canonical StageRun status is still running. The phase 2.3 outcome adapter must seal the exact terminal fact; phase 2.4 must require that proof together with canonical stage success."
+      },
+      "rust": {
+        "module": "domain/verification.rs",
+        "testName": "requires_succeeded_stage_and_sealed_matching_terminal_outcome"
       }
     },
     {
@@ -410,7 +597,7 @@
     },
     {
       "id": "evidence.source_identity_exact",
-      "statement": "A runtime EvidenceRef resolves to exactly one earlier source fact whose source type, ProductSession, WorkerSession, CodexThread, StageRun, role, sequence, and candidate identity all agree with the canonical SessionBinding.",
+      "statement": "A runtime EvidenceRef resolves to exactly one earlier accepted source fact whose source type, ProductSession, ExecutionJob, WorkerSession, CodexThread, StageRun, role, attempt, lease, fencing token, Worker, Worker instance, source sequence, and candidate identity all agree with canonical Control Plane state.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -433,11 +620,103 @@
             "name": "rejects foreign result identities, role drift, and verifier writes"
           }
         ],
-        "gap": "The old TypeScript source checks DSH Session and Codex Session identities. The Rust target replaces that backend pair with the canonical ProductSession, WorkerSession, CodexThread, StageRun, role, and source-sequence identity set from the phase-one contract."
+        "gap": "The old TypeScript source checks DSH Session and Codex Session identities and source order. It does not bind evidence to the canonical ProductSession, ExecutionJob, attempt, lease, fencing token, Worker instance, WorkerSession, and CodexThread identity set required by the Rust Control Plane."
       },
       "rust": {
         "module": "domain/evidence.rs",
         "testName": "evidence_resolves_one_exact_runtime_source_identity"
+      }
+    },
+    {
+      "id": "evidence.source_time_within_stage_and_terminal",
+      "statement": "The persisted source occurrence time and sequence must be at or after the StageRun start and SessionBinding time, earlier than its finding and verdict, and no later than the accepted terminal Worker outcome lastEventSequence. Callers cannot replace or raise the source time.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "resolveDeliveryEvidence"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "resolves runtime and Git facts to exact spec, candidate, stage, and session identities"
+          }
+        ],
+        "gap": "The old input accepts caller-created createdAtMillis, and independent verification raises an earlier event time with Math.max(stage start, binding time, event time). The ledger adapter must preserve the original occurrence time and sequence in a sealed fact; phase 2.4 must compare those values with the stage, binding, result, and terminal outcome."
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "rejects_source_before_stage_or_binding_and_after_terminal_sequence"
+      }
+    },
+    {
+      "id": "evidence.accepted_runtime_ledger_only",
+      "statement": "The runtime-ledger adapter reads source bodies, timestamps, outcomes, and sequences only from the Control Plane accepted append-only ledger and seals an AcceptedRuntimeSourceFact. Callers submit bounded source positions, not RuntimeEvent objects; the phase 2.4 domain accepts only that sealed fact.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "resolveDeliveryEvidence"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
+          },
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "rejects stale acceptance, stale candidate, and foreign result identities"
+          }
+        ],
+        "gap": "The old public functions accept caller-provided runtimeEvents and createdAtMillis values. They validate event order within that supplied array, but they do not prove that the source body or timestamp came from the canonical persisted runtime ledger. The later ledger adapter must load and seal the durable fact; phase 2.4 must reject raw or caller-built source values."
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "evidence_requires_sealed_accepted_runtime_source_fact"
+      }
+    },
+    {
+      "id": "evidence.runtime_checkout_matches_candidate",
+      "statement": "A runtime test, command, file, diff, commit, or finding can support the current candidate only when its accepted ExecutionJob checkout commit and tree attestation exactly match that candidate; sharing a StageRun time window or omitting candidateRef never establishes candidate provenance.",
+      "adrRefs": [
+        "docs/decisions/0025-live-delivery-evaluation.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/candidate-evidence.ts",
+            "name": "resolveDeliveryEvidence"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/candidate-evidence.test.mjs",
+            "name": "rejects missing, foreign, type-mismatched, and candidate-mismatched source facts"
+          }
+        ],
+        "gap": "The old resolver checks candidateRef only when most runtime events happen to include it; test and command evidence can omit candidateRef, and no ExecutionJob checkout attestation is compared with candidateCommitId/candidateTreeId. The Worker/Artifact adapter must seal the attestation; phase 2.4 must require its exact candidate match."
+      },
+      "rust": {
+        "module": "domain/evidence.rs",
+        "testName": "runtime_evidence_requires_sealed_exact_candidate_checkout_attestation"
       }
     },
     {
@@ -473,6 +752,162 @@
       }
     },
     {
+      "id": "verdict.agent_message_cannot_pass",
+      "statement": "An Agent message, final response, review_finding, or generic runtime_event cannot be the sole direct support for pass; every required role must cite a current test, command, diff, file, or commit fact that the Control Plane resolved independently.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0025-live-delivery-evaluation.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "fails closed for each non-passing verification condition"
+          }
+        ],
+        "gap": "The old computation rejects an empty evidence list and failed checks, but any non-empty generic runtime_event with outcome observed can support pass. Rust must exclude Agent/final-response and generic runtime events from direct pass evidence."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "agent_message_or_generic_runtime_event_cannot_produce_pass"
+      }
+    },
+    {
+      "id": "verdict.direct_evidence_controls_classification",
+      "statement": "The Control Plane derives product failure, infrastructure failure, and success from resolved direct outcomes. An Agent cannot relabel a failed product check as infra_error, a successful declared check as fail, or an infrastructure failure as a product result.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0025-live-delivery-evaluation.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "fails closed for each non-passing verification condition"
+          }
+        ],
+        "gap": "The old findingEvaluation trusts Agent infra_error/inconclusive before reading supporting outcomes and accepts fail with a succeeded check. Its public tests cover pass with failed evidence, but not the reverse relabeling paths. Rust must let direct outcomes control the classification."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "direct_evidence_outcome_cannot_be_reclassified_by_agent_claim"
+      }
+    },
+    {
+      "id": "verdict.missing_verification_method_is_inconclusive",
+      "statement": "A criterion whose approved verificationMethod is missing remains verification-blocked and inconclusive; Reviewer or Verifier text cannot invent a convenient check and turn it into pass.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/acceptance-verification.ts",
+            "name": "freezeAcceptanceVerificationInput"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/acceptance-verification.test.mjs",
+            "name": "freezes the exact approved criteria and keeps missing checks explicit"
+          },
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "computes one deterministic passing verdict from current direct evidence"
+          }
+        ],
+        "gap": "The old acceptance freeze labels a missing method as attention-required, but computeDeliveryVerdict does not read that requirement and can pass the criterion when both roles cite other evidence. Rust must keep it inconclusive until a newly reviewed Spec supplies the method."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "missing_verification_method_is_inconclusive"
+      }
+    },
+    {
+      "id": "verdict.required_roles_agree_on_product_outcome",
+      "statement": "Pass or product fail requires current direct evidence from every required role and one consistent product outcome. One role fail cannot override another role missing, incomplete, inconclusive, or infrastructure-failed state.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "fails closed for each non-passing verification condition"
+          }
+        ],
+        "gap": "The old criterion fold gives fail precedence whenever any role evaluates fail, so one product-fail finding can override another required role that is missing, inconclusive, or infra_error. Rust must require all required roles to contribute direct evidence and agree before product fail."
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "product_outcome_requires_all_required_roles_to_agree"
+      }
+    },
+    {
+      "id": "verdict.derived_facts_are_recomputed",
+      "statement": "Public commands never accept caller- or Worker-created EvidenceRef, CriterionResult, DeliveryVerdict, status, or Attention values. The Rust Control Plane rebuilds them from the current Delivery and accepted source facts before one atomic write.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/strongflow-delivery-api.ts",
+            "name": "materializeStrongFlowDeliveryRequest"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-verdict.ts",
+            "name": "computeDeliveryVerdict"
+          }
+        ],
+        "coverage": "covered",
+        "tests": [
+          {
+            "path": "tests/strongflow-delivery-api.test.mjs",
+            "name": "Delivery API rejects extra fields, empty bindings, and mismatched authentication"
+          },
+          {
+            "path": "tests/delivery-verdict.test.mjs",
+            "name": "computes one deterministic passing verdict from current direct evidence"
+          }
+        ],
+        "gap": ""
+      },
+      "rust": {
+        "module": "domain/verdict.rs",
+        "testName": "rejects_caller_supplied_evidence_results_verdict_or_attention"
+      }
+    },
+    {
       "id": "verdict.all_criteria_exactly_once",
       "statement": "The current DeliveryVerdict evaluates every current acceptance criterion exactly once and includes no duplicate or foreign criterion.",
       "adrRefs": [
@@ -501,7 +936,7 @@
       },
       "rust": {
         "module": "domain/verdict.rs",
-        "testName": "delivery_verdict_covers_every_current_criterion_exactly_once"
+        "testName": "rejects_missing_duplicate_and_foreign_criterion_results"
       }
     },
     {
@@ -570,7 +1005,7 @@
     },
     {
       "id": "verdict.conflict_is_inconclusive",
-      "statement": "Different current Reviewer and Verifier conclusions for the same criterion preserve both findings, create a deterministic conflict record, and produce inconclusive for that criterion.",
+      "statement": "Different current Reviewer and Verifier product conclusions for the same criterion preserve both findings, create a deterministic conflict record, and produce inconclusive; one role product-fail message cannot override the other role pass, missing, incomplete, or inconclusive state.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -670,7 +1105,7 @@
     },
     {
       "id": "rework.precise_current_candidate_scope",
-      "statement": "Precise rework is accepted only for the current reviewed candidate, exact diff, original DeliveryTask scope, visible diagram node, changed file, exact hunk digest, and current candidate-bound evidence references.",
+      "statement": "Precise rework is accepted only for the current reviewed candidate, exact diff, original DeliveryTask scope, visible diagram node, changed file, exact hunk digest, and current candidate-bound evidence references; the replacement candidate must also prove that its resulting diff stayed within those approved boundaries.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -701,8 +1136,73 @@
       }
     },
     {
+      "id": "rework.result_stays_within_approved_scope",
+      "statement": "After a remediator finishes, the replacement Git snapshot must show that every changed path and hunk remains inside the approved DeliveryTask, file, and hunk authorization. Prompt instructions or valid input annotations alone do not authorize an expanded result.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0025-live-delivery-evaluation.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/contracts/src/strongflow-delivery-api.ts",
+            "name": "parseStrongFlowDeliveryRemediation"
+          },
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/strongflow-delivery-api.test.mjs",
+            "name": "Delivery API accepts only bounded candidate-bound diagram remediation"
+          },
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService can hand a failed verdict through rework into a new verification run"
+          }
+        ],
+        "gap": "The old service validates the authorization and sends a hard-boundary prompt, but candidate freezing after the remediator does not compare the replacement diff with the authorized files and hunks. The GitSnapshotResolver/Artifact adapter must seal the result; phase 2.4 must compare it with the authorization and reject expansion."
+      },
+      "rust": {
+        "module": "domain/rework.rs",
+        "testName": "replacement_candidate_requires_sealed_snapshot_within_approved_scope"
+      }
+    },
+    {
+      "id": "attention.combined_actions_use_safest_transition",
+      "statement": "When one verdict produces multiple blocking Attention items, the next Delivery state is recomputed from the complete current action set with clarification ahead of rework and rework ahead of verification retry. Resolution order or the last item cannot weaken that transition.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-attention.ts",
+            "name": "deliveryVerdictAttentionNextStatus"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-attention.test.mjs",
+            "name": "multiple failures remain blocking and resolve to the strongest current action"
+          }
+        ],
+        "gap": "The old TypeScript helper recomputes all classified actions and covers fail plus infra_error, but it lacks scope-change combinations. The current Rust Attention application chooses from only the last resolved item; phase 2.4 must centralize the complete safest transition."
+      },
+      "rust": {
+        "module": "domain/rework.rs",
+        "testName": "combined_attention_actions_use_safest_transition_independent_of_resolution_order"
+      }
+    },
+    {
       "id": "rework.bounded_remediator_only",
-      "statement": "A rework writer is a Codex remediator, the Control Plane derives its next attempt, and the number of rework StageRuns never exceeds the approved DeliverySpec maximum.",
+      "statement": "A rework writer is a Codex remediator, the Control Plane derives its next attempt from all current-Delivery reworking StageRuns, and the number of rework StageRuns never exceeds the approved DeliverySpec maximum.",
       "adrRefs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "docs/decisions/0028-control-plane-worker-migration.md"
@@ -730,6 +1230,34 @@
       "rust": {
         "module": "domain/rework.rs",
         "testName": "rework_is_bounded_and_remediator_owned"
+      }
+    },
+    {
+      "id": "rework.attempt_uses_total_delivery_history",
+      "statement": "The next remediator attempt is one plus the total number of reworking StageRuns in the current DeliverySpec, across DeliveryTasks. Callers and per-task counters cannot restart the sequence at one.",
+      "adrRefs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "typescript": {
+        "publicSymbols": [
+          {
+            "path": "packages/strongflow/src/delivery-service.ts",
+            "name": "StrongFlowService"
+          }
+        ],
+        "coverage": "partial",
+        "tests": [
+          {
+            "path": "tests/delivery-service.test.mjs",
+            "name": "StrongFlowService can hand a failed verdict through rework into a new verification run"
+          }
+        ],
+        "gap": "The old service derives a Delivery-wide count, but the public test covers only one task. The current Rust stage coordinator counts matching stage/role/task runs, so cross-task rework can reuse attempt 1. Rust must use total current-Delivery rework history."
+      },
+      "rust": {
+        "module": "domain/rework.rs",
+        "testName": "rework_attempt_uses_total_delivery_rework_history"
       }
     },
     {
@@ -765,7 +1293,7 @@
       },
       "rust": {
         "module": "domain/rework.rs",
-        "testName": "rework_invalidates_previous_candidate_and_requires_full_reverification"
+        "testName": "old_candidate_evidence_and_verdict_cannot_authorize_after_writer_starts"
       }
     },
     {
