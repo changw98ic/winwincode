@@ -61,6 +61,7 @@ fn advance_input(expected_revision: u64, suffix: &str) -> AdvanceStageInput {
         },
         review: None,
         previous_outcome: None,
+        current_lease: None,
         now_millis: 1_800_000_000_100,
     }
 }
@@ -90,7 +91,7 @@ fn approved_plan_without_tasks() -> Delivery {
         context: "frozen-plan-review-context".into(),
         assigned_to: "reviewer-one".into(),
     });
-    input.previous_outcome = Some(successful_outcome(&planning));
+    attach_successful_handoff(&mut input, &planning);
     let review = advance(&planning, input).expect("review starts").delivery;
     let mut snapshot = review.into_snapshot();
     let run = snapshot.stage_runs.last_mut().expect("review run");
@@ -204,6 +205,11 @@ fn successful_outcome(
     delivery: &Delivery,
 ) -> winwincode_delivery::application::stage::VerifiedTerminalOutcome {
     verified_outcome(delivery, TerminalOutcomeStatus::Succeeded)
+}
+
+fn attach_successful_handoff(input: &mut AdvanceStageInput, delivery: &Delivery) {
+    input.current_lease = Some(active_lease(delivery));
+    input.previous_outcome = Some(successful_outcome(delivery));
 }
 
 #[test]
@@ -343,7 +349,7 @@ fn starting_next_stage_settles_bound_previous_run_atomically() {
         context: "frozen-plan-review-context-v1".into(),
         assigned_to: "reviewer-one".into(),
     });
-    input.previous_outcome = Some(successful_outcome(&planning));
+    attach_successful_handoff(&mut input, &planning);
 
     let result = advance(&planning, input).expect("plan review handoff");
     let snapshot = result.delivery.snapshot();
@@ -383,7 +389,7 @@ fn review_stage_opens_linked_blocking_attention_atomically() {
         context: "frozen-review-set:abc123".into(),
         assigned_to: "reviewer-one".into(),
     });
-    input.previous_outcome = Some(successful_outcome(&planning));
+    attach_successful_handoff(&mut input, &planning);
 
     let result = advance(&planning, input).expect("review starts");
     let snapshot = result.delivery.snapshot();
@@ -812,7 +818,7 @@ fn task_status_tracks_execution_verification_rework_and_cancel() {
     let executing = completed_active_binding(executing, "task-integrated-execution");
     let mut verification_input =
         advance_input(executing.revision(), "task-integrated-verification");
-    verification_input.previous_outcome = Some(successful_outcome(&executing));
+    attach_successful_handoff(&mut verification_input, &executing);
     verification_input.now_millis = 1_800_000_000_400;
     let verifying = advance(&executing, verification_input)
         .expect("task verification starts")
@@ -932,7 +938,7 @@ fn open_blocking_attention_prevents_stage_advance() {
         context: "frozen-attention".into(),
         assigned_to: "reviewer-one".into(),
     });
-    input.previous_outcome = Some(successful_outcome(&planning));
+    attach_successful_handoff(&mut input, &planning);
     let review = advance(&planning, input).expect("review starts").delivery;
 
     let error = advance(&review, advance_input(review.revision(), "bypass"))
@@ -955,7 +961,7 @@ fn stale_attention_resolution_is_rejected_without_state_change() {
         context: "frozen-current-context".into(),
         assigned_to: "reviewer-one".into(),
     });
-    input.previous_outcome = Some(successful_outcome(&planning));
+    attach_successful_handoff(&mut input, &planning);
     let review = advance(&planning, input).expect("review starts").delivery;
     let item = review.snapshot().attention_items[0].clone();
     let before = review.clone();
@@ -1008,7 +1014,7 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
         context: "frozen-first-context".into(),
         assigned_to: "reviewer-one".into(),
     });
-    input.previous_outcome = Some(successful_outcome(&planning));
+    attach_successful_handoff(&mut input, &planning);
     let review = advance(&planning, input).expect("review starts").delivery;
     let mut snapshot = review.into_snapshot();
     let mut second = snapshot.attention_items[0].clone();
@@ -1164,7 +1170,7 @@ fn verification_progress_stops_after_required_roles_without_optional_adversary()
 
     let mut reviewer_input = advance_input(writer.revision(), "reviewer-sequence");
     reviewer_input.now_millis = 1_800_000_000_400;
-    reviewer_input.previous_outcome = Some(successful_outcome(&writer));
+    attach_successful_handoff(&mut reviewer_input, &writer);
     let reviewer = advance(&writer, reviewer_input)
         .expect("reviewer starts")
         .delivery;
@@ -1181,7 +1187,7 @@ fn verification_progress_stops_after_required_roles_without_optional_adversary()
 
     let mut verifier_input = advance_input(reviewer.revision(), "verifier-sequence");
     verifier_input.now_millis = 1_800_000_000_500;
-    verifier_input.previous_outcome = Some(successful_outcome(&reviewer));
+    attach_successful_handoff(&mut verifier_input, &reviewer);
     let verifier = advance(&reviewer, verifier_input)
         .expect("verifier starts")
         .delivery;
@@ -1330,6 +1336,42 @@ fn terminal_outcome_rejects_a_lease_that_changed_after_verification() {
     .expect_err("a verified outcome cannot survive lease reassignment");
 
     assert_eq!(error.code(), CoordinationErrorCode::BindingConflict);
+    assert_eq!(
+        planning.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Running
+    );
+}
+
+#[test]
+fn successful_handoff_rejects_a_lease_that_changed_after_verification() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = completed_active_binding(
+        advance(&ready, advance_input(1, "handoff-released"))
+            .expect("planning starts")
+            .delivery,
+        "handoff-released",
+    );
+    let verified = successful_outcome(&planning);
+    let mut reassigned_lease = active_lease(&planning);
+    reassigned_lease.lease_id = LeaseId("lease-after-handoff-reassignment".into());
+    reassigned_lease.fencing_token = FencingToken("2".into());
+    reassigned_lease.worker_id = WorkerId("worker-after-handoff-reassignment".into());
+    reassigned_lease.worker_instance_id =
+        WorkerInstanceId("instance-after-handoff-reassignment".into());
+    let mut input = advance_input(planning.revision(), "stale-success-handoff");
+    input.review = Some(ReviewAttentionSeed {
+        title: "Review plan".into(),
+        context: "frozen-plan-context".into(),
+        assigned_to: "reviewer-one".into(),
+    });
+    input.previous_outcome = Some(verified);
+    input.current_lease = Some(reassigned_lease);
+
+    let error = advance(&planning, input)
+        .expect_err("success verified before reassignment must not start the next stage");
+
+    assert_eq!(error.code(), CoordinationErrorCode::BindingConflict);
+    assert_eq!(planning.snapshot().stage_runs.len(), 1);
     assert_eq!(
         planning.snapshot().stage_runs[0].status,
         winwincode_delivery::domain::StageRunStatus::Running

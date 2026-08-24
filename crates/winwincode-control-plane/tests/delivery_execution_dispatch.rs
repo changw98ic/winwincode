@@ -80,6 +80,7 @@ fn stage_advance(seed: u64, with_task: bool) -> StageAdvanceResult {
             },
             review: None,
             previous_outcome: None,
+            current_lease: None,
             now_millis: 1_800_000_000_100,
         },
     )

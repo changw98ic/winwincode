@@ -90,6 +90,7 @@ const expectedDeliveryTests = Object.freeze([
   'verification_progress_stops_after_required_roles_without_optional_adversary',
   'ordinary_success_must_use_the_atomic_stage_handoff',
   'terminal_outcome_rejects_a_lease_that_changed_after_verification',
+  'successful_handoff_rejects_a_lease_that_changed_after_verification',
   'unsuccessful_terminal_outcome_settles_without_advancing_delivery',
   'worker_can_cancel_and_finish_before_reporting_a_codex_thread',
 ])
