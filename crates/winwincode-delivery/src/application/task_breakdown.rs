@@ -241,7 +241,11 @@ mod tests {
 
     use crate::application::solution_review::{
         resolve_current_solution_review,
-        tests::{ReviewFixtureState, review_delivery, with_newer_review_attempt},
+        tests::{
+            ReviewFixtureState, duplicate_task_and_criterion_fixtures,
+            empty_task_proposals_fixture, invalid_dependency_fixtures, review_delivery,
+            with_newer_review_attempt,
+        },
     };
 
     #[test]
@@ -310,5 +314,30 @@ mod tests {
         assert!(rejected.is_err());
         assert_eq!(transition.review_set_sha256(), review_set_sha256);
         assert!(approved.validate_for_delivery(&changed).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_empty_task_proposals() {
+        let _wire_field = "taskProposals";
+        let empty = empty_task_proposals_fixture();
+        assert!(resolve_current_solution_review(&empty).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_duplicate_task_and_criterion_ids() {
+        let _wire_fields = ("taskProposals", "acceptanceCriterionIds");
+        let (duplicate, duplicate_criterion) = duplicate_task_and_criterion_fixtures();
+        assert!(resolve_current_solution_review(&duplicate).is_err());
+        assert!(resolve_current_solution_review(&duplicate_criterion).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_self_missing_duplicate_and_cyclic_dependencies() {
+        let _wire_field = "blockedByTaskIds";
+        let [self_dependency, missing, duplicate, cycle] = invalid_dependency_fixtures();
+        assert!(resolve_current_solution_review(&self_dependency).is_err());
+        assert!(resolve_current_solution_review(&missing).is_err());
+        assert!(resolve_current_solution_review(&duplicate).is_err());
+        assert!(resolve_current_solution_review(&cycle).is_err());
     }
 }

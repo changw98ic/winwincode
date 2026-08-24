@@ -1877,25 +1877,18 @@ pub(crate) mod tests {
         assert!(resolve_current_solution_review(&stale_order).is_err());
     }
 
-    #[test]
-    fn solution_review_rejects_empty_task_proposals() {
-        let _wire_field = "taskProposals";
-        let empty = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+    pub(crate) fn empty_task_proposals_fixture() -> Delivery {
+        rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
             context.task_proposals.clear()
-        });
-        assert!(resolve_current_solution_review(&empty).is_err());
+        })
     }
 
-    #[test]
-    fn solution_review_rejects_duplicate_task_and_criterion_ids() {
-        let _wire_fields = ("taskProposals", "acceptanceCriterionIds");
+    pub(crate) fn duplicate_task_and_criterion_fixtures() -> (Delivery, Delivery) {
         let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
             context
                 .task_proposals
                 .push(context.task_proposals[0].clone())
         });
-        assert!(resolve_current_solution_review(&duplicate).is_err());
-
         let duplicate_criterion =
             rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
                 let criterion = context.task_proposals[0].acceptance_criterion_ids[0].clone();
@@ -1903,25 +1896,19 @@ pub(crate) mod tests {
                     .acceptance_criterion_ids
                     .push(criterion);
             });
-        assert!(resolve_current_solution_review(&duplicate_criterion).is_err());
+        (duplicate, duplicate_criterion)
     }
 
-    #[test]
-    fn solution_review_rejects_self_missing_duplicate_and_cyclic_dependencies() {
-        let _wire_field = "blockedByTaskIds";
+    pub(crate) fn invalid_dependency_fixtures() -> [Delivery; 4] {
         let self_dependency =
             rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
                 context.task_proposals[0].blocked_by_task_ids =
                     vec![context.task_proposals[0].id.clone()];
             });
-        assert!(resolve_current_solution_review(&self_dependency).is_err());
-
         let missing = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
             context.task_proposals[0].blocked_by_task_ids =
                 vec![DeliveryTaskId("task:missing".into())];
         });
-        assert!(resolve_current_solution_review(&missing).is_err());
-
         let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
             let dependency = DeliveryTaskProposal {
                 id: DeliveryTaskId("task:dependency".into()),
@@ -1936,8 +1923,6 @@ pub(crate) mod tests {
                 vec![dependency.id.clone(), dependency.id.clone()];
             context.task_proposals.push(dependency);
         });
-        assert!(resolve_current_solution_review(&duplicate).is_err());
-
         let cycle = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
             let first_id = context.task_proposals[0].id.clone();
             let second_id = DeliveryTaskId("task:cycle".into());
@@ -1952,7 +1937,7 @@ pub(crate) mod tests {
                 blocked_by_task_ids: vec![first_id],
             });
         });
-        assert!(resolve_current_solution_review(&cycle).is_err());
+        [self_dependency, missing, duplicate, cycle]
     }
 
     #[test]
