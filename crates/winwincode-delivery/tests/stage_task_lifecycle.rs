@@ -9,7 +9,7 @@ use winwincode_delivery::{
     application::stage::{
         ActiveLeaseIdentity, AdvanceStageInput, CancelAcknowledgement, NewStageIdentities,
         ReviewAttentionSeed, StageAdvanceEffect, TerminalOutcomeStatus, TerminalWorkerOutcome,
-        acknowledge_cancel, advance, apply_cancelled_outcome, request_cancel, resume_active,
+        acknowledge_cancel, advance, apply_terminal_outcome, request_cancel, resume_active,
         validate_stage_executor, verify_terminal_outcome,
     },
     application::task::{
@@ -149,15 +149,7 @@ fn verified_outcome(
         .worker_session_id
         .clone()
         .expect("completed worker binding");
-    let lease = ActiveLeaseIdentity {
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId(format!("lease-{}", run.id.0)),
-        fencing_token: FencingToken("1".into()),
-        worker_id: WorkerId("worker-one".into()),
-        worker_instance_id: WorkerInstanceId("worker-instance-one".into()),
-        worker_session_id: worker_session_id.clone(),
-    };
+    let lease = active_lease(delivery);
     verify_terminal_outcome(
         delivery,
         &lease,
@@ -174,6 +166,38 @@ fn verified_outcome(
         },
     )
     .expect("verified successful outcome")
+}
+
+fn active_lease(delivery: &Delivery) -> ActiveLeaseIdentity {
+    let run = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| {
+            matches!(
+                run.status,
+                winwincode_delivery::domain::StageRunStatus::Running
+            )
+        })
+        .expect("active run");
+    let binding = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.stage_run_id == run.id)
+        .expect("active binding");
+    ActiveLeaseIdentity {
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId(format!("lease-{}", run.id.0)),
+        fencing_token: FencingToken("1".into()),
+        worker_id: WorkerId("worker-one".into()),
+        worker_instance_id: WorkerInstanceId("worker-instance-one".into()),
+        worker_session_id: binding
+            .worker_session_id
+            .clone()
+            .expect("completed worker binding"),
+    }
 }
 
 fn successful_outcome(
@@ -479,10 +503,16 @@ fn cancelled_outcome_settles_the_same_stage_run() {
     );
     let original_run = planning.snapshot().stage_runs[0].clone();
     let outcome = verified_outcome(&planning, TerminalOutcomeStatus::Cancelled);
+    let lease = active_lease(&planning);
 
-    let cancelled =
-        apply_cancelled_outcome(&planning, planning.revision(), &outcome, 1_800_000_000_200)
-            .expect("terminal cancellation settles the run");
+    let cancelled = apply_terminal_outcome(
+        &planning,
+        planning.revision(),
+        &lease,
+        &outcome,
+        1_800_000_000_200,
+    )
+    .expect("terminal cancellation settles the run");
 
     assert_eq!(cancelled.snapshot().stage_runs.len(), 1);
     assert_eq!(cancelled.snapshot().stage_runs[0].id, original_run.id);
@@ -495,6 +525,83 @@ fn cancelled_outcome_settles_the_same_stage_run() {
         Some(1_800_000_000_200)
     );
     assert_eq!(cancelled.revision(), planning.revision() + 1);
+}
+
+#[test]
+fn unsuccessful_terminal_outcome_settles_without_advancing_delivery() {
+    let cases = [
+        (
+            "failed",
+            TerminalOutcomeStatus::Failed,
+            winwincode_delivery::domain::StageRunStatus::Failed,
+        ),
+        (
+            "infrastructure-error",
+            TerminalOutcomeStatus::InfrastructureError,
+            winwincode_delivery::domain::StageRunStatus::Failed,
+        ),
+        (
+            "cancelled",
+            TerminalOutcomeStatus::Cancelled,
+            winwincode_delivery::domain::StageRunStatus::Cancelled,
+        ),
+    ];
+
+    for (suffix, outcome_status, expected_run_status) in cases {
+        let ready = delivery_with_status(DeliveryStatus::Ready);
+        let planning = completed_active_binding(
+            advance(&ready, advance_input(1, suffix))
+                .expect("planning starts")
+                .delivery,
+            suffix,
+        );
+        let outcome = verified_outcome(&planning, outcome_status);
+        let lease = active_lease(&planning);
+        let settled = apply_terminal_outcome(
+            &planning,
+            planning.revision(),
+            &lease,
+            &outcome,
+            1_800_000_000_200,
+        )
+        .expect("current terminal outcome settles the run");
+
+        assert_eq!(settled.snapshot().stage_runs[0].status, expected_run_status);
+        assert_eq!(
+            settled.snapshot().stage_runs[0].finished_at_millis,
+            Some(1_800_000_000_200)
+        );
+        assert_eq!(settled.snapshot().status, DeliveryStatus::Planning);
+        assert_eq!(settled.revision(), planning.revision() + 1);
+    }
+}
+
+#[test]
+fn ordinary_success_must_use_the_atomic_stage_handoff() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = completed_active_binding(
+        advance(&ready, advance_input(1, "ordinary-success"))
+            .expect("planning starts")
+            .delivery,
+        "ordinary-success",
+    );
+    let outcome = successful_outcome(&planning);
+    let lease = active_lease(&planning);
+
+    let error = apply_terminal_outcome(
+        &planning,
+        planning.revision(),
+        &lease,
+        &outcome,
+        1_800_000_000_200,
+    )
+    .expect_err("ordinary success must settle through its atomic next-stage handoff");
+
+    assert_eq!(error.code(), CoordinationErrorCode::WrongState);
+    assert_eq!(
+        planning.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Running
+    );
 }
 
 #[test]
@@ -1089,13 +1196,32 @@ fn verification_progress_stops_after_required_roles_without_optional_adversary()
     );
     let verifier = completed_active_binding(verifier, "verifier-sequence");
 
-    let mut beyond = advance_input(verifier.revision(), "verification-overrun");
-    beyond.now_millis = 1_800_000_000_600;
-    beyond.previous_outcome = Some(successful_outcome(&verifier));
+    let final_outcome = successful_outcome(&verifier);
+    let final_lease = active_lease(&verifier);
+    let settled = apply_terminal_outcome(
+        &verifier,
+        verifier.revision(),
+        &final_lease,
+        &final_outcome,
+        1_800_000_000_600,
+    )
+    .expect("final required verifier settles before DeliveryVerdict");
+    assert_eq!(
+        settled
+            .snapshot()
+            .stage_runs
+            .last()
+            .expect("verifier")
+            .status,
+        winwincode_delivery::domain::StageRunStatus::Succeeded
+    );
+
+    let mut beyond = advance_input(settled.revision(), "verification-overrun");
+    beyond.now_millis = 1_800_000_000_700;
     let error =
-        advance(&verifier, beyond).expect_err("optional adversarial verifier must not be forced");
+        advance(&settled, beyond).expect_err("optional adversarial verifier must not be forced");
     assert_eq!(error.code(), CoordinationErrorCode::WrongState);
-    assert_eq!(verifier.snapshot().stage_runs.len(), 5);
+    assert_eq!(settled.snapshot().stage_runs.len(), 5);
 }
 
 #[test]
@@ -1144,5 +1270,140 @@ fn active_stage_handoff_requires_exact_terminal_lease_and_fencing_fact() {
     assert_eq!(
         planning.snapshot().stage_runs[0].status,
         winwincode_delivery::domain::StageRunStatus::Running
+    );
+}
+
+#[test]
+fn terminal_outcome_rejects_a_lease_that_changed_after_verification() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let planning = completed_active_binding(
+        advance(&ready, advance_input(1, "terminal-released"))
+            .expect("planning starts")
+            .delivery,
+        "terminal-released",
+    );
+    let run = &planning.snapshot().stage_runs[0];
+    let binding = &planning.snapshot().session_bindings[0];
+    let worker_session_id = binding.worker_session_id.clone().expect("worker session");
+    let verified_lease = ActiveLeaseIdentity {
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId("lease-before-reassignment".into()),
+        fencing_token: FencingToken("8".into()),
+        worker_id: WorkerId("worker-before-reassignment".into()),
+        worker_instance_id: WorkerInstanceId("instance-before-reassignment".into()),
+        worker_session_id: worker_session_id.clone(),
+    };
+    let verified = verify_terminal_outcome(
+        &planning,
+        &verified_lease,
+        TerminalWorkerOutcome {
+            stage_run_id: run.id.clone(),
+            execution_job_id: binding.execution_job_id.clone(),
+            attempt: run.attempt,
+            lease_id: verified_lease.lease_id.clone(),
+            fencing_token: verified_lease.fencing_token.clone(),
+            worker_id: verified_lease.worker_id.clone(),
+            worker_instance_id: verified_lease.worker_instance_id.clone(),
+            worker_session_id: worker_session_id.clone(),
+            status: TerminalOutcomeStatus::Succeeded,
+        },
+    )
+    .expect("current outcome verifies");
+    let reassigned_lease = ActiveLeaseIdentity {
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId("lease-after-reassignment".into()),
+        fencing_token: FencingToken("9".into()),
+        worker_id: WorkerId("worker-after-reassignment".into()),
+        worker_instance_id: WorkerInstanceId("instance-after-reassignment".into()),
+        worker_session_id,
+    };
+
+    let error = apply_terminal_outcome(
+        &planning,
+        planning.revision(),
+        &reassigned_lease,
+        &verified,
+        1_800_000_000_200,
+    )
+    .expect_err("a verified outcome cannot survive lease reassignment");
+
+    assert_eq!(error.code(), CoordinationErrorCode::BindingConflict);
+    assert_eq!(
+        planning.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Running
+    );
+}
+
+#[test]
+fn worker_can_cancel_and_finish_before_reporting_a_codex_thread() {
+    let ready = delivery_with_status(DeliveryStatus::Ready);
+    let started = advance(&ready, advance_input(1, "terminal-before-thread"))
+        .expect("planning starts")
+        .delivery;
+    let run = &started.snapshot().stage_runs[0];
+    let binding = &started.snapshot().session_bindings[0];
+    let identity = SessionBindingIdentity {
+        delivery_id: started.id().clone(),
+        delivery_task_id: None,
+        stage_run_id: run.id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        execution_job_id: binding.execution_job_id.clone(),
+    };
+    let worker_session_id = WorkerSessionId("worker-session-before-thread".into());
+    let worker_bound = accept_worker_session(
+        &started,
+        started.revision(),
+        &identity,
+        worker_session_id.clone(),
+        1_800_000_000_120,
+    )
+    .expect("WorkerSession is accepted");
+    assert!(
+        worker_bound.snapshot().session_bindings[0]
+            .codex_thread_id
+            .is_none()
+    );
+
+    request_cancel(&worker_bound, worker_bound.revision())
+        .expect("cancel does not depend on a CodexThread");
+    let lease = ActiveLeaseIdentity {
+        execution_job_id: identity.execution_job_id.clone(),
+        attempt: run.attempt,
+        lease_id: LeaseId("lease-before-thread".into()),
+        fencing_token: FencingToken("3".into()),
+        worker_id: WorkerId("worker-before-thread".into()),
+        worker_instance_id: WorkerInstanceId("instance-before-thread".into()),
+        worker_session_id: worker_session_id.clone(),
+    };
+    let verified = verify_terminal_outcome(
+        &worker_bound,
+        &lease,
+        TerminalWorkerOutcome {
+            stage_run_id: identity.stage_run_id,
+            execution_job_id: identity.execution_job_id,
+            attempt: run.attempt,
+            lease_id: lease.lease_id.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            worker_session_id,
+            status: TerminalOutcomeStatus::Cancelled,
+        },
+    )
+    .expect("terminal outcome does not depend on a CodexThread");
+    let cancelled = apply_terminal_outcome(
+        &worker_bound,
+        worker_bound.revision(),
+        &lease,
+        &verified,
+        1_800_000_000_200,
+    )
+    .expect("current cancellation settles the run");
+
+    assert_eq!(
+        cancelled.snapshot().stage_runs[0].status,
+        winwincode_delivery::domain::StageRunStatus::Cancelled
     );
 }

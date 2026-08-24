@@ -80,9 +80,7 @@ pub struct TerminalWorkerOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedTerminalOutcome {
     stage_run_id: StageRunId,
-    execution_job_id: ExecutionJobId,
-    worker_session_id: WorkerSessionId,
-    attempt: u64,
+    lease_identity: ActiveLeaseIdentity,
     status: TerminalOutcomeStatus,
 }
 
@@ -92,15 +90,15 @@ impl VerifiedTerminalOutcome {
     }
 
     pub fn execution_job_id(&self) -> &ExecutionJobId {
-        &self.execution_job_id
+        &self.lease_identity.execution_job_id
     }
 
     pub fn worker_session_id(&self) -> &WorkerSessionId {
-        &self.worker_session_id
+        &self.lease_identity.worker_session_id
     }
 
     pub const fn attempt(&self) -> u64 {
-        self.attempt
+        self.lease_identity.attempt
     }
 
     pub const fn status(&self) -> TerminalOutcomeStatus {
@@ -156,9 +154,7 @@ pub fn verify_terminal_outcome(
     }
     Ok(VerifiedTerminalOutcome {
         stage_run_id: outcome.stage_run_id,
-        execution_job_id: outcome.execution_job_id,
-        worker_session_id: outcome.worker_session_id,
-        attempt: outcome.attempt,
+        lease_identity: lease.clone(),
         status: outcome.status,
     })
 }
@@ -383,9 +379,9 @@ fn validate_previous_outcome(
         )
     })?;
     let exact = outcome.stage_run_id == previous.id
-        && outcome.execution_job_id == binding.execution_job_id
-        && binding.worker_session_id.as_ref() == Some(&outcome.worker_session_id)
-        && outcome.attempt == previous.attempt
+        && outcome.lease_identity.execution_job_id == binding.execution_job_id
+        && binding.worker_session_id.as_ref() == Some(&outcome.lease_identity.worker_session_id)
+        && outcome.lease_identity.attempt == previous.attempt
         && outcome.status == TerminalOutcomeStatus::Succeeded;
     if exact {
         Ok(())
@@ -730,32 +726,36 @@ pub fn acknowledge_cancel(
     Ok(delivery.clone())
 }
 
-/// Applies the verified terminal cancellation to the same `StageRun`.
+/// Applies one verified terminal Worker outcome to its still-current lease.
 ///
-/// This transition does not create a replacement run. A task returns to the
-/// retry state defined by the cancelled stage.
+/// Verification and application are separate durable steps. The scheduler
+/// identity is therefore checked again here so a result verified before a
+/// re-lease cannot settle the newly leased attempt. A Worker process result
+/// never advances Delivery by itself; failed, infrastructure-error, and
+/// cancelled results leave the Delivery in its current retry phase.
 ///
 /// # Errors
 ///
-/// Fails closed on stale revision, non-cancelled outcome, changed active run,
-/// invalid time, or a task state that no longer matches the stage.
-pub fn apply_cancelled_outcome(
+/// Fails closed on stale revision, changed lease/fencing/Worker identity,
+/// changed active binding, invalid finish time, or an incompatible task state.
+pub fn apply_terminal_outcome(
     delivery: &Delivery,
     expected_revision: u64,
+    active_lease: &ActiveLeaseIdentity,
     outcome: &VerifiedTerminalOutcome,
     finished_at_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     if delivery.revision() != expected_revision {
         return Err(CoordinationError::new(
             CoordinationErrorCode::RevisionConflict,
-            "Delivery revision changed before cancellation outcome",
+            "Delivery revision changed before terminal outcome",
         ));
     }
     require_mutation_time(delivery, finished_at_millis)?;
-    if outcome.status != TerminalOutcomeStatus::Cancelled {
+    if &outcome.lease_identity != active_lease {
         return Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "only a verified cancelled outcome can settle cancellation",
+            CoordinationErrorCode::BindingConflict,
+            "terminal outcome was verified for another active lease",
         ));
     }
     let run = delivery
@@ -766,74 +766,97 @@ pub fn apply_cancelled_outcome(
         .ok_or_else(|| {
             CoordinationError::new(
                 CoordinationErrorCode::WrongState,
-                "cancelled outcome does not match the active StageRun",
+                "terminal outcome does not match the active StageRun",
             )
         })?;
-    let binding = exact_binding(delivery, run, true)?;
-    if run.attempt != outcome.attempt
-        || binding.execution_job_id != outcome.execution_job_id
-        || binding.worker_session_id.as_ref() != Some(&outcome.worker_session_id)
+    if outcome.status == TerminalOutcomeStatus::Succeeded
+        && (run.stage != DeliveryStage::Verifying
+            || !matches!(run.role.as_str(), "verifier" | "adversarial-verifier"))
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "ordinary successful outcomes settle only in the atomic next-stage handoff",
+        ));
+    }
+    let binding = exact_binding(delivery, run, false)?;
+    if run.attempt != outcome.lease_identity.attempt
+        || binding.execution_job_id != outcome.lease_identity.execution_job_id
+        || binding.worker_session_id.as_ref() != Some(&outcome.lease_identity.worker_session_id)
         || finished_at_millis < run.started_at_millis
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
-            "cancelled outcome no longer matches the active exact binding",
+            "terminal outcome no longer matches the active StageRun, job, and WorkerSession",
         ));
     }
+
     let run_id = run.id.clone();
     let run_stage = run.stage;
     let task_id = run.delivery_task_id.clone();
     let mut snapshot = delivery.clone().into_snapshot();
-    let Some(stored_run) = snapshot
+    let stored_run = snapshot
         .stage_runs
         .iter_mut()
         .find(|stored| stored.id == run_id)
-    else {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            "the active StageRun disappeared while applying cancellation",
-        ));
-    };
-    stored_run.status = StageRunStatus::Cancelled;
-    stored_run.finished_at_millis = Some(finished_at_millis);
-    if let Some(task_id) = task_id {
-        let task = snapshot
-            .tasks
-            .iter_mut()
-            .find(|task| task.id == task_id)
-            .ok_or_else(|| {
-                CoordinationError::new(
-                    CoordinationErrorCode::Conflict,
-                    "cancelled StageRun task disappeared",
-                )
-            })?;
-        let expected = match run_stage {
-            DeliveryStage::Executing | DeliveryStage::Reworking => DeliveryTaskStatus::Active,
-            DeliveryStage::Verifying => DeliveryTaskStatus::Verifying,
-            _ => {
-                return Err(CoordinationError::new(
-                    CoordinationErrorCode::Conflict,
-                    "a Delivery-level stage unexpectedly targeted a task",
-                ));
-            }
-        };
-        if task.status != expected {
-            return Err(CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "DeliveryTask changed before cancellation outcome",
-            ));
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "the active StageRun disappeared while applying terminal outcome",
+            )
+        })?;
+    stored_run.status = match outcome.status {
+        TerminalOutcomeStatus::Succeeded => StageRunStatus::Succeeded,
+        TerminalOutcomeStatus::Failed | TerminalOutcomeStatus::InfrastructureError => {
+            StageRunStatus::Failed
         }
-        task.status = match run_stage {
-            DeliveryStage::Executing => DeliveryTaskStatus::Pending,
-            DeliveryStage::Verifying => DeliveryTaskStatus::Verifying,
-            DeliveryStage::Reworking => DeliveryTaskStatus::Failed,
-            _ => expected,
-        };
+        TerminalOutcomeStatus::Cancelled => StageRunStatus::Cancelled,
+    };
+    stored_run.finished_at_millis = Some(finished_at_millis);
+    if outcome.status != TerminalOutcomeStatus::Succeeded
+        && let Some(task_id) = task_id
+    {
+        restore_task_after_unsuccessful_outcome(&mut snapshot, &task_id, run_stage)?;
     }
     snapshot.revision += 1;
     snapshot.updated_at_millis = finished_at_millis;
     Delivery::try_from_snapshot(snapshot)
         .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string()))
+}
+
+fn restore_task_after_unsuccessful_outcome(
+    snapshot: &mut DeliverySnapshot,
+    task_id: &DeliveryTaskId,
+    run_stage: DeliveryStage,
+) -> Result<(), CoordinationError> {
+    let task = snapshot
+        .tasks
+        .iter_mut()
+        .find(|task| &task.id == task_id)
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "terminal StageRun task disappeared",
+            )
+        })?;
+    let (expected, next) = match run_stage {
+        DeliveryStage::Executing => (DeliveryTaskStatus::Active, DeliveryTaskStatus::Pending),
+        DeliveryStage::Verifying => (DeliveryTaskStatus::Verifying, DeliveryTaskStatus::Verifying),
+        DeliveryStage::Reworking => (DeliveryTaskStatus::Active, DeliveryTaskStatus::Failed),
+        _ => {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "a Delivery-level StageRun unexpectedly targeted a task",
+            ));
+        }
+    };
+    if task.status != expected {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "DeliveryTask changed before terminal outcome",
+        ));
+    }
+    task.status = next;
+    Ok(())
 }
 
 fn legal_transition(
@@ -985,7 +1008,7 @@ fn role_for_stage(
 fn exact_binding<'delivery>(
     delivery: &'delivery Delivery,
     run: &StageRun,
-    require_complete: bool,
+    require_worker_session: bool,
 ) -> Result<&'delivery SessionBinding, CoordinationError> {
     validate_stage_executor(run.stage, run.actor_type, &run.role)?;
     if run.actor_type == StageRunActorType::Human {
@@ -1008,8 +1031,7 @@ fn exact_binding<'delivery>(
     if bindings.next().is_some()
         || binding.delivery_id != run.delivery_id
         || binding.delivery_task_id != run.delivery_task_id
-        || (require_complete
-            && (binding.worker_session_id.is_none() || binding.codex_thread_id.is_none()))
+        || (require_worker_session && binding.worker_session_id.is_none())
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
