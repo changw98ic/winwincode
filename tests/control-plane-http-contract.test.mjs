@@ -172,6 +172,24 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       '#/$defs/PublicationPage',
     ],
   )
+  assert.deepEqual(
+    [
+      'ProductSessionPage',
+      'DeliveryPage',
+      'CredentialReferencePage',
+      'ApprovalPage',
+      'WorkerPage',
+      'PublicationPage',
+    ].map(name => schema.$defs[name].properties.kind.const),
+    [
+      'product_session_page',
+      'delivery_page',
+      'credential_reference_page',
+      'approval_page',
+      'worker_page',
+      'publication_page',
+    ],
+  )
 
   const pagination = schema['x-winwincode-semantics'].pagination
   assert.equal(pagination.order, 'snapshot_then_updated_at_then_id')
@@ -283,6 +301,14 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   })
   assert.equal(examples.invalidCursor.error.code, 'INVALID_REQUEST')
   assert.equal(examples.invalidCursor.error.details.field, 'page.cursor')
+  assert.equal(examples.responses.queryPage.result.kind, 'delivery_page')
+  assert.deepEqual(examples.responses.commandCompleted.result, {
+    id: 'wrk_00000000000000000000000000',
+    revision: 19,
+    state: 'draining',
+    capacity: 4,
+    lastHeartbeatAt: '2026-08-24T10:00:00.000Z',
+  })
 
   const serialized = JSON.stringify(examples.responses)
   for (const forbidden of ['secretMaterial', 'accessToken', 'apiKey']) {
