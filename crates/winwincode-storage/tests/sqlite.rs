@@ -40,6 +40,7 @@ fn sqlite_adapter_uses_no_dynamic_savepoint_or_sql_identifier_path() {
     for forbidden in [
         ".savepoint(",
         "savepoint_with_name",
+        "new_unchecked",
         "unchecked_transaction",
         "execute(&format!",
         "execute_batch(&format!",

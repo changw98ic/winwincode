@@ -7,7 +7,10 @@
 //! domain logic.
 
 use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use winwincode_storage::SqliteStorage;
 pub use winwincode_storage::{
@@ -19,19 +22,34 @@ pub use winwincode_storage::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
     data_directory: PathBuf,
+    temporary_parent: PathBuf,
 }
 
 impl ControlPlaneConfig {
     #[must_use]
     pub fn local(data_directory: impl AsRef<Path>) -> Self {
+        let data_directory = data_directory.as_ref().to_path_buf();
         Self {
-            data_directory: data_directory.as_ref().to_path_buf(),
+            temporary_parent: data_directory.join(".control-plane-runtime"),
+            data_directory,
         }
+    }
+
+    /// Overrides the parent under which the instance-owned temporary root is created.
+    #[must_use]
+    pub fn with_temporary_parent(mut self, temporary_parent: impl AsRef<Path>) -> Self {
+        self.temporary_parent = temporary_parent.as_ref().to_path_buf();
+        self
     }
 
     #[must_use]
     pub fn data_directory(&self) -> &Path {
         &self.data_directory
+    }
+
+    #[must_use]
+    pub fn temporary_parent(&self) -> &Path {
+        &self.temporary_parent
     }
 }
 
@@ -199,6 +217,7 @@ impl std::error::Error for ShutdownError {}
 pub struct ControlPlane {
     storage: Option<Box<dyn ProductStateStorage>>,
     publisher: Option<Box<dyn EventPublisher>>,
+    temporary_root: Option<OwnedTemporaryRoot>,
 }
 
 impl ControlPlane {
@@ -213,22 +232,39 @@ impl ControlPlane {
         config: ControlPlaneConfig,
         mut publisher: Box<dyn EventPublisher>,
     ) -> Result<Self, StartError> {
-        let ControlPlaneConfig { data_directory } = config;
+        let ControlPlaneConfig {
+            data_directory,
+            temporary_parent,
+        } = config;
+        let temporary_root = match OwnedTemporaryRoot::create(&temporary_parent) {
+            Ok(temporary_root) => temporary_root,
+            Err(error) => {
+                let cleanup = close_publisher(&mut publisher);
+                return Err(StartError::new(format!(
+                    "failed to create the owned temporary root: {error}{cleanup}"
+                )));
+            }
+        };
         let storage = match SqliteStorage::open(data_directory) {
             Ok(storage) => storage,
             Err(error) => {
-                let cleanup = publisher
-                    .close()
-                    .err()
-                    .map_or_else(String::new, |close_error| {
-                        format!("; event publisher close also failed: {close_error}")
-                    });
+                let mut cleanup_failures = Vec::new();
+                if let Err(close_error) = publisher.close() {
+                    cleanup_failures
+                        .push(format!("event publisher close also failed: {close_error}"));
+                }
+                if let Err(release_error) = temporary_root.release() {
+                    cleanup_failures.push(format!(
+                        "temporary root release also failed: {release_error}"
+                    ));
+                }
+                let cleanup = cleanup_suffix(&cleanup_failures);
                 return Err(StartError::new(format!(
                     "failed to open Control Plane storage: {error}{cleanup}"
                 )));
             }
         };
-        Self::start(Box::new(storage), publisher)
+        Self::start_with_resources(Box::new(storage), publisher, temporary_root)
     }
 
     /// Composes the application with a storage adapter at the `PostgreSQL`-ready seam.
@@ -239,11 +275,37 @@ impl ControlPlane {
     /// replay fails.
     pub fn start(
         storage: Box<dyn ProductStateStorage>,
+        mut publisher: Box<dyn EventPublisher>,
+    ) -> Result<Self, StartError> {
+        let temporary_parent = std::env::temp_dir().join("winwincode-control-plane");
+        let temporary_root = match OwnedTemporaryRoot::create(temporary_parent) {
+            Ok(temporary_root) => temporary_root,
+            Err(error) => {
+                let mut failures = Vec::new();
+                if let Err(close_error) = publisher.close() {
+                    failures.push(format!("event publisher close also failed: {close_error}"));
+                }
+                if let Err(close_error) = storage.close() {
+                    failures.push(format!("storage close also failed: {close_error}"));
+                }
+                return Err(StartError::new(format!(
+                    "failed to create the owned temporary root: {error}{}",
+                    cleanup_suffix(&failures)
+                )));
+            }
+        };
+        Self::start_with_resources(storage, publisher, temporary_root)
+    }
+
+    fn start_with_resources(
+        storage: Box<dyn ProductStateStorage>,
         publisher: Box<dyn EventPublisher>,
+        temporary_root: OwnedTemporaryRoot,
     ) -> Result<Self, StartError> {
         let mut control_plane = Self {
             storage: Some(storage),
             publisher: Some(publisher),
+            temporary_root: Some(temporary_root),
         };
         if let Err(error) = control_plane.flush_outbox() {
             let cleanup_failures = control_plane.close_resources();
@@ -257,6 +319,22 @@ impl ControlPlane {
             )));
         }
         Ok(control_plane)
+    }
+
+    /// Returns the instance-owned temporary root while the host is running.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal lifecycle invariant is broken and a running
+    /// host has already lost ownership of its temporary root. Shutdown consumes
+    /// the host, so callers cannot observe a normally released root through this
+    /// method.
+    #[must_use]
+    pub fn temporary_root(&self) -> &Path {
+        self.temporary_root
+            .as_ref()
+            .expect("a running Control Plane always owns a temporary root")
+            .path()
     }
 
     /// Commits canonical state and its outbox first, then publishes pending events.
@@ -367,6 +445,88 @@ impl ControlPlane {
         {
             failures.push(format!("storage close failed: {error}"));
         }
+        if let Some(temporary_root) = self.temporary_root.take()
+            && let Err(error) = temporary_root.release()
+        {
+            failures.push(format!("temporary root release failed: {error}"));
+        }
         failures
+    }
+}
+
+const OWNERSHIP_MARKER: &str = ".winwincode-control-plane-owner";
+static NEXT_TEMPORARY_ROOT_ID: AtomicU64 = AtomicU64::new(1);
+
+struct OwnedTemporaryRoot {
+    path: PathBuf,
+    marker: String,
+}
+
+impl OwnedTemporaryRoot {
+    fn create(parent: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let parent = parent.as_ref();
+        fs::create_dir_all(parent)?;
+        // Phase 2.1 deliberately does not enumerate or remove roots left by a
+        // previous process. A PID or old-looking marker is not proof that a
+        // lease is stale. Each instance only creates and releases its own exact
+        // marker/path pair until a real renewable lease is introduced.
+        loop {
+            let instance_id = NEXT_TEMPORARY_ROOT_ID.fetch_add(1, Ordering::Relaxed);
+            let marker = format!(
+                "winwincode-control-plane\npid={}\ninstance={instance_id}\n",
+                std::process::id()
+            );
+            let path = parent.join(format!("instance-{}-{instance_id}", std::process::id()));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let marker_path = path.join(OWNERSHIP_MARKER);
+                    let marker_result = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&marker_path)
+                        .and_then(|mut file| {
+                            file.write_all(marker.as_bytes())?;
+                            file.sync_all()
+                        });
+                    if let Err(error) = marker_result {
+                        let _ = fs::remove_dir_all(&path);
+                        return Err(error);
+                    }
+                    return Ok(Self { path, marker });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn release(self) -> Result<(), std::io::Error> {
+        let marker_path = self.path.join(OWNERSHIP_MARKER);
+        let actual_marker = fs::read_to_string(&marker_path)?;
+        if actual_marker != self.marker {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "temporary root ownership marker does not match this instance",
+            ));
+        }
+        fs::remove_dir_all(self.path)
+    }
+}
+
+fn close_publisher(publisher: &mut Box<dyn EventPublisher>) -> String {
+    publisher.close().err().map_or_else(String::new, |error| {
+        format!("; event publisher close also failed: {error}")
+    })
+}
+
+fn cleanup_suffix(failures: &[String]) -> String {
+    if failures.is_empty() {
+        String::new()
+    } else {
+        format!("; cleanup also failed: {}", failures.join("; "))
     }
 }

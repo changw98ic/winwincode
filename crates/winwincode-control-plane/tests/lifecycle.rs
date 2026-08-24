@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use winwincode_control_plane::{
     CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig, EventPublishError,
-    EventPublisher, NewOutboxEvent, OutboxEvent, ProductStateStorage, StateCommit, StorageError,
-    StoredState,
+    EventPublisher, NewOutboxEvent, OutboxEvent, ProductStateStorage, ShutdownError,
+    ShutdownReport, StartError, StateCommit, StorageError, StoredState,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -217,10 +217,18 @@ fn startup_migrates_storage_before_the_control_plane_accepts_commits() {
         .expect("the local Control Plane should start after applying SQLite migrations");
 
     assert!(root.join("control-plane.sqlite3").is_file());
+    let temporary_root = control_plane.temporary_root().to_path_buf();
+    assert!(
+        temporary_root
+            .join(".winwincode-control-plane-owner")
+            .is_file(),
+        "the running instance must mark its owned temporary root"
+    );
 
     control_plane
         .shutdown()
         .expect("the local Control Plane should stop cleanly");
+    assert!(!temporary_root.exists());
     fs::remove_dir_all(root).expect("shutdown should release the temporary database directory");
 }
 
@@ -328,7 +336,7 @@ fn publish_failure_keeps_committed_state_and_pending_outbox_for_restart() {
 }
 
 #[test]
-fn restart_replays_committed_but_unpublished_outbox_events_in_sequence_order() {
+fn restart_replays_committed_but_unpublished_outbox_events() {
     let root = temporary_directory("sequence");
     let mut storage =
         winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage should open");
@@ -376,7 +384,7 @@ fn shutdown_flushes_outbox_then_closes_publisher_and_storage() {
         .expect("the Control Plane should start");
     trace.lock().expect("trace lock").clear();
 
-    let report = control_plane.shutdown().expect("shutdown should succeed");
+    let report: ShutdownReport = control_plane.shutdown().expect("shutdown should succeed");
 
     assert_eq!(report.published_event_count, 1);
     assert_eq!(
@@ -398,11 +406,45 @@ fn shutdown_releases_the_sqlite_connection_and_temporary_directory() {
     let control_plane =
         ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(publisher))
             .expect("the local Control Plane should start");
+    let temporary_root = control_plane.temporary_root().to_path_buf();
 
     control_plane.shutdown().expect("shutdown should succeed");
 
+    assert!(!temporary_root.exists());
     fs::remove_dir_all(&root).expect("all SQLite handles should be released after shutdown");
     assert!(!root.exists());
+}
+
+#[test]
+fn startup_does_not_delete_a_preexisting_temporary_root_without_a_proven_stale_lease() {
+    let root = temporary_directory("preexisting-temporary-root");
+    let temporary_parent = root.join("runtime");
+    let preexisting_root = temporary_parent.join("instance-stale-candidate");
+    fs::create_dir_all(&preexisting_root).expect("preexisting root should exist");
+    fs::write(
+        preexisting_root.join(".winwincode-control-plane-owner"),
+        b"winwincode-control-plane\npid=1\ninstance=old\n",
+    )
+    .expect("preexisting marker should exist");
+    let (publisher, _) = RecordingPublisher::successful();
+
+    let control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(root.join("data")).with_temporary_parent(&temporary_parent),
+        Box::new(publisher),
+    )
+    .expect("startup should create a separate owned root");
+    let current_root = control_plane.temporary_root().to_path_buf();
+
+    assert_ne!(current_root, preexisting_root);
+    assert!(preexisting_root.exists());
+    control_plane.shutdown().expect("shutdown should succeed");
+    assert!(!current_root.exists());
+    assert!(
+        preexisting_root.exists(),
+        "a PID or old-looking marker is not proof of a stale lease"
+    );
+
+    fs::remove_dir_all(root).expect("test should remove the deliberately retained root");
 }
 
 #[test]
@@ -416,7 +458,7 @@ fn failed_startup_closes_storage_and_releases_temporary_directory() {
     let (mut publisher, publisher_closed) = RecordingPublisher::failing();
     publisher.trace = Arc::clone(&trace);
 
-    let error = match ControlPlane::start(Box::new(storage), Box::new(publisher)) {
+    let error: StartError = match ControlPlane::start(Box::new(storage), Box::new(publisher)) {
         Ok(control_plane) => {
             control_plane.shutdown().ok();
             panic!("startup should fail when durable outbox replay fails");
@@ -446,9 +488,10 @@ fn local_storage_open_failure_closes_the_event_publisher() {
     let blocked_data_directory = root.join("not-a-directory");
     fs::write(&blocked_data_directory, b"file").expect("blocking file should exist");
     let (publisher, publisher_closed) = RecordingPublisher::failing();
+    let temporary_parent = root.join("runtime");
 
     let result = ControlPlane::start_local(
-        ControlPlaneConfig::local(&blocked_data_directory),
+        ControlPlaneConfig::local(&blocked_data_directory).with_temporary_parent(&temporary_parent),
         Box::new(publisher),
     );
 
@@ -456,6 +499,13 @@ fn local_storage_open_failure_closes_the_event_publisher() {
     assert!(
         publisher_closed.load(Ordering::Acquire),
         "startup must explicitly close the event publisher when storage cannot open"
+    );
+    assert_eq!(
+        fs::read_dir(&temporary_parent)
+            .expect("temporary parent should remain readable")
+            .count(),
+        0,
+        "failed startup must release the instance-owned temporary root"
     );
     fs::remove_dir_all(root).expect("failed startup should leave no open file handles");
 }
@@ -475,9 +525,10 @@ fn shutdown_publish_failure_still_closes_storage_and_releases_temporary_director
     publisher.trace = Arc::clone(&trace);
     let control_plane = ControlPlane::start(Box::new(storage), Box::new(publisher))
         .expect("startup has no pending event and should succeed");
+    let temporary_root = control_plane.temporary_root().to_path_buf();
     trace.lock().expect("trace lock").clear();
 
-    let error = control_plane
+    let error: ShutdownError = control_plane
         .shutdown()
         .expect_err("shutdown should report the publish failure");
 
@@ -485,6 +536,7 @@ fn shutdown_publish_failure_still_closes_storage_and_releases_temporary_director
     assert!(publisher_closed.load(Ordering::Acquire));
     assert!(storage_closed.load(Ordering::Acquire));
     assert!(!root.exists());
+    assert!(!temporary_root.exists());
     assert_eq!(
         *trace.lock().expect("trace lock"),
         [

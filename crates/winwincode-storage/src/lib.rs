@@ -13,9 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
 const SCHEMA_VERSION: i64 = 1;
@@ -267,7 +265,8 @@ impl SqliteStorage {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
-        let connection = Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
+        let mut connection =
+            Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(sql_error)?;
@@ -280,7 +279,7 @@ impl SqliteStorage {
         connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
-        apply_migrations(&connection)?;
+        apply_migrations(&mut connection)?;
 
         Ok(Self {
             connection: Some(connection),
@@ -483,7 +482,7 @@ impl ProductStateStorage for SqliteStorage {
     }
 }
 
-fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
+fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
@@ -493,7 +492,8 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
         )));
     }
 
-    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
     transaction
         .execute_batch(
