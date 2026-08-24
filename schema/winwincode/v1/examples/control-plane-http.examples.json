@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "positive": {
+    "sessionCreate": {
+      "schemaVersion": "winwincode/v1",
+      "command": "session.create",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "requestId": "req_01J00000000000000000000002",
+      "expectedRevision": 0,
+      "payload": {
+        "productSessionId": "psn_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000",
+        "title": "Fix checkout race",
+        "modelRoute": {
+          "providerId": "deepseek",
+          "modelId": "deepseek-v4",
+          "credentialReferenceId": "crd_00000000000000000000000000"
+        }
+      }
+    },
+    "deliveryList": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000003",
+      "query": "delivery.list",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "parameters": {
+        "states": [
+          "executing"
+        ]
+      },
+      "page": {
+        "cursor": null,
+        "limit": 50
+      }
+    }
+  },
+  "idempotency": {
+    "original": {
+      "schemaVersion": "winwincode/v1",
+      "command": "worker.drain",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "requestId": "req_01J00000000000000000000001",
+      "expectedRevision": 18,
+      "payload": {
+        "workerId": "wrk_00000000000000000000000000",
+        "reason": "planned maintenance"
+      }
+    },
+    "retry": {
+      "schemaVersion": "winwincode/v1",
+      "command": "worker.drain",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "requestId": "req_01J00000000000000000000001",
+      "expectedRevision": 18,
+      "payload": {
+        "workerId": "wrk_00000000000000000000000000",
+        "reason": "planned maintenance"
+      }
+    },
+    "conflict": {
+      "schemaVersion": "winwincode/v1",
+      "command": "worker.drain",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "requestId": "req_01J00000000000000000000001",
+      "expectedRevision": 18,
+      "payload": {
+        "workerId": "wrk_00000000000000000000000000",
+        "reason": "changed body"
+      }
+    },
+    "expectedConflict": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000001",
+      "error": {
+        "code": "IDEMPOTENCY_CONFLICT",
+        "message": "requestId was reused for changed input",
+        "retryable": false,
+        "details": {
+          "field": "requestId"
+        }
+      }
+    }
+  },
+  "revisionConflict": {
+    "schemaVersion": "winwincode/v1",
+    "requestId": "req_01J00000000000000000000004",
+    "error": {
+      "code": "REVISION_CONFLICT",
+      "message": "revision changed",
+      "retryable": false,
+      "details": {
+        "expectedRevision": 18,
+        "currentRevision": 19
+      }
+    }
+  },
+  "invalidCursor": {
+    "schemaVersion": "winwincode/v1",
+    "requestId": "req_01J00000000000000000000005",
+    "error": {
+      "code": "INVALID_REQUEST",
+      "message": "cursor does not belong to this query",
+      "retryable": false,
+      "details": {
+        "field": "page.cursor"
+      }
+    }
+  },
+  "responses": {
+    "commandCompleted": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000001",
+      "command": "worker.drain",
+      "outcome": "completed",
+      "previousRevision": 18,
+      "currentRevision": 19,
+      "result": {
+        "workerId": "wrk_00000000000000000000000000",
+        "state": "draining"
+      }
+    },
+    "queryPage": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000003",
+      "query": "delivery.list",
+      "result": {
+        "items": []
+      },
+      "page": {
+        "nextCursor": null,
+        "hasMore": false
+      }
+    },
+    "credentialReference": {
+      "id": "crd_00000000000000000000000000",
+      "providerId": "deepseek",
+      "displayName": "Team model credential",
+      "secretState": "available",
+      "revision": 3,
+      "updatedAt": "2026-08-24T10:00:00.000Z"
+    }
+  }
+}
