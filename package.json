@@ -63,6 +63,8 @@
     "@types/js-yaml": "catalog:",
     "@types/node": "24.13.3",
     "@types/react": "catalog:",
+    "ajv": "catalog:",
+    "ajv-formats": "catalog:",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "tsdown": "0.22.2",
