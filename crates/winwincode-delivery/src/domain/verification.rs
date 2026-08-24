@@ -1374,6 +1374,8 @@ fn relationship_mismatch(path: &str, message: &str) -> DeliveryValidationError {
 /// are unavailable to production code and keep every production field private.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
+    #![allow(dead_code, clippy::wildcard_imports)]
+
     use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

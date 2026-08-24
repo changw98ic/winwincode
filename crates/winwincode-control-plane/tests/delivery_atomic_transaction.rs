@@ -398,12 +398,12 @@ fn raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails() {
         }))
         .expect("seed raw borrowed journal");
     store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: pending.request_id().clone(),
             request_digest: "e".repeat(64),
             expected_revision: 1,
             transition: pending.stage_transition().clone(),
-        }))
+        })))
         .expect("borrowed journal publishes before the outer commit");
     let outer_commit: Result<(), &'static str> = Err("injected outer commit failure");
     assert!(outer_commit.is_err());

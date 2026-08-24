@@ -932,6 +932,8 @@ fn stale_candidate(message: &str) -> DeliveryValidationError {
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
+    #![allow(dead_code, clippy::wildcard_imports)]
+
     use super::*;
     use crate::application::stage::{
         ActiveLeaseIdentity, TerminalArtifactReference, TerminalOutcomeMetadata,

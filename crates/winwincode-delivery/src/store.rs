@@ -239,9 +239,9 @@ pub struct ResolveDeliveryAttention {
 pub enum DeliveryCommand {
     Create(CreateDelivery),
     Append(AppendDelivery),
-    StartStage(StartDeliveryStage),
-    ResolveAttention(ResolveDeliveryAttention),
-    SubmitVerdict(SubmitDeliveryVerdict),
+    StartStage(Box<StartDeliveryStage>),
+    ResolveAttention(Box<ResolveDeliveryAttention>),
+    SubmitVerdict(Box<SubmitDeliveryVerdict>),
 }
 
 #[derive(Debug, Clone)]
@@ -865,9 +865,9 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
         match command {
             DeliveryCommand::Create(create) => self.create(create),
             DeliveryCommand::Append(append) => self.append(append),
-            DeliveryCommand::StartStage(start) => self.start_stage(start),
-            DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(resolve),
-            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(submit),
+            DeliveryCommand::StartStage(start) => self.start_stage(*start),
+            DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
+            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
         }
     }
 }
@@ -1332,7 +1332,7 @@ mod tests {
 
     fn create_store_with_failed_verdict() -> (DeliveryStore<'static>, Delivery) {
         let fixture = verdict_fixture(
-            DeliveryId("delivery-store-verdict".into()),
+            &DeliveryId("delivery-store-verdict".into()),
             VerdictFixtureOutcome::Fail,
         );
         let backend = Arc::new(InMemoryDeliveryJournal::new());
@@ -1356,12 +1356,14 @@ mod tests {
         )
         .expect("computed failing verdict");
         let failed = store
-            .execute(DeliveryCommand::SubmitVerdict(SubmitDeliveryVerdict {
-                request_id: RequestId("submit-failed-verdict".into()),
-                request_digest: REQUEST_B.into(),
-                expected_revision: fixture.delivery.revision(),
-                transition,
-            }))
+            .execute(DeliveryCommand::SubmitVerdict(Box::new(
+                SubmitDeliveryVerdict {
+                    request_id: RequestId("submit-failed-verdict".into()),
+                    request_digest: REQUEST_B.into(),
+                    expected_revision: fixture.delivery.revision(),
+                    transition,
+                },
+            )))
             .expect("submit failing verdict")
             .snapshot;
         (store, failed)
@@ -1429,14 +1431,14 @@ mod tests {
         );
 
         let resolved = store
-            .execute(DeliveryCommand::ResolveAttention(
+            .execute(DeliveryCommand::ResolveAttention(Box::new(
                 ResolveDeliveryAttention {
                     request_id: RequestId("sealed-attention-resolution".into()),
                     request_digest: "e".repeat(64),
                     expected_revision: failed.revision(),
                     transition,
                 },
-            ))
+            )))
             .expect("sealed Attention resolution commits");
         assert_eq!(
             resolved.snapshot.snapshot().status,
@@ -1454,7 +1456,7 @@ mod tests {
         ] {
             let (store, failed) = create_store_with_failed_verdict();
             let passing_fixture = verdict_fixture(
-                DeliveryId("delivery-store-verdict".into()),
+                &DeliveryId("delivery-store-verdict".into()),
                 VerdictFixtureOutcome::Pass,
             );
             let passing = compute_verdict_transition(

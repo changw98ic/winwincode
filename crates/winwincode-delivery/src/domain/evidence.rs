@@ -337,11 +337,15 @@ fn resolution_error(
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
 #[cfg_attr(
-    not(test),
+    all(not(test), not(feature = "test-support")),
     expect(
         dead_code,
         reason = "Phase 3/4 adapter gate keeps production construction closed"
     )
+)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the sealed resolver command is single-use application input"
 )]
 pub(crate) fn resolve_delivery_evidence(
     delivery: &Delivery,
@@ -931,6 +935,8 @@ pub(crate) fn validate(evidence: &EvidenceRef, path: &str) -> Result<(), Deliver
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
+    #![allow(dead_code, clippy::needless_pass_by_value, clippy::wildcard_imports)]
+
     use super::*;
     use crate::domain::verification::test_support::{
         VerificationFixtureState, independent_verification,
