@@ -78,6 +78,24 @@
         "httpStatus": 503,
         "retryable": true
       }
+    },
+    "inputResponse": {
+      "binding": [
+        "actor",
+        "scope",
+        "expectedRevision",
+        "productSessionId",
+        "workerSessionId",
+        "executionJobId",
+        "inputRequestId"
+      ],
+      "mapsAfterValidationTo": "execution-port:input.response",
+      "rejectsArbitraryExecutionMessages": true
+    },
+    "projectionRecovery": {
+      "chatMessages": "session.messages.list",
+      "runtimeProjection": "runtime.projection.get",
+      "webSocketReset": "reload_queries_before_new_subscription"
     }
   },
   "$defs": {
@@ -88,6 +106,9 @@
         },
         {
           "$ref": "#/$defs/ChatSubmitCommand"
+        },
+        {
+          "$ref": "#/$defs/InputRespondCommand"
         },
         {
           "$ref": "#/$defs/SessionCancelCommand"
@@ -148,6 +169,12 @@
           "$ref": "#/$defs/SessionGetQuery"
         },
         {
+          "$ref": "#/$defs/SessionMessagesListQuery"
+        },
+        {
+          "$ref": "#/$defs/RuntimeProjectionGetQuery"
+        },
+        {
           "$ref": "#/$defs/DeliveryListQuery"
         },
         {
@@ -187,6 +214,8 @@
       "enum": [
         "session.list",
         "session.get",
+        "session.messages.list",
+        "runtime.projection.get",
         "delivery.list",
         "delivery.get",
         "settings.get",
@@ -774,6 +803,76 @@
         }
       }
     },
+    "InputRespondPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "workerSessionId",
+        "executionJobId",
+        "inputRequestId",
+        "status",
+        "value"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "executionJobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "inputRequestId": {
+          "$ref": "./domain.schema.json#/$defs/InputRequestId"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "cancelled",
+            "expired",
+            "provided"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/InteractiveInputValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "provided"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "./domain.schema.json#/$defs/InteractiveInputValue"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Control Plane validates the complete binding before emitting one ExecutionPort input.response."
+    },
     "SessionCancelPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -1139,6 +1238,68 @@
         }
       }
     },
+    "SessionMessagesListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "ProductSessionRuntimeProjectionGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "productSessionId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "product-session"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "DeliveryStageRuntimeProjectionGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "productSessionId",
+        "deliveryId",
+        "stageRunId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery-stage"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        }
+      }
+    },
+    "RuntimeProjectionGetParameters": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionRuntimeProjectionGetParameters"
+        },
+        {
+          "$ref": "#/$defs/DeliveryStageRuntimeProjectionGetParameters"
+        }
+      ]
+    },
     "DeliveryListParameters": {
       "type": "object",
       "additionalProperties": false,
@@ -1346,6 +1507,24 @@
             },
             "payload": {
               "$ref": "#/$defs/ChatSubmitPayload"
+            }
+          }
+        }
+      ]
+    },
+    "InputRespondCommand": {
+      "allOf": [
+        {
+          "$ref": "./domain.schema.json#/$defs/CommandEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "const": "input.respond"
+            },
+            "payload": {
+              "$ref": "#/$defs/InputRespondPayload"
             }
           }
         }
@@ -1670,6 +1849,42 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionGetParameters"
+            }
+          }
+        }
+      ]
+    },
+    "SessionMessagesListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "session.messages.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/SessionMessagesListParameters"
+            }
+          }
+        }
+      ]
+    },
+    "RuntimeProjectionGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "runtime.projection.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/RuntimeProjectionGetParameters"
             }
           }
         }
@@ -2076,6 +2291,27 @@
         }
       }
     },
+    "ChatMessagePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "items"
+      ],
+      "properties": {
+        "kind": {
+          "const": "chat_message_page"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/ChatMessageProjection"
+          },
+          "maxItems": 200
+        }
+      },
+      "description": "Secret-safe ProductSession message history page."
+    },
     "DeliveryPage": {
       "type": "object",
       "additionalProperties": false,
@@ -2185,6 +2421,9 @@
           "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
         },
         {
+          "$ref": "./domain.schema.json#/$defs/RuntimeProjectionSnapshot"
+        },
+        {
           "$ref": "#/$defs/SettingsProjection"
         },
         {
@@ -2201,6 +2440,9 @@
         },
         {
           "$ref": "#/$defs/ProductSessionPage"
+        },
+        {
+          "$ref": "#/$defs/ChatMessagePage"
         },
         {
           "$ref": "#/$defs/DeliveryPage"

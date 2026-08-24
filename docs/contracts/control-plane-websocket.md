@@ -25,7 +25,7 @@ Repository 连续层级。`EventStream` 只增加一个资源选择器：
 | --- | --- | --- |
 | `scope` | 无 | 组织、工作区、项目或仓库级活动 |
 | `delivery` | `deliveryId` | Delivery、DeliveryTask、Attention 与交付活动 |
-| `product-session` | `productSessionId` | ProductSession、Approval、Presence 与运行投影 |
+| `product-session` | `productSessionId` | ProductSession、Chat 消息、Approval、Presence 与运行投影 |
 | `lease` | `workerId`、`leaseId` | Worker health 与一次租约绑定的运行状态 |
 
 服务端在接受订阅、续传、重放和实时发送时，都必须从 `scope.organizationId` 开始检查当前
@@ -73,8 +73,14 @@ Scope 和 EventStream 完全相同。服务端只保留每条订阅最后一个�
 `authorizationEpoch`。
 
 如果 cursor 已被保留策略清理、事件流已重建或权限边界已经改变，Control Plane 返回
-`transport.reset-required.v1` 并以 `4409` 关闭连接。客户端随后通过 HTTP Query 获取
-完整的最新 Projection，再建立一条新订阅；不能猜测或跳过缺失序号。
+`transport.reset-required.v1` 并以 `4409` 关闭连接。客户端随后通过
+`session.messages.list` 和 `runtime.projection.get` 获取完整的最新 Projection，再建立一条
+新订阅；不能猜测或跳过缺失序号。
+
+`product-session.message.appended.v1` 只携带已经保存的 `ChatMessageProjection`：消息角色
+只允许用户或助手，正文有大小上限，不包含原始 Provider 请求/响应、工具负载、Credential
+或 Codex 内部对象。Chat 消息与 `runtime-projection.appended.v1` 是两类事实；运行摘要不能
+代替用户可见的会话历史。
 
 ## 权限变化
 

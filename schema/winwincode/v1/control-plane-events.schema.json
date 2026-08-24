@@ -45,6 +45,7 @@
         "delivery-task.changed.v1",
         "presence.changed.v1",
         "product-session.changed.v1",
+        "product-session.message.appended.v1",
         "runtime-projection.appended.v1",
         "worker-health.changed.v1"
       ]
@@ -329,6 +330,27 @@
           "maxLength": 512
         }
       }
+    },
+    "ControlPlaneWebSocketProductSessionMessageAppendedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "productSessionId",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "const": "product-session.message.appended.v1"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "message": {
+          "$ref": "./domain.schema.json#/$defs/ChatMessageProjection"
+        }
+      },
+      "description": "Secret-safe Chat projection only; excludes raw provider, tool, credential, and Codex payloads."
     },
     "ControlPlaneWebSocketRuntimeProjectionAppendedEvent": {
       "type": "object",
@@ -714,6 +736,9 @@
       "oneOf": [
         {
           "$ref": "#/$defs/ControlPlaneWebSocketProductSessionChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketProductSessionMessageAppendedEvent"
         },
         {
           "$ref": "#/$defs/ControlPlaneWebSocketRuntimeProjectionAppendedEvent"

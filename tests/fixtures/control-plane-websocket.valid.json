@@ -290,6 +290,7 @@
               "approval.changed.v1",
               "presence.changed.v1",
               "product-session.changed.v1",
+              "product-session.message.appended.v1",
               "runtime-projection.appended.v1"
             ]
           },
@@ -339,8 +340,8 @@
               "kind": "product-session",
               "productSessionId": "psn_01J00000000000000000000000"
             },
-            "sequence": 8,
-            "eventId": "evt_01J00000000000000000000018"
+            "sequence": 9,
+            "eventId": "evt_01J00000000000000000000019"
           },
           "authorizationEpoch": 7
         },
@@ -474,6 +475,47 @@
           "occurredAt": "2026-08-24T12:00:18.000Z",
           "source": {
             "kind": "control-plane",
+            "component": "product-session-service",
+            "actor": {
+              "kind": "system",
+              "id": "sys_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 7,
+          "event": {
+            "type": "product-session.message.appended.v1",
+            "productSessionId": "psn_01J00000000000000000000000",
+            "message": {
+              "id": "msg_01J00000000000000000000000",
+              "productSessionId": "psn_01J00000000000000000000000",
+              "sequence": 12,
+              "role": "assistant",
+              "state": "completed",
+              "content": "The focused tests passed.",
+              "createdAt": "2026-08-24T12:00:17.500Z",
+              "updatedAt": "2026-08-24T12:00:18.000Z"
+            }
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "eventId": "evt_01J00000000000000000000019",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000000"
+          },
+          "sequence": 9,
+          "occurredAt": "2026-08-24T12:00:19.000Z",
+          "source": {
+            "kind": "control-plane",
             "component": "delivery-service",
             "actor": {
               "kind": "user",
@@ -486,7 +528,7 @@
             "userId": "usr_01J00000000000000000000000",
             "productSessionId": "psn_01J00000000000000000000000",
             "state": "online",
-            "observedAt": "2026-08-24T12:00:18.000Z"
+            "observedAt": "2026-08-24T12:00:19.000Z"
           }
         },
         {
@@ -504,8 +546,8 @@
               "kind": "product-session",
               "productSessionId": "psn_01J00000000000000000000000"
             },
-            "sequence": 8,
-            "eventId": "evt_01J00000000000000000000018"
+            "sequence": 9,
+            "eventId": "evt_01J00000000000000000000019"
           }
         }
       ]

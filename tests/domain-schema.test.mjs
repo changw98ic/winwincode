@@ -3,6 +3,9 @@ import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 
+import Ajv2020 from 'ajv/dist/2020.js'
+import addFormats from 'ajv-formats'
+
 const root = resolve(import.meta.dirname, '..')
 const schemaPath = join(root, 'schema/winwincode/v1/domain.schema.json')
 const samplesPath = join(root, 'schema/winwincode/v1/domain.samples.json')
@@ -10,11 +13,14 @@ const samplesPath = join(root, 'schema/winwincode/v1/domain.samples.json')
 const ID_DEFINITIONS = Object.freeze({
   ApprovalId: 'apr_',
   AttentionItemId: 'att_',
+  ChatMessageId: 'msg_',
   CodexThreadId: 'cdx_',
   CredentialReferenceId: 'crd_',
   DeliveryId: 'dlv_',
   DeliveryTaskId: 'dtk_',
   EvidenceId: 'evd_',
+  ExecutionJobId: 'job_',
+  InputRequestId: 'inp_',
   LeaseId: 'lse_',
   OrganizationId: 'org_',
   ProductSessionId: 'psn_',
@@ -33,6 +39,7 @@ const ID_DEFINITIONS = Object.freeze({
 const COMMAND_NAMES = Object.freeze([
   'session.create',
   'chat.submit',
+  'input.respond',
   'session.cancel',
   'session.close',
   'delivery.create',
@@ -86,6 +93,19 @@ const ERROR_CODES = Object.freeze([
 
 async function loadSchema() {
   return JSON.parse(await readFile(schemaPath, 'utf8'))
+}
+
+function ajvDefinitionValidator(schema, definitionName) {
+  const ajv = new Ajv2020({ allErrors: true, strict: true })
+  addFormats(ajv)
+  return ajv.compile({
+    ...schema,
+    $id: schema.$id.replace(
+      'domain.schema.json',
+      `domain-${definitionName.toLowerCase()}.test.schema.json`,
+    ),
+    $ref: `#/$defs/${definitionName}`,
+  })
 }
 
 function matchesType(value, expectedType) {
@@ -400,6 +420,47 @@ test('DeliveryProjection exposes a minimal page view with complete repository ow
       sessionBindings: [],
     },
   })
+})
+
+test('runtime projection scope is either Chat or one complete Delivery stage', async () => {
+  const schema = await loadSchema()
+  const validateItem = ajvDefinitionValidator(schema, 'RuntimeProjectionItem')
+  const validateSnapshot = ajvDefinitionValidator(schema, 'RuntimeProjectionSnapshot')
+  const item = {
+    productSessionId: 'psn_01J00000000000000000000000',
+    workerSessionId: 'wsn_01J00000000000000000000000',
+    codexThreadId: 'cdx_01J00000000000000000000000',
+    leaseId: 'lse_01J00000000000000000000000',
+    projectionSequence: 1,
+    projectionKind: 'activity',
+    summary: 'Started.',
+    occurredAt: '2026-08-24T09:10:11.123Z',
+  }
+  const snapshot = {
+    kind: 'runtime_projection',
+    revision: 1,
+    productSessionId: item.productSessionId,
+    deliveryId: null,
+    stageRunId: null,
+    lastProjectionSequence: 1,
+    items: [item],
+    rebuiltAt: '2026-08-24T09:10:12.123Z',
+  }
+
+  assert.equal(validateItem(item), true, JSON.stringify(validateItem.errors))
+  assert.equal(validateSnapshot(snapshot), true, JSON.stringify(validateSnapshot.errors))
+  assert.equal(validateItem({
+    ...item,
+    deliveryId: 'dlv_01J00000000000000000000000',
+  }), false)
+  assert.equal(validateSnapshot({
+    ...snapshot,
+    deliveryId: 'dlv_01J00000000000000000000000',
+  }), false)
+  assert.equal(validateSnapshot({
+    ...snapshot,
+    stageRunId: 'run_01J00000000000000000000000',
+  }), false)
 })
 
 test('ErrorEnvelope keeps machine codes and retry behavior stable', async () => {
