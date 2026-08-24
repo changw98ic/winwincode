@@ -1585,6 +1585,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario proves raw rejection, typed resolution, and typed rework persistence"
+    )]
     fn attention_resolution_requires_its_sealed_operation_specific_command() {
         let (store, failed, candidate) = create_store_with_failed_verdict();
         let item = failed

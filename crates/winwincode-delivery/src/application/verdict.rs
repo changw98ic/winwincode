@@ -521,6 +521,10 @@ fn attention_copy(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the complete derived Attention set is validated in one fail-closed pass"
+)]
 pub(crate) fn current_verdict_attention_actions(
     delivery: &Delivery,
     item: &AttentionItem,

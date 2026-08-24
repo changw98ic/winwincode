@@ -26,6 +26,10 @@ use crate::{
 
 const VERDICT_SUBMITTED_TOPIC: &str = "delivery.verdict.submitted";
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "receipt replay and all four atomic Verdict members stay visibly ordered in one transaction seam"
+)]
 pub(crate) fn execute(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
