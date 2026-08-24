@@ -700,28 +700,18 @@ fn delivery_command(command: &CommandName) -> bool {
 }
 
 fn receipt_actor_key(actor: &Actor) -> Result<ReceiptActorKey, StorageError> {
-    let (kind, id) = match actor {
-        Actor::UserActor(actor) => (actor.kind.as_str(), actor.id.0.as_str()),
-        Actor::ServiceAccountActor(actor) => (actor.kind.as_str(), actor.id.0.as_str()),
-        Actor::SystemActor(actor) => (actor.kind.as_str(), actor.id.0.as_str()),
-    };
-    let tag = match kind {
-        "user" => {
-            require_canonical_id(id, "usr_", "command user actor id")?;
-            b"user".as_slice()
+    let (tag, id) = match actor {
+        Actor::UserActor(actor) => {
+            require_canonical_id(&actor.id.0, "usr_", "command user actor id")?;
+            (b"user".as_slice(), actor.id.0.as_str())
         }
-        "service_account" => {
-            require_canonical_id(id, "svc_", "command service account actor id")?;
-            b"service_account".as_slice()
+        Actor::ServiceAccountActor(actor) => {
+            require_canonical_id(&actor.id.0, "svc_", "command service account actor id")?;
+            (b"service_account".as_slice(), actor.id.0.as_str())
         }
-        "system" => {
-            require_canonical_id(id, "sys_", "command system actor id")?;
-            b"system".as_slice()
-        }
-        _ => {
-            return Err(StorageError::invalid_input(
-                "command actor kind is not canonical",
-            ));
+        Actor::SystemActor(actor) => {
+            require_canonical_id(&actor.id.0, "sys_", "command system actor id")?;
+            (b"system".as_slice(), actor.id.0.as_str())
         }
     };
     ReceiptActorKey::from_encoded(encode_key(ACTOR_KEY_PREFIX, tag, &[id]))
@@ -730,7 +720,6 @@ fn receipt_actor_key(actor: &Actor) -> Result<ReceiptActorKey, StorageError> {
 fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
     let encoded = match scope {
         Scope::OrganizationScope(scope) => {
-            require_kind(&scope.kind, "organization")?;
             require_canonical_id(
                 &scope.organization_id.0,
                 "org_",
@@ -743,7 +732,6 @@ fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
             )
         }
         Scope::WorkspaceScope(scope) => {
-            require_kind(&scope.kind, "workspace")?;
             require_canonical_id(
                 &scope.organization_id.0,
                 "org_",
@@ -760,7 +748,6 @@ fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
             )
         }
         Scope::ProjectScope(scope) => {
-            require_kind(&scope.kind, "project")?;
             require_canonical_id(
                 &scope.organization_id.0,
                 "org_",
@@ -779,7 +766,6 @@ fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
             )
         }
         Scope::RepositoryScope(scope) => {
-            require_kind(&scope.kind, "repository")?;
             require_canonical_id(
                 &scope.organization_id.0,
                 "org_",
@@ -801,15 +787,6 @@ fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
         }
     };
     ReceiptScopeKey::from_encoded(encoded)
-}
-
-fn require_kind(actual: &str, expected: &str) -> Result<(), StorageError> {
-    if actual != expected {
-        return Err(StorageError::invalid_input(format!(
-            "command scope kind must be {expected}"
-        )));
-    }
-    Ok(())
 }
 
 fn require_canonical_id(value: &str, prefix: &str, label: &str) -> Result<(), StorageError> {

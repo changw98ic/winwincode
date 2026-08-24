@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 use winwincode_api::generated::{
     CommandEnvelope, CommandName, DeliveryAdvancePayload, DeliveryStageExecutionScope,
-    ExecutionJob, ExecutionScope,
+    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionScope,
 };
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
@@ -249,7 +249,7 @@ fn strict_execution_job(payload: &[u8]) -> Result<ExecutionJob, DeliveryExecutio
         .clone();
     let scope: DeliveryStageExecutionScope = serde_json::from_value(scope_value)
         .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
-    if scope.kind != "delivery-stage" {
+    if scope.kind != DeliveryStageExecutionScopeKind::DeliveryStage {
         return Err(DeliveryExecutionPortError::new(
             "durable execution job scope kind is not delivery-stage",
         ));
