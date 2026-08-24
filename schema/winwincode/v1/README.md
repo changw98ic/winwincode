@@ -47,7 +47,7 @@ HTTP schema 只通过 `$ref` 使用通用领域定义，不再声明另一份 ID
 `pnpm contracts:check` 只做比较，不写文件；缺文件或人工修改生成物都会失败。每个公开
 `$defs` 名称在 v1 合同集合中必须唯一，跨文件 `$ref` 只能指向本目录内的 canonical
 schema。生成文件带统一来源摘要，重复生成相同输入不会改写文件。Rust 中每个独立的基础值只在
-`winwincode-domain` 定义一次，API 数据结构直接引用，不保留第二份 ID 或旧别名。
+`winwincode-domain` 定义一次，API 数据结构从 `winwincode-domain` crate 根直接引用，不保留第二份 ID、旧别名或生成文件布局。
 
 ## 已冻结的写入范围
 

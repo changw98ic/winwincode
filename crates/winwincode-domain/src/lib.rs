@@ -5,4 +5,6 @@
 //! The declarations are generated from `schema/winwincode/v1`; the canonical
 //! JSON Schema remains their only source.
 
-pub mod generated;
+mod generated;
+
+pub use generated::*;

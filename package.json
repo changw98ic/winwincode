@@ -13,7 +13,7 @@
   "scripts": {
     "preinstall": "node scripts/check-runtime.mjs",
     "clean": "node scripts/clean.mjs",
-    "format:check": "node scripts/check-format.mjs && cargo fmt --package winwincode-kernel-helper --package winwincode-kernel --package winwincode-native --package winwincode-api --package winwincode-domain -- --check",
+    "format:check": "node scripts/check-format.mjs && cargo fmt --all -- --check",
     "contracts:generate": "node scripts/generate-contracts.mjs",
     "contracts:check": "node scripts/generate-contracts.mjs --check",
     "lint:source": "node scripts/lint-workspace.mjs",
