@@ -5,6 +5,7 @@
 #![allow(clippy::doc_markdown)]
 
 //! Public transport types generated from the canonical `WinWinCode` schemas.
+//! Shared scalar value objects are defined once in `winwincode-domain`.
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AcceptanceCriterionInput {
@@ -21,15 +22,15 @@ pub struct ActiveLeaseSummary {
     #[serde(rename = "attempt")]
     pub attempt: i64,
     #[serde(rename = "expiresAt")]
-    pub expires_at: Instant,
+    pub expires_at: winwincode_domain::generated::Instant,
     #[serde(rename = "fencingToken")]
-    pub fencing_token: FencingToken,
+    pub fencing_token: winwincode_domain::generated::FencingToken,
     #[serde(rename = "jobId")]
-    pub job_id: ExecutionJobId,
+    pub job_id: winwincode_domain::generated::ExecutionJobId,
     #[serde(rename = "lastEventSequence")]
-    pub last_event_sequence: ExecutionAckSequence,
+    pub last_event_sequence: winwincode_domain::generated::ExecutionAckSequence,
     #[serde(rename = "leaseId")]
-    pub lease_id: LeaseId,
+    pub lease_id: winwincode_domain::generated::LeaseId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -43,9 +44,9 @@ pub enum Actor {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum ActorId {
-    UserId(UserId),
-    ServiceAccountId(ServiceAccountId),
-    SystemActorId(SystemActorId),
+    UserId(winwincode_domain::generated::UserId),
+    ServiceAccountId(winwincode_domain::generated::ServiceAccountId),
+    SystemActorId(winwincode_domain::generated::SystemActorId),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -86,7 +87,7 @@ pub struct ApprovalDecideCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalDecidePayload {
     #[serde(rename = "approvalId")]
-    pub approval_id: ApprovalId,
+    pub approval_id: winwincode_domain::generated::ApprovalId,
     #[serde(rename = "decision")]
     pub decision: String,
     #[serde(rename = "reason")]
@@ -97,9 +98,9 @@ pub struct ApprovalDecidePayload {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalDecisionMessage {
     #[serde(rename = "approvalId")]
-    pub approval_id: ApprovalId,
+    pub approval_id: winwincode_domain::generated::ApprovalId,
     #[serde(rename = "decidedAt")]
-    pub decided_at: Instant,
+    pub decided_at: winwincode_domain::generated::Instant,
     #[serde(rename = "decision")]
     pub decision: String,
     #[serde(rename = "kind")]
@@ -107,7 +108,7 @@ pub struct ApprovalDecisionMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "reason")]
     pub reason: Option<String>,
@@ -116,15 +117,15 @@ pub struct ApprovalDecisionMessage {
     #[serde(rename = "scope")]
     pub scope: String,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalGetParameters {
     #[serde(rename = "approvalId")]
-    pub approval_id: ApprovalId,
+    pub approval_id: winwincode_domain::generated::ApprovalId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -138,10 +139,6 @@ pub struct ApprovalGetQuery {
     #[serde(rename = "query")]
     pub query: Option<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ApprovalId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalListParameters {
@@ -172,11 +169,11 @@ pub struct ApprovalPage {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalProjection {
     #[serde(rename = "id")]
-    pub id: ApprovalId,
+    pub id: winwincode_domain::generated::ApprovalId,
     #[serde(rename = "requestedAt")]
-    pub requested_at: Instant,
+    pub requested_at: winwincode_domain::generated::Instant,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "state")]
     pub state: String,
 }
@@ -187,32 +184,32 @@ pub struct ApprovalRequestMessage {
     #[serde(rename = "action")]
     pub action: ApprovalAction,
     #[serde(rename = "approvalId")]
-    pub approval_id: ApprovalId,
+    pub approval_id: winwincode_domain::generated::ApprovalId,
     #[serde(rename = "expiresAt")]
-    pub expires_at: Instant,
+    pub expires_at: winwincode_domain::generated::Instant,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Acknowledges the highest contiguous artifact chunk.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactAckMessage {
     #[serde(rename = "ackSequence")]
-    pub ack_sequence: ExecutionAckSequence,
+    pub ack_sequence: winwincode_domain::generated::ExecutionAckSequence,
     #[serde(rename = "artifactId")]
-    pub artifact_id: ArtifactId,
+    pub artifact_id: winwincode_domain::generated::ArtifactId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "error")]
     pub error: Option<ExecutionPortError>,
@@ -221,25 +218,25 @@ pub struct ArtifactAckMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "replayFromSequence")]
-    pub replay_from_sequence: Option<ExecutionSequence>,
+    pub replay_from_sequence: Option<winwincode_domain::generated::ExecutionSequence>,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: LeaseWriteStatus,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Transfers one ordered artifact chunk through either local or remote adapters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactChunkMessage {
     #[serde(rename = "artifactId")]
-    pub artifact_id: ArtifactId,
+    pub artifact_id: winwincode_domain::generated::ArtifactId,
     #[serde(rename = "isFinal")]
     pub is_final: bool,
     #[serde(rename = "kind")]
@@ -247,25 +244,25 @@ pub struct ArtifactChunkMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "payload")]
     pub payload: EncodedPayload,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "sequence")]
-    pub sequence: ExecutionSequence,
+    pub sequence: winwincode_domain::generated::ExecutionSequence,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactDescriptor {
     #[serde(rename = "artifactId")]
-    pub artifact_id: ArtifactId,
+    pub artifact_id: winwincode_domain::generated::ArtifactId,
     #[serde(rename = "digest")]
-    pub digest: Sha256Digest,
+    pub digest: winwincode_domain::generated::Sha256Digest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "fileName")]
     pub file_name: Option<String>,
@@ -276,11 +273,6 @@ pub struct ArtifactDescriptor {
     #[serde(rename = "sizeBytes")]
     pub size_bytes: i64,
 }
-
-/// Identity of one lease-scoped execution artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ArtifactId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ArtifactKind {
@@ -310,32 +302,24 @@ pub struct ArtifactOpenMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactReference {
     #[serde(rename = "artifactId")]
-    pub artifact_id: ArtifactId,
+    pub artifact_id: winwincode_domain::generated::ArtifactId,
     #[serde(rename = "digest")]
-    pub digest: Sha256Digest,
+    pub digest: winwincode_domain::generated::Sha256Digest,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct AttentionItemId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ChatMessageId(pub String);
 
 /// Secret-safe ProductSession message history page.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -352,11 +336,11 @@ pub struct ChatMessageProjection {
     #[serde(rename = "content")]
     pub content: String,
     #[serde(rename = "createdAt")]
-    pub created_at: Instant,
+    pub created_at: winwincode_domain::generated::Instant,
     #[serde(rename = "id")]
-    pub id: ChatMessageId,
+    pub id: winwincode_domain::generated::ChatMessageId,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "role")]
     pub role: String,
     #[serde(rename = "sequence")]
@@ -364,7 +348,7 @@ pub struct ChatMessageProjection {
     #[serde(rename = "state")]
     pub state: String,
     #[serde(rename = "updatedAt")]
-    pub updated_at: Instant,
+    pub updated_at: winwincode_domain::generated::Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -384,25 +368,21 @@ pub struct ChatSubmitPayload {
     #[serde(rename = "message")]
     pub message: String,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct CodexThreadId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommandAcceptedResponse {
     #[serde(rename = "acceptedAt")]
-    pub accepted_at: Instant,
+    pub accepted_at: winwincode_domain::generated::Instant,
     #[serde(rename = "command")]
     pub command: CommandName,
     #[serde(rename = "currentRevision")]
-    pub current_revision: Revision,
+    pub current_revision: winwincode_domain::generated::Revision,
     #[serde(rename = "outcome")]
     pub outcome: String,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
 }
@@ -412,13 +392,13 @@ pub struct CommandCompletedResponse {
     #[serde(rename = "command")]
     pub command: CommandName,
     #[serde(rename = "currentRevision")]
-    pub current_revision: Revision,
+    pub current_revision: winwincode_domain::generated::Revision,
     #[serde(rename = "outcome")]
     pub outcome: String,
     #[serde(rename = "previousRevision")]
-    pub previous_revision: Revision,
+    pub previous_revision: winwincode_domain::generated::Revision,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "result")]
     pub result: CommandResult,
     #[serde(rename = "schemaVersion")]
@@ -432,11 +412,11 @@ pub struct CommandEnvelope {
     #[serde(rename = "command")]
     pub command: CommandName,
     #[serde(rename = "expectedRevision")]
-    pub expected_revision: Revision,
+    pub expected_revision: winwincode_domain::generated::Revision,
     #[serde(rename = "payload")]
     pub payload: serde_json::Value,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "scope")]
@@ -527,7 +507,7 @@ pub struct ControlPlaneWebSocketAckFrame {
     #[serde(rename = "cursor")]
     pub cursor: ControlPlaneWebSocketAcknowledgedCursor,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -535,11 +515,11 @@ pub struct ControlPlaneWebSocketAckFrame {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketAcknowledgedCursor {
     #[serde(rename = "eventId")]
-    pub event_id: ControlPlaneWebSocketEventId,
+    pub event_id: winwincode_domain::generated::ControlPlaneWebSocketEventId,
     #[serde(rename = "scope")]
     pub scope: Scope,
     #[serde(rename = "sequence")]
-    pub sequence: ControlPlaneWebSocketStreamPosition,
+    pub sequence: winwincode_domain::generated::ControlPlaneWebSocketStreamPosition,
     #[serde(rename = "stream")]
     pub stream: ControlPlaneWebSocketEventStream,
 }
@@ -552,10 +532,10 @@ pub struct ControlPlaneWebSocketActivityRecordedEvent {
     pub category: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "deliveryId")]
-    pub delivery_id: Option<DeliveryId>,
+    pub delivery_id: Option<winwincode_domain::generated::DeliveryId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "productSessionId")]
-    pub product_session_id: Option<ProductSessionId>,
+    pub product_session_id: Option<winwincode_domain::generated::ProductSessionId>,
     #[serde(rename = "summary")]
     pub summary: String,
     #[serde(rename = "type")]
@@ -565,14 +545,14 @@ pub struct ControlPlaneWebSocketActivityRecordedEvent {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketApprovalChangedEvent {
     #[serde(rename = "approvalId")]
-    pub approval_id: ApprovalId,
+    pub approval_id: winwincode_domain::generated::ApprovalId,
     #[serde(rename = "decidedBy")]
     pub decided_by: Option<Actor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "decisionReason")]
     pub decision_reason: Option<String>,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "requestedBy")]
     pub requested_by: Actor,
     #[serde(rename = "state")]
@@ -588,16 +568,16 @@ pub struct ControlPlaneWebSocketAttentionChangedEvent {
     #[serde(rename = "assignedTo")]
     pub assigned_to: Option<ActorId>,
     #[serde(rename = "attentionItemId")]
-    pub attention_item_id: AttentionItemId,
+    pub attention_item_id: winwincode_domain::generated::AttentionItemId,
     #[serde(rename = "category")]
     pub category: String,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: Option<StageRunId>,
+    pub stage_run_id: Option<winwincode_domain::generated::StageRunId>,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "summary")]
@@ -606,16 +586,14 @@ pub struct ControlPlaneWebSocketAttentionChangedEvent {
     pub type_value: String,
 }
 
-pub type ControlPlaneWebSocketAuthorizationEpoch = i64;
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketAuthorizationRevokedFrame {
     #[serde(rename = "authorizationEpoch")]
-    pub authorization_epoch: ControlPlaneWebSocketAuthorizationEpoch,
+    pub authorization_epoch: winwincode_domain::generated::ControlPlaneWebSocketAuthorizationEpoch,
     #[serde(rename = "closeCode")]
     pub close_code: f64,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -627,11 +605,11 @@ pub struct ControlPlaneWebSocketBackpressureFrame {
     #[serde(rename = "closeCode")]
     pub close_code: f64,
     #[serde(rename = "disconnectAt")]
-    pub disconnect_at: Instant,
+    pub disconnect_at: winwincode_domain::generated::Instant,
     #[serde(rename = "pendingEventCount")]
     pub pending_event_count: i64,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -658,11 +636,11 @@ pub struct ControlPlaneWebSocketControlPlaneSource {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketCursor {
     #[serde(rename = "eventId")]
-    pub event_id: Option<ControlPlaneWebSocketEventId>,
+    pub event_id: Option<winwincode_domain::generated::ControlPlaneWebSocketEventId>,
     #[serde(rename = "scope")]
     pub scope: Scope,
     #[serde(rename = "sequence")]
-    pub sequence: ControlPlaneWebSocketStreamPosition,
+    pub sequence: winwincode_domain::generated::ControlPlaneWebSocketStreamPosition,
     #[serde(rename = "stream")]
     pub stream: ControlPlaneWebSocketEventStream,
 }
@@ -672,9 +650,9 @@ pub struct ControlPlaneWebSocketDeliveryChangedEvent {
     #[serde(rename = "changeKind")]
     pub change_kind: String,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -682,7 +660,7 @@ pub struct ControlPlaneWebSocketDeliveryChangedEvent {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketDeliveryStream {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "kind")]
     pub kind: String,
 }
@@ -692,11 +670,11 @@ pub struct ControlPlaneWebSocketDeliveryTaskChangedEvent {
     #[serde(rename = "changeKind")]
     pub change_kind: String,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "deliveryTaskId")]
-    pub delivery_task_id: DeliveryTaskId,
+    pub delivery_task_id: winwincode_domain::generated::DeliveryTaskId,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -704,30 +682,26 @@ pub struct ControlPlaneWebSocketDeliveryTaskChangedEvent {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketEventFrame {
     #[serde(rename = "authorizationEpoch")]
-    pub authorization_epoch: ControlPlaneWebSocketAuthorizationEpoch,
+    pub authorization_epoch: winwincode_domain::generated::ControlPlaneWebSocketAuthorizationEpoch,
     #[serde(rename = "event")]
     pub event: ControlPlaneWebSocketEventPayload,
     #[serde(rename = "eventId")]
-    pub event_id: ControlPlaneWebSocketEventId,
+    pub event_id: winwincode_domain::generated::ControlPlaneWebSocketEventId,
     #[serde(rename = "occurredAt")]
-    pub occurred_at: Instant,
+    pub occurred_at: winwincode_domain::generated::Instant,
     #[serde(rename = "scope")]
     pub scope: Scope,
     #[serde(rename = "sequence")]
-    pub sequence: ControlPlaneWebSocketEventSequence,
+    pub sequence: winwincode_domain::generated::ControlPlaneWebSocketEventSequence,
     #[serde(rename = "source")]
     pub source: ControlPlaneWebSocketEventSource,
     #[serde(rename = "stream")]
     pub stream: ControlPlaneWebSocketEventStream,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ControlPlaneWebSocketEventId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -749,8 +723,6 @@ pub enum ControlPlaneWebSocketEventPayload {
     ControlPlaneWebSocketWorkerHealthChangedEvent(ControlPlaneWebSocketWorkerHealthChangedEvent),
     ControlPlaneWebSocketActivityRecordedEvent(ControlPlaneWebSocketActivityRecordedEvent),
 }
-
-pub type ControlPlaneWebSocketEventSequence = i64;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -795,15 +767,15 @@ pub enum ControlPlaneWebSocketEventType {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketExecutionWorkerSource {
     #[serde(rename = "codexThreadId")]
-    pub codex_thread_id: CodexThreadId,
+    pub codex_thread_id: winwincode_domain::generated::CodexThreadId,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "leaseId")]
-    pub lease_id: LeaseId,
+    pub lease_id: winwincode_domain::generated::LeaseId,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -811,9 +783,9 @@ pub struct ControlPlaneWebSocketLeaseStream {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "leaseId")]
-    pub lease_id: LeaseId,
+    pub lease_id: winwincode_domain::generated::LeaseId,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -821,7 +793,7 @@ pub struct ControlPlaneWebSocketPingFrame {
     #[serde(rename = "nonce")]
     pub nonce: String,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -837,24 +809,24 @@ pub struct ControlPlaneWebSocketPongFrame {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketPresenceChangedEvent {
     #[serde(rename = "observedAt")]
-    pub observed_at: Instant,
+    pub observed_at: winwincode_domain::generated::Instant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "productSessionId")]
-    pub product_session_id: Option<ProductSessionId>,
+    pub product_session_id: Option<winwincode_domain::generated::ProductSessionId>,
     #[serde(rename = "state")]
     pub state: String,
     #[serde(rename = "type")]
     pub type_value: String,
     #[serde(rename = "userId")]
-    pub user_id: UserId,
+    pub user_id: winwincode_domain::generated::UserId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketProductSessionChangedEvent {
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -870,7 +842,7 @@ pub struct ControlPlaneWebSocketProductSessionMessageAppendedEvent {
     #[serde(rename = "message")]
     pub message: ChatMessageProjection,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -880,7 +852,7 @@ pub struct ControlPlaneWebSocketProductSessionStream {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -900,7 +872,7 @@ pub struct ControlPlaneWebSocketResetRequiredFrame {
     #[serde(rename = "reason")]
     pub reason: String,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -910,11 +882,11 @@ pub struct ControlPlaneWebSocketResumeAcceptedFrame {
     #[serde(rename = "after")]
     pub after: ControlPlaneWebSocketAcknowledgedCursor,
     #[serde(rename = "authorizationEpoch")]
-    pub authorization_epoch: ControlPlaneWebSocketAuthorizationEpoch,
+    pub authorization_epoch: winwincode_domain::generated::ControlPlaneWebSocketAuthorizationEpoch,
     #[serde(rename = "replayThrough")]
     pub replay_through: ControlPlaneWebSocketCursor,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -926,7 +898,7 @@ pub struct ControlPlaneWebSocketResumeFrame {
     #[serde(rename = "subscription")]
     pub subscription: ControlPlaneWebSocketSubscription,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -934,14 +906,14 @@ pub struct ControlPlaneWebSocketResumeFrame {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketRuntimeProjectionAppendedEvent {
     #[serde(rename = "codexThreadId")]
-    pub codex_thread_id: CodexThreadId,
+    pub codex_thread_id: winwincode_domain::generated::CodexThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "deliveryId")]
-    pub delivery_id: Option<DeliveryId>,
+    pub delivery_id: Option<winwincode_domain::generated::DeliveryId>,
     #[serde(rename = "leaseId")]
-    pub lease_id: LeaseId,
+    pub lease_id: winwincode_domain::generated::LeaseId,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "projectionKind")]
     pub projection_kind: String,
     #[serde(rename = "projectionSequence")]
@@ -951,13 +923,13 @@ pub struct ControlPlaneWebSocketRuntimeProjectionAppendedEvent {
     pub source_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: Option<StageRunId>,
+    pub stage_run_id: Option<winwincode_domain::generated::StageRunId>,
     #[serde(rename = "summary")]
     pub summary: String,
     #[serde(rename = "type")]
     pub type_value: String,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -979,8 +951,6 @@ pub enum ControlPlaneWebSocketServerFrame {
     ControlPlaneWebSocketProtocolErrorFrame(ControlPlaneWebSocketProtocolErrorFrame),
 }
 
-pub type ControlPlaneWebSocketStreamPosition = i64;
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketSubscribeFrame {
     #[serde(rename = "startAt")]
@@ -988,7 +958,7 @@ pub struct ControlPlaneWebSocketSubscribeFrame {
     #[serde(rename = "subscription")]
     pub subscription: ControlPlaneWebSocketSubscription,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
@@ -1006,20 +976,16 @@ pub struct ControlPlaneWebSocketSubscription {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketSubscriptionAcceptedFrame {
     #[serde(rename = "authorizationEpoch")]
-    pub authorization_epoch: ControlPlaneWebSocketAuthorizationEpoch,
+    pub authorization_epoch: winwincode_domain::generated::ControlPlaneWebSocketAuthorizationEpoch,
     #[serde(rename = "cursor")]
     pub cursor: ControlPlaneWebSocketCursor,
     #[serde(rename = "limits")]
     pub limits: ControlPlaneWebSocketTransportLimits,
     #[serde(rename = "subscriptionId")]
-    pub subscription_id: ControlPlaneWebSocketSubscriptionId,
+    pub subscription_id: winwincode_domain::generated::ControlPlaneWebSocketSubscriptionId,
     #[serde(rename = "type")]
     pub type_value: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ControlPlaneWebSocketSubscriptionId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ControlPlaneWebSocketTransportLimits {
@@ -1043,16 +1009,14 @@ pub struct ControlPlaneWebSocketWorkerHealthChangedEvent {
     #[serde(rename = "capabilityLabels")]
     pub capability_labels: Option<Vec<String>>,
     #[serde(rename = "observedAt")]
-    pub observed_at: Instant,
+    pub observed_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "type")]
     pub type_value: String,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
 }
-
-pub type Count = i64;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialReferenceCreateCommand {
@@ -1069,7 +1033,7 @@ pub struct CredentialReferenceCreateCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialReferenceCreatePayload {
     #[serde(rename = "credentialReferenceId")]
-    pub credential_reference_id: CredentialReferenceId,
+    pub credential_reference_id: winwincode_domain::generated::CredentialReferenceId,
     #[serde(rename = "displayName")]
     pub display_name: String,
     #[serde(rename = "providerId")]
@@ -1093,13 +1057,13 @@ pub struct CredentialReferenceDeleteCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialReferenceDeletePayload {
     #[serde(rename = "credentialReferenceId")]
-    pub credential_reference_id: CredentialReferenceId,
+    pub credential_reference_id: winwincode_domain::generated::CredentialReferenceId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialReferenceGetParameters {
     #[serde(rename = "credentialReferenceId")]
-    pub credential_reference_id: CredentialReferenceId,
+    pub credential_reference_id: winwincode_domain::generated::CredentialReferenceId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1113,10 +1077,6 @@ pub struct CredentialReferenceGetQuery {
     #[serde(rename = "query")]
     pub query: Option<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct CredentialReferenceId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialReferenceListParameters {
@@ -1150,15 +1110,15 @@ pub struct CredentialReferenceProjection {
     #[serde(rename = "displayName")]
     pub display_name: String,
     #[serde(rename = "id")]
-    pub id: CredentialReferenceId,
+    pub id: winwincode_domain::generated::CredentialReferenceId,
     #[serde(rename = "providerId")]
     pub provider_id: String,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "secretState")]
     pub secret_state: String,
     #[serde(rename = "updatedAt")]
-    pub updated_at: Instant,
+    pub updated_at: winwincode_domain::generated::Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1166,7 +1126,7 @@ pub struct CriterionVerdictInput {
     #[serde(rename = "criterionId")]
     pub criterion_id: String,
     #[serde(rename = "evidenceIds")]
-    pub evidence_ids: Vec<EvidenceId>,
+    pub evidence_ids: Vec<winwincode_domain::generated::EvidenceId>,
     #[serde(rename = "verdict")]
     pub verdict: String,
 }
@@ -1186,7 +1146,7 @@ pub struct DeliveryAdvanceCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryAdvancePayload {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1204,7 +1164,7 @@ pub struct DeliveryApproveTaskBreakdownCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryApproveTaskBreakdownPayload {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "tasks")]
     pub tasks: Vec<DeliveryTaskInput>,
 }
@@ -1224,7 +1184,7 @@ pub struct DeliveryCreateCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryCreatePayload {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "spec")]
     pub spec: DeliverySpecInput,
     #[serde(rename = "tasks")]
@@ -1234,7 +1194,7 @@ pub struct DeliveryCreatePayload {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryGetParameters {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1248,10 +1208,6 @@ pub struct DeliveryGetQuery {
     #[serde(rename = "query")]
     pub query: Option<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct DeliveryId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryListParameters {
@@ -1274,13 +1230,13 @@ pub struct DeliveryListQuery {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryOwnershipProjection {
     #[serde(rename = "organizationId")]
-    pub organization_id: OrganizationId,
+    pub organization_id: winwincode_domain::generated::OrganizationId,
     #[serde(rename = "projectId")]
-    pub project_id: ProjectId,
+    pub project_id: winwincode_domain::generated::ProjectId,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "workspaceId")]
-    pub workspace_id: WorkspaceId,
+    pub workspace_id: winwincode_domain::generated::WorkspaceId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1294,15 +1250,15 @@ pub struct DeliveryPage {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryProjection {
     #[serde(rename = "activeStageRunId")]
-    pub active_stage_run_id: Option<StageRunId>,
+    pub active_stage_run_id: Option<winwincode_domain::generated::StageRunId>,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "openAttentionCount")]
-    pub open_attention_count: Count,
+    pub open_attention_count: winwincode_domain::generated::Count,
     #[serde(rename = "ownership")]
     pub ownership: DeliveryOwnershipProjection,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "status")]
@@ -1312,7 +1268,7 @@ pub struct DeliveryProjection {
     #[serde(rename = "title")]
     pub title: String,
     #[serde(rename = "updatedAt")]
-    pub updated_at: Instant,
+    pub updated_at: winwincode_domain::generated::Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1330,11 +1286,11 @@ pub struct DeliveryResolveAttentionCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryResolveAttentionPayload {
     #[serde(rename = "attentionItemId")]
-    pub attention_item_id: AttentionItemId,
+    pub attention_item_id: winwincode_domain::generated::AttentionItemId,
     #[serde(rename = "decision")]
     pub decision: String,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "remediation")]
     pub remediation: Option<RemediationInput>,
     #[serde(rename = "resolution")]
@@ -1352,7 +1308,7 @@ pub struct DeliverySpecInput {
     #[serde(rename = "publicationTarget")]
     pub publication_target: Option<PublicationTarget>,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "title")]
     pub title: String,
 }
@@ -1360,28 +1316,28 @@ pub struct DeliverySpecInput {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryStageExecutionScope {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "deliveryTaskId")]
-    pub delivery_task_id: Option<DeliveryTaskId>,
+    pub delivery_task_id: Option<winwincode_domain::generated::DeliveryTaskId>,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: StageRunId,
+    pub stage_run_id: winwincode_domain::generated::StageRunId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryStageRuntimeProjectionGetParameters {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: StageRunId,
+    pub stage_run_id: winwincode_domain::generated::StageRunId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1425,45 +1381,41 @@ pub struct DeliverySubmitVerdictCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliverySubmitVerdictPayload {
     #[serde(rename = "candidateDigest")]
-    pub candidate_digest: Sha256Digest,
+    pub candidate_digest: winwincode_domain::generated::Sha256Digest,
     #[serde(rename = "criterionResults")]
     pub criterion_results: Vec<CriterionVerdictInput>,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryTaskCountsProjection {
     #[serde(rename = "active")]
-    pub active: Count,
+    pub active: winwincode_domain::generated::Count,
     #[serde(rename = "blocked")]
-    pub blocked: Count,
+    pub blocked: winwincode_domain::generated::Count,
     #[serde(rename = "completed")]
-    pub completed: Count,
+    pub completed: winwincode_domain::generated::Count,
     #[serde(rename = "failed")]
-    pub failed: Count,
+    pub failed: winwincode_domain::generated::Count,
     #[serde(rename = "pending")]
-    pub pending: Count,
+    pub pending: winwincode_domain::generated::Count,
     #[serde(rename = "total")]
-    pub total: Count,
+    pub total: winwincode_domain::generated::Count,
     #[serde(rename = "verifying")]
-    pub verifying: Count,
+    pub verifying: winwincode_domain::generated::Count,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct DeliveryTaskId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryTaskInput {
     #[serde(rename = "acceptanceCriterionIds")]
     pub acceptance_criterion_ids: Vec<String>,
     #[serde(rename = "blockedByTaskIds")]
-    pub blocked_by_task_ids: Vec<DeliveryTaskId>,
+    pub blocked_by_task_ids: Vec<winwincode_domain::generated::DeliveryTaskId>,
     #[serde(rename = "goal")]
     pub goal: String,
     #[serde(rename = "id")]
-    pub id: DeliveryTaskId,
+    pub id: winwincode_domain::generated::DeliveryTaskId,
     #[serde(rename = "ownerActorId")]
     pub owner_actor_id: Option<ActorId>,
     #[serde(rename = "title")]
@@ -1501,7 +1453,7 @@ pub struct DeliveryUpdateSpecCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryUpdateSpecPayload {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "spec")]
     pub spec: DeliverySpecInput,
 }
@@ -1516,7 +1468,7 @@ pub struct EncodedPayload {
     #[serde(rename = "dataBase64")]
     pub data_base64: String,
     #[serde(rename = "payloadDigest")]
-    pub payload_digest: Sha256Digest,
+    pub payload_digest: winwincode_domain::generated::Sha256Digest,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1570,16 +1522,10 @@ pub struct ErrorEnvelope {
     #[serde(rename = "error")]
     pub error: Error,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct EvidenceId(pub String);
-
-pub type ExecutionAckSequence = i64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ExecutionEventCategory {
@@ -1601,24 +1547,19 @@ pub enum ExecutionEventCategory {
     Diagnostic,
 }
 
-/// Stable identity retained when a runtime event is replayed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ExecutionEventId(pub String);
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionEventRecord {
     #[serde(rename = "category")]
     pub category: ExecutionEventCategory,
     #[serde(rename = "eventId")]
-    pub event_id: ExecutionEventId,
+    pub event_id: winwincode_domain::generated::ExecutionEventId,
     #[serde(rename = "occurredAt")]
-    pub occurred_at: Instant,
+    pub occurred_at: winwincode_domain::generated::Instant,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "payload")]
     pub payload: Option<EncodedPayload>,
     #[serde(rename = "sequence")]
-    pub sequence: ExecutionSequence,
+    pub sequence: winwincode_domain::generated::ExecutionSequence,
     #[serde(rename = "summary")]
     pub summary: String,
 }
@@ -1632,56 +1573,46 @@ pub struct ExecutionJob {
     #[serde(rename = "goal")]
     pub goal: String,
     #[serde(rename = "jobId")]
-    pub job_id: ExecutionJobId,
+    pub job_id: winwincode_domain::generated::ExecutionJobId,
     #[serde(rename = "limits")]
     pub limits: ExecutionLimits,
     #[serde(rename = "payloadDigest")]
-    pub payload_digest: Sha256Digest,
+    pub payload_digest: winwincode_domain::generated::Sha256Digest,
     #[serde(rename = "scope")]
     pub scope: ExecutionScope,
     #[serde(rename = "workspace")]
     pub workspace: ExecutionWorkspace,
 }
 
-/// Identity of one scheduler-owned execution job.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ExecutionJobId(pub String);
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionLeaseStamp {
     #[serde(rename = "attempt")]
     pub attempt: i64,
     #[serde(rename = "expiresAt")]
-    pub expires_at: Instant,
+    pub expires_at: winwincode_domain::generated::Instant,
     #[serde(rename = "fencingToken")]
-    pub fencing_token: FencingToken,
+    pub fencing_token: winwincode_domain::generated::FencingToken,
     #[serde(rename = "issuedAt")]
-    pub issued_at: Instant,
+    pub issued_at: winwincode_domain::generated::Instant,
     #[serde(rename = "jobId")]
-    pub job_id: ExecutionJobId,
+    pub job_id: winwincode_domain::generated::ExecutionJobId,
     #[serde(rename = "leaseId")]
-    pub lease_id: LeaseId,
+    pub lease_id: winwincode_domain::generated::LeaseId,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerInstanceId")]
-    pub worker_instance_id: WorkerInstanceId,
+    pub worker_instance_id: winwincode_domain::generated::WorkerInstanceId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionLimits {
     #[serde(rename = "deadlineAt")]
-    pub deadline_at: Instant,
+    pub deadline_at: winwincode_domain::generated::Instant,
     #[serde(rename = "maxArtifactBytes")]
     pub max_artifact_bytes: i64,
     #[serde(rename = "maxRuntimeSeconds")]
     pub max_runtime_seconds: i64,
 }
-
-/// Unique identity of one ExecutionPort message envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ExecutionMessageId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionOutcome {
@@ -1689,14 +1620,14 @@ pub struct ExecutionOutcome {
     pub artifacts: Vec<ArtifactReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "codexThreadId")]
-    pub codex_thread_id: Option<CodexThreadId>,
+    pub codex_thread_id: Option<winwincode_domain::generated::CodexThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "error")]
     pub error: Option<ExecutionPortError>,
     #[serde(rename = "finishedAt")]
-    pub finished_at: Instant,
+    pub finished_at: winwincode_domain::generated::Instant,
     #[serde(rename = "lastEventSequence")]
-    pub last_event_sequence: ExecutionAckSequence,
+    pub last_event_sequence: winwincode_domain::generated::ExecutionAckSequence,
     #[serde(rename = "status")]
     pub status: ExecutionOutcomeStatus,
     #[serde(rename = "summary")]
@@ -1799,25 +1730,15 @@ pub enum ExecutionScope {
     DeliveryStageExecutionScope(DeliveryStageExecutionScope),
 }
 
-pub type ExecutionSequence = i64;
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionWorkspace {
     #[serde(rename = "checkoutRevision")]
     pub checkout_revision: String,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "writeMode")]
     pub write_mode: String,
 }
-
-/// Monotonically increasing decimal token encoded as a string to preserve 64-bit precision.
-pub type FencingToken = String;
-
-/// Identity of one interactive input request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct InputRequestId(pub String);
 
 /// Requests one typed user input through the Control Plane product session.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1828,27 +1749,27 @@ pub struct InputRequestMessage {
     #[serde(rename = "choices")]
     pub choices: Option<Vec<InteractiveInputChoice>>,
     #[serde(rename = "expiresAt")]
-    pub expires_at: Instant,
+    pub expires_at: winwincode_domain::generated::Instant,
     #[serde(rename = "inputRequestId")]
-    pub input_request_id: InputRequestId,
+    pub input_request_id: winwincode_domain::generated::InputRequestId,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "mode")]
     pub mode: InteractiveInputMode,
     #[serde(rename = "prompt")]
     pub prompt: String,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1867,45 +1788,43 @@ pub struct InputRespondCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InputRespondPayload {
     #[serde(rename = "executionJobId")]
-    pub execution_job_id: ExecutionJobId,
+    pub execution_job_id: winwincode_domain::generated::ExecutionJobId,
     #[serde(rename = "inputRequestId")]
-    pub input_request_id: InputRequestId,
+    pub input_request_id: winwincode_domain::generated::InputRequestId,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "value")]
     pub value: Option<InteractiveInputValue>,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Returns a typed input result without exposing product-session storage.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InputResponseMessage {
     #[serde(rename = "inputRequestId")]
-    pub input_request_id: InputRequestId,
+    pub input_request_id: winwincode_domain::generated::InputRequestId,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "respondedAt")]
-    pub responded_at: Instant,
+    pub responded_at: winwincode_domain::generated::Instant,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "value")]
     pub value: Option<InteractiveInputValue>,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
-
-pub type Instant = String;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InteractiveInputChoice {
@@ -1945,17 +1864,17 @@ pub struct JobCancelAckMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Requests cooperative cancellation for the currently fenced attempt.
@@ -1966,19 +1885,19 @@ pub struct JobCancelMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "reason")]
     pub reason: String,
     #[serde(rename = "requestedAt")]
-    pub requested_at: Instant,
+    pub requested_at: winwincode_domain::generated::Instant,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Dispatches one immutable job payload under one attempt and lease.
@@ -1991,13 +1910,13 @@ pub struct JobDispatchMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
 }
 
 /// Returns the idempotent result of accepting or rejecting a job dispatch.
@@ -2007,26 +1926,26 @@ pub struct JobDispatchResultMessage {
     #[serde(rename = "error")]
     pub error: Option<ExecutionPortError>,
     #[serde(rename = "jobId")]
-    pub job_id: ExecutionJobId,
+    pub job_id: winwincode_domain::generated::ExecutionJobId,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "payloadDigest")]
-    pub payload_digest: Sha256Digest,
+    pub payload_digest: winwincode_domain::generated::Sha256Digest,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: Option<WorkerSessionId>,
+    pub worker_session_id: Option<winwincode_domain::generated::WorkerSessionId>,
 }
 
 /// Accepts or rejects one lease-fenced execution outcome idempotently.
@@ -2040,15 +1959,15 @@ pub struct JobOutcomeAckMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Reports an execution outcome; Control Plane alone derives canonical Delivery state and verdicts.
@@ -2059,20 +1978,16 @@ pub struct JobOutcomeMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "outcome")]
     pub outcome: ExecutionOutcome,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct LeaseId(pub String);
 
 /// Extends one lease for the same Worker instance, attempt, and fencing token.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2082,15 +1997,15 @@ pub struct LeaseRenewMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "priorExpiresAt")]
-    pub prior_expires_at: Instant,
+    pub prior_expires_at: winwincode_domain::generated::Instant,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -2136,7 +2051,7 @@ pub struct LocalDefaultScope {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelAckMessage {
     #[serde(rename = "ackSequence")]
-    pub ack_sequence: ExecutionAckSequence,
+    pub ack_sequence: winwincode_domain::generated::ExecutionAckSequence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "error")]
     pub error: Option<ExecutionPortError>,
@@ -2145,20 +2060,20 @@ pub struct ModelAckMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "modelExchangeId")]
-    pub model_exchange_id: ModelExchangeId,
+    pub model_exchange_id: winwincode_domain::generated::ModelExchangeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "replayFromSequence")]
-    pub replay_from_sequence: Option<ExecutionSequence>,
+    pub replay_from_sequence: Option<winwincode_domain::generated::ExecutionSequence>,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: LeaseWriteStatus,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Streams one opaque provider-neutral model response chunk.
@@ -2174,26 +2089,21 @@ pub struct ModelChunkMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "modelExchangeId")]
-    pub model_exchange_id: ModelExchangeId,
+    pub model_exchange_id: winwincode_domain::generated::ModelExchangeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "payload")]
     pub payload: Option<EncodedPayload>,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "sequence")]
-    pub sequence: ExecutionSequence,
+    pub sequence: winwincode_domain::generated::ExecutionSequence,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
-
-/// Identity of one provider-neutral model stream exchange.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ModelExchangeId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelGatewayRoute {
@@ -2211,27 +2121,27 @@ pub struct ModelOpenMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "modelExchangeId")]
-    pub model_exchange_id: ModelExchangeId,
+    pub model_exchange_id: winwincode_domain::generated::ModelExchangeId,
     #[serde(rename = "request")]
     pub request: EncodedPayload,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "route")]
     pub route: ModelGatewayRoute,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelRoute {
     #[serde(rename = "credentialReferenceId")]
-    pub credential_reference_id: CredentialReferenceId,
+    pub credential_reference_id: winwincode_domain::generated::CredentialReferenceId,
     #[serde(rename = "modelId")]
     pub model_id: String,
     #[serde(rename = "providerId")]
@@ -2243,22 +2153,15 @@ pub struct MutationReceipt {
     #[serde(rename = "resourceKind")]
     pub resource_kind: String,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
 }
-
-/// Opaque cursor bound to scope, query, filters, and one stable snapshot.
-pub type OpaqueCursor = String;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct OrganizationId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OrganizationScope {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "organizationId")]
-    pub organization_id: OrganizationId,
+    pub organization_id: winwincode_domain::generated::OrganizationId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2266,13 +2169,13 @@ pub struct PageInfo {
     #[serde(rename = "hasMore")]
     pub has_more: bool,
     #[serde(rename = "nextCursor")]
-    pub next_cursor: Option<OpaqueCursor>,
+    pub next_cursor: Option<winwincode_domain::generated::OpaqueCursor>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PageRequest {
     #[serde(rename = "cursor")]
-    pub cursor: Option<OpaqueCursor>,
+    pub cursor: Option<winwincode_domain::generated::OpaqueCursor>,
     #[serde(rename = "limit")]
     pub limit: i64,
 }
@@ -2282,12 +2185,8 @@ pub struct ProductSessionExecutionScope {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ProductSessionId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProductSessionPage {
@@ -2300,19 +2199,19 @@ pub struct ProductSessionPage {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProductSessionProjection {
     #[serde(rename = "id")]
-    pub id: ProductSessionId,
+    pub id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "projectId")]
-    pub project_id: ProjectId,
+    pub project_id: winwincode_domain::generated::ProjectId,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "state")]
     pub state: String,
     #[serde(rename = "title")]
     pub title: String,
     #[serde(rename = "updatedAt")]
-    pub updated_at: Instant,
+    pub updated_at: winwincode_domain::generated::Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2320,23 +2219,19 @@ pub struct ProductSessionRuntimeProjectionGetParameters {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ProjectId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectScope {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "organizationId")]
-    pub organization_id: OrganizationId,
+    pub organization_id: winwincode_domain::generated::OrganizationId,
     #[serde(rename = "projectId")]
-    pub project_id: ProjectId,
+    pub project_id: winwincode_domain::generated::ProjectId,
     #[serde(rename = "workspaceId")]
-    pub workspace_id: WorkspaceId,
+    pub workspace_id: winwincode_domain::generated::WorkspaceId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2354,7 +2249,7 @@ pub struct PublicationCancelCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublicationCancelPayload {
     #[serde(rename = "publicationId")]
-    pub publication_id: PublicationId,
+    pub publication_id: winwincode_domain::generated::PublicationId,
     #[serde(rename = "reason")]
     pub reason: String,
 }
@@ -2362,7 +2257,7 @@ pub struct PublicationCancelPayload {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublicationGetParameters {
     #[serde(rename = "publicationId")]
-    pub publication_id: PublicationId,
+    pub publication_id: winwincode_domain::generated::PublicationId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2377,14 +2272,10 @@ pub struct PublicationGetQuery {
     pub query: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct PublicationId(pub String);
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublicationListParameters {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: Option<DeliveryId>,
+    pub delivery_id: Option<winwincode_domain::generated::DeliveryId>,
     #[serde(rename = "states")]
     pub states: Vec<String>,
 }
@@ -2412,15 +2303,15 @@ pub struct PublicationPage {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublicationProjection {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "id")]
-    pub id: PublicationId,
+    pub id: winwincode_domain::generated::PublicationId,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "state")]
     pub state: String,
     #[serde(rename = "updatedAt")]
-    pub updated_at: Instant,
+    pub updated_at: winwincode_domain::generated::Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2438,11 +2329,11 @@ pub struct PublicationPublishCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PublicationPublishPayload {
     #[serde(rename = "candidateDigest")]
-    pub candidate_digest: Sha256Digest,
+    pub candidate_digest: winwincode_domain::generated::Sha256Digest,
     #[serde(rename = "deliveryId")]
-    pub delivery_id: DeliveryId,
+    pub delivery_id: winwincode_domain::generated::DeliveryId,
     #[serde(rename = "publicationId")]
-    pub publication_id: PublicationId,
+    pub publication_id: winwincode_domain::generated::PublicationId,
     #[serde(rename = "target")]
     pub target: PublicationTarget,
 }
@@ -2471,7 +2362,7 @@ pub struct QueryEnvelope {
     #[serde(rename = "query")]
     pub query: QueryName,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "scope")]
@@ -2559,7 +2450,7 @@ pub struct QueryResultResponse {
     #[serde(rename = "query")]
     pub query: QueryName,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "result")]
     pub result: QueryResult,
     #[serde(rename = "schemaVersion")]
@@ -2569,34 +2460,26 @@ pub struct QueryResultResponse {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RemediationInput {
     #[serde(rename = "candidateDigest")]
-    pub candidate_digest: Sha256Digest,
+    pub candidate_digest: winwincode_domain::generated::Sha256Digest,
     #[serde(rename = "deliveryTaskId")]
-    pub delivery_task_id: Option<DeliveryTaskId>,
+    pub delivery_task_id: Option<winwincode_domain::generated::DeliveryTaskId>,
     #[serde(rename = "instructions")]
     pub instructions: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct RepositoryId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepositoryScope {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "organizationId")]
-    pub organization_id: OrganizationId,
+    pub organization_id: winwincode_domain::generated::OrganizationId,
     #[serde(rename = "projectId")]
-    pub project_id: ProjectId,
+    pub project_id: winwincode_domain::generated::ProjectId,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "workspaceId")]
-    pub workspace_id: WorkspaceId,
+    pub workspace_id: winwincode_domain::generated::WorkspaceId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct RequestId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RetryableError {
@@ -2618,13 +2501,11 @@ pub enum RetryableErrorCode {
     ServiceUnavailable,
 }
 
-pub type Revision = i64;
-
 /// Acknowledges the highest contiguous runtime event and requests a gap replay when needed.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeAckMessage {
     #[serde(rename = "ackSequence")]
-    pub ack_sequence: ExecutionAckSequence,
+    pub ack_sequence: winwincode_domain::generated::ExecutionAckSequence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "error")]
     pub error: Option<ExecutionPortError>,
@@ -2633,18 +2514,18 @@ pub struct RuntimeAckMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "replayFromSequence")]
-    pub replay_from_sequence: Option<ExecutionSequence>,
+    pub replay_from_sequence: Option<winwincode_domain::generated::ExecutionSequence>,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: LeaseWriteStatus,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 /// Publishes one ordered, replayable, provider-neutral runtime fact.
@@ -2657,13 +2538,13 @@ pub struct RuntimeEventMessage {
     #[serde(rename = "lease")]
     pub lease: ExecutionLeaseStamp,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2688,16 +2569,16 @@ pub struct RuntimeProjectionGetQuery {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeProjectionItem {
     #[serde(rename = "codexThreadId")]
-    pub codex_thread_id: CodexThreadId,
+    pub codex_thread_id: winwincode_domain::generated::CodexThreadId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "deliveryId")]
-    pub delivery_id: Option<DeliveryId>,
+    pub delivery_id: Option<winwincode_domain::generated::DeliveryId>,
     #[serde(rename = "leaseId")]
-    pub lease_id: LeaseId,
+    pub lease_id: winwincode_domain::generated::LeaseId,
     #[serde(rename = "occurredAt")]
-    pub occurred_at: Instant,
+    pub occurred_at: winwincode_domain::generated::Instant,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "projectionKind")]
     pub projection_kind: RuntimeProjectionKind,
     #[serde(rename = "projectionSequence")]
@@ -2707,11 +2588,11 @@ pub struct RuntimeProjectionItem {
     pub source_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: Option<StageRunId>,
+    pub stage_run_id: Option<winwincode_domain::generated::StageRunId>,
     #[serde(rename = "summary")]
     pub summary: String,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -2746,7 +2627,7 @@ pub enum RuntimeProjectionKind {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeProjectionSnapshot {
     #[serde(rename = "deliveryId")]
-    pub delivery_id: Option<DeliveryId>,
+    pub delivery_id: Option<winwincode_domain::generated::DeliveryId>,
     #[serde(rename = "items")]
     pub items: Vec<RuntimeProjectionItem>,
     #[serde(rename = "kind")]
@@ -2754,20 +2635,20 @@ pub struct RuntimeProjectionSnapshot {
     #[serde(rename = "lastProjectionSequence")]
     pub last_projection_sequence: i64,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "rebuiltAt")]
-    pub rebuilt_at: Instant,
+    pub rebuilt_at: winwincode_domain::generated::Instant,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "stageRunId")]
-    pub stage_run_id: Option<StageRunId>,
+    pub stage_run_id: Option<winwincode_domain::generated::StageRunId>,
 }
 
 /// Requests original runtime events strictly after the acknowledged sequence.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeReplayRequestMessage {
     #[serde(rename = "afterSequence")]
-    pub after_sequence: ExecutionAckSequence,
+    pub after_sequence: winwincode_domain::generated::ExecutionAckSequence,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "lease")]
@@ -2775,15 +2656,15 @@ pub struct RuntimeReplayRequestMessage {
     #[serde(rename = "maxEvents")]
     pub max_events: i64,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerSessionId")]
-    pub worker_session_id: WorkerSessionId,
+    pub worker_session_id: winwincode_domain::generated::WorkerSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -2804,26 +2685,22 @@ pub enum Scope {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScopedResourceLocator {
     #[serde(rename = "organizationId")]
-    pub organization_id: OrganizationId,
+    pub organization_id: winwincode_domain::generated::OrganizationId,
     #[serde(rename = "projectId")]
-    pub project_id: ProjectId,
+    pub project_id: winwincode_domain::generated::ProjectId,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "workspaceId")]
-    pub workspace_id: WorkspaceId,
+    pub workspace_id: winwincode_domain::generated::WorkspaceId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceAccountActor {
     #[serde(rename = "id")]
-    pub id: ServiceAccountId,
+    pub id: winwincode_domain::generated::ServiceAccountId,
     #[serde(rename = "kind")]
     pub kind: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ServiceAccountId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionCancelCommand {
@@ -2840,7 +2717,7 @@ pub struct SessionCancelCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionCancelPayload {
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "reason")]
     pub reason: String,
 }
@@ -2860,7 +2737,7 @@ pub struct SessionCloseCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionClosePayload {
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2880,11 +2757,11 @@ pub struct SessionCreatePayload {
     #[serde(rename = "modelRoute")]
     pub model_route: ModelRoute,
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
     #[serde(rename = "projectId")]
-    pub project_id: ProjectId,
+    pub project_id: winwincode_domain::generated::ProjectId,
     #[serde(rename = "repositoryId")]
-    pub repository_id: RepositoryId,
+    pub repository_id: winwincode_domain::generated::RepositoryId,
     #[serde(rename = "title")]
     pub title: String,
 }
@@ -2892,7 +2769,7 @@ pub struct SessionCreatePayload {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionGetParameters {
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2928,7 +2805,7 @@ pub struct SessionListQuery {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionMessagesListParameters {
     #[serde(rename = "productSessionId")]
-    pub product_session_id: ProductSessionId,
+    pub product_session_id: winwincode_domain::generated::ProductSessionId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2968,7 +2845,7 @@ pub struct SettingsProjection {
     #[serde(rename = "defaultModelRoute")]
     pub default_model_route: Option<ModelRoute>,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "workerConcurrencyLimit")]
     pub worker_concurrency_limit: i64,
 }
@@ -2991,23 +2868,13 @@ pub struct SettingsUpdatePayload {
     pub patch: SettingsPatch,
 }
 
-pub type Sha256Digest = String;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct StageRunId(pub String);
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SystemActor {
     #[serde(rename = "id")]
-    pub id: SystemActorId,
+    pub id: winwincode_domain::generated::SystemActorId,
     #[serde(rename = "kind")]
     pub kind: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct SystemActorId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalError {
@@ -3044,14 +2911,10 @@ pub enum TerminalErrorCode {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UserActor {
     #[serde(rename = "id")]
-    pub id: UserId,
+    pub id: winwincode_domain::generated::UserId,
     #[serde(rename = "kind")]
     pub kind: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct UserId(pub String);
 
 /// Replaces the registered capability snapshot for the current Worker instance.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -3061,19 +2924,19 @@ pub struct WorkerCapabilitiesMessage {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "observedAt")]
-    pub observed_at: Instant,
+    pub observed_at: winwincode_domain::generated::Instant,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerInstanceId")]
-    pub worker_instance_id: WorkerInstanceId,
+    pub worker_instance_id: winwincode_domain::generated::WorkerInstanceId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -3099,7 +2962,7 @@ pub enum WorkerCapabilityFeature {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerCapabilitySet {
     #[serde(rename = "capabilityDigest")]
-    pub capability_digest: Sha256Digest,
+    pub capability_digest: winwincode_domain::generated::Sha256Digest,
     #[serde(rename = "features")]
     pub features: Vec<WorkerCapabilityFeature>,
     #[serde(rename = "maxConcurrentJobs")]
@@ -3133,7 +2996,7 @@ pub struct WorkerDrainPayload {
     #[serde(rename = "reason")]
     pub reason: String,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -3151,13 +3014,13 @@ pub struct WorkerEnableCommand {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerEnablePayload {
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerGetParameters {
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -3179,25 +3042,25 @@ pub struct WorkerHeartbeatAckMessage {
     #[serde(rename = "error")]
     pub error: Option<ExecutionPortError>,
     #[serde(rename = "heartbeatSequence")]
-    pub heartbeat_sequence: ExecutionSequence,
+    pub heartbeat_sequence: winwincode_domain::generated::ExecutionSequence,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "nextHeartbeatWithinMs")]
     pub next_heartbeat_within_ms: i64,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "serverTime")]
-    pub server_time: Instant,
+    pub server_time: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerInstanceId")]
-    pub worker_instance_id: WorkerInstanceId,
+    pub worker_instance_id: winwincode_domain::generated::WorkerInstanceId,
 }
 
 /// Reports liveness, capacity, and lease progress for one Worker instance.
@@ -3208,31 +3071,22 @@ pub struct WorkerHeartbeatMessage {
     #[serde(rename = "capacity")]
     pub capacity: WorkerCapacity,
     #[serde(rename = "heartbeatSequence")]
-    pub heartbeat_sequence: ExecutionSequence,
+    pub heartbeat_sequence: winwincode_domain::generated::ExecutionSequence,
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "observedAt")]
-    pub observed_at: Instant,
+    pub observed_at: winwincode_domain::generated::Instant,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerInstanceId")]
-    pub worker_instance_id: WorkerInstanceId,
+    pub worker_instance_id: winwincode_domain::generated::WorkerInstanceId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct WorkerId(pub String);
-
-/// Identity of one Worker process boot; changes after every restart.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct WorkerInstanceId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerListParameters {
@@ -3265,11 +3119,11 @@ pub struct WorkerProjection {
     #[serde(rename = "capacity")]
     pub capacity: i64,
     #[serde(rename = "id")]
-    pub id: WorkerId,
+    pub id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "lastHeartbeatAt")]
-    pub last_heartbeat_at: Option<Instant>,
+    pub last_heartbeat_at: Option<winwincode_domain::generated::Instant>,
     #[serde(rename = "revision")]
-    pub revision: Revision,
+    pub revision: winwincode_domain::generated::Revision,
     #[serde(rename = "state")]
     pub state: String,
 }
@@ -3282,19 +3136,19 @@ pub struct WorkerRegisterMessage {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "startedAt")]
-    pub started_at: Instant,
+    pub started_at: winwincode_domain::generated::Instant,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerInstanceId")]
-    pub worker_instance_id: WorkerInstanceId,
+    pub worker_instance_id: winwincode_domain::generated::WorkerInstanceId,
 }
 
 /// Returns the idempotent registration result and restart lease recovery rule.
@@ -3310,37 +3164,29 @@ pub struct WorkerRegistrationResultMessage {
     #[serde(rename = "leaseRecovery")]
     pub lease_recovery: String,
     #[serde(rename = "messageId")]
-    pub message_id: ExecutionMessageId,
+    pub message_id: winwincode_domain::generated::ExecutionMessageId,
     #[serde(rename = "requestId")]
-    pub request_id: RequestId,
+    pub request_id: winwincode_domain::generated::RequestId,
     #[serde(rename = "schemaVersion")]
     pub schema_version: SchemaVersion,
     #[serde(rename = "sentAt")]
-    pub sent_at: Instant,
+    pub sent_at: winwincode_domain::generated::Instant,
     #[serde(rename = "serverTime")]
-    pub server_time: Instant,
+    pub server_time: winwincode_domain::generated::Instant,
     #[serde(rename = "status")]
     pub status: String,
     #[serde(rename = "workerId")]
-    pub worker_id: WorkerId,
+    pub worker_id: winwincode_domain::generated::WorkerId,
     #[serde(rename = "workerInstanceId")]
-    pub worker_instance_id: WorkerInstanceId,
+    pub worker_instance_id: winwincode_domain::generated::WorkerInstanceId,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct WorkerSessionId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct WorkspaceId(pub String);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceScope {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "organizationId")]
-    pub organization_id: OrganizationId,
+    pub organization_id: winwincode_domain::generated::OrganizationId,
     #[serde(rename = "workspaceId")]
-    pub workspace_id: WorkspaceId,
+    pub workspace_id: winwincode_domain::generated::WorkspaceId,
 }

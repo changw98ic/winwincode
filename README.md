@@ -204,6 +204,8 @@ packages/native-*/     四个平台的单目标原生包
 crates/helper/         Codex helper 与平台沙箱入口
 crates/kernel/         内嵌 Codex Thread、权限、事件和生命周期
 crates/native/         Node 原生模块边界
+crates/winwincode-domain/  由 canonical schema 生成且只定义一次的 Rust ID 和基础值类型
+crates/winwincode-api/     直接复用上述共用类型的 Rust HTTP、WebSocket 和 ExecutionPort 数据结构
 upstream/              固定上游身份、补丁和许可记录
 tests/                 无密钥流程、产品界面、恢复、安全和发布检查
 ```
