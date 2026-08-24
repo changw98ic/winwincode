@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{DeliveryId, RequestId};
 
-use crate::domain::{Delivery, request_identifier};
+use crate::domain::{Delivery, portable_identifier, request_identifier, safe_non_negative};
 
 pub const DELIVERY_STORE_SCHEMA_VERSION: u8 = 1;
 
@@ -74,6 +74,8 @@ pub enum DeliveryStoreErrorCode {
 pub struct DeliveryStoreError {
     code: DeliveryStoreErrorCode,
     message: String,
+    expected_revision: Option<u64>,
+    current_revision: Option<u64>,
 }
 
 impl DeliveryStoreError {
@@ -83,6 +85,17 @@ impl DeliveryStoreError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Revision supplied by the rejected command, when the failure is a
+    /// concurrency conflict.
+    pub const fn expected_revision(&self) -> Option<u64> {
+        self.expected_revision
+    }
+
+    /// Authoritative revision observed while rejecting a stale command.
+    pub const fn current_revision(&self) -> Option<u64> {
+        self.current_revision
     }
 }
 
@@ -98,6 +111,21 @@ fn store_error(code: DeliveryStoreErrorCode, message: impl Into<String>) -> Deli
     DeliveryStoreError {
         code,
         message: message.into(),
+        expected_revision: None,
+        current_revision: None,
+    }
+}
+
+fn revision_conflict(
+    expected_revision: u64,
+    current_revision: u64,
+    message: impl Into<String>,
+) -> DeliveryStoreError {
+    DeliveryStoreError {
+        code: DeliveryStoreErrorCode::RevisionConflict,
+        message: message.into(),
+        expected_revision: Some(expected_revision),
+        current_revision: Some(current_revision),
     }
 }
 
@@ -180,6 +208,10 @@ pub enum DeliveryQuery {
 }
 
 /// One-method write interface for the Control Plane application layer.
+///
+/// This aggregate journal resolves replay only inside one Delivery. The HTTP
+/// command receipt resolves the canonical `actor + scope + requestId` identity
+/// before commands reach this port.
 pub trait DeliveryCommandPort: Send + Sync {
     /// Applies a validated create or append command.
     ///
@@ -201,7 +233,7 @@ pub trait DeliveryQueryPort: Send + Sync {
     ///
     /// Returns [`DeliveryStoreError`] when the Delivery is absent, corrupt, or
     /// cannot be loaded from the backend.
-    fn query(&self, query: DeliveryQuery) -> Result<StoredDelivery, DeliveryStoreError>;
+    fn query(&self, query: DeliveryQuery) -> Result<Delivery, DeliveryStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +246,8 @@ pub enum JournalEntryState {
 pub struct JournalRecordBytes {
     pub sequence: u64,
     pub state: JournalEntryState,
+    /// Digest metadata used for opaque compare-and-publish and verified on recovery.
+    pub digest: String,
     pub bytes: Vec<u8>,
 }
 
@@ -416,21 +450,50 @@ impl<'journal> DeliveryStore<'journal> {
             created_at_millis: record.snapshot.snapshot().created_at_millis,
             first_record_digest: record.digest.clone(),
         };
-        self.journal()
-            .publish(AtomicPublication::Create {
-                delivery_id: record.delivery_id.clone(),
-                manifest: encode_manifest(&manifest)?,
-                first_record: JournalRecordBytes {
-                    sequence: 1,
-                    state: JournalEntryState::Published,
-                    bytes: encode_record(&record)?,
-                },
-            })
-            .map_err(map_backend_error)?;
-        Ok(DeliveryStoreMutationResult {
-            snapshot: record.snapshot,
-            replayed: false,
-        })
+        let publication = AtomicPublication::Create {
+            delivery_id: record.delivery_id.clone(),
+            manifest: encode_manifest(&manifest)?,
+            first_record: JournalRecordBytes {
+                sequence: 1,
+                state: JournalEntryState::Published,
+                digest: record.digest.clone(),
+                bytes: encode_record(&record)?,
+            },
+        };
+        match self.journal().publish(publication) {
+            Ok(()) => Ok(DeliveryStoreMutationResult {
+                snapshot: record.snapshot,
+                replayed: false,
+            }),
+            Err(error) if error.code == JournalBackendErrorCode::AlreadyExists => {
+                let stored = self.read(&record.delivery_id)?;
+                let first = stored.records.first().ok_or_else(|| {
+                    store_error(
+                        DeliveryStoreErrorCode::StoreCorrupt,
+                        "delivery has no verified first record",
+                    )
+                })?;
+                if first.request_id != record.request_id {
+                    return Err(map_backend_error(error));
+                }
+                if first.request_digest != record.request_digest
+                    || first.operation != DeliveryMutationOperation::DeliveryCreated
+                {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::RequestConflict,
+                        format!(
+                            "request {} was already used for another delivery mutation",
+                            record.request_id.0
+                        ),
+                    ));
+                }
+                Ok(DeliveryStoreMutationResult {
+                    snapshot: first.snapshot.clone(),
+                    replayed: true,
+                })
+            }
+            Err(error) => Err(map_backend_error(error)),
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -476,19 +539,23 @@ impl<'journal> DeliveryStore<'journal> {
         if command.expected_revision != stored.snapshot.revision()
             || command.snapshot.revision() != stored.snapshot.revision() + 1
         {
-            return Err(store_error(
-                DeliveryStoreErrorCode::RevisionConflict,
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
                 "delivery revision changed before mutation",
             ));
         }
-        let previous = stored
-            .records
-            .last()
-            .expect("verified journal is non-empty");
+        let previous = stored.records.last().ok_or_else(|| {
+            store_error(
+                DeliveryStoreErrorCode::StoreCorrupt,
+                "delivery has no verified tail record",
+            )
+        })?;
         let sequence = parse_sequence(&previous.sequence)? + 1;
         if command.snapshot.revision() != sequence {
-            return Err(store_error(
-                DeliveryStoreErrorCode::RevisionConflict,
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
                 "delivery revision and durable sequence diverged",
             ));
         }
@@ -508,6 +575,7 @@ impl<'journal> DeliveryStore<'journal> {
             record: JournalRecordBytes {
                 sequence,
                 state: JournalEntryState::Published,
+                digest: record.digest.clone(),
                 bytes: encode_record(&record)?,
             },
         };
@@ -530,8 +598,9 @@ impl<'journal> DeliveryStore<'journal> {
                         replayed: true,
                     });
                 }
-                Err(store_error(
-                    DeliveryStoreErrorCode::RevisionConflict,
+                Err(revision_conflict(
+                    command.expected_revision,
+                    raced.snapshot.revision(),
                     "another mutation published this delivery revision",
                 ))
             }
@@ -540,6 +609,12 @@ impl<'journal> DeliveryStore<'journal> {
     }
 
     fn read(&self, delivery_id: &DeliveryId) -> Result<StoredDelivery, DeliveryStoreError> {
+        portable_identifier(&delivery_id.0, "deliveryId").map_err(|error| {
+            store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                error.to_string(),
+            )
+        })?;
         let loaded = self
             .journal()
             .load(delivery_id)
@@ -567,9 +642,11 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
 }
 
 impl DeliveryQueryPort for DeliveryStore<'_> {
-    fn query(&self, query: DeliveryQuery) -> Result<StoredDelivery, DeliveryStoreError> {
+    fn query(&self, query: DeliveryQuery) -> Result<Delivery, DeliveryStoreError> {
         match query {
-            DeliveryQuery::Get(delivery_id) => self.read(&delivery_id),
+            DeliveryQuery::Get(delivery_id) => {
+                self.read(&delivery_id).map(|stored| stored.snapshot)
+            }
         }
     }
 }
@@ -670,6 +747,9 @@ fn decode_manifest(bytes: &[u8]) -> Result<DeliveryStoreManifest, DeliveryStoreE
             "delivery manifest schemaVersion is unsupported",
         ));
     }
+    portable_identifier(&manifest.delivery_id.0, "manifest deliveryId")
+        .and_then(|()| safe_non_negative(manifest.created_at_millis, "manifest createdAtMillis"))
+        .map_err(|error| store_error(DeliveryStoreErrorCode::StoreCorrupt, error.to_string()))?;
     validate_digest(
         &manifest.first_record_digest,
         DeliveryStoreErrorCode::StoreCorrupt,
@@ -691,7 +771,9 @@ fn decode_record(bytes: &[u8]) -> Result<DeliveryStoreRecord, DeliveryStoreError
             "delivery record schemaVersion is unsupported",
         ));
     }
-    parse_sequence(&record.sequence)?;
+    portable_identifier(&record.delivery_id.0, "record deliveryId")
+        .map_err(|error| store_error(DeliveryStoreErrorCode::StoreCorrupt, error.to_string()))?;
+    let sequence = parse_sequence(&record.sequence)?;
     validate_request(&record.request_id, &record.request_digest)
         .map_err(|error| store_error(DeliveryStoreErrorCode::StoreCorrupt, error.message))?;
     if let Some(previous) = &record.previous_digest {
@@ -710,6 +792,12 @@ fn decode_record(bytes: &[u8]) -> Result<DeliveryStoreRecord, DeliveryStoreError
         return Err(store_error(
             DeliveryStoreErrorCode::StoreCorrupt,
             "delivery record digest changed",
+        ));
+    }
+    if record.snapshot.id() != &record.delivery_id || record.snapshot.revision() != sequence {
+        return Err(store_error(
+            DeliveryStoreErrorCode::StoreCorrupt,
+            "delivery record does not match its snapshot",
         ));
     }
     Ok(record)
@@ -771,6 +859,7 @@ fn verify_journal(
         let record = decode_record(&entry.bytes)?;
         if record.delivery_id != manifest.delivery_id
             || parse_sequence(&record.sequence)? != entry.sequence
+            || record.digest != entry.digest
             || record.previous_digest != previous_digest
             || record.snapshot.revision() != entry.sequence
             || record.snapshot.id() != &manifest.delivery_id
@@ -789,7 +878,12 @@ fn verify_journal(
         previous_digest = Some(record.digest.clone());
         records.push(record);
     }
-    let first = &records[0];
+    let first = records.first().ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::StoreCorrupt,
+            "delivery has no verified first record",
+        )
+    })?;
     if first.operation != DeliveryMutationOperation::DeliveryCreated
         || first.digest != manifest.first_record_digest
         || first.snapshot.snapshot().created_at_millis != manifest.created_at_millis
@@ -799,7 +893,16 @@ fn verify_journal(
             "delivery manifest does not identify its first record",
         ));
     }
-    let snapshot = records.last().expect("non-empty checked").snapshot.clone();
+    let snapshot = records
+        .last()
+        .ok_or_else(|| {
+            store_error(
+                DeliveryStoreErrorCode::StoreCorrupt,
+                "delivery has no verified tail record",
+            )
+        })?
+        .snapshot
+        .clone();
     Ok(StoredDelivery {
         manifest,
         records,
@@ -894,15 +997,8 @@ impl DeliveryJournalPort for InMemoryDeliveryJournal {
                             "delivery has no published record",
                         )
                     })?;
-                let tail_record: DeliveryStoreRecord = serde_json::from_slice(&tail.bytes)
-                    .map_err(|error| {
-                        JournalBackendError::new(
-                            JournalBackendErrorCode::Io,
-                            format!("stored record is malformed: {error}"),
-                        )
-                    })?;
                 if tail.sequence != expected_tail_sequence
-                    || tail_record.digest != expected_tail_digest
+                    || tail.digest != expected_tail_digest
                     || record.state != JournalEntryState::Published
                     || record.sequence != expected_tail_sequence + 1
                 {
@@ -984,6 +1080,8 @@ mod tests {
             })
             .expect_err("revision conflict");
         assert_eq!(error.code(), DeliveryStoreErrorCode::RevisionConflict);
+        assert_eq!(error.expected_revision(), Some(0));
+        assert_eq!(error.current_revision(), Some(1));
     }
 
     #[test]
@@ -1053,6 +1151,56 @@ mod tests {
     }
 
     #[test]
+    fn journal_digest_metadata_must_match_opaque_record_bytes() {
+        let (backend, store) = create_store();
+        backend
+            .journals
+            .lock()
+            .expect("lock")
+            .get_mut("delivery-store-main")
+            .expect("journal")
+            .records[0]
+            .digest = REQUEST_B.into();
+
+        assert_eq!(
+            store
+                .read(snapshot(1, "draft").id())
+                .expect_err("digest metadata mismatch")
+                .code(),
+            DeliveryStoreErrorCode::StoreCorrupt
+        );
+    }
+
+    #[test]
+    fn codec_rejects_invalid_persisted_delivery_identities() {
+        let (_, store) = create_store();
+        let stored = store.read(snapshot(1, "draft").id()).expect("read");
+
+        let mut manifest = stored.manifest;
+        manifest.delivery_id = DeliveryId("delivery\ninvalid".into());
+        assert_eq!(
+            DeliveryJournalCodec::decode_manifest(
+                &DeliveryJournalCodec::encode_manifest(&manifest).expect("manifest bytes")
+            )
+            .expect_err("invalid manifest identity")
+            .code(),
+            DeliveryStoreErrorCode::StoreCorrupt
+        );
+
+        let mut record = stored.records[0].clone();
+        record.delivery_id = DeliveryId("delivery\ninvalid".into());
+        record.digest = record_digest(&record).expect("record digest");
+        assert_eq!(
+            DeliveryJournalCodec::decode_record(
+                &DeliveryJournalCodec::encode_record(&record).expect("record bytes")
+            )
+            .expect_err("invalid record identity")
+            .code(),
+            DeliveryStoreErrorCode::StoreCorrupt
+        );
+    }
+
+    #[test]
     fn concurrent_append_publishes_one_revision() {
         let (backend, _) = create_store();
         let left = DeliveryStore::new(Arc::clone(&backend));
@@ -1082,6 +1230,12 @@ mod tests {
             right.join().expect("right thread"),
         ];
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let loser = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("one concurrent writer loses");
+        assert_eq!(loser.expected_revision(), Some(1));
+        assert_eq!(loser.current_revision(), Some(2));
         let reader = DeliveryStore::new(backend);
         assert_eq!(
             reader
@@ -1106,6 +1260,7 @@ mod tests {
             .push(JournalRecordBytes {
                 sequence: 2,
                 state: JournalEntryState::Pending,
+                digest: REQUEST_B.into(),
                 bytes: b"not authoritative".to_vec(),
             });
         assert_eq!(
