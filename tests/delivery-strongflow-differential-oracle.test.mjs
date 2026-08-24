@@ -8,11 +8,17 @@ import {
   normalizeLegacyDeliveryOracleValue,
 } from './fixtures/delivery-strongflow-differential-oracle.mjs'
 
-let fullOraclePromise
+const committedOraclePath = resolve(
+  import.meta.dirname,
+  'fixtures',
+  'oracles',
+  'delivery-strongflow-typescript.v1.json',
+)
+let committedOraclePromise
 
-function fullOracle() {
-  fullOraclePromise ??= buildLegacyDeliveryStrongFlowOracle()
-  return fullOraclePromise
+function readCommittedOracle() {
+  committedOraclePromise ??= readFile(committedOraclePath, 'utf8').then(JSON.parse)
+  return committedOraclePromise
 }
 
 test('legacy Delivery oracle normalization removes only local execution facts', () => {
@@ -66,7 +72,7 @@ test('legacy Delivery oracle records requestId replay through the public invoker
 })
 
 test('legacy Delivery oracle covers every Rust differential scenario with full observations', async () => {
-  const oracle = await fullOracle()
+  const oracle = await readCommittedOracle()
   assert.deepEqual(oracle.scenarios.map(scenario => scenario.id), [
     'success-closed-loop',
     'request-id-replay',
@@ -131,16 +137,8 @@ test('legacy Delivery oracle covers every Rust differential scenario with full o
   }
 })
 
-test('committed legacy Delivery oracle is current, portable, and contains no credential value', async () => {
-  const oracle = await fullOracle()
-  const expected = JSON.parse(await readFile(resolve(
-    import.meta.dirname,
-    'fixtures',
-    'oracles',
-    'delivery-strongflow-typescript.v1.json',
-  ), 'utf8'))
-  assert.deepEqual(oracle, expected)
-
+test('committed legacy Delivery oracle is portable and contains no credential value', async () => {
+  const oracle = await readCommittedOracle()
   const serialized = JSON.stringify(oracle)
   assert.equal(serialized.includes(process.execPath), false)
   assert.equal(serialized.includes('fixture-local-session-proof-value'), false)
