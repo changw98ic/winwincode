@@ -12614,6 +12614,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-control-plane"
+version = "0.0.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-api",
+ "winwincode-domain",
+ "winwincode-storage",
+]
+
+[[package]]
 name = "winwincode-delivery"
 version = "0.0.0"
 dependencies = [
@@ -12621,13 +12633,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-domain",
-]
-
-[[package]]
-name = "winwincode-control-plane"
-version = "0.0.0"
-dependencies = [
- "winwincode-storage",
 ]
 
 [[package]]
@@ -12676,6 +12681,8 @@ name = "winwincode-storage"
 version = "0.0.0"
 dependencies = [
  "rusqlite",
+ "sha2 0.10.9",
+ "winwincode-domain",
 ]
 
 [[package]]

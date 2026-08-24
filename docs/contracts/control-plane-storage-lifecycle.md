@@ -58,9 +58,22 @@ HTTP Command
 - 已改状态却没有可恢复事件；
 - 已通知客户端成功，数据库随后回滚。
 
-`requestId`、`expectedRevision` 和领域校验在写状态前完成。重复请求与 revision 冲突的
-具体结果继续使用 canonical HTTP 错误合同；存储 adapter 只实现同一事务结果，不新增
-adapter 专用业务语义。
+`requestId`、`expectedRevision` 和领域校验在写状态前完成。命令回执的完整身份是
+`actor + scope + requestId`，其中 scope 包含当前层级实际存在的全部组织、工作区、项目和
+仓库 ID。相同身份和相同命令摘要返回已经持久化的回执；相同身份却带不同摘要时返回
+幂等冲突；不同 actor 或不同完整 scope 可以各自使用同一个 `requestId`。
+
+Control Plane 通过 canonical `CommandEnvelope` 生成这组身份和命令摘要。JSON 对象字段的
+书写顺序不改变摘要。存储只收到带类型的身份键和 SHA-256 摘要，不保存命令 payload、
+原始凭据或认证证明。重放时返回的 event ID 从已经持久化的 outbox 读取，不采信重试方
+重新提交的 `StateChange`。
+
+SQLite schema v1 启动时一次性迁移到 v2。旧回执缺少 actor 和 scope，只能进入一个保留
+的迁移身份；状态、outbox 顺序和发布状态保持不变。迁移完成后只运行 v2 的复合身份查询，
+不存在旧版 `requestId` 全局查询分支。
+
+重复请求与 revision 冲突的具体结果继续使用 canonical HTTP 错误合同；存储 adapter 只
+实现同一事务结果，不新增 adapter 专用业务语义。
 
 ## 启动顺序
 
@@ -137,7 +150,9 @@ SQLite 的 WAL、busy timeout 或 PostgreSQL 的 isolation level 是 adapter 实
 
 ## Rust 公共检查边界
 
-阶段 2.1 冻结以下公共名字，让集成测试从 crate 外部验证行为：
+阶段 2.1 冻结以下公共名字，让集成测试从 crate 外部验证行为。Control Plane 的主要提交
+入口只接受 canonical `CommandEnvelope + StateChange`；低层 `StateCommit` 和回执身份键
+只属于 `winwincode-storage` 端口，不从 Control Plane 根模块导出：
 
 生命周期入口是 `ControlPlane::start_local`、`ControlPlane::commit` 和
 `ControlPlane::shutdown`；测试只能通过这些公开入口观察启动、提交和关闭结果。
@@ -150,11 +165,13 @@ winwincode-control-plane
 │  └─ ControlPlane::shutdown
 ├─ ControlPlaneConfig
 ├─ EventPublisher
-├─ StateCommit / CommitReceipt
+├─ StateChange / CommitReceipt
 ├─ ShutdownReport
 └─ StartError / CommitError / ShutdownError
 
 winwincode-storage
+├─ ReceiptActorKey / ReceiptScopeKey / ReceiptIdentity
+├─ StateCommit
 ├─ ProductStateStorage
 │  ├─ commit
 │  ├─ load_state
@@ -176,6 +193,11 @@ Rust 集成测试目标固定为
 - 关闭先 flush outbox，再关闭 publisher 和 storage；
 - 关闭时发布失败也继续关闭 storage 并释放临时目录；
 - 关闭释放 SQLite 连接和临时目录。
+- 相同 actor、完整 scope 和 requestId 只重放相同命令摘要；
+- 不同 actor 或完整 scope 可以独立使用相同 requestId；
+- JSON 对象键顺序不改变命令摘要；
+- 非法 scope ID 在调用 storage 前失败；
+- 重放的 event ID 来自持久化 outbox，而不是重试的 StateChange。
 
 Node 门禁会通过 `cargo test --list` 核对固定测试名，并实际运行这个测试目标。Rust crate
 尚未出现时，这些检查不会被当成已经通过。

@@ -10,7 +10,14 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
 [dependencies]
+serde_json.workspace = true
+sha2.workspace = true
+winwincode-api.workspace = true
+winwincode-domain.workspace = true
 winwincode-storage = { path = "../winwincode-storage" }
+
+[dev-dependencies]
+rusqlite.workspace = true
 
 [lints]
 workspace = true

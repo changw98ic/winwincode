@@ -5,6 +5,11 @@ migrates storage before accepting commands, commits canonical state before
 publishing events, replays pending outbox events on startup, and explicitly
 closes the event publisher and storage during shutdown.
 
+Its public commit seam accepts the generated canonical `CommandEnvelope` plus
+one `StateChange`. The adapter validates the full actor/scope identity, hashes
+the semantic command, and only then calls the lower storage port. Storage-only
+receipt key constructors are not re-exported as Control Plane command inputs.
+
 Each running instance creates a unique temporary root with an ownership marker.
 Shutdown removes only the directory whose marker still matches that instance;
 failed startup and failed outbox flush follow the same close-and-release path.

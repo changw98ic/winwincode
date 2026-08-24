@@ -4,11 +4,20 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
+use winwincode_api::generated::{
+    Actor, CommandEnvelope, CommandName, OrganizationScope, ProjectScope, RepositoryScope,
+    SchemaVersion, Scope, ServiceAccountActor, UserActor, WorkspaceScope,
+};
 use winwincode_control_plane::{
     CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig, EventPublishError,
     EventPublisher, NewOutboxEvent, OutboxEvent, ProductStateStorage, ShutdownError,
-    ShutdownReport, StartError, StateCommit, StorageError, StoredState,
+    ShutdownReport, StartError, StateChange, StorageError, StorageErrorKind, StoredState,
 };
+use winwincode_domain::{
+    OrganizationId, ProjectId, RepositoryId, RequestId, ServiceAccountId, UserId, WorkspaceId,
+};
+use winwincode_storage::{ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -117,7 +126,7 @@ impl ProductStateStorage for TraceStorage {
             })
             .collect();
         Ok(CommitReceipt {
-            request_id: commit.request_id.clone(),
+            receipt_identity: commit.receipt_identity.clone(),
             stream_id: commit.stream_id.clone(),
             revision,
             event_ids: commit
@@ -197,14 +206,185 @@ fn committed_event(sequence: u64, event_id: &str) -> OutboxEvent {
     }
 }
 
-fn commit(request_id: &str, expected_revision: u64, state: &[u8], event_id: &str) -> StateCommit {
-    StateCommit::new(
+fn command(
+    request_id: &str,
+    expected_revision: i64,
+    actor: Actor,
+    scope: Scope,
+    payload: serde_json::Value,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        actor,
+        command: CommandName::DeliveryAdvance,
+        expected_revision: winwincode_domain::Revision(expected_revision),
+        payload,
+        request_id: RequestId(request_id.to_owned()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope,
+    }
+}
+
+fn user_actor(value: &str) -> Actor {
+    Actor::UserActor(UserActor {
+        id: UserId(value.to_owned()),
+        kind: "user".to_owned(),
+    })
+}
+
+fn service_actor(value: &str) -> Actor {
+    Actor::ServiceAccountActor(ServiceAccountActor {
+        id: ServiceAccountId(value.to_owned()),
+        kind: "service_account".to_owned(),
+    })
+}
+
+fn repository_scope(
+    organization_id: &str,
+    workspace_id: &str,
+    project_id: &str,
+    repository_id: &str,
+) -> Scope {
+    Scope::RepositoryScope(RepositoryScope {
+        kind: "repository".to_owned(),
+        organization_id: OrganizationId(organization_id.to_owned()),
+        workspace_id: WorkspaceId(workspace_id.to_owned()),
+        project_id: ProjectId(project_id.to_owned()),
+        repository_id: RepositoryId(repository_id.to_owned()),
+    })
+}
+
+fn organization_scope(organization_id: &str) -> Scope {
+    Scope::OrganizationScope(OrganizationScope {
+        kind: "organization".to_owned(),
+        organization_id: OrganizationId(organization_id.to_owned()),
+    })
+}
+
+fn workspace_scope(organization_id: &str, workspace_id: &str) -> Scope {
+    Scope::WorkspaceScope(WorkspaceScope {
+        kind: "workspace".to_owned(),
+        organization_id: OrganizationId(organization_id.to_owned()),
+        workspace_id: WorkspaceId(workspace_id.to_owned()),
+    })
+}
+
+fn project_scope(organization_id: &str, workspace_id: &str, project_id: &str) -> Scope {
+    Scope::ProjectScope(ProjectScope {
+        kind: "project".to_owned(),
+        organization_id: OrganizationId(organization_id.to_owned()),
+        workspace_id: WorkspaceId(workspace_id.to_owned()),
+        project_id: ProjectId(project_id.to_owned()),
+    })
+}
+
+fn default_command(request_id: &str, expected_revision: i64) -> CommandEnvelope {
+    command(
         request_id,
-        "product-session:one",
         expected_revision,
-        state.to_vec(),
-        vec![event(event_id)],
+        user_actor("usr_01J00000000000000000000000"),
+        repository_scope(
+            "org_01J00000000000000000000000",
+            "wsp_01J00000000000000000000000",
+            "prj_01J00000000000000000000000",
+            "rep_01J00000000000000000000000",
+        ),
+        serde_json::json!({"operation": "advance"}),
     )
+}
+
+fn request_id_with_ordinal(ordinal: usize) -> String {
+    format!("req_{ordinal:026}")
+}
+
+fn state_change(state: &[u8], event_id: &str) -> StateChange {
+    state_change_for("product-session:one", state, event_id)
+}
+
+fn state_change_for(stream_id: &str, state: &[u8], event_id: &str) -> StateChange {
+    StateChange::new(stream_id, state.to_vec(), vec![event(event_id)])
+}
+
+fn alternate_receipt_identities(
+    base_actor: &Actor,
+    base_scope: &Scope,
+) -> Vec<(Actor, Scope, &'static str, &'static str)> {
+    vec![
+        (
+            service_actor("svc_01J00000000000000000000000"),
+            base_scope.clone(),
+            "stream-actor",
+            "event-actor",
+        ),
+        (
+            base_actor.clone(),
+            organization_scope("org_01J00000000000000000000000"),
+            "stream-scope-kind",
+            "event-scope-kind",
+        ),
+        (
+            base_actor.clone(),
+            repository_scope(
+                "org_01J00000000000000000000001",
+                "wsp_01J00000000000000000000000",
+                "prj_01J00000000000000000000000",
+                "rep_01J00000000000000000000000",
+            ),
+            "stream-organization",
+            "event-organization",
+        ),
+        (
+            base_actor.clone(),
+            repository_scope(
+                "org_01J00000000000000000000000",
+                "wsp_01J00000000000000000000001",
+                "prj_01J00000000000000000000000",
+                "rep_01J00000000000000000000000",
+            ),
+            "stream-workspace",
+            "event-workspace",
+        ),
+        (
+            base_actor.clone(),
+            repository_scope(
+                "org_01J00000000000000000000000",
+                "wsp_01J00000000000000000000000",
+                "prj_01J00000000000000000000001",
+                "rep_01J00000000000000000000000",
+            ),
+            "stream-project",
+            "event-project",
+        ),
+        (
+            base_actor.clone(),
+            repository_scope(
+                "org_01J00000000000000000000000",
+                "wsp_01J00000000000000000000000",
+                "prj_01J00000000000000000000000",
+                "rep_01J00000000000000000000001",
+            ),
+            "stream-repository",
+            "event-repository",
+        ),
+    ]
+}
+
+fn assert_receipt_excludes_sensitive_command_values(root: &std::path::Path) {
+    let connection = Connection::open(root.join("control-plane.sqlite3"))
+        .expect("receipt database should open for inspection");
+    let persisted_receipt_text: String = connection
+        .query_row(
+            "SELECT CAST(actor_key AS TEXT) || CAST(scope_key AS TEXT) || request_id || \
+                    command_digest || stream_id || CAST(revision AS TEXT) \
+             FROM command_receipts WHERE stream_id = 'stream-base'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the durable receipt should be readable");
+    assert!(!persisted_receipt_text.contains("proof-must-not-be-persisted"));
+    assert!(!persisted_receipt_text.contains("credential-must-not-be-persisted"));
+    connection
+        .close()
+        .expect("inspection connection should close");
 }
 
 #[test]
@@ -245,7 +425,10 @@ fn commit_persists_state_and_outbox_before_publishing_the_event() {
     trace.lock().expect("trace lock").clear();
 
     let receipt = control_plane
-        .commit(commit("request-1", 0, b"state-v1", "event-1"))
+        .commit(
+            &default_command("req_01J00000000000000000000010", 0),
+            state_change(b"state-v1", "event-1"),
+        )
         .expect("state and event should commit");
 
     assert_eq!(receipt.revision, 1);
@@ -262,6 +445,231 @@ fn commit_persists_state_and_outbox_before_publishing_the_event() {
 }
 
 #[test]
+fn command_receipts_use_canonical_actor_full_scope_request_and_payload_digest() {
+    let root = temporary_directory("canonical-receipt-identity");
+    let (publisher, _) = RecordingPublisher::successful();
+    let mut control_plane =
+        ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(publisher))
+            .expect("the local Control Plane should start");
+    let request_id = "req_01J00000000000000000000020";
+    let base_actor = user_actor("usr_01J00000000000000000000000");
+    let base_scope = repository_scope(
+        "org_01J00000000000000000000000",
+        "wsp_01J00000000000000000000000",
+        "prj_01J00000000000000000000000",
+        "rep_01J00000000000000000000000",
+    );
+    let base = command(
+        request_id,
+        0,
+        base_actor.clone(),
+        base_scope.clone(),
+        serde_json::json!({
+            "actorProof": "proof-must-not-be-persisted",
+            "credential": "credential-must-not-be-persisted",
+            "operation": "advance",
+        }),
+    );
+    let first = control_plane
+        .commit(
+            &base,
+            state_change_for("stream-base", b"base", "event-base"),
+        )
+        .expect("base command should commit");
+    assert!(!first.idempotent_replay);
+
+    for (actor, scope, stream_id, event_id) in
+        alternate_receipt_identities(&base_actor, &base_scope)
+    {
+        let receipt = control_plane
+            .commit(
+                &command(
+                    request_id,
+                    0,
+                    actor,
+                    scope,
+                    serde_json::json!({"operation": "advance"}),
+                ),
+                state_change_for(stream_id, stream_id.as_bytes(), event_id),
+            )
+            .expect("another actor or complete scope may reuse the request id");
+        assert!(!receipt.idempotent_replay);
+    }
+
+    let replay = control_plane
+        .commit(
+            &base,
+            state_change_for(
+                "ignored-retry-stream",
+                b"ignored retry state",
+                "ignored-retry-event",
+            ),
+        )
+        .expect("the same command digest should replay its durable receipt");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.stream_id, "stream-base");
+    assert_eq!(replay.event_ids, ["event-base"]);
+
+    let changed = command(
+        request_id,
+        0,
+        base_actor,
+        base_scope,
+        serde_json::json!({"operation": "different"}),
+    );
+    let error = control_plane
+        .commit(
+            &changed,
+            state_change_for("stream-changed", b"changed", "event-changed"),
+        )
+        .expect_err("the same receipt identity cannot represent another command digest");
+    assert!(matches!(
+        error,
+        CommitError::Storage(ref source) if source.kind() == StorageErrorKind::RequestConflict
+    ));
+
+    control_plane.shutdown().expect("shutdown should succeed");
+    assert_receipt_excludes_sensitive_command_values(&root);
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn command_digest_is_stable_when_json_object_keys_arrive_in_another_order() {
+    let root = temporary_directory("canonical-command-digest");
+    let (publisher, _) = RecordingPublisher::successful();
+    let mut control_plane =
+        ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(publisher))
+            .expect("the local Control Plane should start");
+    let request_id = "req_01J00000000000000000000021";
+    let first: serde_json::Value = serde_json::from_str(r#"{"z":3,"nested":{"b":2,"a":1},"a":1}"#)
+        .expect("first JSON payload");
+    let reordered: serde_json::Value =
+        serde_json::from_str(r#"{"a":1,"nested":{"a":1,"b":2},"z":3}"#)
+            .expect("reordered JSON payload");
+    let first_command = command(
+        request_id,
+        0,
+        user_actor("usr_01J00000000000000000000000"),
+        repository_scope(
+            "org_01J00000000000000000000000",
+            "wsp_01J00000000000000000000000",
+            "prj_01J00000000000000000000000",
+            "rep_01J00000000000000000000000",
+        ),
+        first,
+    );
+    let reordered_command = CommandEnvelope {
+        payload: reordered,
+        ..first_command.clone()
+    };
+
+    control_plane
+        .commit(
+            &first_command,
+            state_change_for("stream-json", b"first", "event-json"),
+        )
+        .expect("first command should commit");
+    let replay = control_plane
+        .commit(
+            &reordered_command,
+            state_change_for("ignored", b"ignored", "ignored-event"),
+        )
+        .expect("JSON key order must not change the semantic command digest");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.event_ids, ["event-json"]);
+
+    control_plane.shutdown().expect("shutdown should succeed");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn invalid_scope_ids_fail_before_the_storage_port_is_called() {
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let (storage, _) = TraceStorage::new(Arc::clone(&trace), vec![vec![]], None);
+    let publisher = RecordingPublisher {
+        trace: Arc::clone(&trace),
+        ..RecordingPublisher::default()
+    };
+    let mut control_plane = ControlPlane::start(Box::new(storage), Box::new(publisher))
+        .expect("the Control Plane should start");
+    trace.lock().expect("trace lock").clear();
+    let valid_org = "org_01J00000000000000000000000";
+    let valid_workspace = "wsp_01J00000000000000000000000";
+    let valid_project = "prj_01J00000000000000000000000";
+    let valid_repository = "rep_01J00000000000000000000000";
+    let invalid_scopes = [
+        organization_scope(""),
+        organization_scope("organization-not-canonical"),
+        workspace_scope("", valid_workspace),
+        workspace_scope("organization-not-canonical", valid_workspace),
+        workspace_scope(valid_org, ""),
+        workspace_scope(valid_org, "workspace-not-canonical"),
+        project_scope("", valid_workspace, valid_project),
+        project_scope("organization-not-canonical", valid_workspace, valid_project),
+        project_scope(valid_org, "", valid_project),
+        project_scope(valid_org, "workspace-not-canonical", valid_project),
+        project_scope(valid_org, valid_workspace, ""),
+        project_scope(valid_org, valid_workspace, "project-not-canonical"),
+        repository_scope("", valid_workspace, valid_project, valid_repository),
+        repository_scope(
+            "organization-not-canonical",
+            valid_workspace,
+            valid_project,
+            valid_repository,
+        ),
+        repository_scope(valid_org, "", valid_project, valid_repository),
+        repository_scope(
+            valid_org,
+            "workspace-not-canonical",
+            valid_project,
+            valid_repository,
+        ),
+        repository_scope(valid_org, valid_workspace, "", valid_repository),
+        repository_scope(
+            valid_org,
+            valid_workspace,
+            "project-not-canonical",
+            valid_repository,
+        ),
+        repository_scope(valid_org, valid_workspace, valid_project, ""),
+        repository_scope(
+            valid_org,
+            valid_workspace,
+            valid_project,
+            "repository-not-canonical",
+        ),
+    ];
+
+    for (index, scope) in invalid_scopes.into_iter().enumerate() {
+        let error = control_plane
+            .commit(
+                &command(
+                    &request_id_with_ordinal(100 + index),
+                    0,
+                    user_actor("usr_01J00000000000000000000000"),
+                    scope,
+                    serde_json::json!({"operation": "advance"}),
+                ),
+                state_change_for(
+                    &format!("invalid-scope-{index}"),
+                    b"must not commit",
+                    &format!("invalid-event-{index}"),
+                ),
+            )
+            .expect_err("an invalid scope id must fail closed");
+        assert!(matches!(
+            error,
+            CommitError::Storage(ref source) if source.kind() == StorageErrorKind::InvalidInput
+        ));
+    }
+    assert!(
+        trace.lock().expect("trace lock").is_empty(),
+        "invalid scope values must not reach storage or publication"
+    );
+    control_plane.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
 fn failed_outbox_insert_rolls_back_the_state_write() {
     let root = temporary_directory("rollback");
     let (publisher, _) = RecordingPublisher::successful();
@@ -269,11 +677,17 @@ fn failed_outbox_insert_rolls_back_the_state_write() {
         ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(publisher))
             .expect("the local Control Plane should start");
     control_plane
-        .commit(commit("request-1", 0, b"state-v1", "duplicate-event"))
+        .commit(
+            &default_command("req_01J00000000000000000000011", 0),
+            state_change(b"state-v1", "duplicate-event"),
+        )
         .expect("the first commit should succeed");
 
     let error = control_plane
-        .commit(commit("request-2", 1, b"state-v2", "duplicate-event"))
+        .commit(
+            &default_command("req_01J00000000000000000000012", 1),
+            state_change(b"state-v2", "duplicate-event"),
+        )
         .expect_err("the duplicate outbox event should fail the transaction");
     assert!(matches!(error, CommitError::Storage(_)));
     let state = control_plane
@@ -297,7 +711,10 @@ fn publish_failure_keeps_committed_state_and_pending_outbox_for_restart() {
     .expect("the first Control Plane should start");
 
     let error = control_plane
-        .commit(commit("request-1", 0, b"state-v1", "event-for-restart"))
+        .commit(
+            &default_command("req_01J00000000000000000000013", 0),
+            state_change(b"state-v1", "event-for-restart"),
+        )
         .expect_err("publication should fail after the database commit");
     let receipt = error
         .committed_receipt()
@@ -342,7 +759,13 @@ fn restart_replays_committed_but_unpublished_outbox_events() {
         winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage should open");
     storage
         .commit(&StateCommit::new(
-            "request-1",
+            ReceiptIdentity::new(
+                ReceiptActorKey::from_encoded(b"test-actor".to_vec()).expect("actor key"),
+                ReceiptScopeKey::from_encoded(b"test-scope".to_vec()).expect("scope key"),
+                RequestId("req_01J00000000000000000000014".to_owned()),
+            )
+            .expect("receipt identity"),
+            winwincode_domain::Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             "stream-1",
             0,
             b"one".to_vec(),
