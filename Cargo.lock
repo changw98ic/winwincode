@@ -12610,6 +12610,14 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "winwincode-domain",
+]
+
+[[package]]
+name = "winwincode-domain"
+version = "0.0.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
