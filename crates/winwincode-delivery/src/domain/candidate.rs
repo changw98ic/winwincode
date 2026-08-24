@@ -159,14 +159,6 @@ impl ValidatedGitSnapshotFact {
         &self.changed_hunks
     }
 
-    pub(crate) fn artifact_ref(&self) -> &str {
-        &self.artifact_ref
-    }
-
-    pub(crate) fn artifact_sha256(&self) -> &str {
-        &self.artifact_sha256
-    }
-
     pub(crate) const fn last_event_sequence(&self) -> u64 {
         self.last_event_sequence
     }
@@ -372,8 +364,8 @@ pub fn freeze_delivery_candidate(
     let binding = exact_producer_binding(delivery, producer, &snapshot.session_binding_id)?;
 
     assert_validated_git_snapshot_fact(snapshot)?;
-    validate_git_snapshot(delivery, &snapshot)?;
-    verify_terminal_snapshot_binding(producer, binding, &facts.terminal_outcome, &snapshot)?;
+    validate_git_snapshot(delivery, snapshot)?;
+    verify_terminal_snapshot_binding(producer, binding, &facts.terminal_outcome, snapshot)?;
 
     let mut changed_paths = snapshot.changed_paths.clone();
     changed_paths.sort_by(|left, right| left.path.cmp(&right.path));
@@ -417,7 +409,7 @@ pub fn freeze_delivery_candidate(
 ///
 /// Returns an error when the candidate is no longer the exact current derived
 /// candidate for the Delivery.
-pub fn assert_frozen_candidate_current(
+pub(crate) fn assert_frozen_candidate_current(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
 ) -> Result<(), DeliveryValidationError> {

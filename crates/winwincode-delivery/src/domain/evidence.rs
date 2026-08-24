@@ -232,13 +232,6 @@ impl ResolvedDeliveryEvidence {
         &self.evidence
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "verdict consumes the sealed outcome after branch integration"
-        )
-    )]
     pub(crate) const fn outcome(&self) -> VerifiedEvidenceOutcome {
         self.outcome
     }
@@ -877,10 +870,6 @@ pub(crate) mod test_support {
     /// Resolves one current role-scoped runtime Evidence through the production
     /// resolver. Cross-module tests never construct [`ResolvedDeliveryEvidence`]
     /// or any accepted source fact directly.
-    #[expect(
-        dead_code,
-        reason = "consumed by verdict tests after the Evidence branch is integrated"
-    )]
     pub(crate) fn resolved_role_evidence(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,

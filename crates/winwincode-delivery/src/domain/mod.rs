@@ -27,9 +27,10 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
+pub(crate) use candidate::assert_frozen_candidate_current;
 pub use candidate::{
     CandidatePathFact, CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate,
-    ValidatedGitSnapshotFact, assert_frozen_candidate_current, freeze_delivery_candidate,
+    ValidatedGitSnapshotFact, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType};
 pub use session_binding::SessionBinding;
@@ -39,7 +40,10 @@ pub use spec::{
 };
 pub use stage_run::{DeliveryStage, StageRun, StageRunActorType, StageRunStatus};
 pub use task::{DeliveryTask, DeliveryTaskStatus};
-pub use verdict::{CriterionResult, CriterionVerdict, DeliveryVerdict, DeliveryVerdictStatus};
+pub use verdict::{
+    ComputedDeliveryVerdict, CriterionResult, CriterionVerdict, DeliveryVerdict,
+    DeliveryVerdictStatus, compute_delivery_verdict,
+};
 pub use winwincode_domain::{AttentionItemId, DeliveryId, DeliveryTaskId, EvidenceId, StageRunId};
 
 pub const DELIVERY_SCHEMA_VERSION: u8 = 3;

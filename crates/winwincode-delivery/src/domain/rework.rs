@@ -177,7 +177,7 @@ pub(crate) fn safest_attention_transition(actions: &[VerdictAttentionAction]) ->
     }
 }
 
-/// Returns one plus every reworking StageRun in the current Delivery.
+/// Returns one plus every reworking `StageRun` in the current Delivery.
 pub(crate) fn next_rework_attempt(delivery: &Delivery) -> u64 {
     delivery
         .snapshot()
@@ -512,6 +512,7 @@ mod tests {
         CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
     };
 
+    #[allow(clippy::too_many_lines)]
     fn current_failure() -> (
         Delivery,
         FrozenDeliveryCandidate,
@@ -724,7 +725,7 @@ mod tests {
             &delivery,
             &candidate,
             &scope,
-            &[annotation.clone()],
+            std::slice::from_ref(&annotation),
             &ReworkHistoryFact {
                 prior_failed_criterion_ids: vec![],
             },
