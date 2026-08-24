@@ -29,7 +29,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
 pub use candidate::{
     CandidatePathFact, CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate,
-    assert_frozen_candidate_current, freeze_delivery_candidate,
+    ValidatedGitSnapshotFact, assert_frozen_candidate_current, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType};
 pub use session_binding::SessionBinding;

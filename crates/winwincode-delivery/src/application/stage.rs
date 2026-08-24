@@ -123,6 +123,19 @@ impl VerifiedTerminalOutcome {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_verified_terminal_outcome(
+    stage_run_id: StageRunId,
+    lease_identity: ActiveLeaseIdentity,
+    status: TerminalOutcomeStatus,
+) -> VerifiedTerminalOutcome {
+    VerifiedTerminalOutcome {
+        stage_run_id,
+        lease_identity,
+        status,
+    }
+}
+
 /// Verifies a Worker terminal outcome against both Delivery and scheduler facts.
 ///
 /// # Errors
