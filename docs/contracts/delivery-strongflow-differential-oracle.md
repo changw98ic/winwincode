@@ -88,5 +88,11 @@ Verify that the committed baseline matches the current TypeScript behavior:
 corepack pnpm oracle:delivery:check
 ```
 
+The regular parallel Node test lane reads the committed ten-scenario baseline
+and runs only the small `request-id-replay` live tracer. `test:ts` then invokes
+the exporter with `--check` once, after the Node suite, so the full current
+behavior comparison is isolated from the parallel test processes and reuses
+the TypeScript build produced at the start of `test:ts`.
+
 The Rust migration gate should run the new Rust runner against this committed
 file before the TypeScript owner is deleted.
