@@ -811,6 +811,7 @@ export class DeliveryServiceFixtureTestkit {
     this.root = resolve(options.root)
     this.home = join(this.root, 'home')
     this.repository = join(this.root, 'repository')
+    this.repositoryLocator = options.repositoryLocator ?? this.repository
     this.deliveryId = options.deliveryId ?? DEFAULT_DELIVERY_ID
     this.clock = new DeterministicFixtureClock(options.clockStart)
     this.repositoryIdentity = options.repositoryIdentity
@@ -839,6 +840,7 @@ export class DeliveryServiceFixtureTestkit {
       ownsRoot,
       deliveryId: options.deliveryId,
       clockStart: options.clockStart ?? DELIVERY_FIXTURE_BASE_TIME + 100,
+      repositoryLocator: options.repositoryLocator,
       repositoryIdentity,
     })
   }
@@ -908,7 +910,7 @@ export class DeliveryServiceFixtureTestkit {
       repository: {
         schemaVersion: DELIVERY_SCHEMA_VERSION,
         kind: 'local-git',
-        locator: this.repository,
+        locator: this.repositoryLocator,
       },
       baseRevision: this.repositoryIdentity.baseCommitId,
       maxReworkAttempts: 2,
