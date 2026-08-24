@@ -112,7 +112,7 @@
       "requestedChanges"
     ],
     "storedIn": "AttentionItem.resolution",
-    "publicProjection": "action-only",
+    "publicProjection": "typed-action-comments-and-requested-changes",
     "approveRequestedChangesMustBeEmpty": true,
     "requestChangesRequiresRequestedChanges": true,
     "rejectRequiresComments": true
@@ -259,6 +259,7 @@
       "summary",
       "approach",
       "components",
+      "comments",
       "connections",
       "architectureDiagram",
       "processDiagram",
@@ -267,6 +268,7 @@
       "taskProposals",
       "reviewStatus",
       "decision",
+      "requestedChanges",
       "reviewerId",
       "reviewedAt"
     ],
@@ -306,7 +308,7 @@
   "currentFindings": [
     {
       "id": "approved-only-authority",
-      "status": "present",
+      "status": "closed",
       "meaning": "The current fact exists only after approval, so an open human review has no typed safe solution projection.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
@@ -321,7 +323,7 @@
     },
     {
       "id": "caller-injected-review-fact",
-      "status": "present",
+      "status": "closed",
       "meaning": "ProjectionInput currently accepts a caller-supplied review fact instead of rebuilding current canonical Attention authority.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/mod.rs",
@@ -336,7 +338,7 @@
     },
     {
       "id": "pending-task-proposals-missing",
-      "status": "present",
+      "status": "closed",
       "meaning": "The current approved fact and digest do not contain the ordered DeliveryTaskProposal graph needed for human review and later promotion.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
@@ -351,7 +353,7 @@
     },
     {
       "id": "legacy-solution-wire",
-      "status": "present",
+      "status": "closed",
       "meaning": "The current detail wire uses solution and SolutionProjection instead of the single solutionReview field and SolutionReviewProjection type.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/mod.rs",
@@ -417,6 +419,7 @@
     "factVisibility": "pub(crate)",
     "projectionTypeName": "SolutionReviewProjection",
     "taskProposalTypeName": "DeliveryTaskProposal",
+    "taskProposalVisibility": "pub(crate)",
     "resolver": "resolve_current_solution_review",
     "consumer": "project_current_solution_review",
     "applicationPath": "crates/winwincode-delivery/src/application/solution_review.rs",
@@ -435,6 +438,7 @@
       "summary",
       "approach",
       "components",
+      "comments",
       "connections",
       "architecture_diagram",
       "process_diagram",
@@ -444,6 +448,7 @@
       "prepared_at",
       "review_status",
       "decision",
+      "requested_changes",
       "reviewer_id",
       "reviewed_at"
     ],
@@ -460,6 +465,7 @@
       "summary",
       "approach",
       "components",
+      "comments",
       "connections",
       "architecture_diagram",
       "process_diagram",
@@ -468,6 +474,7 @@
       "task_proposals",
       "review_status",
       "decision",
+      "requested_changes",
       "reviewer_id",
       "reviewed_at"
     ],

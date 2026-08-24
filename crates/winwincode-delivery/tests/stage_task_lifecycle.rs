@@ -1069,6 +1069,13 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
     attach_successful_handoff(&mut input, &planning);
     let review = advance(&planning, input).expect("review starts").delivery;
     let mut snapshot = review.into_snapshot();
+    let blocker_run = snapshot.stage_runs.last_mut().expect("blocker run");
+    blocker_run.stage = DeliveryStage::Verifying;
+    blocker_run.actor_type = StageRunActorType::Codex;
+    blocker_run.role = "verifier".into();
+    blocker_run.status = winwincode_delivery::domain::StageRunStatus::Running;
+    snapshot.attention_items[0].item_type =
+        winwincode_delivery::domain::AttentionItemType::VerificationBlocked;
     let mut second = snapshot.attention_items[0].clone();
     second.id = AttentionItemId("attention-second-blocker".into());
     second.title = "Second review".into();
@@ -1086,7 +1093,7 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
             expected_context: first.context,
             actor: "reviewer-one".into(),
             decision: AttentionDecision::Resolved,
-            resolution: "first decision approved".into(),
+            resolution: "first verification blocker resolved".into(),
             now_millis: 1_800_000_000_200,
         },
     )
@@ -1121,13 +1128,13 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
             expected_context: remaining.context,
             actor: "reviewer-one".into(),
             decision: AttentionDecision::Resolved,
-            resolution: "second decision approved".into(),
+            resolution: "second verification blocker resolved".into(),
             now_millis: 1_800_000_000_300,
         },
     )
     .expect("remaining current blocker can resolve");
 
-    assert_eq!(completed.snapshot().status, DeliveryStatus::Executing);
+    assert_eq!(completed.snapshot().status, DeliveryStatus::Verifying);
     assert!(!completed.snapshot().attention_items.iter().any(|item| {
         item.blocking && item.status == winwincode_delivery::domain::AttentionItemStatus::Open
     }));
@@ -1138,7 +1145,7 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
             .last()
             .expect("review run")
             .status,
-        winwincode_delivery::domain::StageRunStatus::Succeeded
+        winwincode_delivery::domain::StageRunStatus::Running
     );
 }
 

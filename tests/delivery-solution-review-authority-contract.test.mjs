@@ -64,6 +64,7 @@ const PUBLIC_PROJECTION_FIELDS = Object.freeze([
   'architectureDiagram',
   'attentionItemId',
   'components',
+  'comments',
   'connections',
   'decision',
   'deliveryId',
@@ -77,6 +78,7 @@ const PUBLIC_PROJECTION_FIELDS = Object.freeze([
   'reviewerId',
   'reviewSetSha256',
   'reviewStatus',
+  'requestedChanges',
   'risks',
   'solutionId',
   'summary',
@@ -394,6 +396,7 @@ test('the phase 2.5.1.2 application trigger activates typed resolver and adversa
   assert.equal(gate.factVisibility, 'pub(crate)')
   assert.equal(gate.projectionTypeName, 'SolutionReviewProjection')
   assert.equal(gate.taskProposalTypeName, 'DeliveryTaskProposal')
+  assert.equal(gate.taskProposalVisibility, 'pub(crate)')
   assert.equal(gate.resolver, 'resolve_current_solution_review')
   assert.equal(gate.consumer, 'project_current_solution_review')
   assert.deepEqual([...gate.requiredTests].sort(), REQUIRED_RUST_TESTS)
@@ -439,7 +442,7 @@ test('the phase 2.5.1.2 application trigger activates typed resolver and adversa
     [...gate.requiredProjectionPrivateFields].sort(),
     'SolutionReviewProjection public JSON fields changed outside the allowlist',
   )
-  const proposalBody = namedRustStruct(applicationSource, gate.taskProposalTypeName)
+  const proposalBody = namedRustStruct(applicationSource, gate.taskProposalTypeName, 'crate')
   assert.deepEqual(
     rustStructFields(proposalBody).sort(),
     [...gate.requiredTaskProposalPrivateFields].sort(),
