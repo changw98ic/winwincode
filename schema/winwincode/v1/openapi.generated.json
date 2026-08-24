@@ -1,0 +1,19 @@
+{
+  "components": {
+    "schemas": {}
+  },
+  "info": {
+    "license": {
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    },
+    "title": "WinWinCode Control Plane and Execution Port",
+    "version": "1.0.0"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.1.0",
+  "paths": {},
+  "x-generated-from": [],
+  "x-source-digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+}
