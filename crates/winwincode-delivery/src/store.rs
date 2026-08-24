@@ -47,6 +47,8 @@ pub enum DeliveryMutationOperation {
     AttentionResolved,
     #[serde(rename = "verdict.submitted")]
     VerdictSubmitted,
+    #[serde(rename = "rework.clarified")]
+    ReworkClarified,
 }
 
 impl FromStr for DeliveryMutationOperation {
@@ -60,6 +62,7 @@ impl FromStr for DeliveryMutationOperation {
             "session.bound" => Ok(Self::SessionBound),
             "attention.resolved" => Ok(Self::AttentionResolved),
             "verdict.submitted" => Ok(Self::VerdictSubmitted),
+            "rework.clarified" => Ok(Self::ReworkClarified),
             _ => Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
                 "delivery mutation operation is unsupported",
@@ -235,6 +238,16 @@ pub struct ResolveDeliveryAttention {
     pub transition: ResolvedAttentionTransition,
 }
 
+/// Specialized bounded-rework clarification append created only from
+/// [`crate::application::stage::advance_rework`].
+#[derive(Debug, Clone)]
+pub struct ClarifyDeliveryRework {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub transition: StageAdvanceResult,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeliveryCommand {
     Create(CreateDelivery),
@@ -242,6 +255,7 @@ pub enum DeliveryCommand {
     StartStage(Box<StartDeliveryStage>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
     SubmitVerdict(Box<SubmitDeliveryVerdict>),
+    ClarifyRework(Box<ClarifyDeliveryRework>),
 }
 
 #[derive(Debug, Clone)]
@@ -569,10 +583,11 @@ impl<'journal> DeliveryStore<'journal> {
             DeliveryMutationOperation::StageStarted
                 | DeliveryMutationOperation::AttentionResolved
                 | DeliveryMutationOperation::VerdictSubmitted
+                | DeliveryMutationOperation::ReworkClarified
         ) {
             return Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
-                "stage, Attention, and Verdict mutations require their sealed specialized Delivery commands",
+                "stage, Attention, Verdict, and rework clarification mutations require their sealed specialized Delivery commands",
             ));
         }
         self.append_authorized(command, AppendAuthority::Generic)
@@ -622,6 +637,24 @@ impl<'journal> DeliveryStore<'journal> {
             snapshot: command.transition.delivery().clone(),
         };
         self.append_authorized(append, AppendAuthority::Verdict(&command.transition))
+    }
+
+    fn clarify_rework(
+        &self,
+        command: ClarifyDeliveryRework,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        let append = AppendDelivery {
+            delivery_id: command.transition.delivery.id().clone(),
+            request_id: command.request_id,
+            request_digest: command.request_digest,
+            operation: DeliveryMutationOperation::ReworkClarified,
+            expected_revision: command.expected_revision,
+            snapshot: command.transition.delivery.clone(),
+        };
+        self.append_authorized(
+            append,
+            AppendAuthority::ReworkClarification(&command.transition),
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -685,7 +718,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_start_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
             AppendAuthority::Attention(transition) => {
                 validate_authorized_operation(
@@ -695,7 +728,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
             AppendAuthority::Verdict(transition) => {
                 validate_authorized_operation(
@@ -705,7 +738,17 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+            }
+            AppendAuthority::ReworkClarification(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::ReworkClarified,
+                    "rework.clarified",
+                )?;
+                transition
+                    .validate_rework_clarification_source(&stored.snapshot)
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
         }
         if command.expected_revision != stored.snapshot.revision()
@@ -801,11 +844,13 @@ impl<'journal> DeliveryStore<'journal> {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AppendAuthority<'transition> {
     Generic,
     Stage(&'transition StageAdvanceResult),
     Attention(&'transition ResolvedAttentionTransition),
     Verdict(&'transition ComputedVerdictTransition),
+    ReworkClarification(&'transition StageAdvanceResult),
 }
 
 fn validate_authorized_operation(
@@ -824,7 +869,7 @@ fn validate_authorized_operation(
 }
 
 fn map_transition_error(
-    error: CoordinationError,
+    error: &CoordinationError,
     command: &AppendDelivery,
     current: &Delivery,
 ) -> DeliveryStoreError {
@@ -868,6 +913,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             DeliveryCommand::StartStage(start) => self.start_stage(*start),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
+            DeliveryCommand::ClarifyRework(clarify) => self.clarify_rework(*clarify),
         }
     }
 }

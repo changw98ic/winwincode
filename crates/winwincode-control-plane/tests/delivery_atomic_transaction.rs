@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, ExecutionJob, ExecutionLimits, ExecutionWorkspace,
-    RepositoryScope, SchemaVersion, Scope, UserActor,
+    Actor, CommandEnvelope, CommandName, ExecutionJob, ExecutionLimits, ExecutionScope,
+    ExecutionWorkspace, RepositoryScope, SchemaVersion, Scope, UserActor,
 };
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
@@ -19,11 +19,19 @@ use winwincode_delivery::application::stage::{AdvanceStageInput, NewStageIdentit
 use winwincode_delivery::domain::{
     DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
     SessionBindingId,
+    rework::{
+        ReworkClarificationReason,
+        test_support::{
+            ReworkDispatchFixture, ReworkJournalFixture, authorized_rework_dispatch,
+            repeated_rework_clarification,
+        },
+    },
 };
 use winwincode_delivery::store::{
-    AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort,
-    DeliveryQuery, DeliveryQueryPort, DeliveryStore, InMemoryDeliveryJournal, JournalBackendError,
-    LoadedDeliveryJournal, StartDeliveryStage,
+    AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalCodec,
+    DeliveryJournalPort, DeliveryQuery, DeliveryQueryPort, DeliveryStore, InMemoryDeliveryJournal,
+    JournalBackendError, LoadedDeliveryJournal, ResolveDeliveryAttention, StartDeliveryStage,
+    SubmitDeliveryVerdict,
 };
 use winwincode_domain::{
     AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant, OrganizationId,
@@ -142,6 +150,136 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
             repository_id: RepositoryId(canonical_id("rep", seed)),
         }),
     }
+}
+
+fn rework_advance_command(seed: u64, expected_revision: u64) -> CommandEnvelope {
+    let mut command = delivery_advance_command(seed);
+    command.expected_revision = Revision(
+        i64::try_from(expected_revision).expect("rework fixture revision fits transport range"),
+    );
+    command
+}
+
+fn pending_rework(
+    seed: u64,
+    fixture: &ReworkDispatchFixture,
+    digest_byte: char,
+    max_runtime_seconds: i64,
+) -> PendingDeliveryExecution {
+    prepare_delivery_advance(
+        RequestId(canonical_id("req", seed)),
+        fixture.transition.clone(),
+        DeliveryExecutionConfig {
+            payload_digest: Sha256Digest(format!("sha256:{}", digest_byte.to_string().repeat(64))),
+            workspace: ExecutionWorkspace {
+                checkout_revision: fixture.source_candidate_commit_id.clone(),
+                repository_id: RepositoryId(canonical_id("rep", seed)),
+                write_mode: "candidate".into(),
+            },
+            limits: ExecutionLimits {
+                deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
+                max_artifact_bytes: 10_000_000,
+                max_runtime_seconds,
+            },
+        },
+    )
+    .expect("pending authorized rework")
+}
+
+fn seed_rework_history(root: &PathBuf, fixture: &ReworkJournalFixture) {
+    let journal = InMemoryDeliveryJournal::new();
+    let store = DeliveryStore::borrowed(&journal);
+    store
+        .execute(DeliveryCommand::Create(CreateDelivery {
+            request_id: RequestId("1".repeat(64)),
+            request_digest: "1".repeat(64),
+            snapshot: fixture.initial_delivery.clone(),
+        }))
+        .expect("seed initial Delivery record");
+    store
+        .execute(DeliveryCommand::SubmitVerdict(Box::new(
+            SubmitDeliveryVerdict {
+                request_id: RequestId("2".repeat(64)),
+                request_digest: "2".repeat(64),
+                expected_revision: fixture.initial_delivery.revision(),
+                transition: fixture.verdict_transition.clone(),
+            },
+        )))
+        .expect("seed sealed Verdict record");
+    store
+        .execute(DeliveryCommand::ResolveAttention(Box::new(
+            ResolveDeliveryAttention {
+                request_id: RequestId("3".repeat(64)),
+                request_digest: "3".repeat(64),
+                expected_revision: fixture.verdict_transition.delivery().revision(),
+                transition: fixture.attention_transition.clone(),
+            },
+        )))
+        .expect("seed sealed Attention record");
+    let delivery_id = fixture.initial_delivery.id().clone();
+    let loaded = journal
+        .load(&delivery_id)
+        .expect("fixture journal read")
+        .expect("fixture journal");
+    let mut storage = SqliteStorage::open(root).expect("seed storage");
+    let key = AggregateJournalKey::new("delivery", delivery_id.0.clone()).expect("journal key");
+    for (index, record) in loaded.records.iter().enumerate() {
+        let decoded = DeliveryJournalCodec::decode_record(&record.bytes)
+            .expect("verified fixture journal record");
+        let storage_record = AggregateJournalRecord::new(
+            record.sequence,
+            record.digest.clone(),
+            record.bytes.clone(),
+        );
+        let publication = if index == 0 {
+            AggregateJournalPublication::Create {
+                key: key.clone(),
+                manifest: loaded.manifest.clone(),
+                first_record: storage_record,
+            }
+        } else {
+            let previous = &loaded.records[index - 1];
+            AggregateJournalPublication::Append {
+                key: key.clone(),
+                expected_tail_sequence: previous.sequence,
+                expected_tail_digest: previous.digest.clone(),
+                record: storage_record,
+            }
+        };
+        let numeric = 9_000 + u64::try_from(index).expect("small history index");
+        let receipt = storage
+            .commit(
+                &StateCommit::new(
+                    ReceiptIdentity::new(
+                        ReceiptActorKey::from_encoded(b"rework-seed-actor".to_vec())
+                            .expect("seed actor"),
+                        ReceiptScopeKey::from_encoded(b"rework-seed-scope".to_vec())
+                            .expect("seed scope"),
+                        RequestId(canonical_id("req", numeric)),
+                    )
+                    .expect("seed receipt identity"),
+                    Sha256Digest(format!("sha256:{}", format!("{:x}", index + 1).repeat(64))),
+                    format!("delivery:{}", delivery_id.0),
+                    u64::try_from(index).expect("small history revision"),
+                    decoded.snapshot.encode_json().expect("seed snapshot JSON"),
+                    vec![NewOutboxEvent::new(
+                        format!("rework-seed-event-{index}"),
+                        "delivery.seeded",
+                        format!("seed-{index}").into_bytes(),
+                    )],
+                )
+                .with_journal_publication(publication),
+            )
+            .expect("seed verified history record");
+        assert_eq!(
+            receipt.revision,
+            u64::try_from(index + 1).expect("small history revision")
+        );
+        storage
+            .mark_published(&receipt.events[0].event_id)
+            .expect("seed event acknowledgement");
+    }
+    Box::new(storage).close().expect("seed storage close");
 }
 
 #[derive(Default)]
@@ -871,4 +1009,316 @@ fn acknowledgement_failure_keeps_the_dispatched_job_pending_for_restart_replay()
     drop(replayed_events);
     restarted.shutdown().expect("restart shutdown");
     fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_reuse() {
+    let seed = 201;
+    let root = temporary_directory("authorized-rework-scope");
+    let fixture = authorized_rework_dispatch(&DeliveryId(canonical_id("dlv", seed)));
+    seed_rework_history(&root, &fixture.journal);
+    let pending = pending_rework(seed, &fixture, 'a', 3_600);
+    let command = rework_advance_command(seed, fixture.source_delivery.revision());
+    let ExecutionScope::DeliveryStageExecutionScope(scope) = &pending.job().scope else {
+        panic!("rework job must have Delivery stage scope");
+    };
+    let authorization = scope
+        .rework_authorization
+        .as_ref()
+        .expect("remediator job must carry structured authorization");
+    assert_eq!(pending.job().execution_profile, "remediator");
+    assert_eq!(pending.job().attempt, 1);
+    assert_eq!(authorization.candidate_ref, fixture.candidate_ref);
+    assert_eq!(
+        authorization.source_candidate_commit_id,
+        fixture.source_candidate_commit_id
+    );
+    assert_eq!(
+        pending.job().workspace.checkout_revision,
+        fixture.source_candidate_commit_id
+    );
+    assert!(authorization.requires_full_reverification);
+    assert_eq!(authorization.targets.len(), 1);
+    assert_eq!(
+        authorization.targets[0].delivery_task_id,
+        scope
+            .delivery_task_id
+            .clone()
+            .expect("authorized rework task")
+    );
+    assert_eq!(authorization.targets[0].diagram_id, "diagram-main");
+    assert_eq!(authorization.targets[0].node_id, "node-api");
+    assert_eq!(authorization.targets[0].file_path, "src/invitation.rs");
+    assert_eq!(authorization.targets[0].source_hunk_sha256, "b".repeat(64));
+    assert_eq!(
+        authorization.targets[0].evidence_ref_ids,
+        fixture
+            .evidence_ref_ids
+            .iter()
+            .map(|id| id.0.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(!pending.job().goal.contains("REWORK_AUTHORIZATION"));
+
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane should start");
+    let mut dispatcher = RecordingDispatcher::default();
+    let mut foreign = command.clone();
+    foreign.payload = serde_json::json!({"deliveryId": canonical_id("dlv", seed + 1)});
+    control_plane
+        .commit_delivery_execution(&foreign, &pending, &mut dispatcher)
+        .expect_err("authorization cannot cross Delivery identity");
+    assert!(dispatcher.jobs.is_empty());
+    let unchanged = control_plane
+        .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
+        .expect("source state read")
+        .expect("source state");
+    assert_eq!(unchanged.revision, fixture.source_delivery.revision());
+
+    let receipt = control_plane
+        .commit_delivery_execution(&command, &pending, &mut dispatcher)
+        .expect("authorized rework transaction");
+    assert!(!receipt.commit.replayed);
+    assert_eq!(receipt.commit.job, *pending.job());
+    assert_eq!(dispatcher.jobs, [pending.job().clone()]);
+    let committed = Delivery::decode_json(
+        &control_plane
+            .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
+            .expect("committed state read")
+            .expect("committed state")
+            .payload,
+    )
+    .expect("committed rework Delivery");
+    assert_eq!(committed.snapshot().status, DeliveryStatus::Reworking);
+    assert!(committed.snapshot().evidence.is_empty());
+    assert!(committed.snapshot().verdict.is_none());
+    assert_eq!(
+        committed
+            .snapshot()
+            .stage_runs
+            .last()
+            .expect("remediator StageRun")
+            .delivery_task_id,
+        scope.delivery_task_id
+    );
+
+    control_plane.shutdown().expect("shutdown should succeed");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn rework_request_replay_returns_original_durable_job_not_retry_config() {
+    let seed = 202;
+    let root = temporary_directory("authorized-rework-replay");
+    let fixture = authorized_rework_dispatch(&DeliveryId(canonical_id("dlv", seed)));
+    seed_rework_history(&root, &fixture.journal);
+    let original = pending_rework(seed, &fixture, 'a', 3_600);
+    let retry = pending_rework(seed, &fixture, 'f', 42);
+    assert_ne!(original.job().payload_digest, retry.job().payload_digest);
+    assert_ne!(original.job().limits, retry.job().limits);
+    let command = rework_advance_command(seed, fixture.source_delivery.revision());
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane should start");
+    let mut dispatcher = RecordingDispatcher::default();
+
+    let first = control_plane
+        .commit_delivery_execution(&command, &original, &mut dispatcher)
+        .expect("first authorized rework");
+    let replay = control_plane
+        .commit_delivery_execution(&command, &retry, &mut dispatcher)
+        .expect("authorized rework replay");
+
+    assert!(!first.commit.replayed);
+    assert!(replay.commit.replayed);
+    assert!(!replay.dispatched);
+    assert_eq!(replay.commit.job, first.commit.job);
+    assert_ne!(replay.commit.job, *retry.job());
+    assert_eq!(dispatcher.jobs, [original.job().clone()]);
+
+    control_plane.shutdown().expect("shutdown should succeed");
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("inspection database");
+    let counts: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_type = 'delivery' AND aggregate_id = ?1), \
+               (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?2), \
+               (SELECT COUNT(*) FROM outbox WHERE topic = 'execution.job.dispatch')",
+            [
+                fixture.source_delivery.id().0.as_str(),
+                command.request_id.0.as_str(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("durable replay counts");
+    assert_eq!(counts, (4, 1, 1));
+    connection.close().expect("inspection connection close");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn repeated_rework_commits_clarifying_without_dispatch_and_replays_one_event() {
+    let seed = 203;
+    let root = temporary_directory("rework-clarification");
+    let fixture = repeated_rework_clarification(&DeliveryId(canonical_id("dlv", seed)));
+    assert_eq!(
+        fixture.reason,
+        ReworkClarificationReason::RepeatedCriterionFailure
+    );
+    seed_rework_history(&root, &fixture.journal);
+    let command = rework_advance_command(seed, fixture.source_delivery.revision());
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&published),
+        }),
+    )
+    .expect("Control Plane should start");
+
+    let first = control_plane
+        .commit_delivery_rework_clarification(&command, &fixture.transition)
+        .expect("bounded rework clarification");
+    let replay = control_plane
+        .commit_delivery_rework_clarification(&command, &fixture.transition)
+        .expect("bounded rework clarification replay");
+    assert!(!first.idempotent_replay);
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.events, first.events);
+    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.events[0].topic, "delivery.rework.clarified");
+    assert_eq!(published.lock().expect("published events").len(), 1);
+    let state = control_plane
+        .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
+        .expect("clarified state read")
+        .expect("clarified state");
+    let clarified = Delivery::decode_json(&state.payload).expect("clarified Delivery");
+    assert_eq!(clarified.snapshot().status, DeliveryStatus::Clarifying);
+    assert_eq!(
+        clarified.snapshot().stage_runs.len(),
+        fixture.source_delivery.snapshot().stage_runs.len()
+    );
+    assert_eq!(
+        clarified.snapshot().session_bindings.len(),
+        fixture.source_delivery.snapshot().session_bindings.len()
+    );
+
+    control_plane.shutdown().expect("shutdown should succeed");
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("inspection database");
+    let job_events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE topic = 'execution.job.dispatch'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("job event count");
+    let journal_records: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_type = 'delivery' AND aggregate_id = ?1",
+            [fixture.source_delivery.id().0.as_str()],
+            |row| row.get(0),
+        )
+        .expect("journal count");
+    assert_eq!(job_events, 0);
+    assert_eq!(journal_records, 4);
+    connection.close().expect("inspection connection close");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn rework_failure_at_each_atomic_member_rolls_back_and_never_dispatches() {
+    let failure_points = [
+        (
+            "state",
+            "CREATE TRIGGER fail_rework_state BEFORE UPDATE ON product_state \
+             WHEN NEW.stream_id LIKE 'delivery:%' \
+             BEGIN SELECT RAISE(ABORT, 'injected rework state failure'); END;",
+        ),
+        (
+            "journal",
+            "CREATE TRIGGER fail_rework_journal BEFORE INSERT ON aggregate_journal_records \
+             WHEN NEW.sequence = 4 \
+             BEGIN SELECT RAISE(ABORT, 'injected rework journal failure'); END;",
+        ),
+        (
+            "receipt",
+            "CREATE TRIGGER fail_rework_receipt BEFORE INSERT ON command_receipts \
+             WHEN NEW.request_id LIKE 'req_%' \
+             BEGIN SELECT RAISE(ABORT, 'injected rework receipt failure'); END;",
+        ),
+        (
+            "outbox",
+            "CREATE TRIGGER fail_rework_outbox BEFORE INSERT ON outbox \
+             WHEN NEW.topic = 'execution.job.dispatch' \
+             BEGIN SELECT RAISE(ABORT, 'injected rework outbox failure'); END;",
+        ),
+    ];
+
+    for (offset, (member, trigger)) in failure_points.into_iter().enumerate() {
+        let seed = 210 + u64::try_from(offset).expect("small failure index");
+        let root = temporary_directory(&format!("rework-{member}-rollback"));
+        let fixture = authorized_rework_dispatch(&DeliveryId(canonical_id("dlv", seed)));
+        seed_rework_history(&root, &fixture.journal);
+        let pending = pending_rework(seed, &fixture, 'a', 3_600);
+        let command = rework_advance_command(seed, fixture.source_delivery.revision());
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("failure injection database");
+        connection.execute_batch(trigger).expect("failure trigger");
+        connection.close().expect("failure injector close");
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(&root),
+            Box::new(RecordingPublisher),
+        )
+        .expect("Control Plane should start");
+        let mut dispatcher = RecordingDispatcher::default();
+
+        control_plane
+            .commit_delivery_execution(&command, &pending, &mut dispatcher)
+            .expect_err("injected rework transaction failure");
+        assert!(dispatcher.jobs.is_empty(), "failure at {member}");
+        let state = control_plane
+            .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
+            .expect("source state read")
+            .expect("source state");
+        assert_eq!(
+            state.revision,
+            fixture.source_delivery.revision(),
+            "failure at {member}"
+        );
+        assert_eq!(
+            state.payload,
+            fixture
+                .source_delivery
+                .encode_json()
+                .expect("source Delivery JSON"),
+            "failure at {member}"
+        );
+        control_plane.shutdown().expect("shutdown should succeed");
+
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("inspection database");
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_type = 'delivery' AND aggregate_id = ?1), \
+                   (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?2), \
+                   (SELECT COUNT(*) FROM outbox WHERE topic = 'execution.job.dispatch')",
+                [
+                    fixture.source_delivery.id().0.as_str(),
+                    command.request_id.0.as_str(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("rollback counts");
+        assert_eq!(counts, (3, 0, 0), "failure at {member}");
+        connection.close().expect("inspection connection close");
+        fs::remove_dir_all(root).expect("database directory release");
+    }
 }

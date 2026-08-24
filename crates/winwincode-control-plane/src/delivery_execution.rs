@@ -448,7 +448,11 @@ fn execution_rework_scope(authorization: &ReworkAuthorization) -> DeliveryRework
             .map(|target| DeliveryReworkTargetScope {
                 delivery_task_id: target.delivery_task_id().clone(),
                 diagram_id: target.diagram_id().to_owned(),
-                evidence_ref_ids: target.evidence_ref_ids().to_vec(),
+                evidence_ref_ids: target
+                    .evidence_ref_ids()
+                    .iter()
+                    .map(|id| id.0.clone())
+                    .collect(),
                 file_path: target.file_path().to_owned(),
                 node_id: target.node_id().to_owned(),
                 source_hunk_sha256: target.hunk_sha256().to_owned(),
@@ -552,8 +556,8 @@ fn validate_request_id(request_id: &RequestId) -> Result<(), DeliveryExecutionEr
 }
 
 fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionError> {
-    let scope_valid = match &job.scope {
-        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+    let (scope_identity_valid, rework_scope_error) = match &job.scope {
+        ExecutionScope::DeliveryStageExecutionScope(scope) => (
             scope.kind == "delivery-stage"
                 && canonical_identifier(&scope.product_session_id.0, "psn")
                 && canonical_identifier(&scope.delivery_id.0, "dlv")
@@ -561,57 +565,124 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
                     .delivery_task_id
                     .as_ref()
                     .is_none_or(|id| canonical_identifier(&id.0, "dtk"))
-                && delivery_rework_scope_valid(job, scope)
-                && canonical_identifier(&scope.stage_run_id.0, "run")
-        }
-        ExecutionScope::ProductSessionExecutionScope(_) => false,
+                && canonical_identifier(&scope.stage_run_id.0, "run"),
+            delivery_rework_scope_error(job, scope),
+        ),
+        ExecutionScope::ProductSessionExecutionScope(_) => (false, Some("executionJob.scope.kind")),
     };
-    let valid = canonical_identifier(&job.job_id.0, "job")
-        && (1..=1_000).contains(&job.attempt)
-        && sha256_digest(&job.payload_digest.0)
-        && scope_valid
-        && canonical_identifier(&job.workspace.repository_id.0, "rep")
-        && bounded_length(&job.workspace.checkout_revision, 1, 200)
-        && job.workspace.write_mode == "candidate"
-        && bounded_length(&job.execution_profile, 1, 100)
-        && bounded_length(&job.goal, 1, 20_000)
-        && instant(&job.limits.deadline_at.0)
-        && (1..=604_800).contains(&job.limits.max_runtime_seconds)
-        && (0..=1_099_511_627_776).contains(&job.limits.max_artifact_bytes);
-    if valid {
-        Ok(())
-    } else {
-        Err(DeliveryExecutionError::InvalidEffect(
-            "generated ExecutionJob is invalid under the canonical ExecutionPort schema".to_owned(),
-        ))
+    for (field, valid) in [
+        (
+            "executionJob.jobId",
+            canonical_identifier(&job.job_id.0, "job"),
+        ),
+        ("executionJob.attempt", (1..=1_000).contains(&job.attempt)),
+        (
+            "executionJob.payloadDigest",
+            sha256_digest(&job.payload_digest.0),
+        ),
+        ("executionJob.scope.identity", scope_identity_valid),
+        (
+            "executionJob.workspace.repositoryId",
+            canonical_identifier(&job.workspace.repository_id.0, "rep"),
+        ),
+        (
+            "executionJob.workspace.checkoutRevision",
+            bounded_length(&job.workspace.checkout_revision, 1, 200),
+        ),
+        (
+            "executionJob.workspace.writeMode",
+            job.workspace.write_mode == "candidate",
+        ),
+        (
+            "executionJob.executionProfile",
+            bounded_length(&job.execution_profile, 1, 100),
+        ),
+        ("executionJob.goal", bounded_length(&job.goal, 1, 20_000)),
+        (
+            "executionJob.limits.deadlineAt",
+            instant(&job.limits.deadline_at.0),
+        ),
+        (
+            "executionJob.limits.maxRuntimeSeconds",
+            (1..=604_800).contains(&job.limits.max_runtime_seconds),
+        ),
+        (
+            "executionJob.limits.maxArtifactBytes",
+            (0..=1_099_511_627_776).contains(&job.limits.max_artifact_bytes),
+        ),
+    ] {
+        if !valid {
+            return Err(invalid_execution_value(field));
+        }
     }
+    if let Some(field) = rework_scope_error {
+        return Err(invalid_execution_value(field));
+    }
+    Ok(())
 }
 
-fn delivery_rework_scope_valid(job: &ExecutionJob, scope: &DeliveryStageExecutionScope) -> bool {
+#[allow(
+    clippy::too_many_lines,
+    reason = "every structured authorization field stays visibly fail-closed at the Worker boundary"
+)]
+fn delivery_rework_scope_error(
+    job: &ExecutionJob,
+    scope: &DeliveryStageExecutionScope,
+) -> Option<&'static str> {
     let Some(authorization) = scope.rework_authorization.as_ref() else {
-        return job.execution_profile != "remediator";
+        return (job.execution_profile == "remediator")
+            .then_some("executionJob.scope.reworkAuthorization");
     };
     let Some(task_id) = scope.delivery_task_id.as_ref() else {
-        return false;
+        return Some("executionJob.scope.deliveryTaskId");
     };
-    if job.execution_profile != "remediator"
-        || job.workspace.checkout_revision != authorization.source_candidate_commit_id
-        || !authorization.requires_full_reverification
-        || !sha256_digest(&authorization.authorization_digest.0)
-        || !authorization
-            .candidate_ref
-            .strip_prefix("git-candidate:sha256:")
-            .is_some_and(lowercase_sha256)
-        || !lowercase_sha256(&authorization.diff_sha256)
-        || !git_object_id(&authorization.source_candidate_commit_id)
-        || !git_object_id(&authorization.source_candidate_tree_id)
-        || authorization.targets.is_empty()
-        || authorization.targets.len() > 1_000
-    {
-        return false;
+    for (field, valid) in [
+        (
+            "executionJob.executionProfile",
+            job.execution_profile == "remediator",
+        ),
+        (
+            "executionJob.workspace.checkoutRevision",
+            job.workspace.checkout_revision == authorization.source_candidate_commit_id,
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.requiresFullReverification",
+            authorization.requires_full_reverification,
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.authorizationDigest",
+            sha256_digest(&authorization.authorization_digest.0),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.candidateRef",
+            authorization
+                .candidate_ref
+                .strip_prefix("git-candidate:sha256:")
+                .is_some_and(lowercase_sha256),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.diffSha256",
+            lowercase_sha256(&authorization.diff_sha256),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.sourceCandidateCommitId",
+            git_object_id(&authorization.source_candidate_commit_id),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.sourceCandidateTreeId",
+            git_object_id(&authorization.source_candidate_tree_id),
+        ),
+        (
+            "executionJob.scope.reworkAuthorization.targets",
+            !authorization.targets.is_empty() && authorization.targets.len() <= 1_000,
+        ),
+    ] {
+        if !valid {
+            return Some(field);
+        }
     }
     let mut targets = HashSet::with_capacity(authorization.targets.len());
-    authorization.targets.iter().all(|target| {
+    for target in &authorization.targets {
         let key = (
             target.delivery_task_id.0.as_str(),
             target.diagram_id.as_str(),
@@ -620,20 +691,48 @@ fn delivery_rework_scope_valid(job: &ExecutionJob, scope: &DeliveryStageExecutio
             target.source_hunk_sha256.as_str(),
         );
         let mut evidence = HashSet::with_capacity(target.evidence_ref_ids.len());
-        target.delivery_task_id == *task_id
-            && canonical_identifier(&target.delivery_task_id.0, "dtk")
-            && portable_execution_identifier(&target.diagram_id)
-            && portable_execution_identifier(&target.node_id)
-            && portable_path(&target.file_path)
-            && lowercase_sha256(&target.source_hunk_sha256)
-            && !target.evidence_ref_ids.is_empty()
-            && target.evidence_ref_ids.len() <= 1_000
-            && target
-                .evidence_ref_ids
-                .iter()
-                .all(|id| canonical_identifier(&id.0, "evd") && evidence.insert(id.0.as_str()))
-            && targets.insert(key)
-    })
+        for (field, valid) in [
+            (
+                "executionJob.scope.reworkAuthorization.targets.deliveryTaskId",
+                target.delivery_task_id == *task_id
+                    && canonical_identifier(&target.delivery_task_id.0, "dtk"),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.diagramId",
+                portable_execution_identifier(&target.diagram_id),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.nodeId",
+                portable_execution_identifier(&target.node_id),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.filePath",
+                portable_path(&target.file_path),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.sourceHunkSha256",
+                lowercase_sha256(&target.source_hunk_sha256),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets.evidenceRefIds",
+                !target.evidence_ref_ids.is_empty()
+                    && target.evidence_ref_ids.len() <= 1_000
+                    && target
+                        .evidence_ref_ids
+                        .iter()
+                        .all(|id| derived_evidence_id(id) && evidence.insert(id.as_str())),
+            ),
+            (
+                "executionJob.scope.reworkAuthorization.targets",
+                targets.insert(key),
+            ),
+        ] {
+            if !valid {
+                return Some(field);
+            }
+        }
+    }
+    None
 }
 
 fn git_object_id(value: &str) -> bool {
@@ -642,6 +741,12 @@ fn git_object_id(value: &str) -> bool {
 
 fn lowercase_sha256(value: &str) -> bool {
     value.len() == 64 && lowercase_hex(value)
+}
+
+fn derived_evidence_id(value: &str) -> bool {
+    value
+        .strip_prefix("evidence:sha256:")
+        .is_some_and(lowercase_sha256)
 }
 
 fn lowercase_hex(value: &str) -> bool {
@@ -810,7 +915,7 @@ fn decimal(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winwincode_domain::{DeliveryTaskId, EvidenceId};
+    use winwincode_domain::DeliveryTaskId;
 
     fn authorization_scope(file_path: &str) -> DeliveryReworkAuthorizationScope {
         DeliveryReworkAuthorizationScope {
@@ -823,7 +928,7 @@ mod tests {
             targets: vec![DeliveryReworkTargetScope {
                 delivery_task_id: DeliveryTaskId("dtk_01J00000000000000000000000".into()),
                 diagram_id: "diagram-main".into(),
-                evidence_ref_ids: vec![EvidenceId("evd_01J00000000000000000000000".into())],
+                evidence_ref_ids: vec![format!("evidence:sha256:{}", "f".repeat(64))],
                 file_path: file_path.into(),
                 node_id: "node-api".into(),
                 source_hunk_sha256: "e".repeat(64),
@@ -845,7 +950,7 @@ mod tests {
         assert_eq!(encoded["targets"][0]["nodeId"], "node-api");
         assert_eq!(
             encoded["targets"][0]["evidenceRefIds"][0],
-            "evd_01J00000000000000000000000"
+            format!("evidence:sha256:{}", "f".repeat(64))
         );
 
         let second = authorization_scope("src/foreign.rs");

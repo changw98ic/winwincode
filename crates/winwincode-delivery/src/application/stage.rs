@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
@@ -363,6 +363,18 @@ pub enum StageAdvanceEffect {
     Clarify(ReworkClarificationReason),
 }
 
+/// Immutable outbox projection for a bounded rework decision that requires
+/// human clarification instead of another Worker job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryReworkClarifiedEvent {
+    pub schema_version: u8,
+    pub delivery_id: DeliveryId,
+    pub delivery_revision: u64,
+    pub reason: ReworkClarificationReason,
+    pub occurred_at_millis: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageAdvanceResult {
     pub delivery: Delivery,
@@ -599,7 +611,13 @@ pub fn advance_rework(
             input.rework_authorization = Some(authorization);
             advance(delivery, input)
         }
-        ReworkDecision::Clarify(reason) => {
+        ReworkDecision::Clarify(clarification) => {
+            clarification
+                .validate_for_transition(delivery)
+                .map_err(|error| {
+                    CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+                })?;
+            let reason = clarification.reason();
             if delivery.revision() != input.expected_revision {
                 return Err(CoordinationError::new(
                     CoordinationErrorCode::RevisionConflict,

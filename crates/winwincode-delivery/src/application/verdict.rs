@@ -716,7 +716,8 @@ fn delivery_digest(delivery: &Delivery) -> Result<String, CoordinationError> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use winwincode_domain::{
-        CodexThreadId, DeliveryId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
+        CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, ProductSessionId, StageRunId,
+        WorkerSessionId,
     };
 
     use crate::domain::{
@@ -755,7 +756,15 @@ pub mod test_support {
         delivery_id: &DeliveryId,
         outcome: VerdictFixtureOutcome,
     ) -> VerdictFixture {
-        let delivery = verifying_delivery(delivery_id);
+        verdict_fixture_with_rework_limit(delivery_id, outcome, 3)
+    }
+
+    pub(crate) fn verdict_fixture_with_rework_limit(
+        delivery_id: &DeliveryId,
+        outcome: VerdictFixtureOutcome,
+        max_rework_attempts: u64,
+    ) -> VerdictFixture {
+        let delivery = verifying_delivery(delivery_id, max_rework_attempts);
         let candidate = frozen_candidate(
             &delivery,
             &StageRunId("stage-executor-1".into()),
@@ -795,17 +804,20 @@ pub mod test_support {
         }
     }
 
-    fn verifying_delivery(delivery_id: &DeliveryId) -> Delivery {
+    fn verifying_delivery(delivery_id: &DeliveryId, max_rework_attempts: u64) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.id = delivery_id.clone();
         snapshot.spec.delivery_id = delivery_id.clone();
+        snapshot.spec.max_rework_attempts = max_rework_attempts;
         snapshot.revision = 1;
         snapshot.status = DeliveryStatus::Verifying;
         snapshot.evidence.clear();
         snapshot.verdict = None;
         snapshot.attention_items.clear();
+        let canonical_task_id = DeliveryTaskId("dtk_01J00000000000000000000000".into());
         for task in &mut snapshot.tasks {
             task.delivery_id = delivery_id.clone();
+            task.id = canonical_task_id.clone();
             task.status = DeliveryTaskStatus::Verifying;
         }
 
@@ -818,6 +830,7 @@ pub mod test_support {
             writer.status = StageRunStatus::Succeeded;
             writer.started_at_millis = 1_800_000_000_010;
             writer.finished_at_millis = Some(1_800_000_000_020);
+            writer.delivery_task_id = Some(canonical_task_id.clone());
             writer.delivery_task_id.clone()
         };
         let writer_binding = &mut snapshot.session_bindings[0];
@@ -826,6 +839,7 @@ pub mod test_support {
         writer_binding.stage_run_id = StageRunId("stage-executor-1".into());
         writer_binding.product_session_id = ProductSessionId("product-executor".into());
         writer_binding.execution_job_id = ExecutionJobId("job-executor".into());
+        writer_binding.delivery_task_id = Some(canonical_task_id);
         writer_binding.worker_session_id = Some(WorkerSessionId("worker-executor".into()));
         writer_binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         writer_binding.bound_at_millis = 1_800_000_000_011;

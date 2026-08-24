@@ -8,6 +8,7 @@
 
 pub mod delivery_execution;
 mod delivery_transaction;
+mod rework_transaction;
 mod verdict_transaction;
 
 use std::fmt;
@@ -475,6 +476,31 @@ impl ControlPlane {
             DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
         })?;
         delivery_transaction::execute(storage, command, pending, dispatcher)
+    }
+
+    /// Atomically commits a constructor-derived bounded-rework clarification
+    /// without creating or dispatching an `ExecutionJob`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error before any durable write when the command,
+    /// transition, revision, receipt, or journal publication is not exact.
+    pub fn commit_delivery_rework_clarification(
+        &mut self,
+        command: &CommandEnvelope,
+        transition: &winwincode_delivery::application::stage::StageAdvanceResult,
+    ) -> Result<CommitReceipt, CommitError> {
+        let receipt = {
+            let storage = self.storage_mut().map_err(CommitError::Storage)?;
+            rework_transaction::execute(storage, command, transition)
+                .map_err(CommitError::Storage)?
+        };
+        self.flush_outbox()
+            .map_err(|source| CommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })?;
+        Ok(receipt)
     }
 
     /// Recomputes and atomically commits one Delivery's Evidence, Verdict,

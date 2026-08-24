@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{DeliveryId, DeliveryTaskId, EvidenceId, Sha256Digest, StageRunId};
 
@@ -103,10 +103,63 @@ struct ReworkHistoryIdentity<'history> {
     prior_failed_criterion_ids: &'history [AcceptanceCriterionId],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReworkClarificationReason {
     AttemptLimitExhausted,
     RepeatedCriterionFailure,
+}
+
+/// Constructor-derived proof that the current bounded rework policy requires
+/// human clarification instead of another remediator attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReworkClarification {
+    delivery_id: DeliveryId,
+    delivery_spec_id: super::DeliverySpecId,
+    delivery_spec_revision: u64,
+    delivery_revision: u64,
+    delivery_updated_at_millis: u64,
+    history_digest: Sha256Digest,
+    reason: ReworkClarificationReason,
+    clarification_digest: Sha256Digest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReworkClarificationIdentity<'clarification> {
+    delivery_id: &'clarification DeliveryId,
+    delivery_spec_id: &'clarification super::DeliverySpecId,
+    delivery_spec_revision: u64,
+    delivery_revision: u64,
+    delivery_updated_at_millis: u64,
+    history_digest: &'clarification Sha256Digest,
+    reason: &'clarification str,
+}
+
+impl ReworkClarification {
+    pub const fn reason(&self) -> ReworkClarificationReason {
+        self.reason
+    }
+
+    pub(crate) fn validate_for_transition(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<(), DeliveryValidationError> {
+        let current = self.clarification_digest == seal_rework_clarification(self)?
+            && self.delivery_id == *delivery.id()
+            && self.delivery_spec_id == delivery.snapshot().spec.id
+            && self.delivery_spec_revision == delivery.snapshot().spec.revision
+            && self.delivery_revision == delivery.revision()
+            && self.delivery_updated_at_millis == delivery.snapshot().updated_at_millis
+            && delivery.snapshot().status == DeliveryStatus::Reworking;
+        if current {
+            Ok(())
+        } else {
+            Err(invalid_rework(
+                "rework clarification is stale or belongs to another Delivery history",
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,10 +397,55 @@ fn seal_rework_authorization(
     )))
 }
 
+fn seal_rework_clarification(
+    clarification: &ReworkClarification,
+) -> Result<Sha256Digest, DeliveryValidationError> {
+    let identity = ReworkClarificationIdentity {
+        delivery_id: &clarification.delivery_id,
+        delivery_spec_id: &clarification.delivery_spec_id,
+        delivery_spec_revision: clarification.delivery_spec_revision,
+        delivery_revision: clarification.delivery_revision,
+        delivery_updated_at_millis: clarification.delivery_updated_at_millis,
+        history_digest: &clarification.history_digest,
+        reason: match clarification.reason {
+            ReworkClarificationReason::AttemptLimitExhausted => "attempt_limit_exhausted",
+            ReworkClarificationReason::RepeatedCriterionFailure => "repeated_criterion_failure",
+        },
+    };
+    let encoded = serde_json::to_vec(&identity).map_err(|error| {
+        invalid_rework(&format!(
+            "rework clarification seal cannot be encoded: {error}"
+        ))
+    })?;
+    Ok(Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(encoded)
+    )))
+}
+
+fn derive_rework_clarification(
+    delivery: &Delivery,
+    history: &ValidatedReworkHistoryFact,
+    reason: ReworkClarificationReason,
+) -> Result<ReworkClarification, DeliveryValidationError> {
+    let mut clarification = ReworkClarification {
+        delivery_id: delivery.id().clone(),
+        delivery_spec_id: delivery.snapshot().spec.id.clone(),
+        delivery_spec_revision: delivery.snapshot().spec.revision,
+        delivery_revision: delivery.revision(),
+        delivery_updated_at_millis: delivery.snapshot().updated_at_millis,
+        history_digest: history.history_digest.clone(),
+        reason,
+        clarification_digest: Sha256Digest(String::new()),
+    };
+    clarification.clarification_digest = seal_rework_clarification(&clarification)?;
+    Ok(clarification)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReworkDecision {
     Start(Box<ReworkAuthorization>),
-    Clarify(ReworkClarificationReason),
+    Clarify(ReworkClarification),
 }
 
 /// Blocking follow-up actions derived from all current Verdict Attention items.
@@ -570,7 +668,7 @@ pub fn decide_precise_rework(
         &current_failures,
         history,
     ) {
-        return Ok(ReworkDecision::Clarify(reason));
+        return derive_rework_clarification(delivery, history, reason).map(ReworkDecision::Clarify);
     }
 
     let targets = validate_precise_scope(
@@ -886,6 +984,242 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
         "rework",
         message,
     )
+}
+
+/// Narrow sealed fixtures for cross-crate rework transaction tests. They are
+/// compiled only for tests and still pass through the production verdict,
+/// Attention, candidate, history, decision, and stage application services.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::{
+        CriterionVerdict, CurrentReworkScope, Delivery, DeliveryStatus, EvidenceId,
+        FrozenDeliveryCandidate, PreciseReworkAnnotation, ReworkClarificationReason,
+        ReworkDecision, ReworkTargetFact, decide_precise_rework, derive_rework_clarification,
+        derive_validated_rework_history,
+    };
+    use crate::application::attention::ResolvedAttentionTransition;
+    use crate::application::{
+        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
+        stage::{AdvanceStageInput, NewStageIdentities, StageAdvanceResult, advance_rework},
+        verdict::{
+            ComputedVerdictTransition, SubmitVerdictFacts, compute_verdict_transition,
+            test_support::{VerdictFixtureOutcome, verdict_fixture_with_rework_limit},
+        },
+    };
+    use crate::domain::SessionBindingId;
+    use winwincode_domain::{
+        AttentionItemId, DeliveryId, ExecutionJobId, ProductSessionId, StageRunId,
+    };
+
+    #[derive(Debug)]
+    pub struct ReworkJournalFixture {
+        pub initial_delivery: Delivery,
+        pub verdict_transition: ComputedVerdictTransition,
+        pub attention_transition: ResolvedAttentionTransition,
+    }
+
+    #[derive(Debug)]
+    pub struct ReworkDispatchFixture {
+        pub journal: ReworkJournalFixture,
+        pub source_delivery: Delivery,
+        pub transition: StageAdvanceResult,
+        pub candidate_ref: String,
+        pub source_candidate_commit_id: String,
+        pub evidence_ref_ids: Vec<EvidenceId>,
+    }
+
+    #[derive(Debug)]
+    pub struct ReworkClarificationFixture {
+        pub journal: ReworkJournalFixture,
+        pub source_delivery: Delivery,
+        pub transition: StageAdvanceResult,
+        pub reason: ReworkClarificationReason,
+    }
+
+    /// Builds one production-derived, sealed rework dispatch fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixed test facts no longer form a valid rework transition.
+    #[must_use]
+    pub fn authorized_rework_dispatch(delivery_id: &DeliveryId) -> ReworkDispatchFixture {
+        let (journal, source_delivery, candidate, decision, evidence_ref_ids) =
+            rework_decision_fixture(delivery_id, 3);
+        let candidate_ref = candidate.candidate_ref().to_owned();
+        let source_candidate_commit_id = candidate.candidate_commit_id().to_owned();
+        let transition =
+            advance_rework(&source_delivery, advance_input(&source_delivery), decision)
+                .expect("authorized rework fixture must advance");
+        ReworkDispatchFixture {
+            journal,
+            source_delivery,
+            transition,
+            candidate_ref,
+            source_candidate_commit_id,
+            evidence_ref_ids,
+        }
+    }
+
+    /// Builds one production-sealed repeated-failure clarification fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixed test facts no longer form a valid clarification transition.
+    #[must_use]
+    pub fn repeated_rework_clarification(delivery_id: &DeliveryId) -> ReworkClarificationFixture {
+        let (journal, source_delivery, _candidate, _decision, _evidence_ref_ids) =
+            rework_decision_fixture(delivery_id, 3);
+        let history = derive_validated_rework_history(&source_delivery, &[])
+            .expect("first rework fixture history");
+        let reason = ReworkClarificationReason::RepeatedCriterionFailure;
+        let clarification = derive_rework_clarification(&source_delivery, &history, reason)
+            .expect("test-support repeated failure must be sealed");
+        let transition = advance_rework(
+            &source_delivery,
+            advance_input(&source_delivery),
+            ReworkDecision::Clarify(clarification),
+        )
+        .expect("repeated rework fixture must clarify");
+        ReworkClarificationFixture {
+            journal,
+            source_delivery,
+            transition,
+            reason,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn rework_decision_fixture(
+        delivery_id: &DeliveryId,
+        max_rework_attempts: u64,
+    ) -> (
+        ReworkJournalFixture,
+        Delivery,
+        FrozenDeliveryCandidate,
+        ReworkDecision,
+        Vec<EvidenceId>,
+    ) {
+        let fixture = verdict_fixture_with_rework_limit(
+            delivery_id,
+            VerdictFixtureOutcome::Fail,
+            max_rework_attempts,
+        );
+        let verdict_transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: &fixture.verification,
+                evidence: &fixture.evidence,
+                produced_at_millis: 1_800_000_000_100,
+            },
+        )
+        .expect("failing verdict fixture must compute");
+        let failed = verdict_transition.delivery().clone();
+        let attention = failed
+            .snapshot()
+            .attention_items
+            .last()
+            .expect("failing verdict must open Attention")
+            .clone();
+        let attention_transition = resolve_attention(
+            &failed,
+            ResolveAttentionInput {
+                expected_revision: failed.revision(),
+                attention_item_id: attention.id,
+                stage_run_id: attention.stage_run_id.expect("linked Attention StageRun"),
+                expected_context: attention.context,
+                actor: attention.assigned_to.unwrap_or_else(|| "owner".into()),
+                decision: AttentionDecision::Dismissed,
+                resolution: "start exact remediation".into(),
+                now_millis: failed.snapshot().updated_at_millis + 1,
+            },
+        )
+        .expect("failing Attention must enter Reworking");
+        let reworking = attention_transition.clone().into_delivery();
+        assert_eq!(reworking.snapshot().status, DeliveryStatus::Reworking);
+
+        let verdict = reworking
+            .snapshot()
+            .verdict
+            .as_ref()
+            .expect("rework fixture verdict");
+        let mut evidence_ref_ids = verdict
+            .criteria
+            .iter()
+            .filter(|result| result.verdict == CriterionVerdict::Fail)
+            .flat_map(|result| result.evidence_refs.iter().cloned())
+            .collect::<Vec<_>>();
+        evidence_ref_ids.sort_by(|left, right| left.0.cmp(&right.0));
+        evidence_ref_ids.dedup();
+        let delivery_task_id = fixture
+            .candidate
+            .producer_delivery_task_id()
+            .expect("executor candidate task")
+            .clone();
+        let target = ReworkTargetFact {
+            delivery_task_id: delivery_task_id.clone(),
+            diagram_id: "diagram-main".into(),
+            node_id: "node-api".into(),
+            file_path: "src/invitation.rs".into(),
+            hunk_sha256: "b".repeat(64),
+            evidence_ref_ids: evidence_ref_ids.clone(),
+        };
+        let scope = CurrentReworkScope {
+            candidate_ref: fixture.candidate.candidate_ref().into(),
+            diff_sha256: fixture.candidate.diff_sha256().into(),
+            targets: vec![target.clone()],
+        };
+        let annotation = PreciseReworkAnnotation {
+            candidate_ref: scope.candidate_ref.clone(),
+            diff_sha256: scope.diff_sha256.clone(),
+            delivery_task_id,
+            diagram_id: target.diagram_id,
+            node_id: target.node_id,
+            file_path: target.file_path,
+            hunk_sha256: target.hunk_sha256,
+            evidence_ref_ids: evidence_ref_ids.clone(),
+        };
+        let history =
+            derive_validated_rework_history(&reworking, &[]).expect("first rework fixture history");
+        let decision = decide_precise_rework(
+            &reworking,
+            &fixture.candidate,
+            &scope,
+            &[annotation],
+            &history,
+        )
+        .expect("precise rework fixture decision");
+        (
+            ReworkJournalFixture {
+                initial_delivery: fixture.delivery,
+                verdict_transition,
+                attention_transition,
+            },
+            reworking,
+            fixture.candidate,
+            decision,
+            evidence_ref_ids,
+        )
+    }
+
+    fn advance_input(delivery: &Delivery) -> AdvanceStageInput {
+        AdvanceStageInput {
+            expected_revision: delivery.revision(),
+            product_session_id: ProductSessionId("psn_01J00000000000000000000000".into()),
+            identities: NewStageIdentities {
+                stage_run_id: StageRunId("run_01J00000000000000000000000".into()),
+                execution_job_id: ExecutionJobId("job_01J00000000000000000000000".into()),
+                session_binding_id: SessionBindingId("binding_01J00000000000000000000000".into()),
+                attention_item_id: AttentionItemId("att_01J00000000000000000000000".into()),
+            },
+            review: None,
+            previous_outcome: None,
+            current_lease: None,
+            rework_authorization: None,
+            now_millis: delivery.snapshot().updated_at_millis + 1,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1718,10 +2052,11 @@ mod tests {
         let exhausted =
             decide_precise_rework(&delivery, &candidate, &scope, &[annotation], &history)
                 .expect("decision");
-        assert_eq!(
-            exhausted,
-            ReworkDecision::Clarify(ReworkClarificationReason::AttemptLimitExhausted)
-        );
+        assert!(matches!(
+            &exhausted,
+            ReworkDecision::Clarify(clarification)
+                if clarification.reason() == ReworkClarificationReason::AttemptLimitExhausted
+        ));
         let prior_run_count = delivery.snapshot().stage_runs.len();
         let prior_binding_count = delivery.snapshot().session_bindings.len();
         let clarified = advance_rework(&delivery, rework_advance_input(&delivery), exhausted)
@@ -1780,10 +2115,17 @@ mod tests {
 
         let (repeated_transition, _, _, _) = current_failure();
         let repeated_transition = resolve_rework_attention(repeated_transition);
+        let repeated_transition_history = empty_history(&repeated_transition);
+        let repeated_clarification = derive_rework_clarification(
+            &repeated_transition,
+            &repeated_transition_history,
+            repeated_reason.expect("repeated failure"),
+        )
+        .expect("sealed repeated clarification");
         let repeated = advance_rework(
             &repeated_transition,
             rework_advance_input(&repeated_transition),
-            ReworkDecision::Clarify(repeated_reason.expect("repeated failure")),
+            ReworkDecision::Clarify(repeated_clarification),
         )
         .expect("repeated failure enters clarification");
         assert_eq!(
