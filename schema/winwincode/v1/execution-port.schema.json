@@ -550,7 +550,7 @@
         "digest"
       ]
     },
-    "ModelRoute": {
+    "ModelGatewayRoute": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -1546,7 +1546,7 @@
           "$ref": "#/$defs/ModelExchangeId"
         },
         "route": {
-          "$ref": "#/$defs/ModelRoute"
+          "$ref": "#/$defs/ModelGatewayRoute"
         },
         "request": {
           "$ref": "#/$defs/EncodedPayload"
