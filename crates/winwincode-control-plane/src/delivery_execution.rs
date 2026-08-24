@@ -10,6 +10,7 @@
 
 use std::{error::Error, fmt};
 
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     DeliveryStageExecutionScope, ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
     JobCancelAckMessage,
@@ -18,11 +19,13 @@ use winwincode_delivery::{
     application::{
         CoordinationError,
         stage::{
-            ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent, StageAdvanceEffect,
-            StageAdvanceResult, acknowledge_cancel,
+            ActiveLeaseIdentity, CancelAcknowledgement, CancelIntent, ExecutionIntent,
+            StageAdvanceEffect, StageAdvanceResult, acknowledge_cancel,
         },
     },
-    domain::Delivery,
+    domain::{
+        Delivery, DeliveryStage, StageRunActorType, StageRunStatus, rework::ReworkAuthorization,
+    },
 };
 use winwincode_domain::{RequestId, Sha256Digest};
 
@@ -202,18 +205,20 @@ pub fn prepare_delivery_advance(
             "only a newly committed Codex stage creates an ExecutionJob intent".to_owned(),
         ));
     };
+    validate_dispatch_intent(&result.delivery, &intent)?;
     let attempt = i64::try_from(intent.attempt).map_err(|_| {
         DeliveryExecutionError::InvalidEffect(
             "Delivery stage attempt exceeds the ExecutionPort range".to_owned(),
         )
     })?;
+    let (goal, payload_digest) = execution_payload(&intent, &config)?;
     let job = ExecutionJob {
         attempt,
         execution_profile: intent.role,
-        goal: intent.goal,
+        goal,
         job_id: intent.execution_job_id,
         limits: config.limits,
-        payload_digest: config.payload_digest,
+        payload_digest,
         scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
             delivery_id: intent.delivery_id,
             delivery_task_id: intent.delivery_task_id,
@@ -301,6 +306,124 @@ fn validate_commit_receipt(
         return Err("new durable receipt does not contain the exact pending job".to_owned());
     }
     Ok(())
+}
+
+fn validate_dispatch_intent(
+    delivery: &Delivery,
+    intent: &ExecutionIntent,
+) -> Result<(), DeliveryExecutionError> {
+    let mut runs = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| run.id == intent.stage_run_id && run.status == StageRunStatus::Running);
+    let run = runs.next().ok_or_else(|| {
+        DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: no matching running Delivery StageRun".to_owned(),
+        )
+    })?;
+    if runs.next().is_some()
+        || run.delivery_id != intent.delivery_id
+        || run.delivery_task_id != intent.delivery_task_id
+        || run.stage != intent.stage
+        || run.actor_type != StageRunActorType::Codex
+        || run.role != intent.role
+        || run.attempt != intent.attempt
+    {
+        return Err(DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: fields differ from the exact Delivery StageRun".to_owned(),
+        ));
+    }
+    let mut bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.stage_run_id == intent.stage_run_id);
+    let binding = bindings.next().ok_or_else(|| {
+        DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: no exact Delivery SessionBinding".to_owned(),
+        )
+    })?;
+    if bindings.next().is_some()
+        || binding.delivery_id != intent.delivery_id
+        || binding.delivery_task_id != intent.delivery_task_id
+        || binding.product_session_id != intent.product_session_id
+        || binding.execution_job_id != intent.execution_job_id
+        || binding.worker_session_id.is_some()
+        || binding.codex_thread_id.is_some()
+    {
+        return Err(DeliveryExecutionError::InvalidEffect(
+            "invalid dispatch intent: fields differ from the exact pending SessionBinding"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn execution_payload(
+    intent: &ExecutionIntent,
+    config: &DeliveryExecutionConfig,
+) -> Result<(String, Sha256Digest), DeliveryExecutionError> {
+    match (intent.stage, intent.rework_authorization.as_deref()) {
+        (DeliveryStage::Reworking, Some(authorization)) => {
+            validate_rework_dispatch_scope(intent, config, authorization)?;
+            let authorization_value = serde_json::to_value(authorization).map_err(|error| {
+                DeliveryExecutionError::InvalidEffect(format!(
+                    "rework authorization cannot be encoded: {error}"
+                ))
+            })?;
+            encode_authorized_payload(&intent.goal, &config.payload_digest, &authorization_value)
+        }
+        (DeliveryStage::Reworking, None) => Err(DeliveryExecutionError::InvalidEffect(
+            "remediator ExecutionJob is missing its sealed rework authorization".to_owned(),
+        )),
+        (_, Some(_)) => Err(DeliveryExecutionError::InvalidEffect(
+            "non-reworking ExecutionJob cannot carry a rework authorization".to_owned(),
+        )),
+        (_, None) => Ok((intent.goal.clone(), config.payload_digest.clone())),
+    }
+}
+
+fn encode_authorized_payload(
+    base_goal: &str,
+    base_payload_digest: &Sha256Digest,
+    authorization: &serde_json::Value,
+) -> Result<(String, Sha256Digest), DeliveryExecutionError> {
+    let authorization_json = serde_json::to_string(authorization).map_err(|error| {
+        DeliveryExecutionError::InvalidEffect(format!(
+            "rework authorization cannot be encoded: {error}"
+        ))
+    })?;
+    let goal = format!("{base_goal}\n\nREWORK_AUTHORIZATION_JSON={authorization_json}");
+    let mut hasher = Sha256::new();
+    hasher.update(b"winwincode/rework-execution-payload/v1\0");
+    hasher.update(base_payload_digest.0.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(authorization_json.as_bytes());
+    Ok((
+        goal,
+        Sha256Digest(format!("sha256:{:x}", hasher.finalize())),
+    ))
+}
+
+fn validate_rework_dispatch_scope(
+    intent: &ExecutionIntent,
+    config: &DeliveryExecutionConfig,
+    authorization: &ReworkAuthorization,
+) -> Result<(), DeliveryExecutionError> {
+    let exact = intent.role == authorization.writer_role()
+        && intent.delivery_task_id.as_ref() == Some(authorization.delivery_task_id())
+        && intent.attempt == authorization.next_attempt()
+        && config.workspace.checkout_revision
+            == authorization.previous_candidate().candidate_commit_id();
+    if exact {
+        Ok(())
+    } else {
+        Err(DeliveryExecutionError::InvalidEffect(
+            "remediator ExecutionJob does not match its authorized task, attempt, or candidate checkout"
+                .to_owned(),
+        ))
+    }
 }
 
 /// Accepts a generated `job.cancel_ack` without treating it as terminal.
@@ -525,4 +648,37 @@ fn decimal(bytes: &[u8]) -> Option<u32> {
         byte.is_ascii_digit()
             .then_some(value * 10 + u32::from(byte - b'0'))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rework_authorization_is_part_of_goal_and_payload_digest() {
+        let base_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        let first = serde_json::json!({
+            "candidateRef": "candidate-one",
+            "diffSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "target": "src/invitation.rs:hunk-one",
+            "attempt": 2,
+        });
+        let (first_goal, first_digest) =
+            encode_authorized_payload("repair invitation", &base_digest, &first)
+                .expect("authorized payload");
+        let (replayed_goal, replayed_digest) =
+            encode_authorized_payload("repair invitation", &base_digest, &first)
+                .expect("deterministic replay payload");
+        assert_eq!(first_goal, replayed_goal);
+        assert_eq!(first_digest, replayed_digest);
+        assert!(first_goal.contains("candidate-one"));
+        assert!(first_goal.contains("src/invitation.rs:hunk-one"));
+
+        let mut second = first;
+        second["target"] = serde_json::Value::String("src/foreign.rs:hunk-two".into());
+        let (_, second_digest) =
+            encode_authorized_payload("repair invitation", &base_digest, &second)
+                .expect("changed authorization payload");
+        assert_ne!(first_digest, second_digest);
+    }
 }

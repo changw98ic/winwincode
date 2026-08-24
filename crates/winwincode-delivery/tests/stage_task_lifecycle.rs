@@ -64,6 +64,7 @@ fn advance_input(expected_revision: u64, suffix: &str) -> AdvanceStageInput {
         review: None,
         previous_outcome: None,
         current_lease: None,
+        rework_authorization: None,
         now_millis: 1_800_000_000_100,
     }
 }
