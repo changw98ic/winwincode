@@ -1,7 +1,7 @@
 {
   "schemaVersion": "winwincode.control-plane-web-client-gate.v1",
   "issueId": "winwincode-9c4.16.2.5.4.1",
-  "status": "planned-gated",
+  "status": "implemented-enforced",
   "coverage": {
     "mode": "git-file-inventory+rg+ast-grep-fallback",
     "symbolGraphComplete": false,
@@ -10,9 +10,10 @@
   "inventory": {
     "web": {
       "currentFiles": [
-        "apps/web/src/generated/contracts.ts"
+        "apps/web/src/generated/contracts.ts",
+        "apps/web/src/generated/control-plane-client.ts"
       ],
-      "networkImplementation": false,
+      "networkImplementation": true,
       "pageImplementation": false
     },
     "strongFlow": {
@@ -65,7 +66,10 @@
       "ControlPlaneWebSocketClientFrame",
       "ControlPlaneWebSocketServerFrame",
       "ControlPlaneWebSocketCursor",
-      "ControlPlaneWebSocketSubscription"
+      "ControlPlaneWebSocketSubscription",
+      "StrongFlowReadCursor",
+      "ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent",
+      "ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent"
     ],
     "requiredClientExports": [
       {
@@ -94,6 +98,14 @@
       },
       {
         "name": "createStrongFlowProjectionSubscription",
+        "kind": "function"
+      },
+      {
+        "name": "ProductSessionRuntimeProjectionSubscription",
+        "kind": "interface"
+      },
+      {
+        "name": "createProductSessionRuntimeProjectionSubscription",
         "kind": "function"
       }
     ],
@@ -130,6 +142,13 @@
           "close",
           "cursor"
         ]
+      },
+      {
+        "export": "ProductSessionRuntimeProjectionSubscription",
+        "members": [
+          "start",
+          "close"
+        ]
       }
     ]
   },
@@ -141,7 +160,8 @@
     "proofUsesExports": [
       "createControlPlaneHttpClient",
       "createControlPlaneWebSocketClient",
-      "createStrongFlowProjectionSubscription"
+      "createStrongFlowProjectionSubscription",
+      "createProductSessionRuntimeProjectionSubscription"
     ],
     "completionSource": "parent-bead-tests-and-release-gates"
   },
@@ -172,8 +192,13 @@
     "reconnect": {
       "ordinaryDisconnect": "resume-after-last-acknowledged-cursor",
       "close4408": "resume-after-last-acknowledged-cursor",
-      "close4409": "reload-strongflow-snapshot-then-new-subscription",
+      "close4409": "discard-then-reload-complete-snapshot-by-original-subscription-stream",
       "close4403": "clear-subscription-and-do-not-auto-retry"
+    },
+    "resetFrameReloadQueries": false,
+    "resetSelection": {
+      "delivery": "delivery.get-then-runtime.projection.get-at-returned-read-cursor",
+      "product-session": "runtime.projection.get-only-without-delivery-stage-or-read-cursor"
     }
   },
   "strongFlowReset": {
@@ -185,7 +210,10 @@
     "publishPartialReload": false,
     "subscribeBeforeBothQueriesSucceed": false,
     "cursorRule": "resume-or-subscribe-only-after-both-responses-yield-one-compatible-returned-cursor",
-    "failureRule": "discard-partial-results-and-retry-the-pair"
+    "failureRule": "discard-partial-results-and-retry-the-pair",
+    "expiredCursorError": "READ_CURSOR_EXPIRED",
+    "expiredCursorAction": "discard-partial-pair-and-restart-delivery.get-without-atCursor",
+    "invalidOrForeignCursorAction": "surface-canonical-error-without-read-cut-restart"
   },
   "errorBoundary": {
     "source": "ErrorEnvelope",
@@ -262,5 +290,17 @@
     "pageTransportDtoAllowed": false,
     "workerAddressAllowed": false,
     "webSocketBusinessCommandAllowed": false
+  },
+  "productSessionReset": {
+    "reloadQueries": [
+      "runtime.projection.get"
+    ],
+    "forbiddenParameters": [
+      "deliveryId",
+      "stageRunId",
+      "atCursor"
+    ],
+    "publishPartialReload": false,
+    "subscriptionStream": "product-session"
   }
 }

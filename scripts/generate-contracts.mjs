@@ -410,6 +410,11 @@ function tsType(schema, document, context) {
   if (type === 'boolean') return 'boolean'
   if (type === 'null') return 'null'
   if (type === 'array') {
+    if (Array.isArray(schema.prefixItems)) {
+      return `readonly [${schema.prefixItems.map(item => (
+        tsType(isObject(item) ? item : {}, document, context)
+      )).join(', ')}]`
+    }
     return `ReadonlyArray<${tsType(isObject(schema.items) ? schema.items : {}, document, context)}>`
   }
   if (type === 'object' || schema.properties !== undefined || schema.additionalProperties !== undefined) {
@@ -502,6 +507,9 @@ function renderTypescript(context, digest) {
     `// ${GENERATED_MARKER}`,
     `// Source digest: sha256:${digest}`,
     '',
+    '/** Canonical Control Plane routes and projection refresh behavior for the generated Web client. */',
+    `export const WINWINCODE_CLIENT_METADATA = ${JSON.stringify(context.clientMetadata, null, 2)} as const`,
+    '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
 }
@@ -564,10 +572,12 @@ import type {
   ControlPlaneWebSocketAuthorizationRevokedFrame,
   ControlPlaneWebSocketClientFrame,
   ControlPlaneWebSocketCursor,
+  ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
   ControlPlaneWebSocketEventFrame,
   ControlPlaneWebSocketEventType,
   ControlPlaneWebSocketResetRequiredFrame,
   ControlPlaneWebSocketServerFrame,
+  ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
   ControlPlaneWebSocketSubscription,
   ControlPlaneWebSocketSubscriptionId,
   DeliveryDetailProjection,
@@ -882,7 +892,16 @@ export function createControlPlaneHttpClient(
     path: string,
     request: CommandRequest | QueryRequest,
   ): Promise<unknown> {
-    const serialized = JSON.stringify(request)
+    let serialized: string
+    try {
+      serialized = JSON.stringify(request)
+    } catch {
+      throw clientFailure(
+        'INVALID_CLIENT_REQUEST',
+        'The Control Plane request could not be encoded.',
+        request.requestId,
+      )
+    }
     const init: ControlPlaneHttpRequestInit = {
       method: 'POST',
       headers: {
@@ -908,7 +927,16 @@ export function createControlPlaneHttpClient(
           )
         }
         attempt += 1
-        await waitBeforeRetry(attempt)
+        try {
+          await waitBeforeRetry(attempt)
+        } catch {
+          throw clientFailure(
+            'NETWORK_ERROR',
+            'The Control Plane request retry was interrupted.',
+            request.requestId,
+            true,
+          )
+        }
         continue
       }
       const parsed = await responseJson(response, request.requestId)
@@ -993,23 +1021,131 @@ function stableIdentity(value: unknown): string {
   return JSON.stringify(stableJsonValue(value))
 }
 
+function isSocketCursor(value: unknown, eventIdMayBeNull: boolean): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['eventId', 'scope', 'sequence', 'stream'])
+    && isRecord(value.scope)
+    && isRecord(value.stream)
+    && typeof value.sequence === 'number'
+    && Number.isSafeInteger(value.sequence)
+    && value.sequence >= 0
+    && (typeof value.eventId === 'string' || (eventIdMayBeNull && value.eventId === null))
+}
+
 function parseServerFrame(value: unknown): ControlPlaneWebSocketServerFrame {
   if (!isRecord(value) || typeof value.type !== 'string') {
     throw clientFailure('INVALID_WEBSOCKET_FRAME', 'The Control Plane sent an invalid event frame.')
   }
-  const allowed = new Set([
-    'event.v1',
-    'transport.subscription-accepted.v1',
-    'transport.resume-accepted.v1',
-    'transport.backpressure.v1',
-    'transport.authorization-revoked.v1',
-    'transport.reset-required.v1',
-    'transport.ping.v1',
-    'transport.error.v1',
-  ])
-  if (!allowed.has(value.type)) {
-    throw clientFailure('INVALID_WEBSOCKET_FRAME', 'The Control Plane sent an invalid event frame.')
+  let valid = false
+  switch (value.type) {
+    case 'event.v1':
+      valid = hasExactKeys(value, [
+        'authorizationEpoch',
+        'event',
+        'eventId',
+        'occurredAt',
+        'scope',
+        'sequence',
+        'source',
+        'stream',
+        'subscriptionId',
+        'type',
+      ])
+        && typeof value.subscriptionId === 'string'
+        && typeof value.eventId === 'string'
+        && isRecord(value.scope)
+        && isRecord(value.stream)
+        && typeof value.sequence === 'number'
+        && Number.isSafeInteger(value.sequence)
+        && value.sequence >= 0
+        && typeof value.occurredAt === 'string'
+        && isRecord(value.source)
+        && Number.isSafeInteger(value.authorizationEpoch)
+        && isRecord(value.event)
+        && typeof value.event.type === 'string'
+      break
+    case 'transport.subscription-accepted.v1':
+      valid = hasExactKeys(value, [
+        'authorizationEpoch',
+        'cursor',
+        'limits',
+        'subscriptionId',
+        'type',
+      ])
+        && typeof value.subscriptionId === 'string'
+        && isSocketCursor(value.cursor, true)
+        && Number.isSafeInteger(value.authorizationEpoch)
+        && isRecord(value.limits)
+      break
+    case 'transport.resume-accepted.v1':
+      valid = hasExactKeys(value, [
+        'after',
+        'authorizationEpoch',
+        'replayThrough',
+        'subscriptionId',
+        'type',
+      ])
+        && typeof value.subscriptionId === 'string'
+        && isSocketCursor(value.after, false)
+        && isSocketCursor(value.replayThrough, true)
+        && Number.isSafeInteger(value.authorizationEpoch)
+      break
+    case 'transport.backpressure.v1':
+      valid = hasExactKeys(value, [
+        'ackRequiredThrough',
+        'closeCode',
+        'disconnectAt',
+        'pendingEventCount',
+        'subscriptionId',
+        'type',
+      ])
+        && typeof value.subscriptionId === 'string'
+        && value.closeCode === 4408
+        && typeof value.disconnectAt === 'string'
+        && Number.isSafeInteger(value.pendingEventCount)
+        && isSocketCursor(value.ackRequiredThrough, false)
+      break
+    case 'transport.authorization-revoked.v1':
+      valid = hasExactKeys(value, [
+        'authorizationEpoch',
+        'closeCode',
+        'subscriptionId',
+        'type',
+      ])
+        && typeof value.subscriptionId === 'string'
+        && Number.isSafeInteger(value.authorizationEpoch)
+        && value.closeCode === 4403
+      break
+    case 'transport.reset-required.v1':
+      valid = hasExactKeys(value, [
+        'closeCode',
+        'earliestAvailable',
+        'reason',
+        'subscriptionId',
+        'type',
+      ])
+        && typeof value.subscriptionId === 'string'
+        && ['cursor-expired', 'stream-rebuilt', 'authorization-boundary'].includes(
+          typeof value.reason === 'string' ? value.reason : '',
+        )
+        && isSocketCursor(value.earliestAvailable, true)
+        && value.closeCode === 4409
+      break
+    case 'transport.ping.v1':
+      valid = hasExactKeys(value, ['nonce', 'sentAt', 'type'])
+        && typeof value.nonce === 'string'
+        && value.nonce.length >= 16
+        && value.nonce.length <= 128
+        && typeof value.sentAt === 'string'
+      break
+    case 'transport.error.v1':
+      valid = hasExactKeys(value, ['error', 'type']) && isRecord(value.error)
+      break
   }
+  if (!valid) throw clientFailure(
+    'INVALID_WEBSOCKET_FRAME',
+    'The Control Plane sent an invalid event frame.',
+  )
   return value as unknown as ControlPlaneWebSocketServerFrame
 }
 
@@ -1057,6 +1193,7 @@ export function createControlPlaneWebSocketClient(
   let resetting = false
   let eventQueue = Promise.resolve()
   const pendingEvents = new Set<string>()
+  const pendingEventIds = new Map<string, string>()
   const rememberedEvents = new Map<string, string>()
   const rememberedOrder: string[] = []
 
@@ -1129,6 +1266,9 @@ export function createControlPlaneWebSocketClient(
       frame.subscriptionId !== configured.id
       || stableIdentity(frame.scope) !== stableIdentity(configured.value.scope)
       || stableIdentity(frame.stream) !== stableIdentity(configured.value.stream)
+      || !configured.value.eventTypes.includes(
+        frame.event.type as ControlPlaneWebSocketEventType,
+      )
       || typeof frame.eventId !== 'string'
       || !Number.isSafeInteger(frame.sequence)
       || frame.sequence < 0
@@ -1141,7 +1281,11 @@ export function createControlPlaneWebSocketClient(
     }
     const identity = stableIdentity(eventCursor(frame))
     const remembered = rememberedEvents.get(frame.eventId)
-    if (remembered !== undefined && remembered !== identity) {
+    const pendingIdentity = pendingEventIds.get(frame.eventId)
+    if (
+      (remembered !== undefined && remembered !== identity)
+      || (pendingIdentity !== undefined && pendingIdentity !== identity)
+    ) {
       failEventProcessing(clientFailure(
         'INVALID_WEBSOCKET_FRAME',
         'An event identity was reused for a different stream cursor.',
@@ -1158,8 +1302,9 @@ export function createControlPlaneWebSocketClient(
       }
       return
     }
-    if (pendingEvents.has(identity)) return
+    if (pendingEvents.has(identity) || pendingIdentity === identity) return
     pendingEvents.add(identity)
+    pendingEventIds.set(frame.eventId, identity)
     eventQueue = eventQueue.then(async () => {
       if (blocked || manuallyClosed) return
       try {
@@ -1176,6 +1321,7 @@ export function createControlPlaneWebSocketClient(
         failEventProcessing(error)
       } finally {
         pendingEvents.delete(identity)
+        pendingEventIds.delete(frame.eventId)
       }
     })
   }
@@ -1183,9 +1329,16 @@ export function createControlPlaneWebSocketClient(
   function clearReplayState(): void {
     acknowledgedCursor = null
     pendingEvents.clear()
+    pendingEventIds.clear()
     rememberedEvents.clear()
     rememberedOrder.length = 0
     eventQueue = Promise.resolve()
+  }
+
+  function cursorMatchesSubscription(cursor: ControlPlaneWebSocketCursor): boolean {
+    return currentSubscription !== null
+      && stableIdentity(cursor.scope) === stableIdentity(currentSubscription.scope)
+      && stableIdentity(cursor.stream) === stableIdentity(currentSubscription.stream)
   }
 
   async function reset(frame: ControlPlaneWebSocketResetRequiredFrame | null): Promise<void> {
@@ -1235,17 +1388,60 @@ export function createControlPlaneWebSocketClient(
         send({ type: 'transport.pong.v1', nonce: frame.nonce })
         return
       case 'transport.reset-required.v1':
+        if (
+          frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.earliestAvailable)
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The reset does not belong to the active subscription.',
+          ))
+          return
+        }
         void reset(frame)
         return
       case 'transport.authorization-revoked.v1':
+        if (frame.subscriptionId !== currentSubscriptionId) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The authorization change does not belong to the active subscription.',
+          ))
+          return
+        }
         revoke(frame)
         return
       case 'transport.error.v1':
         report(parseErrorEnvelope(frame.error, null))
         return
       case 'transport.subscription-accepted.v1':
+        if (
+          frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.cursor)
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The transport frame does not belong to the active subscription.',
+          ))
+        }
+        return
       case 'transport.resume-accepted.v1':
+        if (
+          frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.after)
+          || !cursorMatchesSubscription(frame.replayThrough)
+        ) failEventProcessing(clientFailure(
+          'INVALID_WEBSOCKET_FRAME',
+          'The transport frame does not belong to the active subscription.',
+        ))
+        return
       case 'transport.backpressure.v1':
+        if (
+          frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.ackRequiredThrough)
+        ) failEventProcessing(clientFailure(
+          'INVALID_WEBSOCKET_FRAME',
+          'The transport frame does not belong to the active subscription.',
+        ))
         return
     }
   }
@@ -1414,10 +1610,18 @@ function assertReadCursor(
     || value.token.length === 0
     || value.deliveryId !== deliveryId
     || stableIdentity(value.scope) !== stableIdentity(scope)
+    || typeof value.deliveryRevision !== 'number'
     || !Number.isSafeInteger(value.deliveryRevision)
+    || value.deliveryRevision < 0
+    || typeof value.runtimeLedgerRevision !== 'number'
     || !Number.isSafeInteger(value.runtimeLedgerRevision)
+    || value.runtimeLedgerRevision < 0
+    || typeof value.runtimeAcceptedSequence !== 'number'
     || !Number.isSafeInteger(value.runtimeAcceptedSequence)
+    || value.runtimeAcceptedSequence < 0
+    || typeof value.publicationRevision !== 'number'
     || !Number.isSafeInteger(value.publicationRevision)
+    || value.publicationRevision < 0
   ) throw invalidResponse(requestIdValue)
   return value as unknown as StrongFlowReadCursor
 }
@@ -1514,7 +1718,7 @@ export function createStrongFlowProjectionSubscription(
     if (frame.event.type !== 'runtime-projection.invalidated.v1') return
     const event = frame.event
     if (
-      event.scopeKind !== 'delivery_stage'
+      event.scopeKind !== 'delivery-stage'
       || event.productSessionId !== options.productSessionId
       || event.deliveryId !== options.deliveryId
       || event.stageRunId !== options.stageRunId
@@ -1632,7 +1836,7 @@ export function createProductSessionRuntimeProjectionSubscription(
     if (frame.event.type !== 'runtime-projection.invalidated.v1') return
     const event = frame.event
     if (
-      event.scopeKind !== 'product_session'
+      event.scopeKind !== 'product-session'
       || event.productSessionId !== options.productSessionId
       || stableIdentity(event.reloadQueries) !== stableIdentity(['runtime.projection.get'])
     ) throw clientFailure(
@@ -1810,6 +2014,14 @@ function rustType(schema, document, context, qualifyShared = false) {
   }
   const [type] = types
   if (type === 'array') {
+    if (Array.isArray(schema.prefixItems)) {
+      const items = schema.prefixItems.map(item => (
+        rustType(isObject(item) ? item : {}, document, context, qualifyShared)
+      ))
+      const tuple = `(${items.join(', ')}${items.length === 1 ? ',' : ''})`
+      if (tuple.length <= 88) return tuple
+      return `(\n        ${items.join(',\n        ')},\n    )`
+    }
     return `Vec<${rustType(isObject(schema.items) ? schema.items : {}, document, context, qualifyShared)}>`
   }
   if (type === 'object' || schema.additionalProperties !== undefined || schema.properties !== undefined) {
@@ -1831,6 +2043,7 @@ function rustObjectFields(
   context,
   existingNames = new Set(),
   qualifyShared = false,
+  typeOverrides = new Map(),
 ) {
   const required = new Set(Array.isArray(schema.required) ? schema.required : [])
   const properties = new Map(Object.entries(schema.properties ?? {}).map(([name, propertySchema]) => [
@@ -1847,6 +2060,7 @@ function rustObjectFields(
     context,
     existingNames,
     qualifyShared,
+    typeOverrides,
   )
 }
 
@@ -1900,6 +2114,18 @@ function rustObjectShapeFields(
 
 function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
+  const constTypes = new Map()
+  for (const [jsonName, property] of Object.entries(entry.schema.properties ?? {})) {
+    if (!isObject(property) || typeof property.const !== 'string') continue
+    const typeName = `${entry.name}${rustVariantName(jsonName)}`
+    constTypes.set(jsonName, typeName)
+    lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+    lines.push(`pub enum ${typeName} {`)
+    lines.push(`    #[serde(rename = ${JSON.stringify(property.const)})]`)
+    lines.push(`    ${rustVariantName(property.const)},`)
+    lines.push('}')
+    lines.push('')
+  }
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
   if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
   const fields = rustObjectFields(
@@ -1908,6 +2134,7 @@ function renderRustObject(entry, context, qualifyShared) {
     context,
     new Set(),
     qualifyShared,
+    constTypes,
   )
   if (fields.length === 0) {
     lines.push(`pub struct ${entry.name} {}`)
@@ -2054,6 +2281,9 @@ function renderRustApi(context, digest) {
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared scalar value objects are defined once in `winwincode-domain`.',
     '',
+    '/// Canonical Control Plane routes and projection refresh behavior for generated clients.',
+    `pub const WINWINCODE_CLIENT_METADATA_JSON: &str = ${rustRawString(JSON.stringify(context.clientMetadata))};`,
+    '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
 }
@@ -2107,6 +2337,7 @@ function renderSchemaCollection(documents, context, digest) {
     $defs: definitions,
     'x-generated-from': documents.map(document => document.id).sort((left, right) => left.localeCompare(right)),
     'x-source-digest': `sha256:${digest}`,
+    'x-winwincode-client-metadata': context.clientMetadata,
     'x-winwincode-license': APACHE_LICENSE,
   })
 }
@@ -2148,6 +2379,7 @@ function renderOpenApi(documents, context, digest) {
     components: { schemas },
     'x-generated-from': documents.map(document => document.id).sort((left, right) => left.localeCompare(right)),
     'x-source-digest': `sha256:${digest}`,
+    'x-winwincode-client-metadata': context.clientMetadata,
   })
 }
 
@@ -2172,6 +2404,12 @@ function generatedClientMetadata(documents) {
     metadata[client.transport] = canonicalValue(client)
   }
   return canonicalValue(metadata)
+}
+
+function rustRawString(value) {
+  let hashes = ''
+  while (value.includes(`"${hashes}`)) hashes += '#'
+  return `r${hashes}"${value}"${hashes}`
 }
 
 function sourceDigest(documents) {

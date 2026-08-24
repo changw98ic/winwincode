@@ -1,15 +1,16 @@
-# Control Plane Web Client 预检合同
+# Control Plane Web Client 实现合同
 
 机器规则位于
-[`control-plane-web-client.rules.json`](./control-plane-web-client.rules.json)。当前状态是 planned/gated：
-本文件固定阶段 2.5.4 要生成什么，以及实现出现后立即检查什么；不会把这份计划当成客户端已经完成。
+[`control-plane-web-client.rules.json`](./control-plane-web-client.rules.json)。当前状态是
+implemented/enforced：生成文件和可执行行为证明已经存在，门禁会拒绝手改产物、类型漂移和
+浏览器绕过。
 
 ## 当前接入面
 
 | 范围 | 当前事实 | 阶段 2.5.4 的处理 |
 | --- | --- | --- |
-| Schema 生成器 | `scripts/generate-contracts.mjs` 从 canonical schema 同时生成 Rust、TypeScript、OpenAPI 和 schema collection | 在同一个生成器增加 Web client 输出，不另建手写生成脚本 |
-| Web 生成目录 | 目前只有 `apps/web/src/generated/contracts.ts`，只有 DTO 和枚举 | 新增生成文件 `control-plane-client.ts` |
+| Schema 生成器 | `scripts/generate-contracts.mjs` 从 canonical schema 同时生成 Rust、TypeScript、OpenAPI、schema collection 和 Web client | Web client 已进入同一个生成器，没有第二个手写生成脚本 |
+| Web 生成目录 | `contracts.ts` 保存 DTO，`control-plane-client.ts` 保存唯一浏览器网络实现 | 两个文件都由同一份 canonical schema 生成并检查漂移 |
 | StrongFlow | `packages/strongflow/src/client.ts` 通过 DSH Typert 的 `strongflow.invoke` / `strongflow.advance` 调用，并每两秒读取一次完整投影 | 新 Web 页面只调用生成的 HTTP/WebSocket client；旧调用不会成为第二条长期路径 |
 | StrongFlow 浏览器状态 | 只把选中的 Delivery ID 放进 `localStorage`；Delivery 和运行投影仍由远端重新读取 | cursor 只能保存为恢复位置，不能成为 Delivery 事实 |
 | StrongFlow 重启恢复 | `delivery-recovery.ts` 从 DeliveryStore 和 RuntimeSessionLedger 重放，再决定下一项动作 | 这是服务端恢复事实，不是浏览器 cursor 的替代品 |
@@ -60,6 +61,11 @@ HTTP。
 最后已确认 cursor 续传；不能从最后收到但尚未应用的事件续传。`4403` 表示权限已经撤销，
 客户端清除订阅并停止自动重试。事件用 `eventId` 加同一 Scope/Stream cursor 去重。
 
+通用 `transport.reset-required.v1` 不携带固定 query 清单。生成 client 保存最初的
+`subscription.stream.kind`：Delivery stream 走完整 StrongFlow 双查询，ProductSession stream
+只重读它自己的运行投影。服务端运行投影失效事件则保留严格的两分支 `reloadQueries`，客户端
+会核对分支和本地订阅一致，不能凭空补一个 Delivery。
+
 ## StrongFlow reset
 
 首次打开或收到 `4409` / `transport.reset-required.v1` 时，生成 client 使用同一 Scope 和
@@ -70,8 +76,13 @@ Delivery 身份发出两次 HTTP query。只有 `delivery.get` 和 `runtime.proj
 订阅。重试仍然重新读取这一对 query。客户端从返回 cursor 续传或建立新订阅，不使用 reset
 前的旧内存 cursor 猜测缺失事件。
 
-Chat 的完整恢复仍按 Chat 合同读取消息历史和运行投影；本任务只盘点这个边界，不把 stock
-DSH Chat 迁移算进阶段 2.5.4。
+如果第二次查询返回 `READ_CURSOR_EXPIRED`，client 丢弃第一次查询结果，从不带 `atCursor`
+的 `delivery.get` 重新建立整组读取；不会只重试 runtime。格式错误或属于其他范围的 cursor
+仍按原错误结束，不进入这个恢复分支。
+
+ProductSession 的生成订阅能力在首次打开、运行失效和 `4409` 时都只调用
+`runtime.projection.get`，请求中没有 Delivery、StageRun 或 StrongFlow cursor。Chat 消息历史
+仍按 Chat 合同读取；stock DSH Chat 页面本身没有在阶段 2.5.4 中迁移。
 
 ## 页面边界与自动门禁
 
@@ -79,8 +90,6 @@ Web 不连接 Execution Worker，不持有 Worker 地址，不导入 ExecutionPo
 或 WebSocket DTO。`apps/web/src/generated` 之外出现直接 `fetch()` 或 `new WebSocket()`
 会直接失败。
 
-在 trigger 文件还不存在时，Node 门禁验证 canonical 输入、当前 types-only 目录、真实旧
-调用面和 planned/gated 计划。trigger 一旦出现，同一个门禁自动解析 TypeScript 源码，检查
-真实 export declaration、接口成员、生成标记、generator 输出和 import 依赖，并要求存在
-可执行的 `tests/generated-control-plane-client.test.mjs` 行为证明。门禁不通过搜索测试名称来
-冒充实现完成。
+Node 门禁解析 TypeScript 源码，检查真实 export declaration、接口成员、生成标记、generator
+输出和 import 依赖，并执行 `tests/generated-control-plane-client.test.mjs` 中的 fake HTTP/WS
+行为证明。门禁不通过搜索测试名称来冒充实现完成。

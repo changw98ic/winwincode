@@ -361,7 +361,7 @@ test('WebSocket acknowledges only applied events, deduplicates, pongs, and resum
 
   const eventOne = runtimeEvent(1, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery_stage',
+    scopeKind: 'delivery-stage',
     productSessionId,
     deliveryId,
     stageRunId,
@@ -445,10 +445,14 @@ test('WebSocket handler failure sends no acknowledgement and 4403 stops reconnec
   client.subscribe('subscription-1', subscription())
   factory.sockets[0].open()
   factory.sockets[0].receive(runtimeEvent(1, {
-    type: 'delivery.changed.v1',
+    type: 'runtime-projection.invalidated.v1',
+    scopeKind: 'delivery-stage',
+    productSessionId,
     deliveryId,
-    revision: 1,
-    changeKind: 'advanced',
+    stageRunId,
+    projectionRevision: 1,
+    lastProjectionSequence: 1,
+    reloadQueries: ['delivery.get', 'runtime.projection.get'],
   }))
   await flush()
   assert.equal(factory.sockets[0].sent.some(frame => frame.type === 'transport.ack.v1'), false)
@@ -465,6 +469,43 @@ test('WebSocket handler failure sends no acknowledgement and 4403 stops reconnec
   assert.throws(() => client.reconnect(), error => (
     error instanceof ControlPlaneClientError && error.code === 'NO_SUBSCRIPTION'
   ))
+})
+
+test('generic reset frames reject the removed fixed reload query list', async () => {
+  const factory = fakeWebSocketFactory()
+  const errors = []
+  let resetCount = 0
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    async onEvent() {},
+    async onResetRequired() {
+      resetCount += 1
+    },
+    onError(error) {
+      errors.push(error)
+    },
+  })
+  client.subscribe('subscription-1', subscription())
+  factory.sockets[0].open()
+  factory.sockets[0].receive({
+    type: 'transport.reset-required.v1',
+    subscriptionId: 'subscription-1',
+    reason: 'cursor-expired',
+    earliestAvailable: {
+      scope,
+      stream: { kind: 'delivery', deliveryId },
+      sequence: 0,
+      eventId: null,
+    },
+    closeCode: 4409,
+    reloadQueries: ['delivery.get', 'runtime.projection.get'],
+  })
+  await flush()
+
+  assert.equal(resetCount, 0)
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].code, 'INVALID_WEBSOCKET_FRAME')
+  assert.equal(factory.sockets.length, 1)
 })
 
 test('StrongFlow reloads delivery then runtime at the exact returned read cursor before publishing', async () => {
@@ -521,7 +562,7 @@ test('StrongFlow reloads delivery then runtime at the exact returned read cursor
   sockets.sockets[0].open()
   sockets.sockets[0].receive(runtimeEvent(1, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'delivery_stage',
+    scopeKind: 'delivery-stage',
     productSessionId,
     deliveryId,
     stageRunId,
@@ -537,6 +578,15 @@ test('StrongFlow reloads delivery then runtime at the exact returned read cursor
   assert.deepEqual(queries[3].parameters.atCursor, snapshots[1].delivery.readCursor)
   assert.equal(snapshots.length, 2)
   assert.equal(sockets.sockets[0].sent.at(-1).type, 'transport.ack.v1')
+
+  sockets.sockets[0].serverClose(4409)
+  await flush()
+  assert.deepEqual(queries.slice(4).map(query => query.query), [
+    'delivery.get',
+    'runtime.projection.get',
+  ])
+  assert.equal(snapshots.length, 3)
+  assert.equal(sockets.sockets.length, 2)
 })
 
 test('StrongFlow discards a partial pair and does not subscribe until a full retry succeeds', async () => {
@@ -734,7 +784,7 @@ test('product-session reset and invalidation reload runtime only and never inven
   sockets.sockets[1].open()
   sockets.sockets[1].receive(runtimeEvent(1, {
     type: 'runtime-projection.invalidated.v1',
-    scopeKind: 'product_session',
+    scopeKind: 'product-session',
     productSessionId,
     projectionRevision: 3,
     lastProjectionSequence: 3,

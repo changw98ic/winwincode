@@ -160,6 +160,26 @@
       "workerSessionId": "wsn_00000000000000000000000005"
     },
     {
+      "kind": "session.binding",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000T",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "productSessionId": "psn_00000000000000000000000006",
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "codexThreadId": "cdx_0000000000000000000000000G",
+      "boundAt": "2026-08-24T12:00:00.000Z"
+    },
+    {
       "kind": "lease.renew",
       "schemaVersion": "winwincode/v1",
       "messageId": "xmsg_00000000000000000000000008",
@@ -199,7 +219,8 @@
         "occurredAt": "2026-08-24T12:00:00.000Z",
         "category": "lifecycle",
         "summary": "Worker session started."
-      }
+      },
+      "codexThreadId": "cdx_0000000000000000000000000G"
     },
     {
       "kind": "runtime.ack",

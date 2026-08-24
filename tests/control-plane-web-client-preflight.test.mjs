@@ -149,11 +149,17 @@ function oneOfDiscriminators(schema, definitionName, field) {
   })
 }
 
+function tupleConstants(schema, definitionName, field) {
+  return schema.$defs[definitionName].properties[field].prefixItems.map(item => (
+    item.const ?? schema.$defs[item.$ref.split('/').at(-1)].const
+  ))
+}
+
 test('preflight records the real current Web, StrongFlow, Chat, and codegen seams', () => {
   const rules = json(rulesPath)
   assert.equal(rules.schemaVersion, 'winwincode.control-plane-web-client-gate.v1')
   assert.equal(rules.issueId, 'winwincode-9c4.16.2.5.4.1')
-  assert.equal(rules.status, 'planned-gated')
+  assert.equal(rules.status, 'implemented-enforced')
   assert.equal(rules.coverage.mode, 'git-file-inventory+rg+ast-grep-fallback')
   assert.equal(rules.coverage.symbolGraphComplete, false)
 
@@ -165,7 +171,11 @@ test('preflight records the real current Web, StrongFlow, Chat, and codegen seam
     ...rules.inventory.chat.paths,
   ]) assert.equal(existsSync(repositoryPath(path)), true, path)
 
-  assert.deepEqual(rules.inventory.web.currentFiles, ['apps/web/src/generated/contracts.ts'])
+  assert.deepEqual(rules.inventory.web.currentFiles, [
+    'apps/web/src/generated/contracts.ts',
+    'apps/web/src/generated/control-plane-client.ts',
+  ])
+  assert.equal(rules.inventory.web.networkImplementation, true)
   assert.equal(rules.inventory.strongFlow.transport, 'dsh-typert-remote')
   assert.equal(rules.inventory.strongFlow.refresh, 'two-second-full-projection-poll')
   assert.equal(
@@ -208,7 +218,7 @@ test('preflight records the real current Web, StrongFlow, Chat, and codegen seam
   assert.match(agentFactory, /#kernel\.resumeSession\(/u)
 })
 
-test('planned HTTP and WebSocket clients stay anchored to canonical generated types', () => {
+test('implemented HTTP and WebSocket clients stay anchored to canonical generated types', () => {
   const rules = json(rulesPath)
   const http = json(repositoryPath(rules.generation.canonicalInputs[1]))
   const websocket = json(repositoryPath(rules.generation.canonicalInputs[2]))
@@ -237,6 +247,29 @@ test('planned HTTP and WebSocket clients stay anchored to canonical generated ty
   ])
   assert.equal(rules.strongFlowReset.publishPartialReload, false)
   assert.equal(rules.strongFlowReset.subscribeBeforeBothQueriesSucceed, false)
+  assert.equal(rules.strongFlowReset.expiredCursorError, 'READ_CURSOR_EXPIRED')
+  assert.deepEqual(rules.productSessionReset.reloadQueries, ['runtime.projection.get'])
+  assert.equal(rules.websocket.resetFrameReloadQueries, false)
+  assert.equal(
+    Object.hasOwn(websocket.$defs.ControlPlaneWebSocketResetRequiredFrame.properties, 'reloadQueries'),
+    false,
+  )
+  assert.deepEqual(
+    tupleConstants(
+      websocket,
+      'ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent',
+      'reloadQueries',
+    ),
+    ['delivery.get', 'runtime.projection.get'],
+  )
+  assert.deepEqual(
+    tupleConstants(
+      websocket,
+      'ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent',
+      'reloadQueries',
+    ),
+    ['runtime.projection.get'],
+  )
 })
 
 test('Web sources cannot hand-open transports or import Worker authority', () => {
@@ -354,12 +387,14 @@ test('generated client trigger activates structural exports, dependency, and pro
   }
 })
 
-test('plain-language contract distinguishes the current inventory from the parent implementation', () => {
+test('plain-language contract records the implemented client and its reset split', () => {
   const contract = readFileSync(contractPath, 'utf8')
   for (const phrase of [
-    '当前状态是 planned/gated',
-    '不会把这份计划当成客户端已经完成',
+    'implemented/enforced',
+    '生成文件和可执行行为证明已经存在',
     '`delivery.get` 和 `runtime.projection.get` 都成功',
+    '`READ_CURSOR_EXPIRED`',
+    '不能凭空补一个 Delivery',
     '`requestId` 和 `expectedRevision`',
     'WebSocket 不提交业务 command',
     'Web 不连接 Execution Worker',

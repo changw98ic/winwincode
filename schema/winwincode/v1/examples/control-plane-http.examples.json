@@ -54,6 +54,27 @@
         "limit": 50
       }
     },
+    "deliveryApproveTaskBreakdown": {
+      "schemaVersion": "winwincode/v1",
+      "command": "delivery.approve_task_breakdown",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "requestId": "req_01J0000000000000000000000A",
+      "expectedRevision": 11,
+      "payload": {
+        "deliveryId": "dlv_00000000000000000000000000",
+        "reviewSetSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
     "inputRespond": {
       "schemaVersion": "winwincode/v1",
       "command": "input.respond",
@@ -124,7 +145,45 @@
         "kind": "delivery-stage",
         "productSessionId": "psn_00000000000000000000000000",
         "deliveryId": "dlv_00000000000000000000000000",
-        "stageRunId": "run_00000000000000000000000000"
+        "stageRunId": "run_00000000000000000000000000",
+        "atCursor": {
+          "token": "sfread_00000000000000000000000000000001",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_00000000000000000000000000",
+            "workspaceId": "wsp_00000000000000000000000000",
+            "projectId": "prj_00000000000000000000000000",
+            "repositoryId": "rep_00000000000000000000000000"
+          },
+          "deliveryId": "dlv_00000000000000000000000000",
+          "deliveryRevision": 11,
+          "runtimeLedgerRevision": 11,
+          "runtimeAcceptedSequence": 42,
+          "publicationRevision": 0
+        }
+      },
+      "page": {
+        "cursor": null,
+        "limit": 1
+      }
+    },
+    "deliveryGet": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J0000000000000000000000B",
+      "query": "delivery.get",
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000000"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "parameters": {
+        "deliveryId": "dlv_00000000000000000000000000"
       },
       "page": {
         "cursor": null,
@@ -234,6 +293,63 @@
       }
     }
   },
+  "readCursorExpired": {
+    "schemaVersion": "winwincode/v1",
+    "requestId": "req_01J00000000000000000000010",
+    "error": {
+      "code": "READ_CURSOR_EXPIRED",
+      "message": "StrongFlow read cursor is outside the retained replay window",
+      "retryable": true,
+      "details": {
+        "field": "atCursor",
+        "action": "restart_strongflow_read_without_cursor"
+      }
+    }
+  },
+  "strongFlowReadCutMismatch": {
+    "deliveryCursor": {
+      "token": "sfread_00000000000000000000000000000001",
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "deliveryId": "dlv_00000000000000000000000000",
+      "deliveryRevision": 11,
+      "runtimeLedgerRevision": 11,
+      "runtimeAcceptedSequence": 42,
+      "publicationRevision": 0
+    },
+    "runtimeCursor": {
+      "token": "sfread_00000000000000000000000000000002",
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000000",
+        "workspaceId": "wsp_00000000000000000000000000",
+        "projectId": "prj_00000000000000000000000000",
+        "repositoryId": "rep_00000000000000000000000000"
+      },
+      "deliveryId": "dlv_00000000000000000000000000",
+      "deliveryRevision": 11,
+      "runtimeLedgerRevision": 11,
+      "runtimeAcceptedSequence": 43,
+      "publicationRevision": 0
+    },
+    "expected": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J00000000000000000000009",
+      "error": {
+        "code": "REVISION_CONFLICT",
+        "message": "StrongFlow read cursors do not name the same bounded cut",
+        "retryable": false,
+        "details": {
+          "field": "readCursor"
+        }
+      }
+    }
+  },
   "responses": {
     "commandCompleted": {
       "schemaVersion": "winwincode/v1",
@@ -302,26 +418,338 @@
       "result": {
         "kind": "runtime_projection",
         "revision": 11,
+        "readCursor": {
+          "token": "sfread_00000000000000000000000000000001",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_00000000000000000000000000",
+            "workspaceId": "wsp_00000000000000000000000000",
+            "projectId": "prj_00000000000000000000000000",
+            "repositoryId": "rep_00000000000000000000000000"
+          },
+          "deliveryId": "dlv_00000000000000000000000000",
+          "deliveryRevision": 11,
+          "runtimeLedgerRevision": 11,
+          "runtimeAcceptedSequence": 42,
+          "publicationRevision": 0
+        },
         "productSessionId": "psn_00000000000000000000000000",
         "deliveryId": "dlv_00000000000000000000000000",
         "stageRunId": "run_00000000000000000000000000",
         "lastProjectionSequence": 42,
-        "items": [
+        "rebuiltAt": "2026-08-24T10:00:02.000Z",
+        "sessions": [
           {
+            "sessionBindingId": "binding:runtime:1",
+            "stageRunId": "run_00000000000000000000000000",
+            "deliveryTaskId": null,
             "productSessionId": "psn_00000000000000000000000000",
             "workerSessionId": "wsn_00000000000000000000000000",
             "codexThreadId": "cdx_00000000000000000000000000",
+            "executionJobId": "job_00000000000000000000000000",
             "leaseId": "lse_00000000000000000000000000",
-            "deliveryId": "dlv_00000000000000000000000000",
-            "stageRunId": "run_00000000000000000000000000",
-            "projectionSequence": 42,
-            "projectionKind": "test",
-            "summary": "The focused contract tests passed.",
-            "sourceRef": "runtime-event:42",
-            "occurredAt": "2026-08-24T10:00:00.000Z"
+            "attempt": 1,
+            "fencingToken": "42",
+            "asOfSequence": 42,
+            "plan": {
+              "itemId": "plan:1",
+              "explanation": "Execute the approved focused checks.",
+              "items": [
+                {
+                  "step": "Run the contract tests.",
+                  "status": "completed"
+                }
+              ],
+              "text": "Run the contract tests.",
+              "complete": true,
+              "sourceRef": "runtime-event:38"
+            },
+            "agents": [
+              {
+                "threadId": "cdx_00000000000000000000000000",
+                "parentThreadId": null,
+                "path": "root",
+                "nickname": "executor",
+                "role": "executor",
+                "status": "completed",
+                "sourceRef": "runtime-event:39"
+              }
+            ],
+            "agentEdges": [],
+            "activities": [
+              {
+                "callId": "call:test:1",
+                "activityType": "test",
+                "command": "pnpm contracts:check",
+                "status": "completed",
+                "outcome": "succeeded",
+                "exitCode": 0,
+                "sourceRef": "runtime-event:40"
+              }
+            ],
+            "usage": {
+              "totals": [
+                {
+                  "name": "total_tokens",
+                  "value": 1200
+                }
+              ],
+              "sourceRef": "runtime-event:41"
+            },
+            "recovery": {
+              "state": "none",
+              "failureCount": 0,
+              "recoveryCount": 0,
+              "lastFailureSourceRef": null,
+              "latestRecoverySourceRef": null
+            },
+            "diffSummary": {
+              "changedFileCount": 3,
+              "additions": 40,
+              "deletions": 8,
+              "detailsVisible": false,
+              "sourceRef": "runtime-event:42"
+            }
+          }
+        ]
+      },
+      "page": {
+        "nextCursor": null,
+        "hasMore": false
+      }
+    },
+    "deliveryDetailPendingReview": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J0000000000000000000000B",
+      "query": "delivery.get",
+      "result": {
+        "kind": "delivery_detail",
+        "schemaVersion": "winwincode/v1",
+        "readCursor": {
+          "token": "sfread_00000000000000000000000000000003",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_00000000000000000000000000",
+            "workspaceId": "wsp_00000000000000000000000000",
+            "projectId": "prj_00000000000000000000000000",
+            "repositoryId": "rep_00000000000000000000000000"
+          },
+          "deliveryId": "dlv_00000000000000000000000000",
+          "deliveryRevision": 11,
+          "runtimeLedgerRevision": 11,
+          "runtimeAcceptedSequence": 42,
+          "publicationRevision": 0
+        },
+        "deliveryId": "dlv_00000000000000000000000000",
+        "deliveryRevision": 11,
+        "ownership": {
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "status": "plan-review",
+        "requirements": {
+          "deliverySpecId": "spec:current",
+          "deliverySpecRevision": 3,
+          "title": "Add bounded StrongFlow reads",
+          "goal": "Display one current Delivery and runtime read cut.",
+          "scope": [
+            "Control Plane StrongFlow query contract"
+          ],
+          "outOfScope": [],
+          "constraints": [
+            "Do not expose raw runtime logs."
+          ],
+          "acceptanceCriteria": [
+            {
+              "id": "criterion:cursor",
+              "description": "Both query results carry one cursor.",
+              "verificationMethod": "Contract validation",
+              "required": true
+            }
+          ],
+          "sourceRef": null,
+          "publicationTarget": null,
+          "repository": {
+            "kind": "local-git",
+            "locator": "workspace://repository"
+          },
+          "baseRevision": "0123456789abcdef0123456789abcdef01234567",
+          "maxReworkAttempts": 2
+        },
+        "solutionReview": {
+          "deliveryId": "dlv_00000000000000000000000000",
+          "deliverySpecId": "spec:current",
+          "deliverySpecRevision": 3,
+          "planningStageRunId": "run_00000000000000000000000000",
+          "planningSessionBindingId": "binding:planning:1",
+          "reviewStageRunId": "run_00000000000000000000000001",
+          "attentionItemId": "att_00000000000000000000000000",
+          "reviewSetSha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "reviewStatus": "pending",
+          "decision": null,
+          "comments": null,
+          "requestedChanges": null,
+          "reviewerId": null,
+          "reviewedAt": null,
+          "solutionId": "solution:current",
+          "summary": "Use one signed read cursor for both StrongFlow queries.",
+          "approach": [
+            "Read Delivery first, then replay runtime at that cursor."
+          ],
+          "components": [],
+          "connections": [],
+          "architectureDiagram": {
+            "id": "diagram:architecture",
+            "kind": "system-architecture",
+            "title": "StrongFlow read boundary",
+            "nodes": [
+              {
+                "id": "node:control-plane",
+                "label": "Control Plane",
+                "description": "Issues and validates the read cursor.",
+                "kind": "delivery-control",
+                "trustBoundary": "Control Plane",
+                "unresolved": false
+              }
+            ],
+            "edges": []
+          },
+          "processDiagram": {
+            "id": "diagram:process",
+            "kind": "process-flow",
+            "title": "Paired read",
+            "nodes": [
+              {
+                "id": "node:delivery-get",
+                "label": "delivery.get",
+                "description": "Establish the read cut.",
+                "kind": "interaction",
+                "trustBoundary": null,
+                "unresolved": false
+              }
+            ],
+            "edges": []
+          },
+          "risks": [
+            "A partial pair could mix revisions."
+          ],
+          "unresolvedItems": [],
+          "taskProposals": [
+            {
+              "id": "dtk_00000000000000000000000000",
+              "title": "Implement the paired read",
+              "goal": "Return and reuse StrongFlowReadCursor.",
+              "acceptanceCriterionIds": [
+                "criterion:cursor"
+              ],
+              "blockedByTaskIds": []
+            }
+          ]
+        },
+        "stages": [
+          {
+            "id": "run_00000000000000000000000000",
+            "deliveryTaskId": null,
+            "stage": "planning",
+            "actorType": "codex",
+            "role": "planner",
+            "status": "succeeded",
+            "attempt": 1,
+            "startedAt": "2026-08-24T09:00:00.000Z",
+            "finishedAt": "2026-08-24T09:01:00.000Z",
+            "sessionBinding": {
+              "bindingId": "binding:planning:1",
+              "productSessionId": "psn_00000000000000000000000000",
+              "executionJobId": "job_00000000000000000000000000",
+              "workerSessionId": "wsn_00000000000000000000000000",
+              "codexThreadId": "cdx_00000000000000000000000000",
+              "boundAt": "2026-08-24T09:00:00.000Z"
+            }
+          },
+          {
+            "id": "run_00000000000000000000000001",
+            "deliveryTaskId": null,
+            "stage": "plan-review",
+            "actorType": "human",
+            "role": "reviewer",
+            "status": "waiting",
+            "attempt": 1,
+            "startedAt": "2026-08-24T09:01:00.000Z",
+            "finishedAt": null,
+            "sessionBinding": null
           }
         ],
-        "rebuiltAt": "2026-08-24T10:00:02.000Z"
+        "tasks": [],
+        "attention": [
+          {
+            "id": "att_00000000000000000000000000",
+            "deliverySpecId": "spec:current",
+            "stageRunId": "run_00000000000000000000000001",
+            "type": "decision_required",
+            "title": "Review the proposed solution and tasks",
+            "options": [
+              {
+                "id": "approve",
+                "label": "Approve",
+                "description": "Promote the sealed tasks."
+              },
+              {
+                "id": "request_changes",
+                "label": "Request changes",
+                "description": "Return bounded review feedback."
+              }
+            ],
+            "assignedTo": null,
+            "blocking": true,
+            "status": "open",
+            "resolutionSummary": null,
+            "resolvedBy": null,
+            "createdAt": "2026-08-24T09:01:00.000Z",
+            "resolvedAt": null
+          }
+        ],
+        "evidence": [],
+        "currentCandidate": null,
+        "verdict": null,
+        "publication": null
+      },
+      "page": {
+        "nextCursor": null,
+        "hasMore": false
+      }
+    },
+    "publicationProjection": {
+      "schemaVersion": "winwincode/v1",
+      "requestId": "req_01J0000000000000000000000C",
+      "query": "publication.get",
+      "result": {
+        "id": "pub_00000000000000000000000000",
+        "revision": 1,
+        "deliveryId": "dlv_00000000000000000000000000",
+        "deliverySpecId": "spec:current",
+        "deliverySpecRevision": 3,
+        "candidateRef": "git-candidate:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "deliveryVerdictId": "verdict:current",
+        "verdictStatus": "pass",
+        "approvalAttentionItemId": "att_00000000000000000000000000",
+        "approvedBy": "usr_00000000000000000000000000",
+        "approvedAt": "2026-08-24T10:05:00.000Z",
+        "publicationSetSha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "target": {
+          "provider": "github",
+          "repository": "openai/winwincode",
+          "baseBranch": "main",
+          "headBranch": "delivery/bounded-strongflow-read"
+        },
+        "state": "published",
+        "resourceRef": {
+          "kind": "github_pull_request",
+          "repository": "openai/winwincode",
+          "number": 42
+        },
+        "updatedAt": "2026-08-24T10:06:00.000Z"
       },
       "page": {
         "nextCursor": null,
