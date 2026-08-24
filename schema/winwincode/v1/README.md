@@ -36,16 +36,18 @@ HTTP schema 只通过 `$ref` 使用通用领域定义，不再声明另一份 ID
 
 ## 生成与漂移检查
 
-`pnpm contracts:generate` 离线读取本目录全部 `*.schema.json`，一次更新以下四个文件：
+`pnpm contracts:generate` 离线读取本目录全部 `*.schema.json`，一次更新以下五个文件：
 
-- `crates/winwincode-api/src/generated.rs`：Rust 公共传输类型；
+- `crates/winwincode-domain/src/generated.rs`：Rust 共用 ID 和基础值类型；
+- `crates/winwincode-api/src/generated.rs`：引用上述共用类型的 Rust 公共传输类型；
 - `apps/web/src/generated/contracts.ts`：Web 客户端类型；
 - `schema-collection.generated.json`：可独立分发的 JSON Schema 集合；
 - `openapi.generated.json`：OpenAPI 3.1 文档。
 
 `pnpm contracts:check` 只做比较，不写文件；缺文件或人工修改生成物都会失败。每个公开
 `$defs` 名称在 v1 合同集合中必须唯一，跨文件 `$ref` 只能指向本目录内的 canonical
-schema。生成文件带统一来源摘要，重复生成相同输入不会改写文件。
+schema。生成文件带统一来源摘要，重复生成相同输入不会改写文件。Rust 中每个独立的基础值只在
+`winwincode-domain` 定义一次，API 数据结构直接引用，不保留第二份 ID 或旧别名。
 
 ## 已冻结的写入范围
 

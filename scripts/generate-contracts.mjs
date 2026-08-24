@@ -24,8 +24,9 @@ function usage() {
     'Options:',
     '  --check                         Verify generated files without writing them',
     '  --schema-dir PATH               Read canonical *.schema.json files from PATH',
-    '  --out-dir PATH                  Write the four fixture-style outputs below PATH',
-    '  --rust-out PATH                 Override the generated Rust module path',
+    '  --out-dir PATH                  Write the five fixture-style outputs below PATH',
+    '  --rust-out PATH                 Override the generated Rust API module path',
+    '  --rust-domain-out PATH          Override the generated shared Rust domain module path',
     '  --typescript-out PATH           Override the generated TypeScript path',
     '  --schema-collection-out PATH    Override the JSON Schema collection path',
     '  --openapi-out PATH              Override the OpenAPI document path',
@@ -39,6 +40,7 @@ function parseArguments(arguments_) {
     check: false,
     schemaDirectory: join(root, 'schema', 'winwincode', 'v1'),
     rustOutput: join(root, 'crates', 'winwincode-api', 'src', 'generated.rs'),
+    rustDomainOutput: join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs'),
     typescriptOutput: join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts'),
     schemaCollectionOutput: join(
       root,
@@ -64,6 +66,7 @@ function parseArguments(arguments_) {
     const valueOptions = new Map([
       ['--schema-dir', 'schemaDirectory'],
       ['--rust-out', 'rustOutput'],
+      ['--rust-domain-out', 'rustDomainOutput'],
       ['--typescript-out', 'typescriptOutput'],
       ['--schema-collection-out', 'schemaCollectionOutput'],
       ['--openapi-out', 'openapiOutput'],
@@ -88,6 +91,7 @@ function parseArguments(arguments_) {
   if (outputDirectory !== undefined) {
     const directory = resolve(outputDirectory)
     options.rustOutput = join(directory, 'rust', 'generated.rs')
+    options.rustDomainOutput = join(directory, 'rust-domain', 'generated.rs')
     options.typescriptOutput = join(directory, 'typescript', 'generated.ts')
     options.schemaCollectionOutput = join(directory, 'schema-collection.generated.json')
     options.openapiOutput = join(directory, 'openapi.generated.json')
@@ -485,37 +489,60 @@ function rustPrimitiveType(type) {
   return 'serde_json::Value'
 }
 
-function rustType(schema, document, context) {
+function isRustSharedScalarDefinition(entry) {
+  const { schema } = entry
+  if (schema.const !== undefined || schema.enum !== undefined) return false
+  if (
+    schema.$ref !== undefined
+    || schema.allOf !== undefined
+    || schema.oneOf !== undefined
+    || schema.anyOf !== undefined
+  ) return false
+  const types = schemaTypes(schema)
+  return types.length === 1 && ['boolean', 'integer', 'number', 'string'].includes(types[0])
+}
+
+function rustNamedType(name, context, qualifyShared) {
+  return qualifyShared && context.rustSharedDefinitionNames.has(name)
+    ? `winwincode_domain::generated::${name}`
+    : name
+}
+
+function rustType(schema, document, context, qualifyShared = false) {
   if (!isObject(schema)) return 'serde_json::Value'
-  if (typeof schema.$ref === 'string') return referenceName(schema, document, context)
+  if (typeof schema.$ref === 'string') {
+    return rustNamedType(referenceName(schema, document, context), context, qualifyShared)
+  }
   if (schema.const !== undefined) return rustPrimitiveType(typeof schema.const)
   if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {
     const branches = schema.oneOf ?? schema.anyOf
     const nonNull = branches.filter(branch => !isObject(branch) || !schemaTypes(branch).includes('null'))
     if (nonNull.length === 1 && nonNull.length !== branches.length) {
-      return `Option<${rustType(nonNull[0], document, context)}>`
+      return `Option<${rustType(nonNull[0], document, context, qualifyShared)}>`
     }
     return 'serde_json::Value'
   }
   if (Array.isArray(schema.allOf)) {
-    if (schema.allOf.length === 1) return rustType(schema.allOf[0], document, context)
+    if (schema.allOf.length === 1) {
+      return rustType(schema.allOf[0], document, context, qualifyShared)
+    }
     return 'serde_json::Value'
   }
   const types = schemaTypes(schema)
   if (types.length > 1) {
     const nonNull = types.filter(type => type !== 'null')
     if (nonNull.length === 1 && nonNull.length !== types.length) {
-      return `Option<${rustType({ ...schema, type: nonNull[0] }, document, context)}>`
+      return `Option<${rustType({ ...schema, type: nonNull[0] }, document, context, qualifyShared)}>`
     }
     return 'serde_json::Value'
   }
   const [type] = types
   if (type === 'array') {
-    return `Vec<${rustType(isObject(schema.items) ? schema.items : {}, document, context)}>`
+    return `Vec<${rustType(isObject(schema.items) ? schema.items : {}, document, context, qualifyShared)}>`
   }
   if (type === 'object' || schema.additionalProperties !== undefined || schema.properties !== undefined) {
     if (isObject(schema.additionalProperties) && Object.keys(schema.properties ?? {}).length === 0) {
-      return `std::collections::BTreeMap<String, ${rustType(schema.additionalProperties, document, context)}>`
+      return `std::collections::BTreeMap<String, ${rustType(schema.additionalProperties, document, context, qualifyShared)}>`
     }
     return 'serde_json::Value'
   }
@@ -526,7 +553,13 @@ function rustDocumentation(description) {
   return descriptionLines(description, '/// ')
 }
 
-function rustObjectFields(schema, document, context, existingNames = new Set()) {
+function rustObjectFields(
+  schema,
+  document,
+  context,
+  existingNames = new Set(),
+  qualifyShared = false,
+) {
   const fields = []
   const required = new Set(Array.isArray(schema.required) ? schema.required : [])
   for (const [jsonName, propertySchema] of Object.entries(schema.properties ?? {})
@@ -539,7 +572,7 @@ function rustObjectFields(schema, document, context, existingNames = new Set()) 
     }
     existingNames.add(fieldName)
     const resolvedSchema = isObject(propertySchema) ? propertySchema : {}
-    let type = rustType(resolvedSchema, document, context)
+    let type = rustType(resolvedSchema, document, context, qualifyShared)
     const optional = !required.has(jsonName)
     if (optional && !type.startsWith('Option<')) type = `Option<${type}>`
     fields.push(...rustDocumentation(resolvedSchema.description))
@@ -555,7 +588,7 @@ function rustObjectFields(schema, document, context, existingNames = new Set()) 
       suffix += 1
     }
     const valueType = isObject(schema.additionalProperties)
-      ? rustType(schema.additionalProperties, document, context)
+      ? rustType(schema.additionalProperties, document, context, qualifyShared)
       : 'serde_json::Value'
     fields.push('    #[serde(default, flatten)]')
     fields.push(`    pub ${fieldName}: std::collections::BTreeMap<String, ${valueType}>,`)
@@ -563,10 +596,16 @@ function rustObjectFields(schema, document, context, existingNames = new Set()) 
   return fields
 }
 
-function renderRustObject(entry, context) {
+function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
-  const fields = rustObjectFields(entry.schema, entry.document, context)
+  const fields = rustObjectFields(
+    entry.schema,
+    entry.document,
+    context,
+    new Set(),
+    qualifyShared,
+  )
   if (fields.length === 0) {
     lines.push(`pub struct ${entry.name} {}`)
     return lines.join('\n')
@@ -577,7 +616,7 @@ function renderRustObject(entry, context) {
   return lines.join('\n')
 }
 
-function renderRustAllOf(entry, context) {
+function renderRustAllOf(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
   lines.push(`pub struct ${entry.name} {`)
@@ -586,11 +625,12 @@ function renderRustAllOf(entry, context) {
   for (const branch of entry.schema.allOf) {
     if (!isObject(branch)) throw new Error(`${entry.document.path}: ${entry.name} allOf branch must be an object`)
     if (typeof branch.$ref === 'string') {
-      const type = referenceName(branch, entry.document, context)
-      let fieldName = rustFieldName(type)
+      const referenced = referenceName(branch, entry.document, context)
+      const type = rustNamedType(referenced, context, qualifyShared)
+      let fieldName = rustFieldName(referenced)
       let suffix = 2
       while (existingNames.has(fieldName)) {
-        fieldName = `${rustFieldName(type)}_${String(suffix)}`
+        fieldName = `${rustFieldName(referenced)}_${String(suffix)}`
         suffix += 1
       }
       existingNames.add(fieldName)
@@ -599,7 +639,13 @@ function renderRustAllOf(entry, context) {
       continue
     }
     if (branch.type === 'object' || branch.properties !== undefined) {
-      lines.push(...rustObjectFields(branch, entry.document, context, existingNames))
+      lines.push(...rustObjectFields(
+        branch,
+        entry.document,
+        context,
+        existingNames,
+        qualifyShared,
+      ))
       continue
     }
     inlineIndex += 1
@@ -611,13 +657,13 @@ function renderRustAllOf(entry, context) {
   return lines.join('\n')
 }
 
-function renderRustUnion(entry, context) {
+function renderRustUnion(entry, context, qualifyShared) {
   const branches = entry.schema.oneOf ?? entry.schema.anyOf
   const nonNull = branches.filter(branch => !isObject(branch) || !schemaTypes(branch).includes('null'))
   if (nonNull.length === 1 && nonNull.length !== branches.length) {
     return [
       ...rustDocumentation(entry.schema.description),
-      `pub type ${entry.name} = Option<${rustType(nonNull[0], entry.document, context)}>;`,
+      `pub type ${entry.name} = Option<${rustType(nonNull[0], entry.document, context, qualifyShared)}>;`,
     ].join('\n')
   }
   const lines = [...rustDocumentation(entry.schema.description)]
@@ -629,7 +675,9 @@ function renderRustUnion(entry, context) {
     const referenced = isObject(branch) && typeof branch.$ref === 'string'
       ? referenceName(branch, entry.document, context)
       : undefined
-    const type = isObject(branch) ? rustType(branch, entry.document, context) : 'serde_json::Value'
+    const type = isObject(branch)
+      ? rustType(branch, entry.document, context, qualifyShared)
+      : 'serde_json::Value'
     const variant = rustVariantName(referenced ?? `Variant${String(index + 1)}`, used)
     const declaration = `    ${variant}(${type}),`
     if (declaration.length <= 100) lines.push(declaration)
@@ -643,16 +691,8 @@ function renderRustUnion(entry, context) {
   return lines.join('\n')
 }
 
-function renderRustDefinition(entry, context) {
+function renderRustDefinition(entry, context, qualifyShared) {
   const { name, schema, document } = entry
-  if (name.endsWith('Id') && schemaTypes(schema).includes('string') && schema.enum === undefined) {
-    return [
-      ...rustDocumentation(schema.description),
-      '#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]',
-      '#[serde(transparent)]',
-      `pub struct ${name}(pub String);`,
-    ].join('\n')
-  }
   if (typeof schema.const === 'string') {
     return [
       ...rustDocumentation(schema.description),
@@ -683,24 +723,39 @@ function renderRustDefinition(entry, context) {
     if (isObject(schema.additionalProperties) && Object.keys(schema.properties ?? {}).length === 0) {
       return [
         ...rustDocumentation(schema.description),
-        `pub type ${name} = ${rustType(schema, document, context)};`,
+        `pub type ${name} = ${rustType(schema, document, context, qualifyShared)};`,
       ].join('\n')
     }
-    return renderRustObject(entry, context)
+    return renderRustObject(entry, context, qualifyShared)
   }
-  if (Array.isArray(schema.allOf)) return renderRustAllOf(entry, context)
+  if (Array.isArray(schema.allOf)) return renderRustAllOf(entry, context, qualifyShared)
   if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {
-    return renderRustUnion(entry, context)
+    return renderRustUnion(entry, context, qualifyShared)
   }
   return [
     ...rustDocumentation(schema.description),
-    `pub type ${name} = ${rustType(schema, document, context)};`,
+    `pub type ${name} = ${rustType(schema, document, context, qualifyShared)};`,
   ].join('\n')
 }
 
-function renderRust(context, digest) {
-  const entries = [...context.registry.values()].sort((left, right) => left.name.localeCompare(right.name))
-  const declarations = entries.map(entry => renderRustDefinition(entry, context))
+function renderRustSharedDefinition(entry) {
+  const primitive = rustPrimitiveType(schemaTypes(entry.schema)[0])
+  const derives = primitive === 'f64'
+    ? 'Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize'
+    : 'Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize'
+  return [
+    ...rustDocumentation(entry.schema.description),
+    `#[derive(${derives})]`,
+    '#[serde(transparent)]',
+    `pub struct ${entry.name}(pub ${primitive});`,
+  ].join('\n')
+}
+
+function renderRustApi(context, digest) {
+  const entries = [...context.registry.values()]
+    .filter(entry => !context.rustSharedDefinitionNames.has(entry.name))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  const declarations = entries.map(entry => renderRustDefinition(entry, context, true))
   return [
     '// SPDX-License-Identifier: Apache-2.0',
     `// ${GENERATED_MARKER}`,
@@ -709,6 +764,25 @@ function renderRust(context, digest) {
     '#![allow(clippy::doc_markdown)]',
     '',
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
+    '//! Shared scalar value objects are defined once in `winwincode-domain`.',
+    '',
+    ...declarations.flatMap(declaration => [declaration, '']),
+  ].join('\n')
+}
+
+function renderRustDomain(context, digest) {
+  const entries = [...context.registry.values()]
+    .filter(entry => context.rustSharedDefinitionNames.has(entry.name))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  const declarations = entries.map(renderRustSharedDefinition)
+  return [
+    '// SPDX-License-Identifier: Apache-2.0',
+    `// ${GENERATED_MARKER}`,
+    `// Source digest: sha256:${digest}`,
+    '',
+    '#![allow(clippy::doc_markdown)]',
+    '',
+    '//! Shared identifiers and scalar value objects generated from the canonical schemas.',
     '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
@@ -818,10 +892,16 @@ function writeAtomically(path, content) {
 function generate(options) {
   const documents = loadDocuments(options.schemaDirectory)
   const context = definitionRegistry(documents)
+  context.rustSharedDefinitionNames = new Set(
+    [...context.registry.values()]
+      .filter(isRustSharedScalarDefinition)
+      .map(entry => entry.name),
+  )
   validateDocuments(documents, context)
   const digest = sourceDigest(documents)
   const outputs = new Map([
-    [options.rustOutput, renderRust(context, digest)],
+    [options.rustDomainOutput, renderRustDomain(context, digest)],
+    [options.rustOutput, renderRustApi(context, digest)],
     [options.typescriptOutput, renderTypescript(context, digest)],
     [options.schemaCollectionOutput, renderSchemaCollection(documents, context, digest)],
     [options.openapiOutput, renderOpenApi(documents, context, digest)],

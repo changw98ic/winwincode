@@ -1,6 +1,6 @@
 [package]
-name = "winwincode-api"
-description = "Generated public transport types for the WinWinCode Control Plane and Execution Port"
+name = "winwincode-domain"
+description = "Generated shared identifiers and scalar value objects for WinWinCode"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,7 @@ publish = false
 include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
-winwincode-domain.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true
