@@ -5,9 +5,14 @@
   "rustTarget": {
     "deliveryCrate": "crates/winwincode-delivery",
     "controlPlaneCrate": "crates/winwincode-control-plane",
-    "deliveryTrigger": "crates/winwincode-delivery/src/projection/mod.rs",
     "controlPlaneTrigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-    "scanRule": "A missing trigger means the implementation phase has not started. Once a trigger exists, every rule assigned to it must have its named module and Rust test."
+    "scanRule": "A missing concrete implementation file means that projection slice has not started. Once delivery.rs, solution.rs, runtime.rs, redaction.rs, or the Control Plane trigger exists, only rules assigned to that concrete trigger require their named module and Rust test.",
+    "deliveryTriggers": [
+      "crates/winwincode-delivery/src/projection/delivery.rs",
+      "crates/winwincode-delivery/src/projection/solution.rs",
+      "crates/winwincode-delivery/src/projection/runtime.rs",
+      "crates/winwincode-delivery/src/projection/redaction.rs"
+    ]
   },
   "sections": [
     {
@@ -61,7 +66,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "requirements_projection_uses_current_delivery_spec"
       }
@@ -117,7 +122,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/solution.rs",
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
         "testName": "solution_projection_requires_current_approved_review_set"
       }
@@ -169,7 +174,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "stage_projection_keeps_stage_and_session_identities_distinct"
       }
@@ -222,7 +227,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "task_projection_rolls_up_only_owned_stage_runs"
       }
@@ -273,7 +278,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "agent_graph_projection_uses_bound_runtime_events"
       }
@@ -320,7 +325,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "activity_projection_distinguishes_commands_and_tests"
       }
@@ -362,7 +367,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "usage_projection_totals_bound_session_metrics"
       }
@@ -414,7 +419,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "attention_projection_uses_current_canonical_items"
       }
@@ -462,7 +467,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "evidence_projection_keeps_references_without_log_copies"
       }
@@ -511,7 +516,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
         "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "verdict_projection_covers_current_acceptance_criteria"
       }
@@ -649,8 +654,8 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
-        "path": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
+        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "projection_is_read_only_over_authoritative_sources"
       }
     },
@@ -671,7 +676,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "runtime_event_requires_one_exact_session_binding"
       }
@@ -692,7 +697,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "runtime_projection_rejects_unbound_or_ambiguous_event"
       }
@@ -708,7 +713,7 @@
         "tests": []
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "runtime_projection_rejects_stale_lease_attempt"
       }
@@ -729,7 +734,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "runtime_projection_requires_contiguous_session_sequence"
       }
@@ -750,8 +755,8 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
-        "path": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/delivery.rs",
+        "path": "crates/winwincode-delivery/src/projection/delivery.rs",
         "testName": "projection_order_is_deterministic"
       }
     },
@@ -771,7 +776,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/runtime.rs",
         "path": "crates/winwincode-delivery/src/projection/runtime.rs",
         "testName": "live_fold_and_persisted_replay_are_equal"
       }
@@ -813,7 +818,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/redaction.rs",
         "path": "crates/winwincode-delivery/src/projection/redaction.rs",
         "testName": "live_diff_projection_exposes_summary_only"
       }
@@ -834,7 +839,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/redaction.rs",
         "path": "crates/winwincode-delivery/src/projection/redaction.rs",
         "testName": "frozen_diff_details_require_current_finished_candidate"
       }
@@ -856,7 +861,7 @@
         ]
       },
       "rust": {
-        "trigger": "crates/winwincode-delivery/src/projection/mod.rs",
+        "trigger": "crates/winwincode-delivery/src/projection/redaction.rs",
         "path": "crates/winwincode-delivery/src/projection/redaction.rs",
         "testName": "public_projection_excludes_logs_payloads_and_credentials"
       }
