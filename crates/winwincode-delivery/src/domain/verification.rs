@@ -1422,6 +1422,7 @@ pub(crate) mod test_support {
 
     use super::*;
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum VerificationFixtureState {
         Missing,

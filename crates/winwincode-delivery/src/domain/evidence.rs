@@ -343,13 +343,6 @@ fn resolution_error(
 /// Rejects a stale candidate, foreign `StageRun` or `SessionBinding`, missing or
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
-#[cfg_attr(
-    all(not(test), not(feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Phase 3/4 adapter gate keeps production construction closed"
-    )
-)]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the sealed resolver command is single-use application input"

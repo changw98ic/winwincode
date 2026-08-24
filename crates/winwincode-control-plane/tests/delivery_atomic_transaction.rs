@@ -166,7 +166,7 @@ impl DeliveryJournalPort for CapturingJournal {
 fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
     let capture = CapturingJournal::default();
     DeliveryStore::borrowed(&capture)
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("c".repeat(64)),
             request_digest: "b".repeat(64),
             snapshot: delivery.clone(),
@@ -391,7 +391,7 @@ fn raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails() {
     let before = delivery_before_advance(99);
     let pending = pending_execution(99, "partial-checkout");
     store
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("d".repeat(64)),
             request_digest: "d".repeat(64),
             snapshot: before,

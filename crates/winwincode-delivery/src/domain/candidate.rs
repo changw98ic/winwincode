@@ -981,6 +981,7 @@ pub(crate) mod test_support {
         fact
     }
 
+    #[allow(dead_code)]
     pub(crate) fn with_changed_hunks(
         mut fact: ValidatedGitSnapshotFact,
         changed_hunks: Vec<CandidateHunkFact>,
@@ -990,6 +991,7 @@ pub(crate) mod test_support {
         fact
     }
 
+    #[allow(dead_code)]
     pub(crate) fn with_foreign_terminal_workspace(
         mut fact: ValidatedGitSnapshotFact,
     ) -> ValidatedGitSnapshotFact {

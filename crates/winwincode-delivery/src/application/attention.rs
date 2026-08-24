@@ -12,8 +12,10 @@ use crate::domain::{
     rework::{resolved_verdict_attention_action, safest_attention_transition},
 };
 
-use super::verdict::current_verdict_attention_action;
-use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
+use super::{
+    CoordinationError, CoordinationErrorCode, require_mutation_time,
+    verdict::current_verdict_attention_actions,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttentionDecision {
@@ -33,12 +35,7 @@ pub struct ResolveAttentionInput {
     pub now_millis: u64,
 }
 
-/// One application-owned Attention resolution ready for an operation-specific
-/// journal command.
-///
-/// The resolved Delivery remains readable for projections and tests, while
-/// the private source and sealed result prevent a caller-edited snapshot from
-/// becoming `attention.resolved` authority.
+/// One application-owned Attention resolution ready for its dedicated journal command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAttentionTransition {
     source_delivery: Delivery,
@@ -155,17 +152,13 @@ pub fn resolve_attention(
             "human review StageRun is no longer waiting for this Attention decision",
         ));
     }
-    let verdict_actions = delivery
-        .snapshot()
-        .attention_items
-        .iter()
-        .filter(|candidate| {
-            candidate.blocking
-                && candidate.delivery_spec_id == delivery.snapshot().spec.id
-                && candidate.stage_run_id.as_ref() == Some(&input.stage_run_id)
-        })
-        .filter_map(|candidate| current_verdict_attention_action(delivery, candidate).transpose())
-        .collect::<Result<Vec<_>, _>>()?;
+    let verdict_actions = current_verdict_attention_actions(delivery, item)?;
+    if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "computed verdict Attention must be resolved before stage movement",
+        ));
+    }
     let resolved = apply_resolution(
         delivery.clone().into_snapshot(),
         input,
@@ -184,7 +177,7 @@ fn apply_resolution(
     input: ResolveAttentionInput,
     item_index: usize,
     run_index: usize,
-    verdict_actions: Vec<crate::domain::rework::VerdictAttentionAction>,
+    verdict_actions: Option<Vec<crate::domain::rework::VerdictAttentionAction>>,
 ) -> Result<Delivery, CoordinationError> {
     let item_type = snapshot.attention_items[item_index].item_type;
     let run_stage = snapshot.stage_runs[run_index].stage;
@@ -230,7 +223,7 @@ fn apply_resolution(
     {
         DeliveryStatus::NeedsAttention
     } else {
-        let actions = if verdict_actions.is_empty() {
+        let actions = verdict_actions.unwrap_or_else(|| {
             snapshot
                 .attention_items
                 .iter()
@@ -240,10 +233,8 @@ fn apply_resolution(
                         && item.delivery_spec_id == snapshot.spec.id
                 })
                 .filter_map(|item| resolved_verdict_attention_action(item.item_type, item.status))
-                .collect::<Vec<_>>()
-        } else {
-            verdict_actions
-        };
+                .collect()
+        });
         if actions.is_empty() {
             next_delivery_status(item_type, run_stage, review_decision)?
         } else {

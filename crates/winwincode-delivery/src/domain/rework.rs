@@ -424,6 +424,65 @@ pub fn decide_precise_rework(
     })))
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_precise_rework_authorization(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+    history: &ValidatedReworkHistoryFact,
+    hunk_sha256: String,
+) -> ReworkAuthorization {
+    let delivery_task_id = candidate
+        .producer_delivery_task_id()
+        .expect("test candidate task")
+        .clone();
+    let file_path = candidate
+        .changed_paths()
+        .first()
+        .expect("test candidate path")
+        .path
+        .clone();
+    let evidence_ref_ids = delivery
+        .snapshot()
+        .verdict
+        .as_ref()
+        .expect("test failing verdict")
+        .criteria
+        .iter()
+        .filter(|result| result.verdict == CriterionVerdict::Fail)
+        .flat_map(|result| result.evidence_refs.iter().cloned())
+        .collect::<Vec<_>>();
+    let target = ReworkTargetFact {
+        delivery_task_id: delivery_task_id.clone(),
+        diagram_id: "diagram-current-verdict".into(),
+        node_id: "node-current-failure".into(),
+        file_path: file_path.clone(),
+        hunk_sha256: hunk_sha256.clone(),
+        evidence_ref_ids: evidence_ref_ids.clone(),
+    };
+    let scope = CurrentReworkScope {
+        candidate_ref: candidate.candidate_ref().into(),
+        diff_sha256: candidate.diff_sha256().into(),
+        targets: vec![target],
+    };
+    let annotation = PreciseReworkAnnotation {
+        candidate_ref: candidate.candidate_ref().into(),
+        diff_sha256: candidate.diff_sha256().into(),
+        delivery_task_id,
+        diagram_id: "diagram-current-verdict".into(),
+        node_id: "node-current-failure".into(),
+        file_path,
+        hunk_sha256,
+        evidence_ref_ids,
+    };
+    let ReworkDecision::Start(authorization) =
+        decide_precise_rework(delivery, candidate, &scope, &[annotation], history)
+            .expect("test rework authorization")
+    else {
+        panic!("test failure should authorize bounded rework");
+    };
+    *authorization
+}
+
 fn clarification_reason(
     rework_count: u64,
     maximum: u64,
