@@ -9,6 +9,7 @@
 pub mod delivery_execution;
 mod delivery_transaction;
 mod rework_transaction;
+pub mod strongflow_projection;
 mod verdict_transaction;
 
 use std::fmt;
@@ -305,6 +306,7 @@ pub struct ControlPlane {
     storage: Option<Box<dyn ProductStateStorage>>,
     publisher: Option<Box<dyn EventPublisher>>,
     temporary_root: Option<OwnedTemporaryRoot>,
+    strongflow_sources: Option<strongflow_projection::StrongFlowProjectionSources>,
 }
 
 impl ControlPlane {
@@ -393,6 +395,7 @@ impl ControlPlane {
             storage: Some(storage),
             publisher: Some(publisher),
             temporary_root: Some(temporary_root),
+            strongflow_sources: None,
         };
         if let Err(error) = control_plane.flush_outbox() {
             let cleanup_failures = control_plane.close_resources();
@@ -422,6 +425,28 @@ impl ControlPlane {
             .as_ref()
             .expect("a running Control Plane always owns a temporary root")
             .path()
+    }
+
+    /// Installs the trusted runtime-ledger and publication read adapters before
+    /// the typed StrongFlow query port is exposed to a transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an adapter set was already installed. Replacing a
+    /// live authority would make previously issued read cursors ambiguous.
+    pub fn install_strongflow_projection_sources(
+        &mut self,
+        sources: strongflow_projection::StrongFlowProjectionSources,
+    ) -> Result<(), strongflow_projection::StrongFlowProjectionError> {
+        if self.strongflow_sources.is_some() {
+            return Err(
+                strongflow_projection::StrongFlowProjectionError::invalid_request(
+                    "StrongFlow projection sources are already installed",
+                ),
+            );
+        }
+        self.strongflow_sources = Some(sources);
+        Ok(())
     }
 
     /// Commits one canonical HTTP command's state and outbox first, then
