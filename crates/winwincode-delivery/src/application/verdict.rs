@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{AttentionItemId, DeliveryTaskId, EvidenceId, StageRunId};
 
+use crate::domain::rework::VerdictAttentionAction;
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption, CriterionResult,
     CriterionVerdict, DELIVERY_SCHEMA_VERSION, Delivery, DeliverySnapshot, DeliveryStatus,
@@ -517,26 +518,37 @@ fn attention_copy(
 pub(crate) fn current_verdict_attention_action(
     delivery: &Delivery,
     item: &AttentionItem,
-) -> Result<DerivedVerdictAttentionAction, CoordinationError> {
-    let context: VerdictAttentionContext = serde_json::from_str(&item.context).map_err(|_| {
-        CoordinationError::new(
-            CoordinationErrorCode::StaleAttention,
-            "verdict Attention context is malformed",
-        )
-    })?;
+) -> Result<Option<VerdictAttentionAction>, CoordinationError> {
+    let context: VerdictAttentionContext = match serde_json::from_str(&item.context) {
+        Ok(context) => context,
+        Err(_) if !item.id.0.starts_with("attention:sha256:") => return Ok(None),
+        Err(_) => {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::StaleAttention,
+                "verdict Attention context is malformed",
+            ));
+        }
+    };
+    if context.protocol != VERDICT_ATTENTION_PROTOCOL {
+        if item.id.0.starts_with("attention:sha256:") {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::StaleAttention,
+                "derived Attention uses an unsupported context protocol",
+            ));
+        }
+        return Ok(None);
+    }
     let verdict = delivery.snapshot().verdict.as_ref().ok_or_else(|| {
         CoordinationError::new(
             CoordinationErrorCode::StaleAttention,
             "verdict Attention has no current Delivery verdict",
         )
     })?;
-    if context.protocol != VERDICT_ATTENTION_PROTOCOL
-        || context.verdict_id != verdict.id
+    if context.verdict_id != verdict.id
         || context.candidate_ref != verdict.candidate_ref
         || item.delivery_id != *delivery.id()
         || item.delivery_spec_id != delivery.snapshot().spec.id
         || item.stage_run_id.as_ref() != Some(&context.stage_run_id)
-        || item.status != AttentionItemStatus::Open
         || !item.blocking
     {
         return Err(CoordinationError::new(
@@ -544,8 +556,12 @@ pub(crate) fn current_verdict_attention_action(
             "verdict Attention does not match the current Delivery verdict",
         ));
     }
+    let mut source = delivery.snapshot().clone();
+    source
+        .attention_items
+        .retain(|stored| !stored.id.0.starts_with("attention:sha256:"));
     let expected = derive_verdict_attention(
-        delivery.snapshot(),
+        &source,
         verdict,
         &context.stage_run_id,
         item.created_at_millis,
@@ -558,13 +574,33 @@ pub(crate) fn current_verdict_attention_action(
             "verdict Attention is absent from the complete current classification",
         )
     })?;
-    if expected != *item {
+    let mut normalized = item.clone();
+    normalized.status = AttentionItemStatus::Open;
+    normalized.resolution = None;
+    normalized.resolved_by = None;
+    normalized.resolved_at_millis = None;
+    if expected != normalized {
         return Err(CoordinationError::new(
             CoordinationErrorCode::StaleAttention,
             "verdict Attention differs from its current computed classification",
         ));
     }
-    Ok(context.action)
+    let action = if item.status == AttentionItemStatus::Dismissed {
+        VerdictAttentionAction::ClarifyDefinition
+    } else {
+        match context.action {
+            DerivedVerdictAttentionAction::StartRework => VerdictAttentionAction::StartRework,
+            DerivedVerdictAttentionAction::ClarifyDefinition => {
+                VerdictAttentionAction::ClarifyDefinition
+            }
+            DerivedVerdictAttentionAction::RetryVerification
+            | DerivedVerdictAttentionAction::CompleteVerification
+            | DerivedVerdictAttentionAction::ResolveVerificationConflict => {
+                VerdictAttentionAction::RetryVerification
+            }
+        }
+    };
+    Ok(Some(action))
 }
 
 fn event_from_transition(
