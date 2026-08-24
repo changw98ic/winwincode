@@ -16,7 +16,10 @@ use super::{
     SessionBinding, SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
     validation_error,
 };
-use winwincode_domain::{DeliveryId, StageRunId};
+use winwincode_domain::{
+    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
+    ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+};
 
 const MAX_CHANGED_PATHS: usize = 100_000;
 const MAX_PATH_LENGTH: usize = 4_096;
@@ -66,20 +69,47 @@ pub struct ResolvedGitDiff {
     pub changed_paths: Vec<CandidatePathFact>,
 }
 
+/// Accepted terminal outcome used to locate the producer Job workspace.
+///
+/// This value comes from the trusted Control Plane ledger adapter. It is not a
+/// browser or Worker command payload and it never decides a Delivery verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedCandidateProducerOutcome {
+    pub stage_run_id: StageRunId,
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+    pub codex_thread_id: CodexThreadId,
+    pub succeeded: bool,
+    pub finished_at_millis: u64,
+}
+
 /// Trusted Git snapshot boundary implemented by the local/remote Worker adapter.
 ///
 /// Browser and command payloads never implement this port. The Control Plane
 /// wires an adapter that resolves immutable Git objects independently from the
 /// values in [`FreezeCandidateFacts`].
 pub trait CandidateGitSnapshotResolver {
+    fn accepted_successful_outcome(
+        &self,
+        stage_run: &StageRun,
+        binding: &SessionBinding,
+    ) -> Result<AcceptedCandidateProducerOutcome, String>;
+
     fn resolve_commit(
         &self,
+        producer: &AcceptedCandidateProducerOutcome,
         repository: &RepositoryRef,
         commit_id: &str,
     ) -> Result<ResolvedGitCommit, String>;
 
     fn resolve_diff(
         &self,
+        producer: &AcceptedCandidateProducerOutcome,
         repository: &RepositoryRef,
         base_commit_id: &str,
         candidate_commit_id: &str,
@@ -99,8 +129,16 @@ pub struct FrozenDeliveryCandidate {
     delivery_spec_revision: u64,
     repository: RepositoryRef,
     base_revision: String,
+    producer_delivery_task_id: Option<DeliveryTaskId>,
     producer_stage_run_id: StageRunId,
+    producer_stage: DeliveryStage,
+    producer_role: String,
+    producer_attempt: u64,
     producer_session_binding_id: SessionBindingId,
+    producer_product_session_id: ProductSessionId,
+    producer_execution_job_id: ExecutionJobId,
+    producer_worker_session_id: WorkerSessionId,
+    producer_codex_thread_id: CodexThreadId,
     base_commit_id: String,
     base_tree_id: String,
     candidate_commit_id: String,
@@ -138,8 +176,40 @@ impl FrozenDeliveryCandidate {
         &self.producer_stage_run_id
     }
 
+    pub fn producer_delivery_task_id(&self) -> Option<&DeliveryTaskId> {
+        self.producer_delivery_task_id.as_ref()
+    }
+
+    pub fn producer_stage(&self) -> DeliveryStage {
+        self.producer_stage
+    }
+
+    pub fn producer_role(&self) -> &str {
+        &self.producer_role
+    }
+
+    pub fn producer_attempt(&self) -> u64 {
+        self.producer_attempt
+    }
+
     pub fn producer_session_binding_id(&self) -> &SessionBindingId {
         &self.producer_session_binding_id
+    }
+
+    pub fn producer_product_session_id(&self) -> &ProductSessionId {
+        &self.producer_product_session_id
+    }
+
+    pub fn producer_execution_job_id(&self) -> &ExecutionJobId {
+        &self.producer_execution_job_id
+    }
+
+    pub fn producer_worker_session_id(&self) -> &WorkerSessionId {
+        &self.producer_worker_session_id
+    }
+
+    pub fn producer_codex_thread_id(&self) -> &CodexThreadId {
+        &self.producer_codex_thread_id
     }
 
     pub fn base_commit_id(&self) -> &str {
@@ -175,8 +245,16 @@ struct CandidateIdentity<'candidate> {
     delivery_spec_revision: u64,
     repository: &'candidate RepositoryRef,
     base_revision: &'candidate str,
+    producer_delivery_task_id: Option<&'candidate DeliveryTaskId>,
     producer_stage_run_id: &'candidate StageRunId,
+    producer_stage: DeliveryStage,
+    producer_role: &'candidate str,
+    producer_attempt: u64,
     producer_session_binding_id: &'candidate SessionBindingId,
+    producer_product_session_id: &'candidate ProductSessionId,
+    producer_execution_job_id: &'candidate ExecutionJobId,
+    producer_worker_session_id: &'candidate WorkerSessionId,
+    producer_codex_thread_id: &'candidate CodexThreadId,
     base_commit_id: &'candidate str,
     base_tree_id: &'candidate str,
     candidate_commit_id: &'candidate str,
@@ -197,11 +275,20 @@ pub fn freeze_delivery_candidate(
     git: &impl CandidateGitSnapshotResolver,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
     let producer = current_writer(delivery, &facts.producer_stage_run_id)?;
-    exact_producer_binding(delivery, producer, &facts.producer_session_binding_id)?;
+    let binding = exact_producer_binding(delivery, producer, &facts.producer_session_binding_id)?;
 
     let mut changed_paths = std::mem::take(&mut facts.changed_paths);
     validate_git_facts(delivery, &facts, &mut changed_paths)?;
-    verify_authoritative_git_snapshot(delivery, &facts, &changed_paths, git)?;
+    let outcome = verify_authoritative_producer_outcome(producer, binding, git)?;
+    verify_authoritative_git_snapshot(delivery, &facts, &changed_paths, &outcome, git)?;
+    let worker_session_id = binding
+        .worker_session_id
+        .clone()
+        .ok_or_else(|| stale_candidate("candidate producer WorkerSession is missing"))?;
+    let codex_thread_id = binding
+        .codex_thread_id
+        .clone()
+        .ok_or_else(|| stale_candidate("candidate producer CodexThread is missing"))?;
 
     let mut candidate = FrozenDeliveryCandidate {
         candidate_ref: String::new(),
@@ -210,8 +297,16 @@ pub fn freeze_delivery_candidate(
         delivery_spec_revision: delivery.snapshot().spec.revision,
         repository: delivery.snapshot().spec.repository.clone(),
         base_revision: delivery.snapshot().spec.base_revision.clone(),
+        producer_delivery_task_id: producer.delivery_task_id.clone(),
         producer_stage_run_id: facts.producer_stage_run_id,
+        producer_stage: producer.stage,
+        producer_role: producer.role.clone(),
+        producer_attempt: producer.attempt,
         producer_session_binding_id: facts.producer_session_binding_id,
+        producer_product_session_id: binding.product_session_id.clone(),
+        producer_execution_job_id: binding.execution_job_id.clone(),
+        producer_worker_session_id: worker_session_id,
+        producer_codex_thread_id: codex_thread_id,
         base_commit_id: facts.base_commit_id,
         base_tree_id: facts.base_tree_id,
         candidate_commit_id: facts.candidate_commit_id,
@@ -251,11 +346,24 @@ pub fn assert_frozen_candidate_current(
             "candidate does not match the current DeliverySpec",
         ));
     }
-    current_writer(delivery, &candidate.producer_stage_run_id)
-        .and_then(|producer| {
-            exact_producer_binding(delivery, producer, &candidate.producer_session_binding_id)
-        })
+    let producer = current_writer(delivery, &candidate.producer_stage_run_id)
         .map_err(|_| stale_candidate("candidate producer is no longer current"))?;
+    let binding =
+        exact_producer_binding(delivery, producer, &candidate.producer_session_binding_id)
+            .map_err(|_| stale_candidate("candidate producer binding is no longer current"))?;
+    let same_writer = candidate.producer_delivery_task_id == producer.delivery_task_id
+        && candidate.producer_stage == producer.stage
+        && candidate.producer_role == producer.role
+        && candidate.producer_attempt == producer.attempt
+        && candidate.producer_product_session_id == binding.product_session_id
+        && candidate.producer_execution_job_id == binding.execution_job_id
+        && binding.worker_session_id.as_ref() == Some(&candidate.producer_worker_session_id)
+        && binding.codex_thread_id.as_ref() == Some(&candidate.producer_codex_thread_id);
+    if !same_writer {
+        return Err(stale_candidate(
+            "candidate writer or complete SessionBinding identity changed",
+        ));
+    }
     let identity = CandidateIdentity::from(candidate);
     let encoded = serde_json::to_vec(&identity).map_err(|_| {
         stale_candidate("candidate identity can no longer be encoded deterministically")
@@ -275,8 +383,16 @@ impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity
             delivery_spec_revision: candidate.delivery_spec_revision,
             repository: &candidate.repository,
             base_revision: &candidate.base_revision,
+            producer_delivery_task_id: candidate.producer_delivery_task_id.as_ref(),
             producer_stage_run_id: &candidate.producer_stage_run_id,
+            producer_stage: candidate.producer_stage,
+            producer_role: &candidate.producer_role,
+            producer_attempt: candidate.producer_attempt,
             producer_session_binding_id: &candidate.producer_session_binding_id,
+            producer_product_session_id: &candidate.producer_product_session_id,
+            producer_execution_job_id: &candidate.producer_execution_job_id,
+            producer_worker_session_id: &candidate.producer_worker_session_id,
+            producer_codex_thread_id: &candidate.producer_codex_thread_id,
             base_commit_id: &candidate.base_commit_id,
             base_tree_id: &candidate.base_tree_id,
             candidate_commit_id: &candidate.candidate_commit_id,
@@ -419,19 +535,21 @@ fn verify_authoritative_git_snapshot(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
     changed_paths: &[CandidatePathFact],
+    outcome: &AcceptedCandidateProducerOutcome,
     git: &impl CandidateGitSnapshotResolver,
 ) -> Result<(), DeliveryValidationError> {
     let repository = &delivery.snapshot().spec.repository;
     let base = git
-        .resolve_commit(repository, &facts.base_commit_id)
+        .resolve_commit(outcome, repository, &facts.base_commit_id)
         .map_err(|_| invalid_candidate("authoritative Git resolver rejected the base commit"))?;
     let candidate = git
-        .resolve_commit(repository, &facts.candidate_commit_id)
+        .resolve_commit(outcome, repository, &facts.candidate_commit_id)
         .map_err(|_| {
             invalid_candidate("authoritative Git resolver rejected the candidate commit")
         })?;
     let mut diff = git
         .resolve_diff(
+            outcome,
             repository,
             &facts.base_commit_id,
             &facts.candidate_commit_id,
@@ -452,6 +570,36 @@ fn verify_authoritative_git_snapshot(
     } else {
         Err(invalid_candidate(
             "candidate facts do not match the authoritative Git commit, tree, diff, and path snapshot",
+        ))
+    }
+}
+
+fn verify_authoritative_producer_outcome(
+    producer: &StageRun,
+    binding: &SessionBinding,
+    git: &impl CandidateGitSnapshotResolver,
+) -> Result<AcceptedCandidateProducerOutcome, DeliveryValidationError> {
+    let outcome = git
+        .accepted_successful_outcome(producer, binding)
+        .map_err(|_| {
+            stale_candidate("candidate producer has no accepted successful Worker outcome")
+        })?;
+    let exact = outcome.succeeded
+        && outcome.stage_run_id == producer.id
+        && outcome.execution_job_id == binding.execution_job_id
+        && outcome.attempt == producer.attempt
+        && binding.worker_session_id.as_ref() == Some(&outcome.worker_session_id)
+        && binding.codex_thread_id.as_ref() == Some(&outcome.codex_thread_id)
+        && producer.finished_at_millis == Some(outcome.finished_at_millis)
+        && !outcome.lease_id.0.is_empty()
+        && !outcome.fencing_token.0.is_empty()
+        && !outcome.worker_id.0.is_empty()
+        && !outcome.worker_instance_id.0.is_empty();
+    if exact {
+        Ok(outcome)
+    } else {
+        Err(stale_candidate(
+            "candidate outcome does not match the producer Job, attempt, lease, Worker, sessions, or finish",
         ))
     }
 }
@@ -551,8 +699,29 @@ mod tests {
     }
 
     impl CandidateGitSnapshotResolver for GitFixture {
+        fn accepted_successful_outcome(
+            &self,
+            stage_run: &StageRun,
+            binding: &SessionBinding,
+        ) -> Result<AcceptedCandidateProducerOutcome, String> {
+            Ok(AcceptedCandidateProducerOutcome {
+                stage_run_id: stage_run.id.clone(),
+                execution_job_id: binding.execution_job_id.clone(),
+                attempt: stage_run.attempt,
+                lease_id: LeaseId("lease-candidate".into()),
+                fencing_token: FencingToken("1".into()),
+                worker_id: WorkerId("worker-candidate".into()),
+                worker_instance_id: WorkerInstanceId("worker-instance-candidate".into()),
+                worker_session_id: binding.worker_session_id.clone().expect("worker"),
+                codex_thread_id: binding.codex_thread_id.clone().expect("thread"),
+                succeeded: true,
+                finished_at_millis: stage_run.finished_at_millis.expect("finished"),
+            })
+        }
+
         fn resolve_commit(
             &self,
+            _producer: &AcceptedCandidateProducerOutcome,
             _repository: &RepositoryRef,
             commit_id: &str,
         ) -> Result<ResolvedGitCommit, String> {
@@ -573,6 +742,7 @@ mod tests {
 
         fn resolve_diff(
             &self,
+            _producer: &AcceptedCandidateProducerOutcome,
             _repository: &RepositoryRef,
             base_commit_id: &str,
             candidate_commit_id: &str,
@@ -598,6 +768,16 @@ mod tests {
             "git-candidate:sha256:".len() + 64
         );
         assert_frozen_candidate_current(&delivery, &first).expect("current");
+
+        let mut rebound = delivery.into_snapshot();
+        rebound.session_bindings[0].product_session_id =
+            ProductSessionId("product-executor-rebound".into());
+        rebound.session_bindings[0].execution_job_id =
+            ExecutionJobId("job-executor-rebound".into());
+        let rebound = Delivery::try_from_snapshot(rebound).expect("rebound writer");
+        let rebound_candidate =
+            freeze_delivery_candidate(&rebound, facts(), &git).expect("rebound candidate");
+        assert_ne!(first.candidate_ref(), rebound_candidate.candidate_ref());
     }
 
     #[test]
@@ -645,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_untrusted_or_inconsistent_git_snapshot_facts() {
+    fn rejects_unverified_or_inconsistent_git_snapshot() {
         let delivery = writer_delivery();
         let mut authoritative = facts();
         authoritative.candidate_tree_id = "5".repeat(40);
@@ -653,5 +833,41 @@ mod tests {
             facts: authoritative,
         };
         assert!(freeze_delivery_candidate(&delivery, facts(), &git).is_err());
+    }
+
+    struct MissingOutcome;
+
+    impl CandidateGitSnapshotResolver for MissingOutcome {
+        fn accepted_successful_outcome(
+            &self,
+            _stage_run: &StageRun,
+            _binding: &SessionBinding,
+        ) -> Result<AcceptedCandidateProducerOutcome, String> {
+            Err("missing accepted outcome".into())
+        }
+
+        fn resolve_commit(
+            &self,
+            _producer: &AcceptedCandidateProducerOutcome,
+            _repository: &RepositoryRef,
+            _commit_id: &str,
+        ) -> Result<ResolvedGitCommit, String> {
+            Err("unreachable".into())
+        }
+
+        fn resolve_diff(
+            &self,
+            _producer: &AcceptedCandidateProducerOutcome,
+            _repository: &RepositoryRef,
+            _base_commit_id: &str,
+            _candidate_commit_id: &str,
+        ) -> Result<ResolvedGitDiff, String> {
+            Err("unreachable".into())
+        }
+    }
+
+    #[test]
+    fn rejects_candidate_without_exact_successful_worker_outcome_and_job_snapshot() {
+        assert!(freeze_delivery_candidate(&writer_delivery(), facts(), &MissingOutcome).is_err());
     }
 }

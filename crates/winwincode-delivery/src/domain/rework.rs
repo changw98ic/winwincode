@@ -443,12 +443,14 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 mod tests {
     use super::*;
     use crate::domain::{
-        CandidateGitSnapshotResolver, CriterionResult, DeliveryStatus, DeliveryVerdict,
-        DeliveryVerdictId, EvidenceRef, EvidenceRefType, FreezeCandidateFacts, RepositoryRef,
-        ResolvedGitCommit, ResolvedGitDiff, SessionBindingId, test_fixture,
+        AcceptedCandidateProducerOutcome, CandidateGitSnapshotResolver, CriterionResult,
+        DeliveryStatus, DeliveryVerdict, DeliveryVerdictId, EvidenceRef, EvidenceRefType,
+        FreezeCandidateFacts, RepositoryRef, ResolvedGitCommit, ResolvedGitDiff, SessionBinding,
+        SessionBindingId, StageRun, test_fixture,
     };
     use winwincode_domain::{
-        CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
+        CodexThreadId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId, StageRunId,
+        WorkerId, WorkerInstanceId, WorkerSessionId,
     };
 
     struct GitFixture {
@@ -456,8 +458,29 @@ mod tests {
     }
 
     impl CandidateGitSnapshotResolver for GitFixture {
+        fn accepted_successful_outcome(
+            &self,
+            stage_run: &StageRun,
+            binding: &SessionBinding,
+        ) -> Result<AcceptedCandidateProducerOutcome, String> {
+            Ok(AcceptedCandidateProducerOutcome {
+                stage_run_id: stage_run.id.clone(),
+                execution_job_id: binding.execution_job_id.clone(),
+                attempt: stage_run.attempt,
+                lease_id: LeaseId("lease-rework".into()),
+                fencing_token: FencingToken("1".into()),
+                worker_id: WorkerId("worker-rework".into()),
+                worker_instance_id: WorkerInstanceId("instance-rework".into()),
+                worker_session_id: binding.worker_session_id.clone().expect("worker"),
+                codex_thread_id: binding.codex_thread_id.clone().expect("thread"),
+                succeeded: true,
+                finished_at_millis: stage_run.finished_at_millis.expect("finished"),
+            })
+        }
+
         fn resolve_commit(
             &self,
+            _producer: &AcceptedCandidateProducerOutcome,
             _repository: &RepositoryRef,
             commit_id: &str,
         ) -> Result<ResolvedGitCommit, String> {
@@ -476,6 +499,7 @@ mod tests {
 
         fn resolve_diff(
             &self,
+            _producer: &AcceptedCandidateProducerOutcome,
             _repository: &RepositoryRef,
             base_commit_id: &str,
             candidate_commit_id: &str,
