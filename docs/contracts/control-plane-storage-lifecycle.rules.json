@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "status": "required-contract-not-implementation-proof",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "targetGraph": "docs/decisions/0028-control-plane-worker-target-graph.json",
+  "phaseTask": "winwincode-9c4.16.2.1",
+  "documentation": "docs/contracts/control-plane-storage-lifecycle.md",
+  "implementationCompletionSource": "rust-black-box-tests-and-beads",
+  "ownership": {
+    "canonicalStateWriter": "winwincode-control-plane",
+    "storagePortOwner": "winwincode-storage",
+    "transactionCoordinator": "control-plane-application-command",
+    "outboxPublisherOwner": "control-plane-lifecycle",
+    "workerMayWriteCanonicalState": false,
+    "processGlobalBackgroundTasksAllowed": false
+  },
+  "commitProtocol": {
+    "order": [
+      "begin-transaction",
+      "validate-command-and-revision",
+      "append-canonical-state",
+      "append-outbox-event",
+      "commit-transaction",
+      "publish-committed-outbox-event"
+    ],
+    "atomicTransactionMembers": [
+      "canonical-state-append",
+      "outbox-event-append"
+    ],
+    "publicationSource": "durable-committed-outbox-only",
+    "publishBeforeCommitAllowed": false,
+    "onAnyPreCommitFailure": [
+      "rollback-transaction",
+      "persist-no-canonical-state",
+      "persist-no-outbox-event",
+      "publish-no-event"
+    ],
+    "onPostCommitPublicationFailure": {
+      "canonicalState": "remain-committed",
+      "outboxEvent": "remain-pending",
+      "commandResult": "committed-publication-pending",
+      "recovery": "retry-without-reexecuting-command"
+    }
+  },
+  "startupProtocol": {
+    "order": [
+      "load-configuration",
+      "create-owned-temporary-root",
+      "open-storage",
+      "apply-pending-migrations",
+      "recover-committed-outbox",
+      "start-owned-services",
+      "accept-commands"
+    ],
+    "acceptCommandsBeforeMigration": false,
+    "onMigrationFailure": [
+      "accept-no-commands",
+      "close-storage",
+      "release-owned-temporary-root",
+      "return-typed-start-error"
+    ]
+  },
+  "crashRecovery": {
+    "uncommittedTransaction": "discard-completely",
+    "committedUnpublishedOutbox": "replay-in-outbox-sequence-order",
+    "duplicatePublication": "deduplicate-by-event-id",
+    "migrationInterruption": "resume-or-rollback-before-serving",
+    "staleTemporaryRoot": "remove-only-after-owned-lease-is-stale"
+  },
+  "shutdownProtocol": {
+    "order": [
+      "stop-accepting-commands",
+      "stop-producing-new-outbox-events",
+      "wait-for-owned-command-work",
+      "flush-committed-outbox",
+      "close-event-publisher",
+      "close-storage",
+      "release-owned-temporary-root"
+    ],
+    "storageClosesAfterPublisher": true,
+    "returnsWithOwnedTasksRunning": false,
+    "onFlushFailure": [
+      "retain-unpublished-outbox",
+      "close-event-publisher",
+      "close-storage",
+      "release-owned-temporary-root",
+      "return-typed-shutdown-error"
+    ]
+  },
+  "temporaryResources": {
+    "ownershipMarkerRequired": true,
+    "gracefulShutdownReleasesAll": true,
+    "arbitraryDirectoryDeletionAllowed": false
+  },
+  "storageAdapters": {
+    "port": {
+      "crate": "winwincode-storage",
+      "trait": "ProductStateStorage",
+      "semanticsOwner": "control-plane-domain"
+    },
+    "local": {
+      "kind": "sqlite",
+      "type": "SqliteStorage",
+      "status": "phase-2.1-required"
+    },
+    "enterprise": {
+      "kind": "postgresql",
+      "type": "PostgresStorage",
+      "status": "future-adapter"
+    },
+    "requiredParity": [
+      "transaction-boundaries",
+      "revision-conflict-result",
+      "canonical-append-order",
+      "outbox-recovery",
+      "migration-before-serving",
+      "deterministic-close"
+    ]
+  },
+  "rustGate": {
+    "activation": {
+      "condition": "either-required-manifest-exists",
+      "effect": "require-both-manifests-workspace-membership-interface-and-tests"
+    },
+    "requiredPackages": [
+      {
+        "id": "winwincode-storage",
+        "manifest": "crates/winwincode-storage/Cargo.toml"
+      },
+      {
+        "id": "winwincode-control-plane",
+        "manifest": "crates/winwincode-control-plane/Cargo.toml"
+      }
+    ],
+    "publicInterfaces": {
+      "winwincode-control-plane": [
+        "ControlPlane",
+        "ControlPlaneConfig",
+        "EventPublisher",
+        "StateCommit",
+        "CommitReceipt",
+        "ShutdownReport",
+        "StartError",
+        "CommitError",
+        "ShutdownError",
+        "ControlPlane::start_local",
+        "ControlPlane::commit",
+        "ControlPlane::shutdown"
+      ],
+      "winwincode-storage": [
+        "ProductStateStorage",
+        "SqliteStorage",
+        "SqliteStorage::open",
+        "ProductStateStorage::commit",
+        "ProductStateStorage::load_state",
+        "ProductStateStorage::pending_events",
+        "ProductStateStorage::mark_published",
+        "ProductStateStorage::close"
+      ]
+    },
+    "forbiddenDependencyPatterns": [
+      "codex-*",
+      "winwincode-codex",
+      "winwincode-kernel",
+      "winwincode-native",
+      "napi",
+      "napi-*"
+    ],
+    "forbiddenGlobalSourcePatterns": [
+      "\\bstatic\\s+[A-Z][A-Z0-9_]*\\s*:\\s*[^=\\n]*(?:JoinHandle|Runtime)",
+      "\\bOnceLock\\s*<\\s*[^>]*(?:JoinHandle|Runtime)"
+    ],
+    "integrationTest": {
+      "package": "winwincode-control-plane",
+      "target": "lifecycle",
+      "path": "crates/winwincode-control-plane/tests/lifecycle.rs",
+      "requiredTests": [
+        "startup_migrates_storage_before_the_control_plane_accepts_commits",
+        "failed_startup_closes_storage_and_releases_temporary_directory",
+        "commit_persists_state_and_outbox_before_publishing_the_event",
+        "failed_outbox_insert_rolls_back_the_state_write",
+        "publish_failure_keeps_committed_state_and_pending_outbox_for_restart",
+        "restart_replays_committed_but_unpublished_outbox_events",
+        "shutdown_flushes_outbox_then_closes_publisher_and_storage",
+        "shutdown_publish_failure_still_closes_storage_and_releases_temporary_directory",
+        "shutdown_releases_the_sqlite_connection_and_temporary_directory"
+      ]
+    }
+  }
+}
