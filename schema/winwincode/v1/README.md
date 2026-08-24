@@ -18,8 +18,9 @@ WebSocket 只推送投影、运行事件、审批请求和通知。业务变更�
   revision、Command 包络和错误包络，由阶段 1.2 提供。
 - [`control-plane-http.schema.json`](./control-plane-http.schema.json) 定义 HTTP
   command、query、分页和响应。
-- [`control-plane-http.openapi.json`](./control-plane-http.openapi.json) 是 OpenAPI
-  3.1 入口，供服务端路由、文档和客户端生成使用。
+- [`control-plane-http.schema.json`](./control-plane-http.schema.json) 根部的
+  `x-winwincode-openapi.paths` 是可合成的 OpenAPI 3.1 路由片段；阶段 1.6
+  从它生成唯一的 `openapi.generated.json`，供服务端路由、文档和客户端使用。
 - [`examples/control-plane-http.examples.json`](./examples/control-plane-http.examples.json)
   固定成功请求、重复请求、revision 冲突和错误 cursor 样本。
 

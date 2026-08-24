@@ -123,7 +123,9 @@ test('HTTP contract specializes every accepted command without copying domain pr
   }
   assert.equal(
     refs.some(ref => typeof ref !== 'string'
-      || (!ref.startsWith('#/$defs/') && !ref.startsWith('./domain.schema.json#/$defs/'))),
+      || (!ref.startsWith('#/$defs/')
+        && !ref.startsWith('./domain.schema.json#/$defs/')
+        && !ref.startsWith('./control-plane-http.schema.json#/$defs/'))),
     false,
   )
 })
@@ -214,10 +216,11 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
   ))) assert.equal(semantics.errors[code].retryable, false)
 })
 
-test('OpenAPI 3.1 exposes one command route and one query route with no legacy aliases', async () => {
-  const openapi = await json('control-plane-http.openapi.json')
+test('OpenAPI 3.1 fragment exposes one command route and one query route with no legacy aliases', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const openapi = schema['x-winwincode-openapi']
 
-  assert.match(openapi.openapi, /^3\.1\./u)
+  assert.deepEqual(Object.keys(openapi), ['paths'])
   assert.deepEqual(Object.keys(openapi.paths), ['/api/v1/commands', '/api/v1/queries'])
   assert.equal(
     openapi.paths['/api/v1/commands'].post.requestBody.content['application/json'].schema.$ref,
@@ -252,6 +255,14 @@ test('OpenAPI 3.1 exposes one command route and one query route with no legacy a
     '500',
     '503',
   ])
+  for (const route of Object.values(openapi.paths)) {
+    assert.equal(route.post.security, undefined)
+    for (const response of Object.values(route.post.responses)) {
+      if (response.content === undefined) continue
+      assert.ok(response.content['application/json'])
+      assert.equal(response.content['application/problem+json'], undefined)
+    }
+  }
 })
 
 test('positive and negative samples pin retries, conflicts, cursors, and secret-safe output', async () => {
