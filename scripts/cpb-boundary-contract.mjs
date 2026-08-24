@@ -243,7 +243,11 @@ export function scanRepositoryCpbBoundary(root) {
   return errors
 }
 
-export function scanPackedPackageCpbBoundary({ packageDirectory, files }) {
+export function scanPackedPackageCpbBoundary({
+  packageDirectory,
+  files,
+  inheritedFileDirectory,
+}) {
   const errors = []
   for (const path of files) {
     const packagePath = `package/${normalizePath(path)}`
@@ -253,7 +257,14 @@ export function scanPackedPackageCpbBoundary({ packageDirectory, files }) {
 
     let text
     try {
-      text = readFileSync(join(packageDirectory, path), 'utf8')
+      const packagePath = join(packageDirectory, path)
+      const inheritedPath = inheritedFileDirectory === undefined || path !== 'LICENSE'
+        ? undefined
+        : join(inheritedFileDirectory, path)
+      text = readFileSync(
+        existsSync(packagePath) || inheritedPath === undefined ? packagePath : inheritedPath,
+        'utf8',
+      )
     } catch (error) {
       errors.push(`${packagePath}: cannot scan packed file: ${error.message}`)
       continue

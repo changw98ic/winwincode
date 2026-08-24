@@ -36,6 +36,7 @@ use codex_core_api::PermissionProfile;
 use codex_core_api::Permissions;
 use codex_core_api::SessionSource;
 use codex_core_api::StartThreadOptions;
+use codex_core_api::StateDbHandle;
 use codex_core_api::SteerSubmission;
 use codex_core_api::ThreadId;
 use codex_core_api::ThreadManager;
@@ -334,6 +335,7 @@ struct Runtime {
     manager: Arc<ThreadManager>,
     auth_manager: Arc<AuthManager>,
     base_config: Config,
+    state_db: Option<StateDbHandle>,
     sessions: RwLock<HashMap<String, Arc<SessionRuntime>>>,
 }
 
@@ -531,6 +533,7 @@ impl Kernel {
                 manager,
                 auth_manager,
                 base_config: config,
+                state_db,
                 sessions: RwLock::new(HashMap::new()),
             }))
         })
@@ -962,6 +965,9 @@ impl Kernel {
             for session in &sessions {
                 join_event_task(session).await;
             }
+            if let Some(state_db) = &runtime.state_db {
+                state_db.close().await;
+            }
             Ok(ShutdownInfo {
                 completed: report
                     .completed
@@ -1092,6 +1098,9 @@ impl Kernel {
             let _ = runtime.manager.shutdown_all_threads_bounded(timeout).await;
             for session in &sessions {
                 join_event_task(session).await;
+            }
+            if let Some(state_db) = &runtime.state_db {
+                state_db.close().await;
             }
         }))
     }

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -11,6 +10,7 @@ import {
   verifyNativePrebuild,
 } from './native-package-contract.mjs'
 import { scanPackedPackageCpbBoundary } from './cpb-boundary-contract.mjs'
+import { pnpmPackDryRun } from './pnpm-pack-report.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const releaseTarget = hostNativeTarget()
@@ -164,22 +164,13 @@ const errors = []
 for (const entry of packages) {
   const directory = join(root, entry.directory)
   const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
-  const packed = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
-    cwd: directory,
-    encoding: 'utf8',
-  })
-  if (packed.status !== 0) {
-    errors.push(`${entry.directory}: npm pack failed: ${(packed.stderr || packed.stdout).trim()}`)
-    continue
-  }
-  let report
+  let packedPaths
   try {
-    report = JSON.parse(packed.stdout)[0]
+    packedPaths = pnpmPackDryRun(directory)
   } catch (error) {
-    errors.push(`${entry.directory}: invalid npm pack report: ${error.message}`)
+    errors.push(`${entry.directory}: ${error.message}`)
     continue
   }
-  const packedPaths = report.files.map(file => file.path)
   const files = packedPaths.map(path => `package/${path}`)
   for (const required of entry.required) {
     if (!files.includes(required)) errors.push(`${entry.directory}: package is missing ${required}`)
@@ -204,6 +195,7 @@ for (const entry of packages) {
   errors.push(...scanPackedPackageCpbBoundary({
     packageDirectory: directory,
     files: packedPaths,
+    inheritedFileDirectory: root,
   }).map(error => `${entry.directory}: ${error}`))
 }
 

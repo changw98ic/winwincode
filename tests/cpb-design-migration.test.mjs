@@ -107,3 +107,18 @@ test('published package scanner rejects CPB state and runtime content', t => {
   assert.equal(errors.some(error => error.includes('CPB environment or configuration key')), true)
   assert.equal(errors.some(error => error.includes('contains a .cpb state directory')), true)
 })
+
+test('published package scanner reads a workspace legal file inherited by pnpm', t => {
+  const root = mkdtempSync(join(tmpdir(), 'winwincode-pnpm-inherited-file-'))
+  const packageDirectory = join(root, 'packages', 'fixture')
+  t.after(() => rmSync(root, { force: true, recursive: true }))
+  mkdirSync(packageDirectory, { recursive: true })
+  writeFileSync(join(root, 'LICENSE'), 'Apache License\n')
+
+  const errors = scanPackedPackageCpbBoundary({
+    packageDirectory,
+    files: ['LICENSE'],
+    inheritedFileDirectory: root,
+  })
+  assert.deepEqual(errors, [])
+})
