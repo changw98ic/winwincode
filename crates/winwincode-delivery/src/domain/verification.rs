@@ -15,8 +15,11 @@ use winwincode_domain::{
     ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
-use crate::application::stage::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
+use crate::application::stage::{
+    TerminalArtifactReference, TerminalOutcomeStatus, VerifiedTerminalOutcome,
+};
 
+use super::candidate::assert_validated_git_snapshot_fact;
 use super::{
     AcceptanceCriterionId, Delivery, DeliveryStage, DeliveryValidationError,
     DeliveryValidationErrorCode, FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER,
@@ -328,6 +331,7 @@ pub struct AcceptedVerificationJobOutcomeFact {
     finished_at_millis: u64,
     status: VerificationJobOutcomeStatus,
     terminal_candidate_tree_id: String,
+    artifacts: Vec<TerminalArtifactReference>,
 }
 
 #[allow(dead_code)]
@@ -341,12 +345,22 @@ impl AcceptedVerificationJobOutcomeFact {
     ) -> Result<Self, DeliveryValidationError> {
         let role_id = role_id.into();
         portable_identifier(&role_id, "verification.terminal.roleId")?;
+        let exact_artifact = outcome.artifacts().iter().any(|artifact| {
+            artifact.artifact_id.0 == snapshot.artifact_ref()
+                && &artifact.digest == snapshot.artifact_digest()
+        });
+        let exact_metadata = outcome.codex_thread_id() == Some(snapshot.codex_thread_id())
+            && outcome.finished_at_millis() == snapshot.finished_at_millis()
+            && u64::try_from(outcome.last_event_sequence().0).ok()
+                == Some(snapshot.last_event_sequence())
+            && exact_artifact;
         if FencedExecutionIdentity::verified(outcome) != FencedExecutionIdentity::snapshot(snapshot)
             || outcome.stage_run_id() != snapshot.stage_run_id()
+            || !exact_metadata
         {
             return Err(relationship_mismatch(
                 "verification.terminal",
-                "verified terminal outcome and sealed Job snapshot identities differ",
+                "verified terminal outcome and sealed Job snapshot identity, time, sequence, CodexThread, or Artifact differ",
             ));
         }
         let last_event_sequence = i64::try_from(snapshot.last_event_sequence()).map_err(|_| {
@@ -378,6 +392,7 @@ impl AcceptedVerificationJobOutcomeFact {
                 TerminalOutcomeStatus::Cancelled => VerificationJobOutcomeStatus::Cancelled,
             },
             terminal_candidate_tree_id: snapshot.candidate_tree_id().into(),
+            artifacts: outcome.artifacts().to_vec(),
         })
     }
 
@@ -624,6 +639,20 @@ pub fn validate_independent_verification(
                 "verification role must have exactly one current Session fact",
             ));
         }
+        let run = current_role_run(delivery, required_role, &path)?;
+        validate_role_consumes_candidate(delivery, run, candidate, &path)?;
+        let binding = current_role_binding(delivery, run, &path)?;
+        ensure_distinct_assignment(
+            run,
+            binding,
+            &path,
+            &mut stage_run_ids,
+            &mut binding_ids,
+            &mut product_session_ids,
+            &mut execution_job_ids,
+            &mut worker_session_ids,
+            &mut codex_thread_ids,
+        )?;
         let Some(session) = matching.first().copied() else {
             settlements.push(missing_settlement(required_role));
             continue;
@@ -638,27 +667,18 @@ pub fn validate_independent_verification(
             ));
         }
 
-        let run = current_role_run(delivery, required_role, &path)?;
         if run.id != session.stage_run_id {
             return Err(relationship_mismatch(
                 &path,
                 "verification Session does not reference the role's current StageRun",
             ));
         }
-        validate_role_consumes_candidate(delivery, run, candidate, &path)?;
-        let binding = exact_role_binding(delivery, run, session, &path)?;
-        ensure_distinct_assignment(
-            run,
-            binding,
-            &path,
-            &mut stage_run_ids,
-            &mut binding_ids,
-            &mut product_session_ids,
-            &mut execution_job_ids,
-            &mut worker_session_ids,
-            &mut codex_thread_ids,
-        )?;
-
+        if binding.id != session.session_binding_id {
+            return Err(relationship_mismatch(
+                &path,
+                "current verification StageRun does not match the referenced SessionBinding",
+            ));
+        }
         let assignment = validate_assignment(binding, run, session, candidate, &path)?;
         let terminal_job_outcome = validate_terminal_job_outcome(
             run,
@@ -763,10 +783,9 @@ fn current_role_run<'delivery>(
     Ok(current[0])
 }
 
-fn exact_role_binding<'delivery>(
+fn current_role_binding<'delivery>(
     delivery: &'delivery Delivery,
     run: &StageRun,
-    session: &VerificationSessionFacts,
     path: &str,
 ) -> Result<&'delivery SessionBinding, DeliveryValidationError> {
     let bindings: Vec<_> = delivery
@@ -775,10 +794,10 @@ fn exact_role_binding<'delivery>(
         .iter()
         .filter(|binding| binding.stage_run_id == run.id)
         .collect();
-    if bindings.len() != 1 || bindings[0].id != session.session_binding_id {
+    if bindings.len() != 1 {
         return Err(relationship_mismatch(
             path,
-            "current verification StageRun must have exactly one referenced SessionBinding",
+            "current verification StageRun must have exactly one SessionBinding",
         ));
     }
     let binding = bindings[0];
@@ -873,13 +892,13 @@ fn validate_assignment(
     else {
         return Ok(None);
     };
-    if checkout.execution_job_id() != &binding.execution_job_id
-        || checkout.repository() != candidate.repository()
-        || checkout.candidate_commit_id() != candidate.candidate_commit_id()
+    assert_validated_git_snapshot_fact(checkout)?;
+    if !snapshot_matches_assignment(checkout, run, binding)
+        || !snapshot_matches_candidate(checkout, candidate)
     {
         return Err(relationship_mismatch(
             &format!("{path}.candidateCheckout"),
-            "checkout must bind the assignment's ExecutionJob to the candidate repository and commit",
+            "checkout must bind the complete current assignment to every frozen candidate Git fact",
         ));
     }
     Ok(Some(VerificationAssignment {
@@ -895,6 +914,33 @@ fn validate_assignment(
     }))
 }
 
+fn snapshot_matches_assignment(
+    snapshot: &ValidatedGitSnapshotFact,
+    run: &StageRun,
+    binding: &SessionBinding,
+) -> bool {
+    snapshot.stage_run_id() == &run.id
+        && snapshot.session_binding_id() == &binding.id
+        && snapshot.product_session_id() == &binding.product_session_id
+        && snapshot.execution_job_id() == &binding.execution_job_id
+        && snapshot.attempt() == run.attempt
+        && binding.worker_session_id.as_ref() == Some(snapshot.worker_session_id())
+        && binding.codex_thread_id.as_ref() == Some(snapshot.codex_thread_id())
+}
+
+fn snapshot_matches_candidate(
+    snapshot: &ValidatedGitSnapshotFact,
+    candidate: &FrozenDeliveryCandidate,
+) -> bool {
+    snapshot.repository() == candidate.repository()
+        && snapshot.base_commit_id() == candidate.base_commit_id()
+        && snapshot.base_tree_id() == candidate.base_tree_id()
+        && snapshot.candidate_commit_id() == candidate.candidate_commit_id()
+        && snapshot.candidate_tree_id() == candidate.candidate_tree_id()
+        && snapshot.diff_sha256() == candidate.diff_sha256()
+        && snapshot.changed_paths() == candidate.changed_paths()
+}
+
 fn validate_terminal_job_outcome(
     run: &StageRun,
     binding: &SessionBinding,
@@ -904,15 +950,12 @@ fn validate_terminal_job_outcome(
     path: &str,
 ) -> Result<Option<AcceptedVerificationJobOutcomeFact>, DeliveryValidationError> {
     let Some(outcome) = session.accepted_job_outcome.as_ref() else {
-        if session.mutation_records.is_empty()
-            && session.pre_candidate_snapshot.is_none()
-            && session.post_candidate_snapshot.is_none()
-        {
+        if session.mutation_records.is_empty() && session.post_candidate_snapshot.is_none() {
             return Ok(None);
         }
         return Err(relationship_mismatch(
             &format!("{path}.mutationRecords"),
-            "Worker mutation records require an accepted terminal JobOutcome",
+            "post-run snapshots and Worker mutation records require an accepted terminal JobOutcome",
         ));
     };
     let Some(assignment) = assignment else {
@@ -951,7 +994,7 @@ fn validate_terminal_job_outcome(
             "verification terminal tree must equal the frozen candidate tree",
         ));
     }
-    validate_snapshot_pair(session, outcome, candidate, path)?;
+    validate_snapshot_pair(run, binding, session, outcome, candidate, path)?;
     validate_mutation_records(&session.mutation_records, outcome, path)?;
 
     Ok(Some(outcome.clone()))
@@ -1075,6 +1118,8 @@ fn validate_mutation_records(
 }
 
 fn validate_snapshot_pair(
+    run: &StageRun,
+    binding: &SessionBinding,
     session: &VerificationSessionFacts,
     outcome: &AcceptedVerificationJobOutcomeFact,
     candidate: &FrozenDeliveryCandidate,
@@ -1090,35 +1135,48 @@ fn validate_snapshot_pair(
             "settlement requires sealed pre- and post-verification Git snapshots",
         ));
     };
-    if before != after {
-        return Err(invalid_verification(
-            &format!("{path}.candidateSnapshots"),
-            "sealed pre- and post-verification snapshots differ",
-        ));
-    }
-    let exact_runtime_identity = FencedExecutionIdentity::snapshot(before)
-        == FencedExecutionIdentity::outcome(outcome)
-        && before.stage_run_id() == &outcome.stage_run_id
-        && before.session_binding_id() == &session.session_binding_id
-        && before.product_session_id() == &outcome.product_session_id
-        && before.codex_thread_id() == &outcome.codex_thread_id
-        && before.last_event_sequence()
-            <= u64::try_from(outcome.last_event_sequence.0).unwrap_or_default()
-        && before.finished_at_millis() <= outcome.finished_at_millis;
-    let exact_candidate = before.repository() == candidate.repository()
-        && before.base_commit_id() == candidate.base_commit_id()
-        && before.base_tree_id() == candidate.base_tree_id()
-        && before.candidate_commit_id() == candidate.candidate_commit_id()
-        && before.candidate_tree_id() == candidate.candidate_tree_id()
-        && before.diff_sha256() == candidate.diff_sha256()
-        && before.changed_paths() == candidate.changed_paths();
-    if !exact_runtime_identity || !exact_candidate {
+    assert_validated_git_snapshot_fact(before)?;
+    assert_validated_git_snapshot_fact(after)?;
+    let terminal_sequence = u64::try_from(outcome.last_event_sequence.0).unwrap_or_default();
+    let exact_runtime_identity = [before, after].iter().all(|snapshot| {
+        FencedExecutionIdentity::snapshot(snapshot) == FencedExecutionIdentity::outcome(outcome)
+            && snapshot_matches_assignment(snapshot, run, binding)
+            && terminal_names_snapshot(outcome, snapshot)
+    });
+    let exact_candidate = [before, after]
+        .iter()
+        .all(|snapshot| snapshot_matches_candidate(snapshot, candidate));
+    let same_git_facts = before.repository() == after.repository()
+        && before.base_commit_id() == after.base_commit_id()
+        && before.base_tree_id() == after.base_tree_id()
+        && before.candidate_commit_id() == after.candidate_commit_id()
+        && before.candidate_tree_id() == after.candidate_tree_id()
+        && before.diff_sha256() == after.diff_sha256()
+        && before.changed_paths() == after.changed_paths()
+        && before.changed_hunks() == after.changed_hunks();
+    let observations_are_ordered = run.started_at_millis <= before.finished_at_millis()
+        && binding.bound_at_millis <= before.finished_at_millis()
+        && before.finished_at_millis() <= after.finished_at_millis()
+        && after.finished_at_millis() <= outcome.finished_at_millis
+        && before.last_event_sequence() <= after.last_event_sequence()
+        && after.last_event_sequence() <= terminal_sequence;
+    if !exact_runtime_identity || !exact_candidate || !same_git_facts || !observations_are_ordered {
         return Err(relationship_mismatch(
             &format!("{path}.candidateSnapshots"),
-            "sealed snapshots must match the terminal fenced Job and frozen candidate exactly",
+            "sealed pre/post snapshots must be ordered observations of one terminal fenced Job and unchanged frozen candidate",
         ));
     }
     Ok(())
+}
+
+fn terminal_names_snapshot(
+    outcome: &AcceptedVerificationJobOutcomeFact,
+    snapshot: &ValidatedGitSnapshotFact,
+) -> bool {
+    outcome.artifacts.iter().any(|artifact| {
+        artifact.artifact_id.0 == snapshot.artifact_ref()
+            && &artifact.digest == snapshot.artifact_digest()
+    })
 }
 
 fn validate_findings(
@@ -1445,6 +1503,7 @@ pub(crate) mod test_support {
                 .expect("verification fixture requires a terminal StageRun"),
             status: outcome_status,
             terminal_candidate_tree_id: candidate.candidate_tree_id().into(),
+            artifacts: vec![],
         };
         let (session_state, terminal_job_outcome, terminal_settlement, findings) = match state {
             VerificationFixtureState::Running => {
@@ -1537,14 +1596,15 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::application::stage::{
-        ActiveLeaseIdentity, TerminalWorkerOutcome, verify_terminal_outcome,
+        ActiveLeaseIdentity, TerminalArtifactReference, TerminalOutcomeMetadata,
+        TerminalWorkerOutcome, verify_terminal_outcome,
     };
     use crate::domain::candidate::test_support::{frozen_candidate, validated_git_snapshot};
     use crate::domain::{
         Delivery, DeliveryStage, DeliveryStatus, FrozenDeliveryCandidate, SessionBinding,
         SessionBindingId, StageRun, StageRunActorType, StageRunStatus, test_fixture,
     };
-    use winwincode_domain::{DeliveryId, DeliveryTaskId};
+    use winwincode_domain::{ArtifactId, DeliveryId, DeliveryTaskId};
 
     const WRITER_STAGE_ID: &str = "stage-executor-1";
     const WRITER_BINDING_ID: &str = "binding-executor-1";
@@ -1741,6 +1801,17 @@ mod tests {
             .find(|run| &run.id == stage_run_id)
             .expect("final StageRun");
         let role = final_run.role.clone();
+        let verified = verified_terminal_outcome(delivery, snapshot, status);
+        AcceptedVerificationJobOutcomeFact::from_verified_outcome(&verified, snapshot, role)
+            .expect("composite terminal outcome")
+    }
+
+    fn verified_terminal_outcome(
+        delivery: &Delivery,
+        snapshot: &ValidatedGitSnapshotFact,
+        status: TerminalOutcomeStatus,
+    ) -> VerifiedTerminalOutcome {
+        let stage_run_id = snapshot.stage_run_id();
         let mut active_snapshot = delivery.clone().into_snapshot();
         let active_run = active_snapshot
             .stage_runs
@@ -1759,7 +1830,7 @@ mod tests {
             worker_instance_id: snapshot.worker_instance_id().clone(),
             worker_session_id: snapshot.worker_session_id().clone(),
         };
-        let verified = verify_terminal_outcome(
+        verify_terminal_outcome(
             &active,
             &lease,
             TerminalWorkerOutcome {
@@ -1772,11 +1843,21 @@ mod tests {
                 worker_instance_id: lease.worker_instance_id.clone(),
                 worker_session_id: lease.worker_session_id.clone(),
                 status,
+                metadata: TerminalOutcomeMetadata {
+                    codex_thread_id: Some(snapshot.codex_thread_id().clone()),
+                    finished_at_millis: snapshot.finished_at_millis(),
+                    last_event_sequence: ExecutionAckSequence(
+                        i64::try_from(snapshot.last_event_sequence())
+                            .expect("fixture event sequence fits i64"),
+                    ),
+                    artifacts: vec![TerminalArtifactReference {
+                        artifact_id: ArtifactId(snapshot.artifact_ref().into()),
+                        digest: snapshot.artifact_digest().clone(),
+                    }],
+                },
             },
         )
-        .expect("verified terminal outcome");
-        AcceptedVerificationJobOutcomeFact::from_verified_outcome(&verified, snapshot, role)
-            .expect("composite terminal outcome")
+        .expect("verified terminal outcome")
     }
 
     fn with_stage_status(
@@ -1896,6 +1977,61 @@ mod tests {
     }
 
     #[test]
+    fn missing_session_fact_still_rejects_an_ambiguous_current_assignment() {
+        let (delivery, candidate, mut facts) = fixture(false);
+        facts.sessions.remove(0);
+        let mut ambiguous = delivery.into_snapshot();
+        ambiguous.stage_runs.push(stage(
+            "stage-reviewer-duplicate",
+            "reviewer",
+            1_800_000_000_090,
+        ));
+        ambiguous.session_bindings.push(binding(
+            "binding-reviewer-duplicate",
+            "stage-reviewer-duplicate",
+            "reviewer-duplicate",
+            1_800_000_000_091,
+        ));
+        ambiguous.updated_at_millis = 1_800_000_000_100;
+        let ambiguous = Delivery::try_from_snapshot(ambiguous)
+            .expect("aggregate leaves current role ambiguity to verification");
+
+        assert!(validate_independent_verification(&ambiguous, &candidate, &facts).is_err());
+    }
+
+    #[test]
+    fn missing_session_fact_still_rejects_reused_current_role_identity() {
+        let (delivery, candidate, mut facts) = fixture(false);
+        facts.sessions.remove(0);
+        let mut reused = delivery.into_snapshot();
+        reused.session_bindings[1].product_session_id =
+            reused.session_bindings[0].product_session_id.clone();
+        let reused = Delivery::try_from_snapshot(reused)
+            .expect("aggregate leaves cross-role identity rejection to verification");
+
+        assert!(validate_independent_verification(&reused, &candidate, &facts).is_err());
+    }
+
+    #[test]
+    fn stale_session_fact_cannot_follow_a_higher_role_attempt() {
+        let (delivery, candidate, facts) = fixture(false);
+        let mut higher = delivery.into_snapshot();
+        let mut second_attempt = stage("stage-reviewer-attempt-2", "reviewer", 1_800_000_000_090);
+        second_attempt.attempt = 2;
+        higher.stage_runs.push(second_attempt);
+        higher.session_bindings.push(binding(
+            "binding-reviewer-attempt-2",
+            "stage-reviewer-attempt-2",
+            "reviewer-attempt-2",
+            1_800_000_000_091,
+        ));
+        higher.updated_at_millis = 1_800_000_000_100;
+        let higher = Delivery::try_from_snapshot(higher).expect("higher role attempt");
+
+        assert!(validate_independent_verification(&higher, &candidate, &facts).is_err());
+    }
+
+    #[test]
     fn requires_exactly_one_current_assignment_and_distinct_session_per_role() {
         let (delivery, candidate, facts) = fixture(false);
         let verification = validate_independent_verification(&delivery, &candidate, &facts)
@@ -1987,6 +2123,49 @@ mod tests {
             verification.settlements()[0].state(),
             VerificationSessionState::Incomplete
         );
+    }
+
+    #[test]
+    fn running_role_keeps_its_exact_read_only_checkout_assignment() {
+        let (delivery, candidate, mut facts) = fixture(false);
+        let running = with_stage_status(&delivery, REVIEWER_STAGE_ID, StageRunStatus::Running);
+        let reviewer = &mut facts.sessions[0];
+        reviewer.accepted_job_outcome = None;
+        reviewer.post_candidate_snapshot = None;
+        reviewer.findings.clear();
+        reviewer.codex_turn_completed = false;
+
+        let verification = validate_independent_verification(&running, &candidate, &facts)
+            .expect("running verification keeps its accepted candidate checkout");
+        let reviewer = &verification.settlements()[0];
+        assert_eq!(reviewer.state(), VerificationSessionState::Running);
+        assert!(reviewer.assignment().is_some());
+        assert!(reviewer.terminal_job_outcome().is_none());
+        assert!(reviewer.terminal_settlement().is_none());
+    }
+
+    #[test]
+    fn running_role_rejects_a_checkout_from_another_stage_and_session() {
+        let (delivery, candidate, mut facts) = fixture(false);
+        let running = with_stage_status(&delivery, REVIEWER_STAGE_ID, StageRunStatus::Running);
+
+        let foreign_checkout = validated_git_snapshot(
+            &delivery,
+            &StageRunId(VERIFIER_STAGE_ID.into()),
+            &SessionBindingId(REVIEWER_BINDING_ID.into()),
+            candidate.candidate_commit_id(),
+            candidate.candidate_tree_id(),
+            candidate.diff_sha256(),
+            candidate.changed_paths().to_vec(),
+        );
+
+        let reviewer = &mut facts.sessions[0];
+        reviewer.pre_candidate_snapshot = Some(foreign_checkout);
+        reviewer.post_candidate_snapshot = None;
+        reviewer.accepted_job_outcome = None;
+        reviewer.findings.clear();
+
+        assert!(validate_independent_verification(&running, &candidate, &facts).is_err());
     }
 
     #[test]
@@ -2085,6 +2264,34 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_candidate_allows_ordered_pre_and_post_snapshot_observations() {
+        let (delivery, candidate, mut facts) = fixture(false);
+        let mut settled_snapshot = delivery.clone().into_snapshot();
+        settled_snapshot.stage_runs[1].finished_at_millis = Some(1_800_000_000_041);
+        let settled_delivery = Delivery::try_from_snapshot(settled_snapshot)
+            .expect("later terminal observation remains canonical");
+        let post = validated_git_snapshot(
+            &settled_delivery,
+            &StageRunId(REVIEWER_STAGE_ID.into()),
+            &SessionBindingId(REVIEWER_BINDING_ID.into()),
+            candidate.candidate_commit_id(),
+            candidate.candidate_tree_id(),
+            candidate.diff_sha256(),
+            candidate.changed_paths().to_vec(),
+        );
+        let reviewer = &mut facts.sessions[0];
+        reviewer.accepted_job_outcome = Some(terminal_outcome(
+            &settled_delivery,
+            &post,
+            TerminalOutcomeStatus::Succeeded,
+        ));
+        reviewer.post_candidate_snapshot = Some(post);
+
+        validate_independent_verification(&settled_delivery, &candidate, &facts)
+            .expect("unchanged Git facts survive ordered pre/post observations");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn requires_succeeded_stage_and_sealed_matching_terminal_outcome() {
         let (delivery, candidate, facts) = fixture(false);
@@ -2154,6 +2361,25 @@ mod tests {
             Some(VerificationTerminalSettlement::Failed)
         );
 
+        let mut infrastructure_facts = facts.clone();
+        reseal_session(
+            &failed_delivery,
+            &candidate,
+            &mut infrastructure_facts.sessions[0],
+            TerminalOutcomeStatus::InfrastructureError,
+        );
+        let infrastructure =
+            validate_independent_verification(&failed_delivery, &candidate, &infrastructure_facts)
+                .expect("infrastructure terminal role remains fail closed");
+        assert_eq!(
+            infrastructure.settlements()[0].state(),
+            VerificationSessionState::Failed
+        );
+        assert_eq!(
+            infrastructure.settlements()[0].terminal_settlement(),
+            Some(VerificationTerminalSettlement::InfrastructureError)
+        );
+
         let cancelled_delivery =
             with_stage_status(&delivery, REVIEWER_STAGE_ID, StageRunStatus::Cancelled);
         let mut cancelled_facts = facts.clone();
@@ -2213,6 +2439,43 @@ mod tests {
             .expect("outcome")
             .terminal_candidate_tree_id = "5555555555555555555555555555555555555555".into();
         assert!(validate_independent_verification(&delivery, &candidate, &changed_tree).is_err());
+    }
+
+    #[test]
+    fn accepted_terminal_outcome_rejects_snapshot_metadata_from_another_outcome() {
+        let (delivery, candidate, facts) = fixture(false);
+        let accepted_snapshot = facts.sessions[0]
+            .pre_candidate_snapshot
+            .as_ref()
+            .expect("accepted reviewer snapshot");
+        let verified = verified_terminal_outcome(
+            &delivery,
+            accepted_snapshot,
+            TerminalOutcomeStatus::Succeeded,
+        );
+
+        let mut substituted_delivery = delivery.clone().into_snapshot();
+        substituted_delivery.stage_runs[1].finished_at_millis = Some(1_800_000_000_041);
+        let substituted_delivery = Delivery::try_from_snapshot(substituted_delivery)
+            .expect("substituted terminal time remains a valid Delivery snapshot");
+        let substituted_snapshot = validated_git_snapshot(
+            &substituted_delivery,
+            &StageRunId(REVIEWER_STAGE_ID.into()),
+            &SessionBindingId(REVIEWER_BINDING_ID.into()),
+            candidate.candidate_commit_id(),
+            candidate.candidate_tree_id(),
+            candidate.diff_sha256(),
+            candidate.changed_paths().to_vec(),
+        );
+
+        assert!(
+            AcceptedVerificationJobOutcomeFact::from_verified_outcome(
+                &verified,
+                &substituted_snapshot,
+                "reviewer",
+            )
+            .is_err()
+        );
     }
 
     #[test]

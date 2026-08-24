@@ -2,15 +2,20 @@
 
 //! Delivery stage coordination application service.
 
+use std::collections::HashSet;
+
+use serde::Serialize;
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
-    ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionJobId, FencingToken, LeaseId, ProductSessionId, Sha256Digest, StageRunId, WorkerId,
+    WorkerInstanceId, WorkerSessionId,
 };
 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
-    DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, SessionBinding,
-    SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
+    DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, MAX_COLLECTION_LENGTH,
+    MAX_SAFE_INTEGER, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
+    StageRunStatus,
 };
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
@@ -74,6 +79,24 @@ pub struct TerminalWorkerOutcome {
     pub worker_instance_id: WorkerInstanceId,
     pub worker_session_id: WorkerSessionId,
     pub status: TerminalOutcomeStatus,
+    pub metadata: TerminalOutcomeMetadata,
+}
+
+/// Bounded facts carried by the accepted Worker `job.outcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalOutcomeMetadata {
+    pub codex_thread_id: Option<CodexThreadId>,
+    pub finished_at_millis: u64,
+    pub last_event_sequence: ExecutionAckSequence,
+    pub artifacts: Vec<TerminalArtifactReference>,
+}
+
+/// One immutable Artifact identity named by the accepted Worker outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalArtifactReference {
+    pub artifact_id: ArtifactId,
+    pub digest: Sha256Digest,
 }
 
 /// A terminal fact that matched the current `StageRun`, `SessionBinding`, and
@@ -83,6 +106,7 @@ pub struct VerifiedTerminalOutcome {
     stage_run_id: StageRunId,
     lease_identity: ActiveLeaseIdentity,
     status: TerminalOutcomeStatus,
+    metadata: TerminalOutcomeMetadata,
 }
 
 impl VerifiedTerminalOutcome {
@@ -121,6 +145,22 @@ impl VerifiedTerminalOutcome {
     pub const fn status(&self) -> TerminalOutcomeStatus {
         self.status
     }
+
+    pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
+        self.metadata.codex_thread_id.as_ref()
+    }
+
+    pub const fn finished_at_millis(&self) -> u64 {
+        self.metadata.finished_at_millis
+    }
+
+    pub fn last_event_sequence(&self) -> &ExecutionAckSequence {
+        &self.metadata.last_event_sequence
+    }
+
+    pub fn artifacts(&self) -> &[TerminalArtifactReference] {
+        &self.metadata.artifacts
+    }
 }
 
 #[cfg(test)]
@@ -128,11 +168,13 @@ pub(crate) fn fixture_verified_terminal_outcome(
     stage_run_id: StageRunId,
     lease_identity: ActiveLeaseIdentity,
     status: TerminalOutcomeStatus,
+    metadata: TerminalOutcomeMetadata,
 ) -> VerifiedTerminalOutcome {
     VerifiedTerminalOutcome {
         stage_run_id,
         lease_identity,
         status,
+        metadata,
     }
 }
 
@@ -165,6 +207,7 @@ pub fn verify_terminal_outcome(
         ));
     }
     let binding = exact_binding(delivery, run, true)?;
+    validate_terminal_metadata(run, binding, &outcome.metadata)?;
     let exact = outcome.stage_run_id == run.id
         && outcome.execution_job_id == binding.execution_job_id
         && outcome.execution_job_id == lease.execution_job_id
@@ -186,7 +229,69 @@ pub fn verify_terminal_outcome(
         stage_run_id: outcome.stage_run_id,
         lease_identity: lease.clone(),
         status: outcome.status,
+        metadata: outcome.metadata,
     })
+}
+
+fn validate_terminal_metadata(
+    run: &StageRun,
+    binding: &SessionBinding,
+    metadata: &TerminalOutcomeMetadata,
+) -> Result<(), CoordinationError> {
+    let max_sequence = i64::try_from(MAX_SAFE_INTEGER).unwrap_or(i64::MAX);
+    if metadata.finished_at_millis > MAX_SAFE_INTEGER
+        || metadata.finished_at_millis < run.started_at_millis
+        || metadata.finished_at_millis < binding.bound_at_millis
+        || !(0..=max_sequence).contains(&metadata.last_event_sequence.0)
+        || metadata.codex_thread_id != binding.codex_thread_id
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "terminal Worker metadata does not match the StageRun time, CodexThread, or event sequence",
+        ));
+    }
+    if metadata.artifacts.len() > MAX_COLLECTION_LENGTH {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "terminal Worker artifacts exceed the supported limit",
+        ));
+    }
+    let mut artifact_ids = HashSet::with_capacity(metadata.artifacts.len());
+    for artifact in &metadata.artifacts {
+        let valid_digest = artifact
+            .digest
+            .0
+            .strip_prefix("sha256:")
+            .is_some_and(lowercase_sha256);
+        if !portable_execution_identifier(&artifact.artifact_id.0)
+            || !artifact_ids.insert(artifact.artifact_id.0.as_str())
+            || !valid_digest
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::InvalidRequest,
+                "terminal Worker artifacts must have unique identities and lowercase SHA-256 digests",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn portable_execution_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 200
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'@' | b'-')
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,7 +407,11 @@ pub fn advance(
     let mut snapshot = delivery.clone().into_snapshot();
     snapshot.revision += 1;
     snapshot.status = next.next_status;
-    settle_previous_run(&mut snapshot, next.previous, input.now_millis)?;
+    settle_previous_run(
+        &mut snapshot,
+        next.previous,
+        input.previous_outcome.as_ref(),
+    )?;
     start_selected_task(&mut snapshot, &next)?;
     if next.stage == DeliveryStage::Reworking {
         crate::domain::rework::invalidate_candidate_authorization_for_writer_start(&mut snapshot);
@@ -370,6 +479,7 @@ fn select_next_stage<'delivery>(
         previous,
         input.previous_outcome.as_ref(),
         input.current_lease.as_ref(),
+        input.now_millis,
     )?;
     let delivery_task_id = select_task_id(delivery, stage, previous)?;
     let role = role_for_stage(delivery, stage, previous, delivery_task_id.as_ref())?;
@@ -399,6 +509,7 @@ fn validate_previous_outcome(
     previous: Option<&StageRun>,
     outcome: Option<&VerifiedTerminalOutcome>,
     current_lease: Option<&ActiveLeaseIdentity>,
+    handoff_at_millis: u64,
 ) -> Result<(), CoordinationError> {
     let Some(previous) = previous else {
         return if outcome.is_none() && current_lease.is_none() {
@@ -432,7 +543,10 @@ fn validate_previous_outcome(
     let exact = outcome.stage_run_id == previous.id
         && outcome.lease_identity.execution_job_id == binding.execution_job_id
         && binding.worker_session_id.as_ref() == Some(&outcome.lease_identity.worker_session_id)
+        && binding.codex_thread_id.as_ref() == outcome.codex_thread_id()
         && outcome.lease_identity.attempt == previous.attempt
+        && outcome.finished_at_millis() >= previous.started_at_millis
+        && outcome.finished_at_millis() <= handoff_at_millis
         && outcome.status == TerminalOutcomeStatus::Succeeded;
     if exact {
         Ok(())
@@ -447,9 +561,18 @@ fn validate_previous_outcome(
 fn settle_previous_run(
     snapshot: &mut DeliverySnapshot,
     previous: Option<&StageRun>,
-    finished_at_millis: u64,
+    outcome: Option<&VerifiedTerminalOutcome>,
 ) -> Result<(), CoordinationError> {
     if let Some(previous) = previous {
+        let finished_at_millis = outcome
+            .filter(|outcome| outcome.stage_run_id() == &previous.id)
+            .map(VerifiedTerminalOutcome::finished_at_millis)
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::WrongState,
+                    "the previous StageRun has no exact verified finish time",
+                )
+            })?;
         let stored = snapshot
             .stage_runs
             .iter_mut()
@@ -794,7 +917,6 @@ pub fn apply_terminal_outcome(
     expected_revision: u64,
     active_lease: &ActiveLeaseIdentity,
     outcome: &VerifiedTerminalOutcome,
-    finished_at_millis: u64,
 ) -> Result<Delivery, CoordinationError> {
     if delivery.revision() != expected_revision {
         return Err(CoordinationError::new(
@@ -802,7 +924,7 @@ pub fn apply_terminal_outcome(
             "Delivery revision changed before terminal outcome",
         ));
     }
-    require_mutation_time(delivery, finished_at_millis)?;
+    require_mutation_time(delivery, outcome.finished_at_millis())?;
     if &outcome.lease_identity != active_lease {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -833,7 +955,8 @@ pub fn apply_terminal_outcome(
     if run.attempt != outcome.lease_identity.attempt
         || binding.execution_job_id != outcome.lease_identity.execution_job_id
         || binding.worker_session_id.as_ref() != Some(&outcome.lease_identity.worker_session_id)
-        || finished_at_millis < run.started_at_millis
+        || binding.codex_thread_id.as_ref() != outcome.codex_thread_id()
+        || outcome.finished_at_millis() < run.started_at_millis
     {
         return Err(CoordinationError::new(
             CoordinationErrorCode::BindingConflict,
@@ -862,14 +985,14 @@ pub fn apply_terminal_outcome(
         }
         TerminalOutcomeStatus::Cancelled => StageRunStatus::Cancelled,
     };
-    stored_run.finished_at_millis = Some(finished_at_millis);
+    stored_run.finished_at_millis = Some(outcome.finished_at_millis());
     if outcome.status != TerminalOutcomeStatus::Succeeded
         && let Some(task_id) = task_id
     {
         restore_task_after_unsuccessful_outcome(&mut snapshot, &task_id, run_stage)?;
     }
     snapshot.revision += 1;
-    snapshot.updated_at_millis = finished_at_millis;
+    snapshot.updated_at_millis = outcome.finished_at_millis();
     Delivery::try_from_snapshot(snapshot)
         .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string()))
 }
