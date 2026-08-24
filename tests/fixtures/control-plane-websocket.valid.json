@@ -1,0 +1,633 @@
+{
+  "schema": "schema/winwincode/v1/control-plane-events.schema.json",
+  "transcripts": [
+    {
+      "name": "delivery-live-and-backpressure",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000000"
+            },
+            "eventTypes": [
+              "activity.recorded.v1",
+              "attention.changed.v1",
+              "delivery.changed.v1",
+              "delivery-task.changed.v1"
+            ]
+          },
+          "startAt": "latest"
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000000"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "eventId": "evt_01J00000000000000000000001",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "delivery",
+            "deliveryId": "dlv_01J00000000000000000000000"
+          },
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:00:01.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "activity.recorded.v1",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            },
+            "deliveryId": "dlv_01J00000000000000000000000",
+            "category": "product",
+            "summary": "Delivery entered execution."
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "eventId": "evt_01J00000000000000000000002",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "delivery",
+            "deliveryId": "dlv_01J00000000000000000000000"
+          },
+          "sequence": 2,
+          "occurredAt": "2026-08-24T12:00:02.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "delivery.changed.v1",
+            "deliveryId": "dlv_01J00000000000000000000000",
+            "revision": 18,
+            "changeKind": "advanced"
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "eventId": "evt_01J00000000000000000000003",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "delivery",
+            "deliveryId": "dlv_01J00000000000000000000000"
+          },
+          "sequence": 3,
+          "occurredAt": "2026-08-24T12:00:03.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "delivery-task.changed.v1",
+            "deliveryId": "dlv_01J00000000000000000000000",
+            "deliveryTaskId": "dtk_01J00000000000000000000000",
+            "revision": 4,
+            "changeKind": "started"
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "eventId": "evt_01J00000000000000000000004",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "delivery",
+            "deliveryId": "dlv_01J00000000000000000000000"
+          },
+          "sequence": 4,
+          "occurredAt": "2026-08-24T12:00:04.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "attention.changed.v1",
+            "attentionItemId": "att_01J00000000000000000000000",
+            "deliveryId": "dlv_01J00000000000000000000000",
+            "revision": 2,
+            "status": "blocking",
+            "category": "business",
+            "summary": "Human review is required.",
+            "assignedTo": "usr_01J00000000000000000000000"
+          }
+        },
+        {
+          "type": "transport.backpressure.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "pendingEventCount": 256,
+          "ackRequiredThrough": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000000"
+            },
+            "sequence": 4,
+            "eventId": "evt_01J00000000000000000000004"
+          },
+          "disconnectAt": "2026-08-24T12:00:34.000Z",
+          "closeCode": 4408
+        },
+        {
+          "type": "transport.ack.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000000"
+            },
+            "sequence": 4,
+            "eventId": "evt_01J00000000000000000000004"
+          }
+        },
+        {
+          "type": "transport.ping.v1",
+          "nonce": "heartbeat_0000000000000001",
+          "sentAt": "2026-08-24T12:00:35.000Z"
+        },
+        {
+          "type": "transport.pong.v1",
+          "nonce": "heartbeat_0000000000000001"
+        },
+        {
+          "type": "transport.reset-required.v1",
+          "subscriptionId": "sub_01J00000000000000000000001",
+          "reason": "stream-rebuilt",
+          "earliestAvailable": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000000"
+            },
+            "sequence": 1,
+            "eventId": "evt_01J00000000000000000000001"
+          },
+          "closeCode": 4409
+        }
+      ]
+    },
+    {
+      "name": "product-session-resume",
+      "frames": [
+        {
+          "type": "transport.resume.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000000"
+            },
+            "eventTypes": [
+              "approval.changed.v1",
+              "presence.changed.v1",
+              "product-session.changed.v1",
+              "runtime-projection.appended.v1"
+            ]
+          },
+          "after": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000000"
+            },
+            "sequence": 4,
+            "eventId": "evt_01J00000000000000000000014"
+          }
+        },
+        {
+          "type": "transport.resume-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "after": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000000"
+            },
+            "sequence": 4,
+            "eventId": "evt_01J00000000000000000000014"
+          },
+          "replayThrough": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000000"
+            },
+            "sequence": 8,
+            "eventId": "evt_01J00000000000000000000018"
+          },
+          "authorizationEpoch": 7
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "eventId": "evt_01J00000000000000000000015",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000000"
+          },
+          "sequence": 5,
+          "occurredAt": "2026-08-24T12:00:15.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 7,
+          "event": {
+            "type": "product-session.changed.v1",
+            "productSessionId": "psn_01J00000000000000000000000",
+            "revision": 11,
+            "status": "waiting-approval",
+            "title": "Implement invitation flow"
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "eventId": "evt_01J00000000000000000000016",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000000"
+          },
+          "sequence": 6,
+          "occurredAt": "2026-08-24T12:00:16.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 7,
+          "event": {
+            "type": "approval.changed.v1",
+            "approvalId": "apr_01J00000000000000000000000",
+            "productSessionId": "psn_01J00000000000000000000000",
+            "state": "pending",
+            "subject": "Run repository tests",
+            "requestedBy": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            },
+            "decidedBy": null
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "eventId": "evt_01J00000000000000000000017",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000000"
+          },
+          "sequence": 7,
+          "occurredAt": "2026-08-24T12:00:17.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 7,
+          "event": {
+            "type": "runtime-projection.appended.v1",
+            "productSessionId": "psn_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "deliveryId": "dlv_01J00000000000000000000000",
+            "projectionSequence": 42,
+            "projectionKind": "test",
+            "summary": "The focused contract tests passed.",
+            "sourceRef": "runtime-event:42"
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "eventId": "evt_01J00000000000000000000018",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000000"
+          },
+          "sequence": 8,
+          "occurredAt": "2026-08-24T12:00:18.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "delivery-service",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 7,
+          "event": {
+            "type": "presence.changed.v1",
+            "userId": "usr_01J00000000000000000000000",
+            "productSessionId": "psn_01J00000000000000000000000",
+            "state": "online",
+            "observedAt": "2026-08-24T12:00:18.000Z"
+          }
+        },
+        {
+          "type": "transport.ack.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000000"
+            },
+            "sequence": 8,
+            "eventId": "evt_01J00000000000000000000018"
+          }
+        }
+      ]
+    },
+    {
+      "name": "lease-health-and-revocation",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000003",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "lease",
+              "workerId": "wrk_01J00000000000000000000000",
+              "leaseId": "lse_01J00000000000000000000000"
+            },
+            "eventTypes": [
+              "worker-health.changed.v1"
+            ]
+          },
+          "startAt": "earliest-available"
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000003",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "lease",
+              "workerId": "wrk_01J00000000000000000000000",
+              "leaseId": "lse_01J00000000000000000000000"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 3,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000003",
+          "eventId": "evt_01J00000000000000000000021",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "lease",
+            "workerId": "wrk_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000"
+          },
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:00:21.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 3,
+          "event": {
+            "type": "worker-health.changed.v1",
+            "workerId": "wrk_01J00000000000000000000000",
+            "status": "healthy",
+            "observedAt": "2026-08-24T12:00:21.000Z",
+            "activeLeaseCount": 1,
+            "availableCapacity": 3,
+            "capabilityLabels": [
+              "linux",
+              "x86_64"
+            ]
+          }
+        },
+        {
+          "type": "transport.ack.v1",
+          "subscriptionId": "sub_01J00000000000000000000003",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "lease",
+              "workerId": "wrk_01J00000000000000000000000",
+              "leaseId": "lse_01J00000000000000000000000"
+            },
+            "sequence": 1,
+            "eventId": "evt_01J00000000000000000000021"
+          }
+        },
+        {
+          "type": "transport.authorization-revoked.v1",
+          "subscriptionId": "sub_01J00000000000000000000003",
+          "authorizationEpoch": 4,
+          "closeCode": 4403
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/v1/control-plane-events.schema.json",
+  "title": "WinWinCode Control Plane WebSocket Protocol v1",
+  "description": "Server event delivery and transport-only client frames. Product commands are deliberately absent and use the HTTP command contract.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ControlPlaneWebSocketClientFrame"
+    },
+    {
+      "$ref": "#/$defs/ControlPlaneWebSocketServerFrame"
+    }
+  ],
+  "$defs": {
+    "ControlPlaneWebSocketSubscriptionId": {
+      "type": "string",
+      "pattern": "^sub_[A-Za-z0-9_-]{16,128}$"
+    },
+    "ControlPlaneWebSocketEventId": {
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9_-]{16,128}$"
+    },
+    "ControlPlaneWebSocketEventSequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "ControlPlaneWebSocketStreamPosition": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "ControlPlaneWebSocketAuthorizationEpoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "ControlPlaneWebSocketEventType": {
+      "type": "string",
+      "enum": [
+        "activity.recorded.v1",
+        "approval.changed.v1",
+        "attention.changed.v1",
+        "delivery.changed.v1",
+        "delivery-task.changed.v1",
+        "presence.changed.v1",
+        "product-session.changed.v1",
+        "runtime-projection.appended.v1",
+        "worker-health.changed.v1"
+      ]
+    },
+    "ControlPlaneWebSocketScopeStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "scope"
+        }
+      }
+    },
+    "ControlPlaneWebSocketDeliveryStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "deliveryId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        }
+      }
+    },
+    "ControlPlaneWebSocketProductSessionStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "productSessionId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "product-session"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "ControlPlaneWebSocketLeaseStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workerId",
+        "leaseId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "lease"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        }
+      }
+    },
+    "ControlPlaneWebSocketEventStream": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketScopeStream"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketDeliveryStream"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketProductSessionStream"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketLeaseStream"
+        }
+      ]
+    },
+    "ControlPlaneWebSocketCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ControlPlaneWebSocketStreamPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ControlPlaneWebSocketAcknowledgedCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ControlPlaneWebSocketStreamPosition"
+        },
+        "eventId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventId"
+        }
+      }
+    },
+    "ControlPlaneWebSocketSubscription": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "eventTypes"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+        },
+        "eventTypes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ControlPlaneWebSocketEventType"
+          }
+        }
+      }
+    },
+    "ControlPlaneWebSocketTransportLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxUnackedEvents",
+        "hardUnackedEvents",
+        "ackDeadlineMillis",
+        "backpressureCloseCode"
+      ],
+      "properties": {
+        "maxUnackedEvents": {
+          "const": 256
+        },
+        "hardUnackedEvents": {
+          "const": 1024
+        },
+        "ackDeadlineMillis": {
+          "const": 30000
+        },
+        "backpressureCloseCode": {
+          "const": 4408
+        }
+      }
+    },
+    "ControlPlaneWebSocketControlPlaneSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "component",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "control-plane"
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actor": {
+          "$ref": "./domain.schema.json#/$defs/Actor"
+        }
+      }
+    },
+    "ControlPlaneWebSocketExecutionWorkerSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workerId",
+        "workerSessionId",
+        "leaseId",
+        "codexThreadId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "execution-worker"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        }
+      }
+    },
+    "ControlPlaneWebSocketEventSource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketControlPlaneSource"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketExecutionWorkerSource"
+        }
+      ]
+    },
+    "ControlPlaneWebSocketProductSessionChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "productSessionId",
+        "revision",
+        "status"
+      ],
+      "properties": {
+        "type": {
+          "const": "product-session.changed.v1"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "waiting-input",
+            "waiting-approval",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "ControlPlaneWebSocketRuntimeProjectionAppendedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "leaseId",
+        "projectionSequence",
+        "projectionKind",
+        "summary"
+      ],
+      "properties": {
+        "type": {
+          "const": "runtime-projection.appended.v1"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "projectionSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "projectionKind": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "agent-graph",
+            "activity",
+            "command",
+            "test",
+            "recovery",
+            "failure",
+            "diff",
+            "usage",
+            "evidence",
+            "input-request",
+            "execution-approval"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "ControlPlaneWebSocketApprovalChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "approvalId",
+        "productSessionId",
+        "state",
+        "subject",
+        "requestedBy",
+        "decidedBy"
+      ],
+      "properties": {
+        "type": {
+          "const": "approval.changed.v1"
+        },
+        "approvalId": {
+          "$ref": "./domain.schema.json#/$defs/ApprovalId"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "denied",
+            "expired",
+            "cancelled"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "requestedBy": {
+          "$ref": "./domain.schema.json#/$defs/Actor"
+        },
+        "decidedBy": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Actor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decisionReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "ControlPlaneWebSocketAttentionChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "attentionItemId",
+        "deliveryId",
+        "revision",
+        "status",
+        "category",
+        "summary",
+        "assignedTo"
+      ],
+      "properties": {
+        "type": {
+          "const": "attention.changed.v1"
+        },
+        "attentionItemId": {
+          "$ref": "./domain.schema.json#/$defs/AttentionItemId"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "blocking",
+            "resolved",
+            "obsolete"
+          ]
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "credential",
+            "execution-approval",
+            "user-input",
+            "provider",
+            "verification",
+            "business"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "assignedTo": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ControlPlaneWebSocketDeliveryChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "deliveryId",
+        "revision",
+        "changeKind"
+      ],
+      "properties": {
+        "type": {
+          "const": "delivery.changed.v1"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "changeKind": {
+          "type": "string",
+          "enum": [
+            "created",
+            "advanced",
+            "reworked",
+            "cancelled",
+            "published"
+          ]
+        }
+      }
+    },
+    "ControlPlaneWebSocketDeliveryTaskChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "deliveryId",
+        "deliveryTaskId",
+        "revision",
+        "changeKind"
+      ],
+      "properties": {
+        "type": {
+          "const": "delivery-task.changed.v1"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliveryTaskId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "changeKind": {
+          "type": "string",
+          "enum": [
+            "created",
+            "assigned",
+            "blocked",
+            "started",
+            "completed",
+            "cancelled"
+          ]
+        }
+      }
+    },
+    "ControlPlaneWebSocketPresenceChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "userId",
+        "state",
+        "observedAt"
+      ],
+      "properties": {
+        "type": {
+          "const": "presence.changed.v1"
+        },
+        "userId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "online",
+            "away",
+            "offline"
+          ]
+        },
+        "observedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "ControlPlaneWebSocketWorkerHealthChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "workerId",
+        "status",
+        "observedAt",
+        "activeLeaseCount",
+        "availableCapacity"
+      ],
+      "properties": {
+        "type": {
+          "const": "worker-health.changed.v1"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "registering",
+            "healthy",
+            "degraded",
+            "draining",
+            "offline"
+          ]
+        },
+        "observedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "activeLeaseCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "availableCapacity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capabilityLabels": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "ControlPlaneWebSocketActivityRecordedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "actor",
+        "category",
+        "summary"
+      ],
+      "properties": {
+        "type": {
+          "const": "activity.recorded.v1"
+        },
+        "actor": {
+          "$ref": "./domain.schema.json#/$defs/Actor"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "product",
+            "runtime",
+            "approval",
+            "publication",
+            "collaboration",
+            "security"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "ControlPlaneWebSocketEventPayload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketProductSessionChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketRuntimeProjectionAppendedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketApprovalChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketAttentionChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketDeliveryChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketDeliveryTaskChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketPresenceChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketWorkerHealthChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketActivityRecordedEvent"
+        }
+      ]
+    },
+    "ControlPlaneWebSocketSubscribeFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "subscription",
+        "startAt"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.subscribe.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "subscription": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscription"
+        },
+        "startAt": {
+          "type": "string",
+          "enum": [
+            "latest",
+            "earliest-available"
+          ]
+        }
+      }
+    },
+    "ControlPlaneWebSocketResumeFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "subscription",
+        "after"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.resume.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "subscription": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscription"
+        },
+        "after": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAcknowledgedCursor"
+        }
+      }
+    },
+    "ControlPlaneWebSocketAckFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "cursor"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.ack.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "cursor": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAcknowledgedCursor"
+        }
+      }
+    },
+    "ControlPlaneWebSocketPongFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "nonce"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.pong.v1"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        }
+      }
+    },
+    "ControlPlaneWebSocketClientFrame": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscribeFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketResumeFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketAckFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketPongFrame"
+        }
+      ]
+    },
+    "ControlPlaneWebSocketEventFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "eventId",
+        "scope",
+        "stream",
+        "sequence",
+        "occurredAt",
+        "source",
+        "authorizationEpoch",
+        "event"
+      ],
+      "properties": {
+        "type": {
+          "const": "event.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "eventId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventId"
+        },
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "source": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventSource"
+        },
+        "authorizationEpoch": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationEpoch"
+        },
+        "event": {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventPayload"
+        }
+      }
+    },
+    "ControlPlaneWebSocketSubscriptionAcceptedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "cursor",
+        "authorizationEpoch",
+        "limits"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.subscription-accepted.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "cursor": {
+          "$ref": "#/$defs/ControlPlaneWebSocketCursor"
+        },
+        "authorizationEpoch": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationEpoch"
+        },
+        "limits": {
+          "$ref": "#/$defs/ControlPlaneWebSocketTransportLimits"
+        }
+      }
+    },
+    "ControlPlaneWebSocketResumeAcceptedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "after",
+        "replayThrough",
+        "authorizationEpoch"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.resume-accepted.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "after": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAcknowledgedCursor"
+        },
+        "replayThrough": {
+          "$ref": "#/$defs/ControlPlaneWebSocketCursor"
+        },
+        "authorizationEpoch": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationEpoch"
+        }
+      }
+    },
+    "ControlPlaneWebSocketBackpressureFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "pendingEventCount",
+        "ackRequiredThrough",
+        "disconnectAt",
+        "closeCode"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.backpressure.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "pendingEventCount": {
+          "type": "integer",
+          "minimum": 256
+        },
+        "ackRequiredThrough": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAcknowledgedCursor"
+        },
+        "disconnectAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "closeCode": {
+          "const": 4408
+        }
+      }
+    },
+    "ControlPlaneWebSocketAuthorizationRevokedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "authorizationEpoch",
+        "closeCode"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.authorization-revoked.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "authorizationEpoch": {
+          "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationEpoch"
+        },
+        "closeCode": {
+          "const": 4403
+        }
+      }
+    },
+    "ControlPlaneWebSocketResetRequiredFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "subscriptionId",
+        "reason",
+        "earliestAvailable",
+        "closeCode"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.reset-required.v1"
+        },
+        "subscriptionId": {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "cursor-expired",
+            "stream-rebuilt",
+            "authorization-boundary"
+          ]
+        },
+        "earliestAvailable": {
+          "$ref": "#/$defs/ControlPlaneWebSocketCursor"
+        },
+        "closeCode": {
+          "const": 4409
+        }
+      }
+    },
+    "ControlPlaneWebSocketPingFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "nonce",
+        "sentAt"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.ping.v1"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "ControlPlaneWebSocketProtocolErrorFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "error"
+      ],
+      "properties": {
+        "type": {
+          "const": "transport.error.v1"
+        },
+        "error": {
+          "$ref": "./domain.schema.json#/$defs/ErrorEnvelope"
+        }
+      }
+    },
+    "ControlPlaneWebSocketServerFrame": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEventFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionAcceptedFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketResumeAcceptedFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketBackpressureFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationRevokedFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketResetRequiredFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketPingFrame"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketProtocolErrorFrame"
+        }
+      ]
+    }
+  }
+}
