@@ -3,9 +3,10 @@
 //! Transactional product-state storage for the `WinWinCode` Control Plane.
 //!
 //! [`ProductStateStorage`] is the storage seam used by the Control Plane. A
-//! commit replaces one canonical state value and appends its outbox events in
-//! one transaction. The interface deliberately does not expose transaction
-//! handles, so callers cannot publish an event before its state is durable.
+//! commit replaces one canonical state value and atomically appends an optional
+//! opaque aggregate-journal record, its scoped request receipt, and outbox
+//! events. The interface deliberately does not expose transaction handles, so
+//! callers cannot publish an event before every durable fact commits.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -292,6 +293,7 @@ pub struct StateCommit {
     pub state: Vec<u8>,
     pub events: Vec<NewOutboxEvent>,
     journal_publication: Option<AggregateJournalPublication>,
+    receipt_replay_required: bool,
 }
 
 impl StateCommit {
@@ -312,6 +314,7 @@ impl StateCommit {
             state: state.into(),
             events,
             journal_publication: None,
+            receipt_replay_required: false,
         }
     }
 
@@ -325,6 +328,17 @@ impl StateCommit {
     #[must_use]
     pub const fn journal_publication(&self) -> Option<&AggregateJournalPublication> {
         self.journal_publication.as_ref()
+    }
+
+    /// Requires this call to resolve an already durable scoped receipt.
+    ///
+    /// Aggregate adapters use this after their journal reports the request as
+    /// a replay. If an older unsafe composition left only the journal record,
+    /// storage fails closed instead of persisting recomputed state or events.
+    #[must_use]
+    pub fn require_receipt_replay(mut self) -> Self {
+        self.receipt_replay_required = true;
+        self
     }
 
     fn validate(&self) -> Result<(), StorageError> {
@@ -401,6 +415,7 @@ pub enum StorageErrorKind {
     InvalidInput,
     RevisionConflict,
     RequestConflict,
+    RequestReplayMissing,
     JournalAlreadyExists,
     JournalNotFound,
     JournalConflict,
@@ -455,6 +470,16 @@ impl StorageError {
             kind: StorageErrorKind::RequestConflict,
             message: format!(
                 "request id {} was already used for another command in this actor and scope",
+                request_id.0
+            ),
+        }
+    }
+
+    fn request_replay_missing(request_id: &RequestId) -> Self {
+        Self {
+            kind: StorageErrorKind::RequestReplayMissing,
+            message: format!(
+                "request id {} exists in the aggregate journal without its scoped command receipt",
                 request_id.0
             ),
         }
@@ -627,6 +652,11 @@ impl ProductStateStorage for SqliteStorage {
             let receipt = replay_receipt(&transaction, commit, prior)?;
             transaction.commit().map_err(sql_error)?;
             return Ok(receipt);
+        }
+        if commit.receipt_replay_required {
+            return Err(StorageError::request_replay_missing(
+                commit.receipt_identity.request_id(),
+            ));
         }
 
         let receipt = append_state_commit(&transaction, commit)?;

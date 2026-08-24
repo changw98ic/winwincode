@@ -10,9 +10,10 @@ use winwincode_api::generated::{
     SchemaVersion, Scope, ServiceAccountActor, UserActor, WorkspaceScope,
 };
 use winwincode_control_plane::{
-    CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig, EventPublishError,
-    EventPublisher, NewOutboxEvent, OutboxEvent, ProductStateStorage, ShutdownError,
-    ShutdownReport, StartError, StateChange, StorageError, StorageErrorKind, StoredState,
+    AggregateJournalKey, CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig,
+    EventPublishError, EventPublisher, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent,
+    ProductStateStorage, ShutdownError, ShutdownReport, StartError, StateChange, StorageError,
+    StorageErrorKind, StoredState,
 };
 use winwincode_domain::{
     OrganizationId, ProjectId, RepositoryId, RequestId, ServiceAccountId, UserId, WorkspaceId,
@@ -129,10 +130,16 @@ impl ProductStateStorage for TraceStorage {
             receipt_identity: commit.receipt_identity.clone(),
             stream_id: commit.stream_id.clone(),
             revision,
-            event_ids: commit
+            events: commit
                 .events
                 .iter()
-                .map(|event| event.event_id.clone())
+                .enumerate()
+                .map(|(index, event)| OutboxEvent {
+                    sequence: u64::try_from(index + 1).expect("test event sequence"),
+                    event_id: event.event_id.clone(),
+                    topic: event.topic.clone(),
+                    payload: event.payload.clone(),
+                })
                 .collect(),
             idempotent_replay: false,
         })
@@ -140,6 +147,13 @@ impl ProductStateStorage for TraceStorage {
 
     fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         Ok(self.state.lock().expect("state lock").clone())
+    }
+
+    fn load_journal(
+        &self,
+        _key: &AggregateJournalKey,
+    ) -> Result<Option<LoadedAggregateJournal>, StorageError> {
+        Ok(None)
     }
 
     fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError> {
@@ -215,7 +229,7 @@ fn command(
 ) -> CommandEnvelope {
     CommandEnvelope {
         actor,
-        command: CommandName::DeliveryAdvance,
+        command: CommandName::SettingsUpdate,
         expected_revision: winwincode_domain::Revision(expected_revision),
         payload,
         request_id: RequestId(request_id.to_owned()),
@@ -508,7 +522,7 @@ fn command_receipts_use_canonical_actor_full_scope_request_and_payload_digest() 
         .expect("the same command digest should replay its durable receipt");
     assert!(replay.idempotent_replay);
     assert_eq!(replay.stream_id, "stream-base");
-    assert_eq!(replay.event_ids, ["event-base"]);
+    assert_eq!(replay.events[0].event_id, "event-base");
 
     let changed = command(
         request_id,
@@ -576,7 +590,7 @@ fn command_digest_is_stable_when_json_object_keys_arrive_in_another_order() {
         )
         .expect("JSON key order must not change the semantic command digest");
     assert!(replay.idempotent_replay);
-    assert_eq!(replay.event_ids, ["event-json"]);
+    assert_eq!(replay.events[0].event_id, "event-json");
 
     control_plane.shutdown().expect("shutdown should succeed");
     fs::remove_dir_all(root).expect("database directory should be released");

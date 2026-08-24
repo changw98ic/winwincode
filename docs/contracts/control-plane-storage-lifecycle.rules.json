@@ -19,12 +19,16 @@
       "begin-transaction",
       "validate-command-and-revision",
       "append-canonical-state",
+      "append-aggregate-journal",
+      "append-command-receipt",
       "append-outbox-event",
       "commit-transaction",
       "publish-committed-outbox-event"
     ],
     "atomicTransactionMembers": [
       "canonical-state-append",
+      "aggregate-journal-append",
+      "scoped-command-receipt-append",
       "outbox-event-append"
     ],
     "publicationSource": "durable-committed-outbox-only",
@@ -32,11 +36,15 @@
     "onAnyPreCommitFailure": [
       "rollback-transaction",
       "persist-no-canonical-state",
+      "persist-no-aggregate-journal-record",
+      "persist-no-command-receipt",
       "persist-no-outbox-event",
       "publish-no-event"
     ],
     "onPostCommitPublicationFailure": {
       "canonicalState": "remain-committed",
+      "aggregateJournal": "remain-committed",
+      "commandReceipt": "remain-committed",
       "outboxEvent": "remain-pending",
       "commandResult": "committed-publication-pending",
       "recovery": "retry-without-reexecuting-command"
@@ -112,6 +120,8 @@
       "transaction-boundaries",
       "revision-conflict-result",
       "canonical-append-order",
+      "aggregate-journal-tail-cas",
+      "scoped-receipt-original-event-replay",
       "outbox-recovery",
       "migration-before-serving",
       "deterministic-close"
@@ -194,6 +204,29 @@
       ]
     }
   },
+  "deliveryAtomicExtension": {
+    "phaseTask": "winwincode-9c4.16.2.3.1",
+    "commandEntry": "ControlPlane::commit_delivery_execution",
+    "genericDeliveryCommandBypassAllowed": false,
+    "journalSemanticsOwner": "winwincode-delivery",
+    "storageJournalPayloadSemantics": "opaque-bytes-and-tail-token",
+    "integrationTest": {
+      "package": "winwincode-control-plane",
+      "target": "delivery_atomic_transaction",
+      "path": "crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs",
+      "requiredTests": [
+        "raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails",
+        "delivery_advance_commits_every_durable_fact_before_dispatch",
+        "generic_control_plane_commit_rejects_every_delivery_command_bypass",
+        "mismatched_delivery_command_payload_fails_before_storage_or_dispatch",
+        "scoped_request_replay_returns_the_original_committed_job_without_redispatch",
+        "corrupted_durable_job_payload_is_rejected_without_recomputed_dispatch",
+        "pre_commit_failure_at_each_atomic_member_rolls_back_every_fact_and_dispatch",
+        "dispatch_failure_keeps_the_committed_job_pending_for_restart_replay",
+        "acknowledgement_failure_keeps_the_dispatched_job_pending_for_restart_replay"
+      ]
+    }
+  },
   "receiptIdentity": {
     "keyFields": [
       "actor.kind",
@@ -210,18 +243,20 @@
     "differentActorOrScopeSameRequestId": "independent-command",
     "commandDigest": "sha256-of-canonical-command-envelope",
     "semanticJsonObjectKeyOrderAffectsDigest": false,
-    "replayEventIdsSource": "durable-outbox",
+    "replayEventsSource": "durable-outbox-bytes",
     "persistedSecretsAllowed": false,
     "persistedActorProofAllowed": false,
-    "legacyV1Migration": {
-      "targetSchemaVersion": 2,
+    "sqliteMigration": {
+      "targetSchemaVersion": 3,
       "receiptIdentity": "reserved-legacy-v1-migration-identity",
       "preserves": [
         "canonical-state",
         "outbox-sequence",
         "outbox-publication-state"
       ],
-      "legacyRuntimeLookupPath": false
+      "legacyRuntimeLookupPath": false,
+      "v2ToV3": "single-transaction-add-aggregate-journal",
+      "v2RuntimePathAfterMigration": false
     }
   }
 }

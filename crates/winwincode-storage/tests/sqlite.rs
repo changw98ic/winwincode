@@ -861,3 +861,72 @@ fn scoped_request_replay_returns_the_original_event_without_duplicate_rows() {
     Box::new(storage).close().expect("storage should close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
+
+#[test]
+fn replay_only_commit_refuses_to_fill_a_journal_without_its_original_receipt() {
+    let root = temporary_directory("partial-journal-replay");
+    let storage = SqliteStorage::open(&root).expect("schema should be created");
+    let database_path = storage.database_path().to_path_buf();
+    Box::new(storage).close().expect("bootstrap storage close");
+    let connection = Connection::open(&database_path).expect("partial journal fixture");
+    connection
+        .execute(
+            "INSERT INTO aggregate_journals (aggregate_type, aggregate_id, manifest) \
+             VALUES ('delivery', 'dlv_01J00000000000000000000000', X'6D616E6966657374')",
+            [],
+        )
+        .expect("partial journal manifest");
+    connection
+        .execute(
+            "INSERT INTO aggregate_journal_records \
+             (aggregate_type, aggregate_id, sequence, digest, payload) \
+             VALUES (
+                 'delivery', 'dlv_01J00000000000000000000000', 1,
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 X'7265636F7264'
+             )",
+            [],
+        )
+        .expect("partial journal record");
+    connection.close().expect("fixture connection close");
+
+    let mut storage = SqliteStorage::open(&root).expect("partial storage should open");
+    let commit = state_commit(
+        (
+            "user:partial",
+            "repository:partial",
+            "req_01J00000000000000000000010",
+        ),
+        &format!("sha256:{}", "c".repeat(64)),
+        "delivery:partial",
+        0,
+        b"recomputed-state-must-not-commit",
+        "recomputed-event-must-not-commit",
+    )
+    .require_receipt_replay();
+
+    let error = storage
+        .commit(&commit)
+        .expect_err("missing original receipt must fail closed");
+    assert_eq!(error.kind(), StorageErrorKind::RequestReplayMissing);
+    assert!(
+        storage
+            .load_state("delivery:partial")
+            .expect("partial state read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .pending_events()
+            .expect("partial outbox read")
+            .is_empty()
+    );
+    let journal = storage
+        .load_journal(&journal_key())
+        .expect("partial journal read")
+        .expect("partial journal remains for diagnosis");
+    assert_eq!(journal.records.len(), 1);
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}

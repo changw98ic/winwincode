@@ -2,11 +2,12 @@
 
 //! Application lifecycle host for the `WinWinCode` Control Plane.
 //!
-//! This crate owns application composition and durable event publication. It
-//! intentionally has no dependency on Codex Core, an HTTP server, or Delivery
-//! domain logic.
+//! This crate owns application composition, Delivery persistence adapters, and
+//! durable event publication. It has no dependency on Codex Core, an HTTP
+//! server, or an Execution Worker runtime.
 
 pub mod delivery_execution;
+mod delivery_transaction;
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -14,11 +15,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use delivery_execution::{
+    DeliveryExecutionDispatchReceipt, DeliveryExecutionError, DeliveryExecutionPortError,
+    ExecutionJobDispatcher, PendingDeliveryExecution,
+};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{Actor, CommandEnvelope, Scope};
+use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_domain::Sha256Digest;
 pub use winwincode_storage::{
-    CommitReceipt, NewOutboxEvent, OutboxEvent, ProductStateStorage, StorageError,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
+    LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage, StorageError,
     StorageErrorKind, StoredState,
 };
 use winwincode_storage::{
@@ -383,6 +389,11 @@ impl ControlPlane {
         command: &CommandEnvelope,
         change: StateChange,
     ) -> Result<CommitReceipt, CommitError> {
+        if delivery_command(&command.command) {
+            return Err(CommitError::Storage(StorageError::invalid_input(
+                "Delivery commands require the atomic Delivery command path",
+            )));
+        }
         let commit = storage_commit(command, change).map_err(CommitError::Storage)?;
         let receipt = self
             .storage_mut()
@@ -396,6 +407,27 @@ impl ControlPlane {
                 source,
             })?;
         Ok(receipt)
+    }
+
+    /// Atomically commits one `delivery.advance` journal record, canonical
+    /// snapshot, scoped command receipt, and execution-job outbox intent before
+    /// offering the exact committed job to the `ExecutionPort` dispatcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns without dispatch when any pre-commit member fails. A dispatch or
+    /// acknowledgement failure carries the committed receipt and leaves the
+    /// durable event pending for startup replay.
+    pub fn commit_delivery_execution(
+        &mut self,
+        command: &CommandEnvelope,
+        pending: &PendingDeliveryExecution,
+        dispatcher: &mut dyn ExecutionJobDispatcher,
+    ) -> Result<DeliveryExecutionDispatchReceipt, DeliveryExecutionError> {
+        let storage = self.storage_mut().map_err(|error| {
+            DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
+        })?;
+        delivery_transaction::execute(storage, command, pending, dispatcher)
     }
 
     /// Loads canonical state through the configured storage adapter.
@@ -493,7 +525,7 @@ impl ControlPlane {
     }
 }
 
-fn storage_commit(
+pub(crate) fn storage_commit(
     command: &CommandEnvelope,
     change: StateChange,
 ) -> Result<StateCommit, StorageError> {
@@ -520,6 +552,18 @@ fn storage_commit(
         change.state,
         change.events,
     ))
+}
+
+fn delivery_command(command: &CommandName) -> bool {
+    matches!(
+        command,
+        CommandName::DeliveryCreate
+            | CommandName::DeliveryUpdateSpec
+            | CommandName::DeliveryApproveTaskBreakdown
+            | CommandName::DeliveryAdvance
+            | CommandName::DeliveryResolveAttention
+            | CommandName::DeliverySubmitVerdict
+    )
 }
 
 fn receipt_actor_key(actor: &Actor) -> Result<ReceiptActorKey, StorageError> {
