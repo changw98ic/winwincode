@@ -18,6 +18,12 @@ catalogs:
     '@types/react':
       specifier: 18.3.31
       version: 18.3.31
+    ajv:
+      specifier: 8.20.0
+      version: 8.20.0
+    ajv-formats:
+      specifier: 3.0.1
+      version: 3.0.1
     react:
       specifier: 18.3.1
       version: 18.3.1
@@ -86,6 +92,12 @@ importers:
       '@types/react':
         specifier: 'catalog:'
         version: 18.3.31
+      ajv:
+        specifier: 'catalog:'
+        version: 8.20.0
+      ajv-formats:
+        specifier: 'catalog:'
+        version: 3.0.1(ajv@8.20.0)
       react:
         specifier: 18.3.1
         version: 18.3.1
