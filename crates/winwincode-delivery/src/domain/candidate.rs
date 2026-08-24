@@ -46,7 +46,13 @@ pub struct CandidatePathFact {
 #[serde(rename_all = "camelCase")]
 pub struct CandidateHunkFact {
     pub file_path: String,
+    /// Digest of the resulting diff hunk content.
     pub hunk_sha256: String,
+    /// Original reviewed hunk identity whose range this result modifies.
+    ///
+    /// Present only for a remediator old-to-new delta. The trusted Git adapter
+    /// derives this mapping from hunk ranges; it is not copied from a prompt.
+    pub source_hunk_sha256: Option<String>,
 }
 
 /// A Git/Artifact-adapter fact for one exact Job workspace snapshot.
@@ -174,6 +180,27 @@ impl ValidatedGitSnapshotFact {
     pub(crate) const fn finished_at_millis(&self) -> u64 {
         self.finished_at_millis
     }
+
+    pub(crate) fn has_same_terminal_workspace(&self, other: &Self) -> bool {
+        self.stage_run_id == other.stage_run_id
+            && self.session_binding_id == other.session_binding_id
+            && self.product_session_id == other.product_session_id
+            && self.execution_job_id == other.execution_job_id
+            && self.attempt == other.attempt
+            && self.lease_id == other.lease_id
+            && self.fencing_token == other.fencing_token
+            && self.worker_id == other.worker_id
+            && self.worker_instance_id == other.worker_instance_id
+            && self.worker_session_id == other.worker_session_id
+            && self.codex_thread_id == other.codex_thread_id
+            && self.repository == other.repository
+            && self.candidate_commit_id == other.candidate_commit_id
+            && self.candidate_tree_id == other.candidate_tree_id
+            && self.artifact_ref == other.artifact_ref
+            && self.artifact_digest == other.artifact_digest
+            && self.last_event_sequence == other.last_event_sequence
+            && self.finished_at_millis == other.finished_at_millis
+    }
 }
 
 /// Sealed input accepted by [`freeze_delivery_candidate`].
@@ -181,6 +208,12 @@ impl ValidatedGitSnapshotFact {
 pub struct FreezeCandidateFacts {
     git_snapshot: ValidatedGitSnapshotFact,
     terminal_outcome: VerifiedTerminalOutcome,
+}
+
+impl FreezeCandidateFacts {
+    pub(crate) fn git_snapshot(&self) -> &ValidatedGitSnapshotFact {
+        &self.git_snapshot
+    }
 }
 
 /// One immutable candidate identity derived from canonical Delivery and sealed
@@ -356,7 +389,12 @@ struct CandidateIdentity<'candidate> {
     changed_paths: &'candidate [CandidatePathFact],
 }
 
-/// Freezes the current successful executor/remediator writer from sealed facts.
+/// Freezes the current successful executor writer from sealed facts.
+///
+/// Remediator output has a different trust boundary: callers must use the
+/// authorization-bound replacement entry in the rework module. Keeping that
+/// path separate makes it impossible to promote an unchecked rework result to
+/// the current candidate.
 ///
 /// # Errors
 ///
@@ -367,8 +405,34 @@ pub fn freeze_delivery_candidate(
     delivery: &Delivery,
     facts: &FreezeCandidateFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
+    freeze_candidate_for_stage(delivery, facts, DeliveryStage::Executing)
+}
+
+pub(crate) fn freeze_authorized_rework_candidate(
+    delivery: &Delivery,
+    facts: &FreezeCandidateFacts,
+) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
+    freeze_candidate_for_stage(delivery, facts, DeliveryStage::Reworking)
+}
+
+fn freeze_candidate_for_stage(
+    delivery: &Delivery,
+    facts: &FreezeCandidateFacts,
+    required_stage: DeliveryStage,
+) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
     let snapshot = &facts.git_snapshot;
     let producer = current_writer(delivery, &snapshot.stage_run_id)?;
+    if producer.stage != required_stage {
+        return Err(stale_candidate(match required_stage {
+            DeliveryStage::Executing => {
+                "generic candidate freeze accepts only an executor; remediator output requires authorization"
+            }
+            DeliveryStage::Reworking => {
+                "authorized replacement freeze requires one remediator producer"
+            }
+            _ => "candidate freeze received an unsupported writer stage",
+        }));
+    }
     let binding = exact_producer_binding(delivery, producer, &snapshot.session_binding_id)?;
 
     assert_validated_git_snapshot_fact(snapshot)?;
@@ -515,15 +579,15 @@ fn current_writer<'delivery>(
     );
     if producer.actor_type != StageRunActorType::Codex
         || producer.status != StageRunStatus::Succeeded
+        || producer.delivery_task_id.is_none()
         || !valid_role
     {
         return Err(stale_candidate(
-            "candidate producer must be one successful Codex executor or remediator",
+            "candidate producer must be one task-scoped successful Codex executor or remediator",
         ));
     }
     let later_writer = runs.iter().enumerate().any(|(index, run)| {
         run.id != producer.id
-            && run.actor_type == StageRunActorType::Codex
             && matches!(
                 run.stage,
                 DeliveryStage::Executing | DeliveryStage::Reworking
@@ -531,7 +595,7 @@ fn current_writer<'delivery>(
             && (index > producer_index
                 || run.started_at_millis > producer.started_at_millis
                 || (run.started_at_millis == producer.started_at_millis
-                    && run.attempt > producer.attempt))
+                    && run.attempt >= producer.attempt))
     });
     if later_writer {
         return Err(stale_candidate(
@@ -546,19 +610,18 @@ fn exact_producer_binding<'delivery>(
     producer: &StageRun,
     binding_id: &SessionBindingId,
 ) -> Result<&'delivery SessionBinding, DeliveryValidationError> {
-    let mut bindings = delivery
+    let bindings = delivery
         .snapshot()
         .session_bindings
         .iter()
-        .filter(|binding| &binding.id == binding_id && binding.stage_run_id == producer.id);
-    let binding = bindings
-        .next()
-        .ok_or_else(|| stale_candidate("candidate producer SessionBinding is missing"))?;
-    if bindings.next().is_some() {
+        .filter(|binding| binding.stage_run_id == producer.id)
+        .collect::<Vec<_>>();
+    if bindings.len() != 1 || &bindings[0].id != binding_id {
         return Err(stale_candidate(
-            "candidate producer SessionBinding is ambiguous",
+            "candidate producer must have exactly one referenced SessionBinding",
         ));
     }
+    let binding = bindings[0];
     let complete = binding.worker_session_id.is_some() && binding.codex_thread_id.is_some();
     if binding.delivery_id != *delivery.id()
         || binding.delivery_task_id != producer.delivery_task_id
@@ -668,6 +731,10 @@ fn validate_git_snapshot_shape(
     for hunk in &snapshot.changed_hunks {
         if !portable_path(&hunk.file_path)
             || !lowercase_sha256(&hunk.hunk_sha256)
+            || hunk
+                .source_hunk_sha256
+                .as_deref()
+                .is_some_and(|source| !lowercase_sha256(source))
             || !paths.contains(hunk.file_path.as_str())
             || !hunks.insert((hunk.file_path.as_str(), hunk.hunk_sha256.as_str()))
         {
@@ -889,6 +956,7 @@ pub(crate) mod test_support {
                 .map(|path| CandidateHunkFact {
                     file_path: path.path.clone(),
                     hunk_sha256: "b".repeat(64),
+                    source_hunk_sha256: None,
                 })
                 .collect(),
             changed_paths,
@@ -898,6 +966,30 @@ pub(crate) mod test_support {
             finished_at_millis: run.finished_at_millis.expect("fixture finished StageRun"),
             validation_seal: [0; 32],
         };
+        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
+        fact
+    }
+
+    pub(crate) fn with_changed_hunks(
+        mut fact: ValidatedGitSnapshotFact,
+        changed_hunks: Vec<CandidateHunkFact>,
+    ) -> ValidatedGitSnapshotFact {
+        fact.changed_hunks = changed_hunks;
+        fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
+        fact
+    }
+
+    pub(crate) fn with_foreign_terminal_workspace(
+        mut fact: ValidatedGitSnapshotFact,
+    ) -> ValidatedGitSnapshotFact {
+        fact.lease_id = LeaseId("lease-foreign".into());
+        fact.fencing_token = FencingToken("2".into());
+        fact.worker_id = WorkerId("worker-foreign".into());
+        fact.worker_instance_id = WorkerInstanceId("worker-instance-foreign".into());
+        fact.artifact_ref = "artifact:job:foreign".into();
+        fact.artifact_digest = Sha256Digest(format!("sha256:{}", "8".repeat(64)));
+        fact.last_event_sequence += 1;
+        fact.finished_at_millis += 1;
         fact.validation_seal = seal_git_snapshot(&fact).expect("fixture Git snapshot seal");
         fact
     }
@@ -1093,6 +1185,128 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn candidate_requires_exactly_one_writer_session_binding() {
+        let delivery = writer_delivery();
+        let facts = freeze_facts(&delivery, snapshot(&delivery));
+        let mut ambiguous = delivery.into_snapshot();
+        ambiguous.session_bindings.push(SessionBinding {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: SessionBindingId("binding-executor-duplicate".into()),
+            delivery_id: ambiguous.id.clone(),
+            delivery_task_id: ambiguous.stage_runs[0].delivery_task_id.clone(),
+            stage_run_id: StageRunId("stage-executor-1".into()),
+            product_session_id: ProductSessionId("product-executor-duplicate".into()),
+            execution_job_id: ExecutionJobId("job-executor-duplicate".into()),
+            worker_session_id: Some(WorkerSessionId("worker-executor-duplicate".into())),
+            codex_thread_id: Some(CodexThreadId("thread-executor-duplicate".into())),
+            bound_at_millis: 1_800_000_000_012,
+        });
+        let ambiguous = Delivery::try_from_snapshot(ambiguous)
+            .expect("aggregate permits verification of writer binding cardinality here");
+
+        assert!(freeze_delivery_candidate(&ambiguous, &facts).is_err());
+    }
+
+    #[test]
+    fn candidate_rejects_taskless_executor_or_remediator_writer() {
+        for (stage, role) in [
+            (DeliveryStage::Executing, "executor"),
+            (DeliveryStage::Reworking, "remediator"),
+        ] {
+            let mut taskless = writer_delivery().into_snapshot();
+            taskless.stage_runs[0].stage = stage;
+            taskless.stage_runs[0].role = role.into();
+            taskless.stage_runs[0].delivery_task_id = None;
+            taskless.session_bindings[0].delivery_task_id = None;
+            let taskless = Delivery::try_from_snapshot(taskless)
+                .expect("aggregate permits a Delivery-level run that cannot produce a candidate");
+            let facts = freeze_facts(&taskless, snapshot(&taskless));
+
+            freeze_candidate_for_stage(&taskless, &facts, stage)
+                .expect_err("a candidate writer must bind one concrete DeliveryTask");
+        }
+    }
+
+    #[test]
+    fn generic_candidate_freeze_rejects_a_remediator_writer() {
+        let mut replacement = writer_delivery().into_snapshot();
+        replacement.stage_runs[0].stage = DeliveryStage::Reworking;
+        replacement.stage_runs[0].role = "remediator".into();
+        let replacement = Delivery::try_from_snapshot(replacement).expect("remediator output");
+        let facts = freeze_facts(&replacement, snapshot(&replacement));
+
+        freeze_delivery_candidate(&replacement, &facts)
+            .expect_err("remediator output requires the authorization-bound replacement entry");
+    }
+
+    #[test]
+    fn candidate_rejects_an_ambiguous_same_time_writer() {
+        let delivery = writer_delivery();
+        let facts = freeze_facts(&delivery, snapshot(&delivery));
+        let mut ambiguous = delivery.into_snapshot();
+        let task_id = ambiguous.stage_runs[0].delivery_task_id.clone();
+        ambiguous.stage_runs.insert(
+            0,
+            StageRun {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: StageRunId("stage-executor-concurrent".into()),
+                delivery_id: ambiguous.id.clone(),
+                delivery_task_id: task_id.clone(),
+                stage: DeliveryStage::Executing,
+                actor_type: StageRunActorType::Codex,
+                role: "executor".into(),
+                status: StageRunStatus::Succeeded,
+                attempt: 1,
+                started_at_millis: 1_800_000_000_010,
+                finished_at_millis: Some(1_800_000_000_020),
+            },
+        );
+        ambiguous.session_bindings.push(SessionBinding {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: SessionBindingId("binding-executor-concurrent".into()),
+            delivery_id: ambiguous.id.clone(),
+            delivery_task_id: task_id,
+            stage_run_id: StageRunId("stage-executor-concurrent".into()),
+            product_session_id: ProductSessionId("product-executor-concurrent".into()),
+            execution_job_id: ExecutionJobId("job-executor-concurrent".into()),
+            worker_session_id: Some(WorkerSessionId("worker-executor-concurrent".into())),
+            codex_thread_id: Some(CodexThreadId("thread-executor-concurrent".into())),
+            bound_at_millis: 1_800_000_000_011,
+        });
+        let ambiguous = Delivery::try_from_snapshot(ambiguous)
+            .expect("aggregate permits candidate writer ambiguity check here");
+
+        assert!(freeze_delivery_candidate(&ambiguous, &facts).is_err());
+    }
+
+    #[test]
+    fn any_later_writer_stage_invalidates_the_candidate() {
+        let delivery = writer_delivery();
+        let candidate =
+            freeze_delivery_candidate(&delivery, &freeze_facts(&delivery, snapshot(&delivery)))
+                .expect("candidate");
+        let mut later = delivery.into_snapshot();
+        later.stage_runs.push(StageRun {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: StageRunId("stage-human-writer".into()),
+            delivery_id: later.id.clone(),
+            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
+            stage: DeliveryStage::Executing,
+            actor_type: StageRunActorType::Human,
+            role: "executor".into(),
+            status: StageRunStatus::Running,
+            attempt: 2,
+            started_at_millis: 1_800_000_000_030,
+            finished_at_millis: None,
+        });
+        later.updated_at_millis = 1_800_000_000_030;
+        let later = Delivery::try_from_snapshot(later)
+            .expect("aggregate permits candidate fail-closed writer detection here");
+
+        assert!(assert_frozen_candidate_current(&later, &candidate).is_err());
     }
 
     #[test]

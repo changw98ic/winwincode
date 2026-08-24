@@ -7,9 +7,13 @@ use winwincode_domain::{AttentionItemId, StageRunId};
 use crate::domain::{
     AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot, DeliveryStage,
     DeliveryStatus, StageRunActorType, StageRunStatus,
+    rework::{resolved_verdict_attention_action, safest_attention_transition},
 };
 
-use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
+use super::{
+    CoordinationError, CoordinationErrorCode, require_mutation_time,
+    verdict::current_verdict_attention_actions,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttentionDecision {
@@ -103,11 +107,19 @@ pub fn resolve_attention(
             "human review StageRun is no longer waiting for this Attention decision",
         ));
     }
+    let verdict_actions = current_verdict_attention_actions(delivery, item)?;
+    if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "computed verdict Attention must be resolved before stage movement",
+        ));
+    }
     apply_resolution(
         delivery.clone().into_snapshot(),
         input,
         item_index,
         run_index,
+        verdict_actions,
     )
 }
 
@@ -116,6 +128,7 @@ fn apply_resolution(
     input: ResolveAttentionInput,
     item_index: usize,
     run_index: usize,
+    verdict_actions: Option<Vec<crate::domain::rework::VerdictAttentionAction>>,
 ) -> Result<Delivery, CoordinationError> {
     let item_type = snapshot.attention_items[item_index].item_type;
     let run_stage = snapshot.stage_runs[run_index].stage;
@@ -161,7 +174,23 @@ fn apply_resolution(
     {
         DeliveryStatus::NeedsAttention
     } else {
-        next_delivery_status(item_type, run_stage, review_decision)?
+        let actions = verdict_actions.unwrap_or_else(|| {
+            snapshot
+                .attention_items
+                .iter()
+                .filter(|item| {
+                    item.blocking
+                        && item.stage_run_id.as_ref() == Some(&input.stage_run_id)
+                        && item.delivery_spec_id == snapshot.spec.id
+                })
+                .filter_map(|item| resolved_verdict_attention_action(item.item_type, item.status))
+                .collect()
+        });
+        if actions.is_empty() {
+            next_delivery_status(item_type, run_stage, review_decision)?
+        } else {
+            safest_attention_transition(&actions)
+        }
     };
     snapshot.revision += 1;
     snapshot.updated_at_millis = input.now_millis;

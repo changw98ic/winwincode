@@ -15,7 +15,7 @@ use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
     DeliverySnapshot, DeliveryStage, DeliveryStatus, DeliveryTaskStatus, MAX_COLLECTION_LENGTH,
     MAX_SAFE_INTEGER, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
-    StageRunStatus,
+    StageRunStatus, rework::ReworkAuthorization,
 };
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
@@ -44,6 +44,9 @@ pub struct AdvanceStageInput {
     pub review: Option<ReviewAttentionSeed>,
     pub previous_outcome: Option<VerifiedTerminalOutcome>,
     pub current_lease: Option<ActiveLeaseIdentity>,
+    /// Exact current-candidate remediation authority. Required only for a
+    /// `Reworking` stage and consumed into the immutable dispatch intent.
+    pub rework_authorization: Option<Box<ReworkAuthorization>>,
     pub now_millis: u64,
 }
 
@@ -305,6 +308,7 @@ pub struct ExecutionIntent {
     pub role: String,
     pub attempt: u64,
     pub goal: String,
+    pub rework_authorization: Option<Box<ReworkAuthorization>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,18 +485,26 @@ fn select_next_stage<'delivery>(
         input.current_lease.as_ref(),
         input.now_millis,
     )?;
-    let delivery_task_id = select_task_id(delivery, stage, previous)?;
+    let rework_authorization = validate_rework_authorization(delivery, stage, input)?;
+    let delivery_task_id = select_task_id(delivery, stage, previous, rework_authorization)?;
     let role = role_for_stage(delivery, stage, previous, delivery_task_id.as_ref())?;
     validate_stage_executor(stage, actor_type, role)?;
-    let attempt = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| {
-            run.stage == stage && run.role == role && run.delivery_task_id == delivery_task_id
-        })
-        .count() as u64
-        + 1;
+    let attempt = rework_authorization.map_or_else(
+        || {
+            delivery
+                .snapshot()
+                .stage_runs
+                .iter()
+                .filter(|run| {
+                    run.stage == stage
+                        && run.role == role
+                        && run.delivery_task_id == delivery_task_id
+                })
+                .count() as u64
+                + 1
+        },
+        ReworkAuthorization::next_attempt,
+    );
     Ok(NextStage {
         previous,
         stage,
@@ -502,6 +514,35 @@ fn select_next_stage<'delivery>(
         role,
         attempt,
     })
+}
+
+fn validate_rework_authorization<'input>(
+    delivery: &Delivery,
+    stage: DeliveryStage,
+    input: &'input AdvanceStageInput,
+) -> Result<Option<&'input ReworkAuthorization>, CoordinationError> {
+    match (stage, input.rework_authorization.as_deref()) {
+        (DeliveryStage::Reworking, Some(authorization)) => {
+            authorization
+                .validate_for_dispatch(delivery)
+                .map_err(|error| {
+                    CoordinationError::new(
+                        CoordinationErrorCode::Conflict,
+                        format!("rework dispatch authorization is stale: {error}"),
+                    )
+                })?;
+            Ok(Some(authorization))
+        }
+        (DeliveryStage::Reworking, None) => Err(CoordinationError::new(
+            CoordinationErrorCode::AttentionRequired,
+            "rework dispatch requires a sealed current-candidate authorization",
+        )),
+        (_, Some(_)) => Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "rework authorization cannot be attached to a non-reworking stage",
+        )),
+        (_, None) => Ok(None),
+    }
 }
 
 fn validate_previous_outcome(
@@ -713,6 +754,7 @@ fn append_execution_effect(
         role: next.role.to_owned(),
         attempt: next.attempt,
         goal: goal_for_task(delivery, next.delivery_task_id.as_ref()),
+        rework_authorization: input.rework_authorization,
     }))
 }
 
@@ -769,6 +811,12 @@ pub fn resume_active(
             "Delivery has more than one active StageRun",
         ));
     }
+    if run.stage == DeliveryStage::Reworking {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "a remediator dispatch must replay its committed authorized ExecutionJob instead of reconstructing an unscoped intent",
+        ));
+    }
     let binding = exact_binding(delivery, run, false)?;
     let goal = run
         .delivery_task_id
@@ -796,6 +844,7 @@ pub fn resume_active(
             role: run.role.clone(),
             attempt: run.attempt,
             goal,
+            rework_authorization: None,
         }),
     })
 }
@@ -1089,6 +1138,7 @@ fn select_task_id(
     delivery: &Delivery,
     stage: DeliveryStage,
     previous: Option<&StageRun>,
+    rework_authorization: Option<&ReworkAuthorization>,
 ) -> Result<Option<DeliveryTaskId>, CoordinationError> {
     if !matches!(
         stage,
@@ -1111,6 +1161,16 @@ fn select_task_id(
                 "task verification cannot follow a Delivery-level writer",
             )
         });
+    }
+    if stage == DeliveryStage::Reworking {
+        return rework_authorization
+            .map(|authorization| Some(authorization.delivery_task_id().clone()))
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::AttentionRequired,
+                    "rework task selection requires the sealed authorization",
+                )
+            });
     }
     Ok(Some(runnable_task(delivery, stage)?.id.clone()))
 }
