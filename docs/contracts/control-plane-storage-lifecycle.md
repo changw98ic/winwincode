@@ -3,7 +3,8 @@
 - 正式决定：[ADR-0028](../decisions/0028-control-plane-worker-migration.md)
 - 目标模块图：[0028-control-plane-worker-target-graph.json](../decisions/0028-control-plane-worker-target-graph.json)
 - 机器规则：[control-plane-storage-lifecycle.rules.json](./control-plane-storage-lifecycle.rules.json)
-- 对应任务：`winwincode-9c4.16.2.1`
+- 基础对应任务：`winwincode-9c4.16.2.1`
+- Delivery 原子扩展任务：`winwincode-9c4.16.2.3.1`
 
 ## 这份门禁说明什么
 
@@ -24,6 +25,8 @@ HTTP Command
   → Control Plane application command
   → ProductStateStorage transaction
       ├─ canonical state append
+      ├─ aggregate journal append
+      ├─ scoped command receipt append
       └─ outbox event append
   → commit
   → EventPublisher reads committed outbox
@@ -36,22 +39,25 @@ HTTP Command
 
 ## 一次命令的原子提交顺序
 
-状态和对外事件必须进入同一个数据库事务，固定顺序如下：
+状态、领域 journal、命令回执和对外事件必须进入同一个数据库事务，固定顺序如下：
 
 1. `begin-transaction`
 2. `validate-command-and-revision`
 3. `append-canonical-state`
-4. `append-outbox-event`
-5. `commit-transaction`
-6. `publish-committed-outbox-event`
+4. `append-aggregate-journal`
+5. `append-command-receipt`
+6. `append-outbox-event`
+7. `commit-transaction`
+8. `publish-committed-outbox-event`
 
-提交前不得发布事件。`append-canonical-state` 与 `append-outbox-event` 是同一原子单元；
-其中任何一步失败，都回滚整个事务，不能留下新状态、孤立 outbox 行或已经发出的事件。
+提交前不得发布事件。canonical state、aggregate journal、带 actor 和完整 scope 的命令回执、
+outbox 是同一原子单元；其中任何一步失败，都回滚整个事务，不能留下新状态、单独出现的
+journal record、缺少事件的回执、孤立 outbox 行或已经发出的事件。
 发送器只读取已经提交的 outbox，不能从内存中的待提交对象直接广播。
 
-数据库提交成功后，即时发布仍可能失败。这时 canonical state 保持已提交，outbox 事件
-保持 pending，命令结果必须明确表示“状态已提交、发布待重试”。恢复只重试发送，不得
-重新执行原业务命令，也不得声称数据库写入已经回滚。
+数据库提交成功后，即时发布仍可能失败。这时 canonical state、aggregate journal 和命令
+回执保持已提交，outbox 事件保持 pending，命令结果必须明确表示“状态已提交、发布待重试”。
+恢复只重试发送，不得重新执行原业务命令，也不得声称数据库写入已经回滚。
 
 这个顺序解决两种半写状态：
 
@@ -65,12 +71,21 @@ HTTP Command
 
 Control Plane 通过 canonical `CommandEnvelope` 生成这组身份和命令摘要。JSON 对象字段的
 书写顺序不改变摘要。存储只收到带类型的身份键和 SHA-256 摘要，不保存命令 payload、
-原始凭据或认证证明。重放时返回的 event ID 从已经持久化的 outbox 读取，不采信重试方
-重新提交的 `StateChange`。
+原始凭据或认证证明。重放时返回 event ID 和 event payload 的原始持久化字节，不采信
+重试方重新提交的 `StateChange` 或重新计算的 ExecutionJob。
 
-SQLite schema v1 启动时一次性迁移到 v2。旧回执缺少 actor 和 scope，只能进入一个保留
-的迁移身份；状态、outbox 顺序和发布状态保持不变。迁移完成后只运行 v2 的复合身份查询，
-不存在旧版 `requestId` 全局查询分支。
+SQLite 当前 schema 是 v3。v1 的旧回执和 v2 的复合回执结构都在启动事务内一次性迁移到
+v3：v1 回执缺少 actor 和 scope，只能进入一个保留的迁移身份；v2 增加 opaque aggregate
+journal 表。状态、outbox 顺序和发布状态保持不变。迁移完成后只运行 v3，不存在 v1 全局
+`requestId` 查询或 v2 无 journal 的第二条运行路径。迁移任一步失败时，版本号和建表变更
+一起回滚，服务不会开放命令入口。
+
+Delivery 的唯一 Control Plane 写入口是 `ControlPlane::commit_delivery_execution`。它先用
+transaction-scoped journal adapter 生成不透明的 Delivery record，再把 record、canonical
+Delivery snapshot、带 actor 和完整 scope 的回执、原始 ExecutionJob outbox 放入同一个
+`ProductStateStorage` commit。数据库返回成功后才派发 receipt 中恢复出的原始 job；普通
+`ControlPlane::commit` 拒绝 Delivery 命令，避免再次形成 journal 已成功而外层状态失败的
+分离写入路径。
 
 重复请求与 revision 冲突的具体结果继续使用 canonical HTTP 错误合同；存储 adapter 只
 实现同一事务结果，不新增 adapter 专用业务语义。
@@ -150,7 +165,8 @@ SQLite 的 WAL、busy timeout 或 PostgreSQL 的 isolation level 是 adapter 实
 
 ## Rust 公共检查边界
 
-阶段 2.1 冻结以下公共名字，让集成测试从 crate 外部验证行为。Control Plane 的主要提交
+阶段 2.1 冻结以下公共名字，让集成测试从 crate 外部验证行为。阶段 2.3.1 在这条边界上增加
+Delivery 专用原子入口和 opaque aggregate journal primitive。Control Plane 的通用提交
 入口只接受 canonical `CommandEnvelope + StateChange`；低层 `StateCommit` 和回执身份键
 只属于 `winwincode-storage` 端口，不从 Control Plane 根模块导出：
 
@@ -162,6 +178,7 @@ winwincode-control-plane
 ├─ ControlPlane
 │  ├─ ControlPlane::start_local
 │  ├─ ControlPlane::commit
+│  ├─ ControlPlane::commit_delivery_execution
 │  └─ ControlPlane::shutdown
 ├─ ControlPlaneConfig
 ├─ EventPublisher
@@ -172,9 +189,12 @@ winwincode-control-plane
 winwincode-storage
 ├─ ReceiptActorKey / ReceiptScopeKey / ReceiptIdentity
 ├─ StateCommit
+├─ AggregateJournalKey / AggregateJournalRecord
+├─ AggregateJournalPublication / LoadedAggregateJournal
 ├─ ProductStateStorage
 │  ├─ commit
 │  ├─ load_state
+│  ├─ load_journal
 │  ├─ pending_events
 │  ├─ mark_published
 │  └─ close
@@ -199,7 +219,9 @@ Rust 集成测试目标固定为
 - 非法 scope ID 在调用 storage 前失败；
 - 重放的 event ID 来自持久化 outbox，而不是重试的 StateChange。
 
-Node 门禁会通过 `cargo test --list` 核对固定测试名，并实际运行这个测试目标。Rust crate
+Node 门禁会通过 `cargo test --list` 核对固定测试名，并实际运行生命周期目标。阶段 2.3.1
+还固定运行 `delivery_atomic_transaction.rs`，从 crate 外部验证 Delivery 原子提交、四个事务
+成员的失败回滚、原始 job 重放、旁路拒绝，以及 dispatch/ack 失败后的重启补发。Rust crate
 尚未出现时，这些检查不会被当成已经通过。
 
 ## 依赖与后台任务边界

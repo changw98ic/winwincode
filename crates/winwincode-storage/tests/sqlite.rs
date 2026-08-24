@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use rusqlite::Connection;
 use winwincode_domain::{RequestId, Sha256Digest};
 use winwincode_storage::{
-    NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
-    SqliteStorage, StateCommit, StorageErrorKind,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
+    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
+    StateCommit, StorageErrorKind,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -48,6 +51,32 @@ fn state_commit(
             b"event".to_vec(),
         )],
     )
+}
+
+fn journal_key() -> AggregateJournalKey {
+    AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+        .expect("aggregate journal key")
+}
+
+fn journal_create(digest: &str, payload: &[u8]) -> AggregateJournalPublication {
+    AggregateJournalPublication::Create {
+        key: journal_key(),
+        manifest: b"delivery-manifest".to_vec(),
+        first_record: AggregateJournalRecord::new(1, digest, payload.to_vec()),
+    }
+}
+
+fn journal_append(
+    expected_tail_digest: &str,
+    digest: &str,
+    payload: &[u8],
+) -> AggregateJournalPublication {
+    AggregateJournalPublication::Append {
+        key: journal_key(),
+        expected_tail_sequence: 1,
+        expected_tail_digest: expected_tail_digest.to_owned(),
+        record: AggregateJournalRecord::new(2, digest, payload.to_vec()),
+    }
 }
 
 fn create_v1_fixture(database_path: &Path) {
@@ -96,12 +125,64 @@ fn create_v1_fixture(database_path: &Path) {
     connection.close().expect("v1 fixture should close");
 }
 
-fn assert_v2_receipt_schema(database_path: &Path) {
+fn create_v2_fixture(database_path: &Path) {
+    let connection = Connection::open(database_path).expect("v2 database should open");
+    connection
+        .execute_batch(
+            "CREATE TABLE product_state (
+                 stream_id TEXT PRIMARY KEY NOT NULL,
+                 revision INTEGER NOT NULL CHECK (revision > 0),
+                 payload BLOB NOT NULL
+             );
+             CREATE TABLE command_receipts (
+                 actor_key BLOB NOT NULL,
+                 scope_key BLOB NOT NULL,
+                 request_id TEXT NOT NULL,
+                 command_digest TEXT NOT NULL,
+                 stream_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL CHECK (revision > 0),
+                 PRIMARY KEY (actor_key, scope_key, request_id)
+             );
+             CREATE TABLE outbox (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 event_id TEXT UNIQUE NOT NULL,
+                 receipt_actor_key BLOB NOT NULL,
+                 receipt_scope_key BLOB NOT NULL,
+                 request_id TEXT NOT NULL,
+                 topic TEXT NOT NULL,
+                 payload BLOB NOT NULL,
+                 published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
+                 FOREIGN KEY (receipt_actor_key, receipt_scope_key, request_id)
+                     REFERENCES command_receipts (actor_key, scope_key, request_id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );
+             CREATE INDEX outbox_pending_sequence ON outbox (published, sequence);
+             INSERT INTO product_state VALUES ('v2-stream', 1, X'76322D7374617465');
+             INSERT INTO command_receipts VALUES (
+                 X'76322D6163746F72', X'76322D73636F7065',
+                 'req_01J00000000000000000000009',
+                 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'v2-stream', 1
+             );
+             INSERT INTO outbox
+                 (event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload)
+                 VALUES (
+                     'v2-event', X'76322D6163746F72', X'76322D73636F7065',
+                     'req_01J00000000000000000000009',
+                     'control-plane.state.changed', X'76322D6576656E74'
+                 );
+             PRAGMA user_version = 2;",
+        )
+        .expect("v2 fixture should be created");
+    connection.close().expect("v2 fixture should close");
+}
+
+fn assert_current_receipt_schema(database_path: &Path) {
     let connection = Connection::open(database_path).expect("migrated database should open");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let receipt_columns = {
         let mut statement = connection
             .prepare("PRAGMA table_info(command_receipts)")
@@ -142,7 +223,7 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
     let database_path = root.join("control-plane.sqlite3");
     let connection = Connection::open(&database_path).expect("test database should open");
     connection
-        .pragma_update(None, "user_version", 3)
+        .pragma_update(None, "user_version", 4)
         .expect("test schema version should be written");
     connection.close().expect("test database should close");
 
@@ -150,7 +231,7 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
         panic!("a newer schema must not be silently downgraded");
     };
 
-    assert!(error.to_string().contains("unsupported schema version 3"));
+    assert!(error.to_string().contains("unsupported schema version 4"));
     fs::remove_dir_all(root).expect("rejected database should have no open connection");
 }
 
@@ -196,7 +277,105 @@ fn startup_migrates_v1_receipts_once_without_a_legacy_runtime_lookup_path() {
         .expect("a canonical identity may reuse a v1 globally-scoped request id");
     Box::new(storage).close().expect("storage should close");
 
-    assert_v2_receipt_schema(&database_path);
+    assert_current_receipt_schema(&database_path);
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn startup_migrates_v2_to_the_single_journal_schema_before_serving() {
+    let root = temporary_directory("v2-journal-migration");
+    fs::create_dir_all(&root).expect("test directory should exist");
+    let database_path = root.join("control-plane.sqlite3");
+    create_v2_fixture(&database_path);
+
+    let storage = SqliteStorage::open(&root).expect("v2 storage should migrate to v3");
+    assert_eq!(
+        storage
+            .load_state("v2-stream")
+            .expect("migrated state read")
+            .expect("migrated state")
+            .payload,
+        b"v2-state"
+    );
+    assert_eq!(
+        storage.pending_events().expect("migrated outbox")[0].event_id,
+        "v2-event"
+    );
+    assert!(
+        storage
+            .load_journal(&journal_key())
+            .expect("new journal read")
+            .is_none()
+    );
+    Box::new(storage).close().expect("storage should close");
+
+    let connection = Connection::open(&database_path).expect("migrated database");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version");
+    assert_eq!(version, 3);
+    for table in ["aggregate_journals", "aggregate_journal_records"] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("journal table lookup");
+        assert_eq!(exists, 1, "{table} must exist after v2 migration");
+    }
+    connection
+        .close()
+        .expect("inspection connection should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn interrupted_v2_migration_rolls_back_before_serving() {
+    let root = temporary_directory("v2-migration-rollback");
+    fs::create_dir_all(&root).expect("test directory should exist");
+    let database_path = root.join("control-plane.sqlite3");
+    create_v2_fixture(&database_path);
+    let connection = Connection::open(&database_path).expect("v2 database");
+    connection
+        .execute_batch("CREATE VIEW aggregate_journal_records AS SELECT 1 AS incompatible_fixture;")
+        .expect("migration blocker should install");
+    connection.close().expect("v2 database should close");
+
+    let error = SqliteStorage::open(&root)
+        .err()
+        .expect("migration failure must prevent storage startup");
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate journal record schema is not canonical")
+    );
+
+    let connection = Connection::open(&database_path).expect("rolled back database");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("rolled back version");
+    assert_eq!(version, 2);
+    let journal_table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'aggregate_journals'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("rolled back journal table lookup");
+    assert_eq!(journal_table_count, 0);
+    let state: Vec<u8> = connection
+        .query_row(
+            "SELECT payload FROM product_state WHERE stream_id = 'v2-stream'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("v2 state must remain intact");
+    assert_eq!(state, b"v2-state");
+    connection
+        .close()
+        .expect("inspection connection should close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
 
@@ -356,7 +535,7 @@ fn receipt_identity_replays_only_the_same_digest_and_rejects_a_changed_digest() 
         .expect("the same receipt identity and digest should replay");
     assert!(replay.idempotent_replay);
     assert_eq!(replay.stream_id, "stream-one");
-    assert_eq!(replay.event_ids, ["event-original"]);
+    assert_eq!(replay.events[0].event_id, "event-original");
 
     let error = storage
         .commit(&state_commit(
@@ -369,6 +548,384 @@ fn receipt_identity_replays_only_the_same_digest_and_rejects_a_changed_digest() 
         ))
         .expect_err("the same receipt identity cannot represent another digest");
     assert_eq!(error.kind(), StorageErrorKind::RequestConflict);
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn one_commit_makes_state_journal_receipt_and_outbox_authoritative_together() {
+    let root = temporary_directory("atomic-journal-create");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let commit = state_commit(
+        (
+            "user:one",
+            "repository:org:workspace:project:repository-one",
+            "req_01J00000000000000000000003",
+        ),
+        &format!("sha256:{}", "5".repeat(64)),
+        "delivery:one",
+        0,
+        b"canonical-delivery-v1",
+        "job-event-one",
+    )
+    .with_journal_publication(journal_create("record-one", b"journal-record-one"));
+
+    let receipt = storage
+        .commit(&commit)
+        .expect("one transaction should commit");
+
+    assert_eq!(receipt.revision, 1);
+    assert!(!receipt.idempotent_replay);
+    assert_eq!(receipt.events.len(), 1);
+    assert_eq!(receipt.events[0].event_id, "job-event-one");
+    assert_eq!(receipt.events[0].payload, b"event");
+    let state = storage
+        .load_state("delivery:one")
+        .expect("state read")
+        .expect("committed state");
+    assert_eq!(
+        (state.revision, state.payload),
+        (1, b"canonical-delivery-v1".to_vec())
+    );
+    let journal = storage
+        .load_journal(&journal_key())
+        .expect("journal read")
+        .expect("committed journal");
+    assert_eq!(journal.manifest, b"delivery-manifest");
+    assert_eq!(journal.records.len(), 1);
+    assert_eq!(journal.records[0].sequence, 1);
+    assert_eq!(journal.records[0].digest, "record-one");
+    assert_eq!(journal.records[0].payload, b"journal-record-one");
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+fn install_failing_insert_trigger(database_path: &Path, table: &str) {
+    let connection = Connection::open(database_path).expect("failure injection database");
+    let trigger = match table {
+        "product_state" => {
+            "CREATE TRIGGER fail_product_state_insert BEFORE INSERT ON product_state \
+             BEGIN SELECT RAISE(ABORT, 'injected product_state failure'); END;"
+        }
+        "aggregate_journal_records" => {
+            "CREATE TRIGGER fail_aggregate_journal_records_insert \
+             BEFORE INSERT ON aggregate_journal_records \
+             BEGIN SELECT RAISE(ABORT, 'injected aggregate_journal_records failure'); END;"
+        }
+        "command_receipts" => {
+            "CREATE TRIGGER fail_command_receipts_insert BEFORE INSERT ON command_receipts \
+             BEGIN SELECT RAISE(ABORT, 'injected command_receipts failure'); END;"
+        }
+        "outbox" => {
+            "CREATE TRIGGER fail_outbox_insert BEFORE INSERT ON outbox \
+             BEGIN SELECT RAISE(ABORT, 'injected outbox failure'); END;"
+        }
+        _ => panic!("unsupported failure injection table"),
+    };
+    connection
+        .execute_batch(trigger)
+        .expect("failure trigger should install");
+    connection.close().expect("failure injector should close");
+}
+
+fn table_count(database_path: &Path, table: &str) -> i64 {
+    let connection = Connection::open(database_path).expect("inspection database");
+    let query = match table {
+        "product_state" => "SELECT COUNT(*) FROM product_state",
+        "aggregate_journals" => "SELECT COUNT(*) FROM aggregate_journals",
+        "aggregate_journal_records" => "SELECT COUNT(*) FROM aggregate_journal_records",
+        "command_receipts" => "SELECT COUNT(*) FROM command_receipts",
+        "outbox" => "SELECT COUNT(*) FROM outbox",
+        _ => panic!("unsupported inspection table"),
+    };
+    let count = connection
+        .query_row(query, [], |row| row.get(0))
+        .expect("table count");
+    connection
+        .close()
+        .expect("inspection connection should close");
+    count
+}
+
+#[test]
+fn failure_at_each_atomic_member_rolls_back_every_member() {
+    for failing_table in [
+        "product_state",
+        "aggregate_journal_records",
+        "command_receipts",
+        "outbox",
+    ] {
+        let root = temporary_directory(&format!("rollback-{failing_table}"));
+        let storage = SqliteStorage::open(&root).expect("schema should be created");
+        let database_path = storage.database_path().to_path_buf();
+        Box::new(storage)
+            .close()
+            .expect("bootstrap storage should close");
+        install_failing_insert_trigger(&database_path, failing_table);
+
+        let mut storage = SqliteStorage::open(&root).expect("storage with trigger should open");
+        let commit = state_commit(
+            (
+                "user:rollback",
+                "repository:rollback",
+                "req_01J00000000000000000000004",
+            ),
+            &format!("sha256:{}", "6".repeat(64)),
+            "delivery:rollback",
+            0,
+            b"must-not-commit",
+            "must-not-commit-event",
+        )
+        .with_journal_publication(journal_create(
+            "must-not-commit-record",
+            b"must-not-commit-record",
+        ));
+
+        let error = storage
+            .commit(&commit)
+            .expect_err("injected failure must abort the transaction");
+        assert_eq!(error.kind(), StorageErrorKind::Adapter);
+        Box::new(storage)
+            .close()
+            .expect("failed storage should close");
+
+        for table in [
+            "product_state",
+            "aggregate_journals",
+            "aggregate_journal_records",
+            "command_receipts",
+            "outbox",
+        ] {
+            assert_eq!(
+                table_count(&database_path, table),
+                0,
+                "{failing_table} failure left a partial row in {table}"
+            );
+        }
+        fs::remove_dir_all(root).expect("database directory should be released");
+    }
+}
+
+#[test]
+fn journal_tail_compare_and_append_allows_only_one_concurrent_winner() {
+    let root = temporary_directory("journal-tail-cas");
+    let mut bootstrap = SqliteStorage::open(&root).expect("SQLite storage should open");
+    bootstrap
+        .commit(
+            &state_commit(
+                (
+                    "user:bootstrap",
+                    "repository:bootstrap",
+                    "req_01J00000000000000000000005",
+                ),
+                &format!("sha256:{}", "7".repeat(64)),
+                "bootstrap",
+                0,
+                b"bootstrap",
+                "bootstrap-event",
+            )
+            .with_journal_publication(journal_create("record-one", b"record-one")),
+        )
+        .expect("first journal record");
+    Box::new(bootstrap).close().expect("bootstrap should close");
+
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for ordinal in 0..2 {
+        let root = root.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            let mut storage = SqliteStorage::open(&root).expect("contender storage should open");
+            let stream_id = format!("contender-{ordinal}");
+            let state = format!("state-{ordinal}");
+            let event_id = format!("event-{ordinal}");
+            let record_digest = format!("record-{ordinal}");
+            let record_payload = format!("record-{ordinal}");
+            let digest_nibble = if ordinal == 0 { "8" } else { "9" };
+            let commit = state_commit(
+                (
+                    if ordinal == 0 { "user:one" } else { "user:two" },
+                    "repository:race",
+                    if ordinal == 0 {
+                        "req_01J00000000000000000000006"
+                    } else {
+                        "req_01J00000000000000000000007"
+                    },
+                ),
+                &format!("sha256:{}", digest_nibble.repeat(64)),
+                &stream_id,
+                0,
+                state.as_bytes(),
+                &event_id,
+            )
+            .with_journal_publication(journal_append(
+                "record-one",
+                &record_digest,
+                record_payload.as_bytes(),
+            ));
+            barrier.wait();
+            let result = storage.commit(&commit);
+            Box::new(storage).close().expect("contender should close");
+            result
+        }));
+    }
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("contender thread"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .expect("one contender should lose");
+    assert_eq!(error.kind(), StorageErrorKind::JournalConflict);
+
+    let storage = SqliteStorage::open(&root).expect("inspection storage should open");
+    let journal = storage
+        .load_journal(&journal_key())
+        .expect("journal read")
+        .expect("journal");
+    assert_eq!(journal.records.len(), 2);
+    assert_eq!(storage.pending_events().expect("pending events").len(), 2);
+    Box::new(storage)
+        .close()
+        .expect("inspection storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn scoped_request_replay_returns_the_original_event_without_duplicate_rows() {
+    let root = temporary_directory("journal-request-replay");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let identity = (
+        "user:one",
+        "repository:one",
+        "req_01J00000000000000000000008",
+    );
+    let digest = format!("sha256:{}", "a".repeat(64));
+    storage
+        .commit(
+            &state_commit(
+                identity,
+                &digest,
+                "delivery:original",
+                0,
+                b"original-state",
+                "original-job-event",
+            )
+            .with_journal_publication(journal_create("record-one", b"original-record")),
+        )
+        .expect("original commit");
+
+    let replay = storage
+        .commit(
+            &state_commit(
+                identity,
+                &digest,
+                "delivery:retry-must-be-ignored",
+                99,
+                b"retry-state-must-be-ignored",
+                "retry-event-must-be-ignored",
+            )
+            .with_journal_publication(journal_append(
+                "record-one",
+                "retry-record",
+                b"retry-record-must-be-ignored",
+            )),
+        )
+        .expect("same scoped command should replay");
+
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.stream_id, "delivery:original");
+    assert_eq!(replay.revision, 1);
+    assert_eq!(replay.events.len(), 1);
+    assert_eq!(replay.events[0].event_id, "original-job-event");
+    assert_eq!(replay.events[0].payload, b"event");
+    assert_eq!(storage.pending_events().expect("pending events").len(), 1);
+    let journal = storage
+        .load_journal(&journal_key())
+        .expect("journal read")
+        .expect("journal");
+    assert_eq!(journal.records.len(), 1);
+    assert_eq!(journal.records[0].payload, b"original-record");
+    assert!(
+        storage
+            .load_state("delivery:retry-must-be-ignored")
+            .expect("retry state query")
+            .is_none()
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn replay_only_commit_refuses_to_fill_a_journal_without_its_original_receipt() {
+    let root = temporary_directory("partial-journal-replay");
+    let storage = SqliteStorage::open(&root).expect("schema should be created");
+    let database_path = storage.database_path().to_path_buf();
+    Box::new(storage).close().expect("bootstrap storage close");
+    let connection = Connection::open(&database_path).expect("partial journal fixture");
+    connection
+        .execute(
+            "INSERT INTO aggregate_journals (aggregate_type, aggregate_id, manifest) \
+             VALUES ('delivery', 'dlv_01J00000000000000000000000', X'6D616E6966657374')",
+            [],
+        )
+        .expect("partial journal manifest");
+    connection
+        .execute(
+            "INSERT INTO aggregate_journal_records \
+             (aggregate_type, aggregate_id, sequence, digest, payload) \
+             VALUES (
+                 'delivery', 'dlv_01J00000000000000000000000', 1,
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 X'7265636F7264'
+             )",
+            [],
+        )
+        .expect("partial journal record");
+    connection.close().expect("fixture connection close");
+
+    let mut storage = SqliteStorage::open(&root).expect("partial storage should open");
+    let commit = state_commit(
+        (
+            "user:partial",
+            "repository:partial",
+            "req_01J00000000000000000000010",
+        ),
+        &format!("sha256:{}", "c".repeat(64)),
+        "delivery:partial",
+        0,
+        b"recomputed-state-must-not-commit",
+        "recomputed-event-must-not-commit",
+    )
+    .require_receipt_replay();
+
+    let error = storage
+        .commit(&commit)
+        .expect_err("missing original receipt must fail closed");
+    assert_eq!(error.kind(), StorageErrorKind::RequestReplayMissing);
+    assert!(
+        storage
+            .load_state("delivery:partial")
+            .expect("partial state read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .pending_events()
+            .expect("partial outbox read")
+            .is_empty()
+    );
+    let journal = storage
+        .load_journal(&journal_key())
+        .expect("partial journal read")
+        .expect("partial journal remains for diagnosis");
+    assert_eq!(journal.records.len(), 1);
 
     Box::new(storage).close().expect("storage should close");
     fs::remove_dir_all(root).expect("database directory should be released");

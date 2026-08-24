@@ -1,17 +1,24 @@
 # winwincode-storage
 
 This crate is the Control Plane persistence seam. `ProductStateStorage::commit`
-atomically writes one canonical state revision and its outbox events. The local
-adapter uses SQLite with a bundled SQLite library; a later PostgreSQL adapter
-must implement the same small interface instead of changing application code.
+atomically writes one canonical state revision, an optional opaque aggregate
+journal publication, the scoped command receipt, and its outbox events. The
+local adapter uses SQLite with a bundled SQLite library; a later PostgreSQL
+adapter implements this same port and transaction result.
 
 Command receipts are keyed by the canonical actor identity, every ID present
 in the organization/workspace/project/repository scope, and `requestId`.
 Storage receives opaque typed keys and a SHA-256 command digest rather than the
-command payload, credentials, or authentication proof. SQLite schema v1 is
-migrated once to the composite v2 identity; no v1 lookup path remains at
-runtime. An idempotent replay returns the original event IDs from the durable
-outbox.
+command payload, credentials, or authentication proof. SQLite v1 receipt data
+and v2 databases are migrated in one startup transaction to schema v3. Runtime
+uses only the v3 composite receipt and aggregate-journal tables. An idempotent
+replay returns the original event IDs and payload bytes from the durable outbox.
+
+Aggregate journal values stay opaque: storage owns the static tables,
+transaction, and tail compare-and-append; the Control Plane domain adapter owns
+Delivery record decoding and digest-chain verification. A replay-only commit
+fails closed when an older split write left a journal record without its scoped
+receipt, so retry data cannot manufacture a replacement job event.
 
 The outbox is delivered at least once in its persisted sequence order. Event
 publishers therefore deduplicate by the stable `event_id`.

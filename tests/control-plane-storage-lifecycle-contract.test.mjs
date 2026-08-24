@@ -37,6 +37,8 @@ const expectedCommitOrder = [
   'begin-transaction',
   'validate-command-and-revision',
   'append-canonical-state',
+  'append-aggregate-journal',
+  'append-command-receipt',
   'append-outbox-event',
   'commit-transaction',
   'publish-committed-outbox-event',
@@ -75,6 +77,18 @@ const expectedLifecycleTests = [
   'command_receipts_use_canonical_actor_full_scope_request_and_payload_digest',
   'command_digest_is_stable_when_json_object_keys_arrive_in_another_order',
   'invalid_scope_ids_fail_before_the_storage_port_is_called',
+]
+
+const expectedDeliveryAtomicTests = [
+  'raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails',
+  'delivery_advance_commits_every_durable_fact_before_dispatch',
+  'generic_control_plane_commit_rejects_every_delivery_command_bypass',
+  'mismatched_delivery_command_payload_fails_before_storage_or_dispatch',
+  'scoped_request_replay_returns_the_original_committed_job_without_redispatch',
+  'corrupted_durable_job_payload_is_rejected_without_recomputed_dispatch',
+  'pre_commit_failure_at_each_atomic_member_rolls_back_every_fact_and_dispatch',
+  'dispatch_failure_keeps_the_committed_job_pending_for_restart_replay',
+  'acknowledgement_failure_keeps_the_dispatched_job_pending_for_restart_replay',
 ]
 
 function json(path) {
@@ -154,6 +168,8 @@ test('canonical state and its outbox event commit atomically before publication'
   assert.deepEqual(protocol.order, expectedCommitOrder)
   assert.deepEqual(protocol.atomicTransactionMembers, [
     'canonical-state-append',
+    'aggregate-journal-append',
+    'scoped-command-receipt-append',
     'outbox-event-append',
   ])
   assert.equal(protocol.publicationSource, 'durable-committed-outbox-only')
@@ -161,11 +177,15 @@ test('canonical state and its outbox event commit atomically before publication'
   assert.deepEqual(protocol.onAnyPreCommitFailure, [
     'rollback-transaction',
     'persist-no-canonical-state',
+    'persist-no-aggregate-journal-record',
+    'persist-no-command-receipt',
     'persist-no-outbox-event',
     'publish-no-event',
   ])
   assert.deepEqual(protocol.onPostCommitPublicationFailure, {
     canonicalState: 'remain-committed',
+    aggregateJournal: 'remain-committed',
+    commandReceipt: 'remain-committed',
     outboxEvent: 'remain-pending',
     commandResult: 'committed-publication-pending',
     recovery: 'retry-without-reexecuting-command',
@@ -191,14 +211,16 @@ test('command receipt identity is actor and full scope aware without persisting 
     differentActorOrScopeSameRequestId: 'independent-command',
     commandDigest: 'sha256-of-canonical-command-envelope',
     semanticJsonObjectKeyOrderAffectsDigest: false,
-    replayEventIdsSource: 'durable-outbox',
+    replayEventsSource: 'durable-outbox-bytes',
     persistedSecretsAllowed: false,
     persistedActorProofAllowed: false,
-    legacyV1Migration: {
-      targetSchemaVersion: 2,
+    sqliteMigration: {
+      targetSchemaVersion: 3,
       receiptIdentity: 'reserved-legacy-v1-migration-identity',
       preserves: ['canonical-state', 'outbox-sequence', 'outbox-publication-state'],
       legacyRuntimeLookupPath: false,
+      v2ToV3: 'single-transaction-add-aggregate-journal',
+      v2RuntimePathAfterMigration: false,
     },
   })
 })
@@ -260,6 +282,8 @@ test('SQLite and PostgreSQL remain adapters behind one product storage port', ()
     'transaction-boundaries',
     'revision-conflict-result',
     'canonical-append-order',
+    'aggregate-journal-tail-cas',
+    'scoped-receipt-original-event-replay',
     'outbox-recovery',
     'migration-before-serving',
     'deterministic-close',
@@ -319,6 +343,7 @@ test('storage lifecycle documentation explains every enforced outcome in plain t
     '`ProductStateStorage`',
     '`ControlPlane::start_local`',
     '`ControlPlane::commit`',
+    '`ControlPlane::commit_delivery_execution`',
     '`ControlPlane::shutdown`',
   ]) assert.ok(text.includes(statement), `missing documentation statement: ${statement}`)
 
@@ -478,6 +503,56 @@ test('future phase 2.1 crates must expose and pass the frozen Rust black-box sea
     gate.integrationTest.package,
     '--test',
     gate.integrationTest.target,
+  ], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, commandFailure(executed))
+})
+
+test('Delivery commands use one atomic journal state receipt and job-outbox path', () => {
+  const extension = json(rulesPath).deliveryAtomicExtension
+  assert.deepEqual(extension, {
+    phaseTask: 'winwincode-9c4.16.2.3.1',
+    commandEntry: 'ControlPlane::commit_delivery_execution',
+    genericDeliveryCommandBypassAllowed: false,
+    journalSemanticsOwner: 'winwincode-delivery',
+    storageJournalPayloadSemantics: 'opaque-bytes-and-tail-token',
+    integrationTest: {
+      package: 'winwincode-control-plane',
+      target: 'delivery_atomic_transaction',
+      path: 'crates/winwincode-control-plane/tests/delivery_atomic_transaction.rs',
+      requiredTests: expectedDeliveryAtomicTests,
+    },
+  })
+
+  const testPath = join(root, extension.integrationTest.path)
+  assert.equal(existsSync(testPath), true)
+  const source = readFileSync(testPath, 'utf8')
+  assert.ok(source.includes(extension.commandEntry.split('::').at(-1)))
+  for (const testName of expectedDeliveryAtomicTests) {
+    assert.ok(source.includes(`fn ${testName}()`), `missing Delivery atomic test: ${testName}`)
+  }
+
+  const listed = spawnSync('cargo', [
+    'test',
+    '--locked',
+    '--package',
+    extension.integrationTest.package,
+    '--test',
+    extension.integrationTest.target,
+    '--',
+    '--list',
+  ], { cwd: root, encoding: 'utf8' })
+  assert.equal(listed.status, 0, commandFailure(listed))
+  for (const testName of extension.integrationTest.requiredTests) {
+    assert.match(listed.stdout, new RegExp(`^${testName}: test$`, 'mu'))
+  }
+
+  const executed = spawnSync('cargo', [
+    'test',
+    '--locked',
+    '--package',
+    extension.integrationTest.package,
+    '--test',
+    extension.integrationTest.target,
   ], { cwd: root, encoding: 'utf8' })
   assert.equal(executed.status, 0, commandFailure(executed))
 })
