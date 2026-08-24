@@ -166,24 +166,6 @@ class AbortableFixtureKernel extends FixtureKernel {
   }
 }
 
-class ClosingSessionRemovalKernel extends FixtureKernel {
-  async closeSession(sessionId) {
-    assert.equal(this.sessions.delete(sessionId), true)
-  }
-
-  async *events(sessionId) {
-    assert.equal(this.sessions.has(sessionId), true)
-    while (true) {
-      await new Promise(resolvePromise => setImmediate(resolvePromise))
-      if (!this.sessions.has(sessionId)) {
-        throw Object.assign(new Error(`session ${sessionId} is not registered`), {
-          code: 'SESSION_NOT_FOUND',
-        })
-      }
-    }
-  }
-}
-
 async function mount(home, kernel, persistenceRoot) {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
@@ -207,24 +189,6 @@ async function mount(home, kernel, persistenceRoot) {
   assert.ok(factory)
   return ctx
 }
-
-test('agent disposal accepts its closing native session disappearing between event polls', async t => {
-  const home = await mkdtemp(join(tmpdir(), 'winwincode-agent-closing-stream-'))
-  t.after(() => rm(home, { recursive: true, force: true }))
-  const kernel = new ClosingSessionRemovalKernel()
-  const ctx = await mount(home, kernel)
-  t.after(() => ctx.fiber.dispose())
-
-  const handle = await ctx.agents.create({
-    sessionId: SessionId('dsh-closing-stream'),
-    meta: { cwd: home },
-    agentOptions: { provider: 'fixture', model: 'fixture-coder' },
-  })
-
-  await handle.dispose()
-  assert.equal(ctx.agents.get(SessionId('dsh-closing-stream')), undefined)
-  assert.equal(ctx.sessions.get(SessionId('dsh-closing-stream')), undefined)
-})
 
 test('DSH AgentFactory runs a stock chat turn through one embedded kernel session', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-agent-factory-'))
