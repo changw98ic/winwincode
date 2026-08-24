@@ -112,7 +112,7 @@
       "requestedChanges"
     ],
     "storedIn": "AttentionItem.resolution",
-    "publicProjection": "action-only",
+    "publicProjection": "typed-action-comments-and-requested-changes",
     "approveRequestedChangesMustBeEmpty": true,
     "requestChangesRequiresRequestedChanges": true,
     "rejectRequiresComments": true
@@ -259,6 +259,7 @@
       "summary",
       "approach",
       "components",
+      "comments",
       "connections",
       "architectureDiagram",
       "processDiagram",
@@ -267,6 +268,7 @@
       "taskProposals",
       "reviewStatus",
       "decision",
+      "requestedChanges",
       "reviewerId",
       "reviewedAt"
     ],
@@ -417,6 +419,7 @@
     "factVisibility": "pub(crate)",
     "projectionTypeName": "SolutionReviewProjection",
     "taskProposalTypeName": "DeliveryTaskProposal",
+    "taskProposalVisibility": "pub(crate)",
     "resolver": "resolve_current_solution_review",
     "consumer": "project_current_solution_review",
     "applicationPath": "crates/winwincode-delivery/src/application/solution_review.rs",
@@ -435,6 +438,7 @@
       "summary",
       "approach",
       "components",
+      "comments",
       "connections",
       "architecture_diagram",
       "process_diagram",
@@ -444,6 +448,7 @@
       "prepared_at",
       "review_status",
       "decision",
+      "requested_changes",
       "reviewer_id",
       "reviewed_at"
     ],
@@ -460,6 +465,7 @@
       "summary",
       "approach",
       "components",
+      "comments",
       "connections",
       "architecture_diagram",
       "process_diagram",
@@ -468,6 +474,7 @@
       "task_proposals",
       "review_status",
       "decision",
+      "requested_changes",
       "reviewer_id",
       "reviewed_at"
     ],
