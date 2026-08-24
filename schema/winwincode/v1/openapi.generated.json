@@ -672,6 +672,85 @@
         "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
+      "ChatMessageId": {
+        "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "ChatMessagePage": {
+        "additionalProperties": false,
+        "description": "Secret-safe ProductSession message history page.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessageProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "chat_message_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "ChatMessageProjection": {
+        "additionalProperties": false,
+        "description": "Secret-safe product message projection. It excludes provider requests, provider responses, tool payloads, credentials, and Codex internals.",
+        "properties": {
+          "content": {
+            "maxLength": 1048576,
+            "type": "string"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ChatMessageId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "type": "string"
+          },
+          "sequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "streaming",
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "productSessionId",
+          "sequence",
+          "role",
+          "state",
+          "content",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
       "ChatSubmitCommand": {
         "allOf": [
           {
@@ -821,6 +900,7 @@
         "enum": [
           "session.create",
           "chat.submit",
+          "input.respond",
           "session.cancel",
           "session.close",
           "delivery.create",
@@ -847,6 +927,9 @@
           },
           {
             "$ref": "#/components/schemas/ChatSubmitCommand"
+          },
+          {
+            "$ref": "#/components/schemas/InputRespondCommand"
           },
           {
             "$ref": "#/components/schemas/SessionCancelCommand"
@@ -1404,6 +1487,9 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketProductSessionChangedEvent"
           },
           {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketProductSessionMessageAppendedEvent"
+          },
+          {
             "$ref": "#/components/schemas/ControlPlaneWebSocketRuntimeProjectionAppendedEvent"
           },
           {
@@ -1469,6 +1555,7 @@
           "delivery-task.changed.v1",
           "presence.changed.v1",
           "product-session.changed.v1",
+          "product-session.message.appended.v1",
           "runtime-projection.appended.v1",
           "worker-health.changed.v1"
         ],
@@ -1628,6 +1715,27 @@
           "productSessionId",
           "revision",
           "status"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketProductSessionMessageAppendedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe Chat projection only; excludes raw provider, tool, credential, and Codex payloads.",
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/ChatMessageProjection"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "type": {
+            "const": "product-session.message.appended.v1"
+          }
+        },
+        "required": [
+          "type",
+          "productSessionId",
+          "message"
         ],
         "type": "object"
       },
@@ -2663,6 +2771,57 @@
         ],
         "type": "object"
       },
+      "DeliveryStageExecutionScope": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "deliveryTaskId": {
+            "$ref": "#/components/schemas/DeliveryTaskId"
+          },
+          "kind": {
+            "const": "delivery-stage"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId",
+          "deliveryId",
+          "stageRunId"
+        ],
+        "type": "object"
+      },
+      "DeliveryStageRuntimeProjectionGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "kind": {
+            "const": "delivery-stage"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId",
+          "deliveryId",
+          "stageRunId"
+        ],
+        "type": "object"
+      },
       "DeliveryStatus": {
         "enum": [
           "draft",
@@ -3295,27 +3454,14 @@
         "title": "ExecutionPortMessage"
       },
       "ExecutionScope": {
-        "additionalProperties": false,
-        "properties": {
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProductSessionExecutionScope"
           },
-          "deliveryTaskId": {
-            "$ref": "#/components/schemas/DeliveryTaskId"
-          },
-          "productSessionId": {
-            "$ref": "#/components/schemas/ProductSessionId"
-          },
-          "stageRunId": {
-            "$ref": "#/components/schemas/StageRunId"
+          {
+            "$ref": "#/components/schemas/DeliveryStageExecutionScope"
           }
-        },
-        "required": [
-          "productSessionId",
-          "deliveryId",
-          "stageRunId"
-        ],
-        "type": "object"
+        ]
       },
       "ExecutionSequence": {
         "maximum": 9007199254740991,
@@ -3425,8 +3571,121 @@
         "x-authority": "lease-write",
         "x-direction": "worker-to-control-plane"
       },
+      "InputRespondCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "input.respond"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/InputRespondPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "InputRespondPayload": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "else": {
+              "properties": {
+                "value": {
+                  "type": "null"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "provided"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "value": {
+                  "$ref": "#/components/schemas/InteractiveInputValue"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Control Plane validates the complete binding before emitting one ExecutionPort input.response.",
+        "properties": {
+          "executionJobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "inputRequestId": {
+            "$ref": "#/components/schemas/InputRequestId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "status": {
+            "enum": [
+              "cancelled",
+              "expired",
+              "provided"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InteractiveInputValue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "workerSessionId",
+          "executionJobId",
+          "inputRequestId",
+          "status",
+          "value"
+        ],
+        "type": "object"
+      },
       "InputResponseMessage": {
         "additionalProperties": false,
+        "allOf": [
+          {
+            "else": {
+              "properties": {
+                "value": {
+                  "type": "null"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "provided"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "value": {
+                  "$ref": "#/components/schemas/InteractiveInputValue"
+                }
+              }
+            }
+          }
+        ],
         "description": "Returns a typed input result without exposing product-session storage.",
         "properties": {
           "inputRequestId": {
@@ -3459,7 +3718,14 @@
             "type": "string"
           },
           "value": {
-            "$ref": "#/components/schemas/InteractiveInputValue"
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InteractiveInputValue"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
@@ -3474,6 +3740,7 @@
           "workerSessionId",
           "inputRequestId",
           "status",
+          "value",
           "respondedAt"
         ],
         "title": "input.response",
@@ -3516,6 +3783,7 @@
       },
       "InteractiveInputValue": {
         "additionalProperties": false,
+        "description": "Bound user response value; never an ExecutionPort message or command payload.",
         "properties": {
           "mode": {
             "$ref": "#/components/schemas/InteractiveInputMode"
@@ -4274,6 +4542,22 @@
         ],
         "type": "object"
       },
+      "ProductSessionExecutionScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "product-session"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId"
+        ],
+        "type": "object"
+      },
       "ProductSessionId": {
         "pattern": "^psn_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
@@ -4342,6 +4626,22 @@
           "title",
           "state",
           "updatedAt"
+        ],
+        "type": "object"
+      },
+      "ProductSessionRuntimeProjectionGetParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "product-session"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId"
         ],
         "type": "object"
       },
@@ -4663,6 +4963,8 @@
         "enum": [
           "session.list",
           "session.get",
+          "session.messages.list",
+          "runtime.projection.get",
           "delivery.list",
           "delivery.get",
           "settings.get",
@@ -4684,6 +4986,12 @@
           },
           {
             "$ref": "#/components/schemas/SessionGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/SessionMessagesListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/RuntimeProjectionGetQuery"
           },
           {
             "$ref": "#/components/schemas/DeliveryListQuery"
@@ -4729,6 +5037,9 @@
             "$ref": "#/components/schemas/DeliveryProjection"
           },
           {
+            "$ref": "#/components/schemas/RuntimeProjectionSnapshot"
+          },
+          {
             "$ref": "#/components/schemas/SettingsProjection"
           },
           {
@@ -4745,6 +5056,9 @@
           },
           {
             "$ref": "#/components/schemas/ProductSessionPage"
+          },
+          {
+            "$ref": "#/components/schemas/ChatMessagePage"
           },
           {
             "$ref": "#/components/schemas/DeliveryPage"
@@ -5030,6 +5344,197 @@
         "type": "object",
         "x-authority": "lease-write",
         "x-direction": "worker-to-control-plane"
+      },
+      "RuntimeProjectionGetParameters": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProductSessionRuntimeProjectionGetParameters"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryStageRuntimeProjectionGetParameters"
+          }
+        ]
+      },
+      "RuntimeProjectionGetQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/RuntimeProjectionGetParameters"
+              },
+              "query": {
+                "const": "runtime.projection.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "RuntimeProjectionItem": {
+        "additionalProperties": false,
+        "dependentRequired": {
+          "deliveryId": [
+            "stageRunId"
+          ],
+          "stageRunId": [
+            "deliveryId"
+          ]
+        },
+        "properties": {
+          "codexThreadId": {
+            "$ref": "#/components/schemas/CodexThreadId"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "projectionKind": {
+            "$ref": "#/components/schemas/RuntimeProjectionKind"
+          },
+          "projectionSequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sourceRef": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          },
+          "summary": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "workerSessionId",
+          "codexThreadId",
+          "leaseId",
+          "projectionSequence",
+          "projectionKind",
+          "summary",
+          "occurredAt"
+        ],
+        "type": "object"
+      },
+      "RuntimeProjectionKind": {
+        "enum": [
+          "plan",
+          "agent-graph",
+          "activity",
+          "command",
+          "test",
+          "recovery",
+          "failure",
+          "diff",
+          "usage",
+          "evidence",
+          "input-request",
+          "execution-approval"
+        ],
+        "type": "string"
+      },
+      "RuntimeProjectionSnapshot": {
+        "additionalProperties": false,
+        "description": "Complete bounded projection used after restart or WebSocket reset.",
+        "oneOf": [
+          {
+            "properties": {
+              "deliveryId": {
+                "type": "null"
+              },
+              "stageRunId": {
+                "type": "null"
+              }
+            }
+          },
+          {
+            "properties": {
+              "deliveryId": {
+                "$ref": "#/components/schemas/DeliveryId"
+              },
+              "stageRunId": {
+                "$ref": "#/components/schemas/StageRunId"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "deliveryId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeProjectionItem"
+            },
+            "maxItems": 10000,
+            "type": "array"
+          },
+          "kind": {
+            "const": "runtime_projection"
+          },
+          "lastProjectionSequence": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "rebuiltAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "stageRunId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StageRunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "revision",
+          "productSessionId",
+          "deliveryId",
+          "stageRunId",
+          "lastProjectionSequence",
+          "items",
+          "rebuiltAt"
+        ],
+        "type": "object"
       },
       "RuntimeReplayRequestMessage": {
         "additionalProperties": false,
@@ -5326,6 +5831,36 @@
               },
               "query": {
                 "const": "session.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionMessagesListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "productSessionId"
+        ],
+        "type": "object"
+      },
+      "SessionMessagesListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/SessionMessagesListParameters"
+              },
+              "query": {
+                "const": "session.messages.list"
               }
             },
             "type": "object"
@@ -6349,5 +6884,5 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:36a78e0bfa4b5a35ceae76e9800158ee08067c9654fd3820ddee5a26d88672e6"
+  "x-source-digest": "sha256:d344adbfcb3f6446d1f8e773d31ac7431960086c76e9e562cbdfe2aef1b9a906"
 }
