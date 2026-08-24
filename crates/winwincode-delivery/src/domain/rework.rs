@@ -10,10 +10,10 @@ use std::collections::HashSet;
 use winwincode_domain::{DeliveryTaskId, EvidenceId};
 
 use super::{
-    AcceptanceCriterionId, CandidatePathState, CriterionVerdict, Delivery, DeliveryValidationError,
-    DeliveryValidationErrorCode, DeliveryVerdictStatus, FrozenDeliveryCandidate, StageRunActorType,
-    StageRunStatus, assert_frozen_candidate_current, bounded_text, portable_identifier,
-    validation_error,
+    AcceptanceCriterionId, CandidatePathState, CriterionVerdict, Delivery, DeliverySnapshot,
+    DeliveryStatus, DeliveryValidationError, DeliveryValidationErrorCode, DeliveryVerdictStatus,
+    FrozenDeliveryCandidate, StageRunActorType, StageRunStatus, assert_frozen_candidate_current,
+    bounded_text, portable_identifier, validation_error,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +107,48 @@ pub enum ReworkDecision {
     Clarify(ReworkClarificationReason),
 }
 
+/// Blocking follow-up actions derived from all current Verdict Attention items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictAttentionAction {
+    ClarifyDefinition,
+    StartRework,
+    RetryVerification,
+}
+
+/// Chooses the safest next state from the complete current action set.
+///
+/// Clarification always outranks code rework, which outranks a retry. The
+/// result therefore cannot change with Attention resolution order.
+pub fn safest_attention_transition(actions: &[VerdictAttentionAction]) -> DeliveryStatus {
+    if actions.contains(&VerdictAttentionAction::ClarifyDefinition) {
+        DeliveryStatus::Clarifying
+    } else if actions.contains(&VerdictAttentionAction::StartRework) {
+        DeliveryStatus::Reworking
+    } else {
+        DeliveryStatus::Verifying
+    }
+}
+
+/// Returns one plus every reworking StageRun in the current Delivery.
+pub fn next_rework_attempt(delivery: &Delivery) -> u64 {
+    delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| run.stage == super::DeliveryStage::Reworking)
+        .count() as u64
+        + 1
+}
+
+/// Removes prior candidate authorization when a remediator writer starts.
+///
+/// Historical records stay in the append-only journal, while the new current
+/// snapshot no longer exposes prior-candidate Evidence or Verdict as usable.
+pub fn invalidate_candidate_authorization_for_writer_start(snapshot: &mut DeliverySnapshot) {
+    snapshot.evidence.clear();
+    snapshot.verdict = None;
+}
+
 /// Chooses clarification or returns one exact remediator authorization.
 ///
 /// The caller supplies current diagram annotations, but cannot supply the
@@ -136,36 +178,20 @@ pub fn decide_precise_rework(
         ));
     }
 
-    let rework_count = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .filter(|run| {
-            run.stage == super::DeliveryStage::Reworking
-                && run.actor_type == StageRunActorType::Codex
-                && run.role == "remediator"
-        })
-        .count() as u64;
-    if rework_count >= delivery.snapshot().spec.max_rework_attempts {
-        return Ok(ReworkDecision::Clarify(
-            ReworkClarificationReason::AttemptLimitExhausted,
-        ));
-    }
+    let rework_count = next_rework_attempt(delivery) - 1;
     let current_failures: HashSet<&str> = verdict
         .criteria
         .iter()
         .filter(|result| result.verdict == CriterionVerdict::Fail)
         .map(|result| result.criterion_id.0.as_str())
         .collect();
-    if rework_count > 0
-        && history
-            .prior_failed_criterion_ids
-            .iter()
-            .any(|criterion_id| current_failures.contains(criterion_id.0.as_str()))
-    {
-        return Ok(ReworkDecision::Clarify(
-            ReworkClarificationReason::RepeatedCriterionFailure,
-        ));
+    if let Some(reason) = clarification_reason(
+        rework_count,
+        delivery.snapshot().spec.max_rework_attempts,
+        &current_failures,
+        history,
+    ) {
+        return Ok(ReworkDecision::Clarify(reason));
     }
 
     let targets = validate_precise_scope(delivery, candidate, scope, annotations)?;
@@ -177,6 +203,26 @@ pub fn decide_precise_rework(
         next_attempt: rework_count + 1,
         targets,
     }))
+}
+
+fn clarification_reason(
+    rework_count: u64,
+    maximum: u64,
+    current_failures: &HashSet<&str>,
+    history: &ReworkHistoryFact,
+) -> Option<ReworkClarificationReason> {
+    if rework_count >= maximum {
+        Some(ReworkClarificationReason::AttemptLimitExhausted)
+    } else if rework_count > 0
+        && history
+            .prior_failed_criterion_ids
+            .iter()
+            .any(|criterion_id| current_failures.contains(criterion_id.0.as_str()))
+    {
+        Some(ReworkClarificationReason::RepeatedCriterionFailure)
+    } else {
+        None
+    }
 }
 
 fn validate_precise_scope(
@@ -306,6 +352,23 @@ pub struct ReworkDeltaHunkFact {
     pub hunk_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReworkDelta {
+    pub from_candidate_ref: String,
+    pub to_candidate_ref: String,
+    pub changed_paths: Vec<String>,
+    pub changed_hunks: Vec<ReworkDeltaHunkFact>,
+}
+
+/// Trusted adapter boundary for the actual old-to-new remediator Git delta.
+pub trait ReworkResultResolver {
+    fn resolve_rework_delta(
+        &self,
+        previous_candidate: &FrozenDeliveryCandidate,
+        replacement_candidate: &FrozenDeliveryCandidate,
+    ) -> Result<ResolvedReworkDelta, String>;
+}
+
 /// Verifies the remediator's actual delta after execution, not just its prompt.
 ///
 /// # Errors
@@ -313,22 +376,60 @@ pub struct ReworkDeltaHunkFact {
 /// Rejects output outside an authorized path/hunk or a replacement candidate
 /// that did not come from a later remediator writer.
 pub fn assert_remediator_output_in_scope(
+    delivery: &Delivery,
     authorization: &ReworkAuthorization,
     previous_candidate: &FrozenDeliveryCandidate,
     replacement_candidate: &FrozenDeliveryCandidate,
-    delta_hunks: &[ReworkDeltaHunkFact],
+    resolver: &impl ReworkResultResolver,
 ) -> Result<(), DeliveryValidationError> {
+    assert_frozen_candidate_current(delivery, replacement_candidate)?;
+    let producer = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| &run.id == replacement_candidate.producer_stage_run_id())
+        .ok_or_else(|| invalid_rework("replacement remediator StageRun is missing"))?;
+    let exact_writer = producer.stage == super::DeliveryStage::Reworking
+        && producer.actor_type == StageRunActorType::Codex
+        && producer.role == "remediator"
+        && producer.status == StageRunStatus::Succeeded
+        && producer.delivery_task_id.as_ref() == Some(&authorization.delivery_task_id)
+        && producer.attempt == authorization.next_attempt;
     if replacement_candidate.candidate_ref() == previous_candidate.candidate_ref()
         || replacement_candidate.producer_stage_run_id()
             == previous_candidate.producer_stage_run_id()
         || authorization.candidate_ref != previous_candidate.candidate_ref()
-        || delta_hunks.is_empty()
+        || !exact_writer
     {
         return Err(invalid_rework(
             "rework must produce a replacement candidate from a new remediator writer",
         ));
     }
-    for delta in delta_hunks {
+    let delta = resolver
+        .resolve_rework_delta(previous_candidate, replacement_candidate)
+        .map_err(|_| invalid_rework("trusted rework result resolver rejected the Git delta"))?;
+    if delta.from_candidate_ref != previous_candidate.candidate_ref()
+        || delta.to_candidate_ref != replacement_candidate.candidate_ref()
+        || delta.changed_paths.is_empty()
+        || delta.changed_hunks.is_empty()
+    {
+        return Err(invalid_rework(
+            "rework result does not bind the authorized old and new candidates",
+        ));
+    }
+    for path in &delta.changed_paths {
+        if !portable_path(path)
+            || !authorization
+                .targets
+                .iter()
+                .any(|target| target.file_path == *path)
+        {
+            return Err(invalid_rework(
+                "remediator output added a path outside the authorization",
+            ));
+        }
+    }
+    for delta in &delta.changed_hunks {
         if !portable_path(&delta.file_path)
             || !lowercase_sha256(&delta.hunk_sha256)
             || !authorization.targets.iter().any(|target| {
@@ -442,76 +543,14 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::candidate::test_support::{freeze_facts, validated_git_snapshot};
     use crate::domain::{
-        AcceptedCandidateProducerOutcome, CandidateGitSnapshotResolver, CriterionResult,
-        DeliveryStatus, DeliveryVerdict, DeliveryVerdictId, EvidenceRef, EvidenceRefType,
-        FreezeCandidateFacts, RepositoryRef, ResolvedGitCommit, ResolvedGitDiff, SessionBinding,
-        SessionBindingId, StageRun, test_fixture,
+        CriterionResult, DeliveryStatus, DeliveryVerdict, DeliveryVerdictId, EvidenceRef,
+        EvidenceRefType, SessionBinding, SessionBindingId, StageRun, test_fixture,
     };
     use winwincode_domain::{
-        CodexThreadId, ExecutionJobId, FencingToken, LeaseId, ProductSessionId, StageRunId,
-        WorkerId, WorkerInstanceId, WorkerSessionId,
+        CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId, WorkerSessionId,
     };
-
-    struct GitFixture {
-        facts: FreezeCandidateFacts,
-    }
-
-    impl CandidateGitSnapshotResolver for GitFixture {
-        fn accepted_successful_outcome(
-            &self,
-            stage_run: &StageRun,
-            binding: &SessionBinding,
-        ) -> Result<AcceptedCandidateProducerOutcome, String> {
-            Ok(AcceptedCandidateProducerOutcome {
-                stage_run_id: stage_run.id.clone(),
-                execution_job_id: binding.execution_job_id.clone(),
-                attempt: stage_run.attempt,
-                lease_id: LeaseId("lease-rework".into()),
-                fencing_token: FencingToken("1".into()),
-                worker_id: WorkerId("worker-rework".into()),
-                worker_instance_id: WorkerInstanceId("instance-rework".into()),
-                worker_session_id: binding.worker_session_id.clone().expect("worker"),
-                codex_thread_id: binding.codex_thread_id.clone().expect("thread"),
-                succeeded: true,
-                finished_at_millis: stage_run.finished_at_millis.expect("finished"),
-            })
-        }
-
-        fn resolve_commit(
-            &self,
-            _producer: &AcceptedCandidateProducerOutcome,
-            _repository: &RepositoryRef,
-            commit_id: &str,
-        ) -> Result<ResolvedGitCommit, String> {
-            let tree_id = if commit_id == self.facts.base_commit_id {
-                self.facts.base_tree_id.clone()
-            } else if commit_id == self.facts.candidate_commit_id {
-                self.facts.candidate_tree_id.clone()
-            } else {
-                return Err("unknown commit".into());
-            };
-            Ok(ResolvedGitCommit {
-                commit_id: commit_id.into(),
-                tree_id,
-            })
-        }
-
-        fn resolve_diff(
-            &self,
-            _producer: &AcceptedCandidateProducerOutcome,
-            _repository: &RepositoryRef,
-            base_commit_id: &str,
-            candidate_commit_id: &str,
-        ) -> Result<ResolvedGitDiff, String> {
-            Ok(ResolvedGitDiff {
-                base_commit_id: base_commit_id.into(),
-                candidate_commit_id: candidate_commit_id.into(),
-                diff_sha256: self.facts.diff_sha256.clone(),
-                changed_paths: self.facts.changed_paths.clone(),
-            })
-        }
-    }
 
     fn current_failure() -> (
         Delivery,
@@ -536,25 +575,22 @@ mod tests {
         binding.worker_session_id = Some(WorkerSessionId("writer-worker".into()));
         binding.codex_thread_id = Some(CodexThreadId("writer-thread".into()));
         let writer = Delivery::try_from_snapshot(snapshot).expect("writer");
-        let facts = FreezeCandidateFacts {
-            producer_stage_run_id: StageRunId("writer".into()),
-            producer_session_binding_id: SessionBindingId("writer-binding".into()),
-            base_commit_id: "0123456789012345678901234567890123456789".into(),
-            base_tree_id: "1".repeat(40),
-            candidate_commit_id: "2".repeat(40),
-            candidate_tree_id: "3".repeat(40),
-            diff_sha256: "a".repeat(64),
-            changed_paths: vec![super::super::CandidatePathFact {
+        let facts = validated_git_snapshot(
+            &writer,
+            &StageRunId("writer".into()),
+            &SessionBindingId("writer-binding".into()),
+            &"2".repeat(40),
+            &"3".repeat(40),
+            &"a".repeat(64),
+            vec![super::super::CandidatePathFact {
                 path: "src/invitation.rs".into(),
                 state: CandidatePathState::Present,
                 object_id: Some("4".repeat(40)),
             }],
-        };
-        let git = GitFixture {
-            facts: facts.clone(),
-        };
+        );
         let candidate =
-            super::super::freeze_delivery_candidate(&writer, facts, &git).expect("candidate");
+            super::super::freeze_delivery_candidate(&writer, &freeze_facts(&writer, facts))
+                .expect("candidate");
         let mut snapshot = writer.into_snapshot();
         snapshot.status = DeliveryStatus::NeedsAttention;
         snapshot.evidence = vec![EvidenceRef {

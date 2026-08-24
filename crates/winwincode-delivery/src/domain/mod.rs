@@ -28,9 +28,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
 pub use candidate::{
-    AcceptedCandidateProducerOutcome, CandidateGitSnapshotResolver, CandidatePathFact,
-    CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate, ResolvedGitCommit,
-    ResolvedGitDiff, assert_frozen_candidate_current, freeze_delivery_candidate,
+    CandidatePathFact, CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate,
+    ValidatedGitSnapshotFact, assert_frozen_candidate_current, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType};
 pub use session_binding::SessionBinding;
