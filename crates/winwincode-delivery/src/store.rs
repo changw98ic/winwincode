@@ -24,7 +24,12 @@ use crate::{
         CoordinationError, CoordinationErrorCode,
         attention::ResolvedAttentionTransition,
         session_binding::{SessionBindingIdentity, accept_worker_session, report_codex_thread},
+        solution_review::resolve_current_solution_review,
         stage::StageAdvanceResult,
+        task_breakdown::{
+            DeliveryTaskBreakdownApprovedEvent, TaskBreakdownPromotionTransition,
+            prepare_task_breakdown_promotion, restore_task_breakdown_event,
+        },
         verdict::ComputedVerdictTransition,
     },
     domain::{
@@ -52,6 +57,8 @@ pub enum DeliveryMutationOperation {
     VerdictSubmitted,
     #[serde(rename = "rework.clarified")]
     ReworkClarified,
+    #[serde(rename = "delivery.task_breakdown.approved")]
+    TaskBreakdownApproved,
 }
 
 impl FromStr for DeliveryMutationOperation {
@@ -66,6 +73,7 @@ impl FromStr for DeliveryMutationOperation {
             "attention.resolved" => Ok(Self::AttentionResolved),
             "verdict.submitted" => Ok(Self::VerdictSubmitted),
             "rework.clarified" => Ok(Self::ReworkClarified),
+            "delivery.task_breakdown.approved" => Ok(Self::TaskBreakdownApproved),
             _ => Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
                 "delivery mutation operation is unsupported",
@@ -193,6 +201,7 @@ pub struct StoredDelivery {
 pub struct DeliveryStoreMutationResult {
     pub snapshot: Delivery,
     pub replayed: bool,
+    pub task_breakdown_event: Option<DeliveryTaskBreakdownApprovedEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +219,18 @@ pub struct AppendDelivery {
     pub operation: DeliveryMutationOperation,
     pub expected_revision: u64,
     pub snapshot: Delivery,
+}
+
+/// Specialized task-promotion append. The command contains only durable
+/// request identity and the approved review digest; the Store rebuilds the
+/// exact task graph from the current canonical Delivery.
+#[derive(Debug, Clone)]
+pub struct ApproveDeliveryTaskBreakdown {
+    pub delivery_id: DeliveryId,
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub review_set_sha256: String,
 }
 
 /// Specialized verdict append that can be created only by the application
@@ -261,6 +282,7 @@ pub enum DeliveryCommand {
     ResolveAttention(Box<ResolveDeliveryAttention>),
     SubmitVerdict(Box<SubmitDeliveryVerdict>),
     ClarifyRework(Box<ClarifyDeliveryRework>),
+    ApproveTaskBreakdown(Box<ApproveDeliveryTaskBreakdown>),
 }
 
 #[derive(Debug, Clone)]
@@ -563,6 +585,7 @@ impl<'journal> DeliveryStore<'journal> {
             Ok(()) => Ok(DeliveryStoreMutationResult {
                 snapshot: record.snapshot,
                 replayed: false,
+                task_breakdown_event: None,
             }),
             Err(error) if error.code == JournalBackendErrorCode::AlreadyExists => {
                 let stored = self.read(&record.delivery_id)?;
@@ -589,6 +612,7 @@ impl<'journal> DeliveryStore<'journal> {
                 Ok(DeliveryStoreMutationResult {
                     snapshot: first.snapshot.clone(),
                     replayed: true,
+                    task_breakdown_event: None,
                 })
             }
             Err(error) => Err(map_backend_error(error)),
@@ -606,10 +630,11 @@ impl<'journal> DeliveryStore<'journal> {
                 | DeliveryMutationOperation::AttentionResolved
                 | DeliveryMutationOperation::VerdictSubmitted
                 | DeliveryMutationOperation::ReworkClarified
+                | DeliveryMutationOperation::TaskBreakdownApproved
         ) {
             return Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
-                "stage, Attention, Verdict, and rework clarification mutations require their sealed specialized Delivery commands",
+                "stage, Attention, Verdict, rework clarification, and task-breakdown mutations require their sealed specialized Delivery commands",
             ));
         }
         self.append_authorized(command, AppendAuthority::Generic)
@@ -679,6 +704,112 @@ impl<'journal> DeliveryStore<'journal> {
         )
     }
 
+    fn approve_task_breakdown(
+        &self,
+        command: ApproveDeliveryTaskBreakdown,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        validate_request(&command.request_id, &command.request_digest)?;
+        validate_digest(
+            &command.review_set_sha256,
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "reviewSetSha256",
+        )?;
+        let stored = self.read(&command.delivery_id)?;
+
+        if let Some((index, prior)) = stored
+            .records
+            .iter()
+            .enumerate()
+            .find(|(_, record)| record.request_id == command.request_id)
+        {
+            let prior_expected_revision =
+                prior.snapshot.revision().checked_sub(1).ok_or_else(|| {
+                    store_error(
+                        DeliveryStoreErrorCode::StoreCorrupt,
+                        "task-breakdown record cannot have revision zero",
+                    )
+                })?;
+            if prior.request_digest != command.request_digest
+                || prior.operation != DeliveryMutationOperation::TaskBreakdownApproved
+                || prior_expected_revision != command.expected_revision
+            {
+                return Err(store_error(
+                    DeliveryStoreErrorCode::RequestConflict,
+                    format!(
+                        "request {} was already used for another delivery mutation",
+                        command.request_id.0
+                    ),
+                ));
+            }
+            let source = index
+                .checked_sub(1)
+                .and_then(|source_index| {
+                    stored
+                        .records
+                        .get(source_index)
+                        .map(|record| &record.snapshot)
+                })
+                .ok_or_else(|| {
+                    store_error(
+                        DeliveryStoreErrorCode::StoreCorrupt,
+                        "task-breakdown record has no source Delivery revision",
+                    )
+                })?;
+            let event =
+                restore_task_breakdown_event(source, &prior.snapshot, &command.review_set_sha256)
+                    .map_err(map_task_breakdown_error)?;
+            return Ok(DeliveryStoreMutationResult {
+                snapshot: prior.snapshot.clone(),
+                replayed: true,
+                task_breakdown_event: Some(event),
+            });
+        }
+
+        if command.expected_revision != stored.snapshot.revision() {
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
+                "delivery revision changed before task-breakdown promotion",
+            ));
+        }
+        let review = resolve_current_solution_review(&stored.snapshot)
+            .map_err(|error| {
+                store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    error.to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    "task-breakdown promotion requires a current solution review",
+                )
+            })?;
+        let approved = review.approved_task_promotion().ok_or_else(|| {
+            store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "task-breakdown promotion requires the current approved solution review",
+            )
+        })?;
+        if approved.review_set_sha256() != command.review_set_sha256 {
+            return Err(store_error(
+                DeliveryStoreErrorCode::InvalidStoreOptions,
+                "reviewSetSha256 does not match the current approved solution review",
+            ));
+        }
+        let transition = prepare_task_breakdown_promotion(&stored.snapshot, &approved)
+            .map_err(map_task_breakdown_error)?;
+        let append = AppendDelivery {
+            delivery_id: command.delivery_id,
+            request_id: command.request_id,
+            request_digest: command.request_digest,
+            operation: DeliveryMutationOperation::TaskBreakdownApproved,
+            expected_revision: command.expected_revision,
+            snapshot: transition.delivery().clone(),
+        };
+        self.append_authorized(append, AppendAuthority::TaskBreakdown(&transition))
+    }
+
     #[allow(clippy::too_many_lines)]
     fn append_authorized(
         &self,
@@ -726,6 +857,7 @@ impl<'journal> DeliveryStore<'journal> {
             return Ok(DeliveryStoreMutationResult {
                 snapshot: prior.snapshot.clone(),
                 replayed: true,
+                task_breakdown_event: authority.task_breakdown_event(),
             });
         }
         if command.expected_revision != stored.snapshot.revision()
@@ -785,6 +917,24 @@ impl<'journal> DeliveryStore<'journal> {
                     .validate_rework_clarification_source(&stored.snapshot)
                     .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
+            AppendAuthority::TaskBreakdown(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::TaskBreakdownApproved,
+                    "delivery.task_breakdown.approved",
+                )?;
+                transition
+                    .validate_source(&stored.snapshot)
+                    .map_err(map_task_breakdown_error)?;
+                if transition.delivery() != &command.snapshot
+                    || transition.review_set_sha256() != transition.event().review_set_sha256
+                {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "task-breakdown command does not match its sealed transition",
+                    ));
+                }
+            }
         }
         let previous = stored.records.last().ok_or_else(|| {
             store_error(
@@ -824,6 +974,7 @@ impl<'journal> DeliveryStore<'journal> {
             Ok(()) => Ok(DeliveryStoreMutationResult {
                 snapshot: record.snapshot,
                 replayed: false,
+                task_breakdown_event: authority.task_breakdown_event(),
             }),
             Err(error) if error.code == JournalBackendErrorCode::Conflict => {
                 let raced = self.read(&command.delivery_id)?;
@@ -837,6 +988,7 @@ impl<'journal> DeliveryStore<'journal> {
                     return Ok(DeliveryStoreMutationResult {
                         snapshot: prior.snapshot.clone(),
                         replayed: true,
+                        task_breakdown_event: authority.task_breakdown_event(),
                     });
                 }
                 Err(revision_conflict(
@@ -877,6 +1029,20 @@ enum AppendAuthority<'transition> {
     Attention(&'transition ResolvedAttentionTransition),
     Verdict(&'transition ComputedVerdictTransition),
     ReworkClarification(&'transition StageAdvanceResult),
+    TaskBreakdown(&'transition TaskBreakdownPromotionTransition),
+}
+
+impl AppendAuthority<'_> {
+    fn task_breakdown_event(self) -> Option<DeliveryTaskBreakdownApprovedEvent> {
+        match self {
+            Self::TaskBreakdown(transition) => Some(transition.event().clone()),
+            Self::Generic
+            | Self::Stage(_)
+            | Self::Attention(_)
+            | Self::Verdict(_)
+            | Self::ReworkClarification(_) => None,
+        }
+    }
 }
 
 fn validate_authorized_operation(
@@ -913,6 +1079,16 @@ fn map_transition_error(
     }
 }
 
+fn map_task_breakdown_error(
+    error: crate::application::task_breakdown::TaskBreakdownPromotionError,
+) -> DeliveryStoreError {
+    let code = error.code();
+    store_error(
+        DeliveryStoreErrorCode::InvalidStoreOptions,
+        format!("{code:?}: {}", error.message()),
+    )
+}
+
 fn validate_generic_append_delta(
     operation: DeliveryMutationOperation,
     before: &Delivery,
@@ -925,7 +1101,8 @@ fn validate_generic_append_delta(
         | DeliveryMutationOperation::StageStarted
         | DeliveryMutationOperation::AttentionResolved
         | DeliveryMutationOperation::VerdictSubmitted
-        | DeliveryMutationOperation::ReworkClarified => Err(store_error(
+        | DeliveryMutationOperation::ReworkClarified
+        | DeliveryMutationOperation::TaskBreakdownApproved => Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
             "this Delivery operation requires its dedicated application command",
         )),
@@ -1093,6 +1270,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
             DeliveryCommand::ClarifyRework(clarify) => self.clarify_rework(*clarify),
+            DeliveryCommand::ApproveTaskBreakdown(approve) => self.approve_task_breakdown(*approve),
         }
     }
 }

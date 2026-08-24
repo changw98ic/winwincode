@@ -14,6 +14,7 @@ pub mod session_binding;
 pub(crate) mod solution_review;
 pub mod stage;
 pub mod task;
+pub mod task_breakdown;
 pub mod verdict;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

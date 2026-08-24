@@ -1281,7 +1281,7 @@ fn review_error(code: SolutionReviewErrorCode, message: &str) -> SolutionReviewE
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use serde_json::{Value, json};
@@ -1309,7 +1309,7 @@ mod tests {
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ReviewFixtureState {
+    pub(crate) enum ReviewFixtureState {
         Pending,
         Approved,
         ChangesRequested,
@@ -1468,7 +1468,7 @@ mod tests {
         }
     }
 
-    fn review_delivery(state: ReviewFixtureState) -> Delivery {
+    pub(crate) fn review_delivery(state: ReviewFixtureState) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.status = match state {
             ReviewFixtureState::Pending => DeliveryStatus::NeedsAttention,
@@ -1556,7 +1556,10 @@ mod tests {
         Delivery::try_from_snapshot(snapshot).expect("solution-review Delivery")
     }
 
-    fn with_newer_review_attempt(history: Delivery, current: ReviewFixtureState) -> Delivery {
+    pub(crate) fn with_newer_review_attempt(
+        history: Delivery,
+        current: ReviewFixtureState,
+    ) -> Delivery {
         let mut snapshot = history.into_snapshot();
         snapshot.status = match current {
             ReviewFixtureState::Pending => DeliveryStatus::NeedsAttention,
@@ -1872,6 +1875,84 @@ mod tests {
             serde_json::to_string(&context).expect("stale-order context");
         let stale_order = Delivery::try_from_snapshot(stale_order).expect("stale-order Delivery");
         assert!(resolve_current_solution_review(&stale_order).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_empty_task_proposals() {
+        let _wire_field = "taskProposals";
+        let empty = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals.clear()
+        });
+        assert!(resolve_current_solution_review(&empty).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_duplicate_task_and_criterion_ids() {
+        let _wire_fields = ("taskProposals", "acceptanceCriterionIds");
+        let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context
+                .task_proposals
+                .push(context.task_proposals[0].clone())
+        });
+        assert!(resolve_current_solution_review(&duplicate).is_err());
+
+        let duplicate_criterion =
+            rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+                let criterion = context.task_proposals[0].acceptance_criterion_ids[0].clone();
+                context.task_proposals[0]
+                    .acceptance_criterion_ids
+                    .push(criterion);
+            });
+        assert!(resolve_current_solution_review(&duplicate_criterion).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_self_missing_duplicate_and_cyclic_dependencies() {
+        let _wire_field = "blockedByTaskIds";
+        let self_dependency =
+            rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+                context.task_proposals[0].blocked_by_task_ids =
+                    vec![context.task_proposals[0].id.clone()];
+            });
+        assert!(resolve_current_solution_review(&self_dependency).is_err());
+
+        let missing = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals[0].blocked_by_task_ids =
+                vec![DeliveryTaskId("task:missing".into())];
+        });
+        assert!(resolve_current_solution_review(&missing).is_err());
+
+        let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            let dependency = DeliveryTaskProposal {
+                id: DeliveryTaskId("task:dependency".into()),
+                title: "Dependency".into(),
+                goal: "Retain current acceptance coverage.".into(),
+                acceptance_criterion_ids: context.task_proposals[0]
+                    .acceptance_criterion_ids
+                    .clone(),
+                blocked_by_task_ids: vec![],
+            };
+            context.task_proposals[0].blocked_by_task_ids =
+                vec![dependency.id.clone(), dependency.id.clone()];
+            context.task_proposals.push(dependency);
+        });
+        assert!(resolve_current_solution_review(&duplicate).is_err());
+
+        let cycle = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            let first_id = context.task_proposals[0].id.clone();
+            let second_id = DeliveryTaskId("task:cycle".into());
+            context.task_proposals[0].blocked_by_task_ids = vec![second_id.clone()];
+            context.task_proposals.push(DeliveryTaskProposal {
+                id: second_id,
+                title: "Cycle".into(),
+                goal: "Exercise cycle rejection.".into(),
+                acceptance_criterion_ids: context.task_proposals[0]
+                    .acceptance_criterion_ids
+                    .clone(),
+                blocked_by_task_ids: vec![first_id],
+            });
+        });
+        assert!(resolve_current_solution_review(&cycle).is_err());
     }
 
     #[test]

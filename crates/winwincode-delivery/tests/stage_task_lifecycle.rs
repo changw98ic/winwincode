@@ -20,8 +20,7 @@ use winwincode_delivery::{
         validate_stage_executor,
     },
     application::task::{
-        TaskFact, approve_task_breakdown, runnable_task, transition_task_status,
-        validate_create_tasks_empty,
+        TaskFact, runnable_task, transition_task_status, validate_create_tasks_empty,
     },
     domain::{
         Delivery, DeliveryStage, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
@@ -84,6 +83,14 @@ fn completed_active_binding(delivery: Delivery, suffix: &str) -> Delivery {
     binding.worker_session_id = Some(WorkerSessionId(format!("worker-session-{suffix}")));
     binding.codex_thread_id = Some(CodexThreadId(format!("codex-thread-{suffix}")));
     Delivery::try_from_snapshot(snapshot).expect("completed binding")
+}
+
+fn with_test_tasks(delivery: &Delivery, tasks: Vec<DeliveryTask>, now_millis: u64) -> Delivery {
+    let mut snapshot = delivery.clone().into_snapshot();
+    snapshot.tasks = tasks;
+    snapshot.revision += 1;
+    snapshot.updated_at_millis = now_millis;
+    Delivery::try_from_snapshot(snapshot).expect("test-only task graph")
 }
 
 fn approved_plan_without_tasks() -> Delivery {
@@ -663,32 +670,6 @@ fn ordinary_success_must_use_the_atomic_stage_handoff() {
 }
 
 #[test]
-fn task_breakdown_approval_replaces_empty_graph_once() {
-    let approved_plan = approved_plan_without_tasks();
-    let first = task(&approved_plan, "task-first", vec![]);
-    let second = task(&approved_plan, "task-second", vec![first.id.clone()]);
-
-    let with_tasks = approve_task_breakdown(
-        &approved_plan,
-        approved_plan.revision(),
-        vec![first.clone(), second.clone()],
-        1_800_000_000_200,
-    )
-    .expect("current reviewed graph is approved once");
-    assert_eq!(with_tasks.snapshot().tasks, [first, second]);
-    assert_eq!(with_tasks.revision(), approved_plan.revision() + 1);
-
-    let error = approve_task_breakdown(
-        &with_tasks,
-        with_tasks.revision(),
-        vec![task(&with_tasks, "task-replacement", vec![])],
-        1_800_000_000_300,
-    )
-    .expect_err("the same Spec revision cannot replace its task graph");
-    assert_eq!(error.code(), CoordinationErrorCode::Conflict);
-}
-
-#[test]
 fn approved_plan_without_a_frozen_task_graph_cannot_start_execution() {
     let approved_plan = approved_plan_without_tasks();
     let mut input = advance_input(approved_plan.revision(), "empty-task-graph");
@@ -721,63 +702,15 @@ fn delivery_create_accepts_only_an_empty_task_graph() {
 }
 
 #[test]
-fn task_breakdown_rejects_missing_self_and_cyclic_dependencies() {
-    let delivery = approved_plan_without_tasks();
-
-    let missing = task(
-        &delivery,
-        "task-missing",
-        vec![DeliveryTaskId("task-does-not-exist".into())],
-    );
-    assert!(
-        approve_task_breakdown(
-            &delivery,
-            delivery.revision(),
-            vec![missing],
-            1_800_000_000_200,
-        )
-        .is_err()
-    );
-
-    let self_id = DeliveryTaskId("task-self".into());
-    let self_referencing = task(&delivery, "task-self", vec![self_id]);
-    assert!(
-        approve_task_breakdown(
-            &delivery,
-            delivery.revision(),
-            vec![self_referencing],
-            1_800_000_000_200,
-        )
-        .is_err()
-    );
-
-    let first_id = DeliveryTaskId("task-cycle-first".into());
-    let second_id = DeliveryTaskId("task-cycle-second".into());
-    let first = task(&delivery, &first_id.0, vec![second_id.clone()]);
-    let second = task(&delivery, &second_id.0, vec![first_id]);
-    assert!(
-        approve_task_breakdown(
-            &delivery,
-            delivery.revision(),
-            vec![first, second],
-            1_800_000_000_200,
-        )
-        .is_err()
-    );
-}
-
-#[test]
 fn blocked_task_never_becomes_runnable() {
     let approved = approved_plan_without_tasks();
     let dependency = task(&approved, "task-dependency", vec![]);
     let blocked = task(&approved, "task-blocked", vec![dependency.id.clone()]);
-    let with_tasks = approve_task_breakdown(
+    let with_tasks = with_test_tasks(
         &approved,
-        approved.revision(),
         vec![blocked.clone(), dependency.clone()],
         1_800_000_000_200,
-    )
-    .expect("valid graph");
+    );
 
     assert_eq!(
         runnable_task(&with_tasks, DeliveryStage::Executing)
@@ -841,13 +774,7 @@ fn task_status_tracks_execution_verification_rework_and_cancel() {
 
     let approved = approved_plan_without_tasks();
     let approved_task = task(&approved, "task-integrated-status", vec![]);
-    let with_tasks = approve_task_breakdown(
-        &approved,
-        approved.revision(),
-        vec![approved_task.clone()],
-        1_800_000_000_200,
-    )
-    .expect("approve task graph");
+    let with_tasks = with_test_tasks(&approved, vec![approved_task.clone()], 1_800_000_000_200);
     let mut execution_input = advance_input(with_tasks.revision(), "task-integrated-execution");
     execution_input.now_millis = 1_800_000_000_300;
     let executing = advance(&with_tasks, execution_input)
@@ -1298,13 +1225,7 @@ fn replayed_advance_returns_original_stage_run_without_new_state() {
 fn verification_progress_stops_after_required_roles_without_optional_adversary() {
     let approved = approved_plan_without_tasks();
     let approved_task = task(&approved, "task-verification-sequence", vec![]);
-    let executing = approve_task_breakdown(
-        &approved,
-        approved.revision(),
-        vec![approved_task],
-        1_800_000_000_200,
-    )
-    .expect("task graph approved");
+    let executing = with_test_tasks(&approved, vec![approved_task], 1_800_000_000_200);
     let mut writer_input = advance_input(executing.revision(), "writer-sequence");
     writer_input.now_millis = 1_800_000_000_300;
     let writer = completed_active_binding(
