@@ -219,6 +219,9 @@ tests/                 无密钥流程、产品界面、恢复、安全和发布
 - [社区行为准则](CODE_OF_CONDUCT.md)
 - [固定 Codex Core 与 DSH 集成边界](docs/decisions/0001-upstream-integration.md)
 - [TypeScript 表现层、Rust Control Plane 与 Rust Execution Worker](docs/decisions/0028-control-plane-worker-migration.md)
+- [Control Plane HTTP 合同](schema/winwincode/v1/control-plane-http.schema.json)
+- [Control Plane WebSocket 合同](docs/contracts/control-plane-websocket.md)（[机器可读 schema](schema/winwincode/v1/control-plane-events.schema.json)）
+- [ExecutionPort 合同](docs/contracts/execution-port-v1.md)（[机器可读 schema](schema/winwincode/v1/execution-port.schema.json)）
 - [Canonical Delivery 所有权](docs/decisions/0023-canonical-delivery-ownership.md)
 - [确定性 Delivery fixture](docs/decisions/0024-deterministic-delivery-fixture.md)
 - [CPB 设计知识迁移记录](docs/decisions/0022-cpb-design-knowledge-migration.md)

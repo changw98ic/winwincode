@@ -2,7 +2,8 @@
 
 ## 用途
 
-`control-plane-events.schema.json` 是 TypeScript Web 与 Rust Control Plane
+[`control-plane-events.schema.json`](../../schema/winwincode/v1/control-plane-events.schema.json)
+是 TypeScript Web 与 Rust Control Plane
 之间唯一的实时消息合同。它推送已经由 Control Plane 接受并持久化的事实，以及订阅、
 确认、续传和心跳等传输控制消息。
 
