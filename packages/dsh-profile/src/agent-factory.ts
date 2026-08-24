@@ -248,6 +248,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function isClosedSessionError(error: unknown): boolean {
+  return isRecord(error) && error.code === 'SESSION_NOT_FOUND'
+}
+
 interface Deferred<T> {
   readonly promise: Promise<T>
   readonly resolve: (value: T | PromiseLike<T>) => void
@@ -703,20 +707,27 @@ export class EmbeddedCodexAgent implements Agent {
     native: NativeRuntimeState,
     projector: CodexRuntimeProjector,
   ): Promise<void> {
-    for await (const raw of this.#kernel.events(native.kernelSessionId)) {
-      const event = projector.ingest(raw)
-      if (event === undefined) continue
-      await this.#ledger.appendEvent(event)
-      const delta = this.#projection.apply(event)
-      for (const append of delta.sessionAppends) this.#writer.append(append)
-      if (event.kind === 'turn.started') this.#appendRequestHeader()
-      if (event.kind === 'approval.requested') await this.#requestApproval(event)
-      if ((event.kind === 'turn.completed' || event.kind === 'turn.aborted')
-        && (this.#activeTurnId === undefined || event.source.turnId === this.#activeTurnId)) {
-        this.#turnSettlement?.resolve()
+    try {
+      for await (const raw of this.#kernel.events(native.kernelSessionId)) {
+        const event = projector.ingest(raw)
+        if (event === undefined) continue
+        await this.#ledger.appendEvent(event)
+        const delta = this.#projection.apply(event)
+        for (const append of delta.sessionAppends) this.#writer.append(append)
+        if (event.kind === 'turn.started') this.#appendRequestHeader()
+        if (event.kind === 'approval.requested') await this.#requestApproval(event)
+        if ((event.kind === 'turn.completed' || event.kind === 'turn.aborted')
+          && (this.#activeTurnId === undefined || event.source.turnId === this.#activeTurnId)) {
+          this.#turnSettlement?.resolve()
+        }
+      }
+    } catch (error) {
+      if (!this.#closingStreams.has(native.kernelStreamId) || !isClosedSessionError(error)) {
+        throw error
       }
     }
-    if (!this.#disposed && !this.#closingStreams.delete(native.kernelStreamId)) {
+    const expectedClose = this.#closingStreams.delete(native.kernelStreamId)
+    if (!this.#disposed && !expectedClose) {
       throw new Error(`embedded Codex event stream ${native.kernelStreamId} closed unexpectedly`)
     }
     this.#native = Object.freeze({

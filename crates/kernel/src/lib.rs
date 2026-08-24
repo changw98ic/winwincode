@@ -59,7 +59,6 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
-use tokio::sync::OnceCell;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -367,7 +366,7 @@ fn canonical_role_policy(role_id: &str) -> Option<CanonicalRolePolicy> {
 pub struct Kernel {
     options: KernelOptions,
     model_port: Arc<dyn ModelPort>,
-    runtime: OnceCell<Arc<Runtime>>,
+    runtime: Arc<Mutex<Option<Arc<Runtime>>>>,
     closed: AtomicBool,
 }
 
@@ -421,7 +420,7 @@ impl Kernel {
         Ok(Self {
             options,
             model_port,
-            runtime: OnceCell::new(),
+            runtime: Arc::new(Mutex::new(None)),
             closed: AtomicBool::new(false),
         })
     }
@@ -452,10 +451,25 @@ impl Kernel {
                     "kernel has already shut down",
                 ));
             }
-            self.runtime
-                .get_or_try_init(|| self.initialize_runtime())
-                .await
-                .cloned()
+            let mut runtime = self.runtime.lock().await;
+            if self.is_closed() {
+                return Err(KernelFailure::new(
+                    "KERNEL_CLOSED",
+                    "kernel has already shut down",
+                ));
+            }
+            if let Some(runtime) = runtime.as_ref() {
+                return Ok(Arc::clone(runtime));
+            }
+            let initialized = self.initialize_runtime().await?;
+            *runtime = Some(Arc::clone(&initialized));
+            if self.is_closed() {
+                return Err(KernelFailure::new(
+                    "KERNEL_CLOSED",
+                    "kernel shut down during initialization",
+                ));
+            }
+            Ok(initialized)
         })
     }
 
@@ -941,7 +955,7 @@ impl Kernel {
                     timed_out: Vec::new(),
                 });
             }
-            let Some(runtime) = self.runtime.get().cloned() else {
+            let Some(runtime) = self.runtime.lock().await.take() else {
                 return Ok(ShutdownInfo {
                     completed: Vec::new(),
                     submit_failed: Vec::new(),
@@ -1082,9 +1096,12 @@ impl Kernel {
         if self.closed.swap(true, Ordering::AcqRel) {
             return None;
         }
-        let runtime = self.runtime.get()?.clone();
+        let runtime = Arc::clone(&self.runtime);
         let timeout = self.options.shutdown_timeout;
         Some(Box::pin(async move {
+            let Some(runtime) = runtime.lock().await.take() else {
+                return;
+            };
             let sessions = runtime
                 .sessions
                 .write()
@@ -1406,6 +1423,31 @@ mod tests {
         );
         assert_eq!(build.event_capacity, 16);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_the_initialized_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-kernel-runtime-shutdown-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&home).expect("create kernel home");
+        let helper = std::env::current_exe().expect("current test executable");
+        let kernel = Kernel::new(KernelOptions::new(home, helper), Arc::new(UnusedModelPort))
+            .expect("construct kernel");
+        let runtime = kernel.runtime().await.expect("initialize runtime");
+        let runtime_owner = Arc::downgrade(&runtime);
+        drop(runtime);
+
+        kernel.shutdown().await.expect("shut down kernel");
+
+        assert!(
+            runtime_owner.upgrade().is_none(),
+            "shutdown must release the complete runtime before it returns"
+        );
+        std::fs::remove_dir_all(root).expect("remove kernel home after shutdown");
     }
 
     #[test]
