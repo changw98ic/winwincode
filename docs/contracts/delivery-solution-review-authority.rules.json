@@ -306,7 +306,7 @@
   "currentFindings": [
     {
       "id": "approved-only-authority",
-      "status": "present",
+      "status": "closed",
       "meaning": "The current fact exists only after approval, so an open human review has no typed safe solution projection.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
@@ -321,7 +321,7 @@
     },
     {
       "id": "caller-injected-review-fact",
-      "status": "present",
+      "status": "closed",
       "meaning": "ProjectionInput currently accepts a caller-supplied review fact instead of rebuilding current canonical Attention authority.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/mod.rs",
@@ -336,7 +336,7 @@
     },
     {
       "id": "pending-task-proposals-missing",
-      "status": "present",
+      "status": "closed",
       "meaning": "The current approved fact and digest do not contain the ordered DeliveryTaskProposal graph needed for human review and later promotion.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
@@ -351,7 +351,7 @@
     },
     {
       "id": "legacy-solution-wire",
-      "status": "present",
+      "status": "closed",
       "meaning": "The current detail wire uses solution and SolutionProjection instead of the single solutionReview field and SolutionReviewProjection type.",
       "evidence": {
         "path": "crates/winwincode-delivery/src/projection/mod.rs",

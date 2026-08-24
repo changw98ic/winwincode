@@ -11,6 +11,7 @@ use crate::domain::{Delivery, MAX_SAFE_INTEGER};
 
 pub mod attention;
 pub mod session_binding;
+pub(crate) mod solution_review;
 pub mod stage;
 pub mod task;
 pub mod verdict;
