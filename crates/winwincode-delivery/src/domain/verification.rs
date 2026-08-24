@@ -51,7 +51,6 @@ struct FencedExecutionIdentity<'fact> {
     worker_session_id: &'fact WorkerSessionId,
 }
 
-#[allow(dead_code)]
 impl<'fact> FencedExecutionIdentity<'fact> {
     fn verified(outcome: &'fact VerifiedTerminalOutcome) -> Self {
         Self {
@@ -124,7 +123,13 @@ impl VerificationRole {
 /// Workspace policy observed for one verification Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 4 Worker adapter has not exposed non-read-only policy facts"
+    )
+)]
 pub(crate) enum VerificationWorkspaceMode {
     CandidateReadOnly,
     CandidateWrite,
@@ -134,7 +139,13 @@ pub(crate) enum VerificationWorkspaceMode {
 /// Restricted permission profile accepted for an independent verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 4 Worker adapter has not exposed unrestricted policy facts"
+    )
+)]
 pub(crate) enum VerificationPermissionProfile {
     CandidateReadOnlyRestricted,
     Unrestricted,
@@ -143,7 +154,13 @@ pub(crate) enum VerificationPermissionProfile {
 /// Candidate mutation category emitted by the Worker runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 4 Worker adapter has not exposed mutation records"
+    )
+)]
 pub(crate) enum VerificationMutationKind {
     FileWrite,
     PatchApply,
@@ -166,7 +183,13 @@ pub(crate) struct VerificationWorkerMutationRecord {
 }
 
 impl VerificationWorkerMutationRecord {
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 4 Worker adapter is the production constructor"
+        )
+    )]
     pub(crate) fn from_terminal_outcome(
         outcome: &AcceptedVerificationJobOutcomeFact,
         sequence: ExecutionSequence,
@@ -344,10 +367,16 @@ pub struct AcceptedVerificationJobOutcomeFact {
     artifacts: Vec<TerminalArtifactReference>,
 }
 
-#[allow(dead_code)]
 impl AcceptedVerificationJobOutcomeFact {
     /// Joins the stage coordinator's sealed outcome to one adapter-sealed Job
     /// snapshot. No caller-supplied identity or terminal timestamp is copied.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 4 Worker and Git adapters are the production constructors"
+        )
+    )]
     pub(crate) fn from_verified_outcome(
         outcome: &VerifiedTerminalOutcome,
         snapshot: &ValidatedGitSnapshotFact,
@@ -503,12 +532,17 @@ impl VerificationFinding {
         &self.source_refs
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 4 runtime ledger adapter will consume the terminal result position"
+        )
+    )]
     pub(crate) fn result_sequence(&self) -> &ExecutionSequence {
         &self.result_sequence
     }
 
-    #[allow(dead_code)]
     pub(crate) fn source_sequences(&self) -> &[ExecutionSequence] {
         &self.source_sequences
     }
