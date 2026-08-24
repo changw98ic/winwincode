@@ -53,6 +53,7 @@ const ERROR_STATUS = Object.freeze({
   RESOURCE_NOT_FOUND: 404,
   IDEMPOTENCY_CONFLICT: 409,
   REVISION_CONFLICT: 409,
+  READ_CURSOR_EXPIRED: 409,
   CANDIDATE_STALE: 409,
   WRONG_STATE: 409,
   RATE_LIMITED: 429,
@@ -165,7 +166,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     schema.$defs.QueryResult.oneOf.map(entry => entry.$ref),
     [
       '#/$defs/ProductSessionProjection',
-      './domain.schema.json#/$defs/DeliveryProjection',
+      '#/$defs/DeliveryDetailProjection',
       './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
       '#/$defs/SettingsProjection',
       '#/$defs/CredentialReferenceProjection',
@@ -287,10 +288,12 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
     ERROR_STATUS,
   )
   assert.equal(semantics.errors.RATE_LIMITED.retryable, true)
+  assert.equal(semantics.errors.READ_CURSOR_EXPIRED.retryable, true)
   assert.equal(semantics.errors.SERVICE_UNAVAILABLE.retryable, true)
   assert.equal(semantics.errors.TRUSTED_FACTS_UNAVAILABLE.retryable, true)
   for (const code of Object.keys(ERROR_STATUS).filter(code => (
     code !== 'RATE_LIMITED'
+    && code !== 'READ_CURSOR_EXPIRED'
     && code !== 'SERVICE_UNAVAILABLE'
     && code !== 'TRUSTED_FACTS_UNAVAILABLE'
   ))) assert.equal(semantics.errors[code].retryable, false)
@@ -331,6 +334,7 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
     '401',
     '403',
     '404',
+    '409',
     '429',
     '500',
     '503',
@@ -343,6 +347,17 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
       assert.equal(response.content['application/problem+json'], undefined)
     }
   }
+
+  const taskApproval = schema.$defs.DeliveryApproveTaskBreakdownPayload
+  assert.deepEqual(taskApproval.required, ['deliveryId', 'reviewSetSha256'])
+  assert.equal(taskApproval.properties.tasks, undefined)
+  assert.deepEqual(schema['x-winwincode-semantics'].taskBreakdownApproval, {
+    payload: ['deliveryId', 'reviewSetSha256'],
+    authority: 'current_sealed_approved_solution_review',
+    callerTaskFieldsAllowed: false,
+    promotion: 'copy_ordered_task_proposals_field_by_field',
+    staleDigestError: 'REVISION_CONFLICT',
+  })
 })
 
 test('positive and negative samples pin retries, conflicts, cursors, and secret-safe output', async () => {
@@ -363,6 +378,12 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   })
   assert.equal(examples.invalidCursor.error.code, 'INVALID_REQUEST')
   assert.equal(examples.invalidCursor.error.details.field, 'page.cursor')
+  assert.equal(examples.readCursorExpired.error.code, 'READ_CURSOR_EXPIRED')
+  assert.equal(examples.readCursorExpired.error.retryable, true)
+  assert.deepEqual(examples.readCursorExpired.error.details, {
+    field: 'atCursor',
+    action: 'restart_strongflow_read_without_cursor',
+  })
   assert.equal(examples.responses.queryPage.result.kind, 'delivery_page')
   assert.deepEqual(examples.responses.commandCompleted.result, {
     id: 'wrk_00000000000000000000000000',
@@ -381,7 +402,32 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   assert.equal(examples.positive.inputRespond.payload.status, 'provided')
   assert.equal(examples.positive.sessionMessagesList.query, 'session.messages.list')
   assert.equal(examples.positive.runtimeProjectionGet.query, 'runtime.projection.get')
+  assert.deepEqual(examples.positive.deliveryApproveTaskBreakdown.payload, {
+    deliveryId: 'dlv_00000000000000000000000000',
+    reviewSetSha256:
+      'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+  })
   assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
+  assert.equal(
+    examples.responses.deliveryDetailPendingReview.result.solutionReview.reviewStatus,
+    'pending',
+  )
+  assert.equal(
+    examples.responses.deliveryDetailPendingReview.result.solutionReview.taskProposals.length,
+    1,
+  )
   assert.equal(examples.responses.runtimeProjection.result.kind, 'runtime_projection')
-  assert.equal(examples.responses.runtimeProjection.result.items[0].projectionSequence, 42)
+  assert.equal(examples.responses.runtimeProjection.result.sessions[0].asOfSequence, 42)
+  assert.deepEqual(
+    examples.positive.runtimeProjectionGet.parameters.atCursor,
+    examples.responses.runtimeProjection.result.readCursor,
+  )
+  assert.notDeepEqual(
+    examples.strongFlowReadCutMismatch.deliveryCursor,
+    examples.strongFlowReadCutMismatch.runtimeCursor,
+  )
+  assert.equal(
+    examples.strongFlowReadCutMismatch.expected.error.code,
+    'REVISION_CONFLICT',
+  )
 })

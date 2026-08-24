@@ -39,7 +39,7 @@ const eventTypes = Object.freeze([
   'presence.changed.v1',
   'product-session.message.appended.v1',
   'product-session.changed.v1',
-  'runtime-projection.appended.v1',
+  'runtime-projection.invalidated.v1',
   'worker-health.changed.v1',
 ])
 
@@ -52,7 +52,13 @@ const clientFrameTypes = Object.freeze([
 
 function branchConst(branchRef, propertyName) {
   const name = branchRef.$ref.split('/').at(-1)
-  return schema.$defs[name].properties[propertyName].const
+  const branch = schema.$defs[name]
+  if (branch.properties?.[propertyName]?.const !== undefined) {
+    return branch.properties[propertyName].const
+  }
+  const values = branch.oneOf.map(nested => branchConst(nested, propertyName))
+  assert.equal(new Set(values).size, 1, `${name} needs one nested ${propertyName}`)
+  return values[0]
 }
 
 function collectRefs(value, refs = []) {
@@ -125,12 +131,22 @@ function validateSchemaNode(value, node, path = '$') {
     if (node.minItems !== undefined && value.length < node.minItems) {
       errors.push(`${path}: array is shorter than minItems`)
     }
+    if (node.maxItems !== undefined && value.length > node.maxItems) {
+      errors.push(`${path}: array is longer than maxItems`)
+    }
     if (node.uniqueItems) {
       const encoded = value.map(item => JSON.stringify(item))
       if (new Set(encoded).size !== encoded.length) errors.push(`${path}: items are not unique`)
     }
-    if (node.items) {
-      value.forEach((item, index) => {
+    const prefixLength = node.prefixItems?.length ?? 0
+    for (let index = 0; index < Math.min(prefixLength, value.length); index += 1) {
+      errors.push(...validateSchemaNode(value[index], node.prefixItems[index], `${path}[${index}]`))
+    }
+    if (node.items === false && value.length > prefixLength) {
+      errors.push(`${path}: array has items after the closed tuple prefix`)
+    } else if (node.items && node.items !== true) {
+      value.slice(prefixLength).forEach((item, offset) => {
+        const index = prefixLength + offset
         errors.push(...validateSchemaNode(item, node.items, `${path}[${index}]`))
       })
     }
@@ -345,6 +361,23 @@ test('resume, authorization recheck, and slow-client rules are machine visible',
   assert.equal(schema.$defs.ControlPlaneWebSocketTransportLimits.properties.backpressureCloseCode.const, 4408)
   assert.equal(schema.$defs.ControlPlaneWebSocketAuthorizationRevokedFrame.properties.closeCode.const, 4403)
   assert.equal(schema.$defs.ControlPlaneWebSocketResetRequiredFrame.properties.closeCode.const, 4409)
+  assert.equal(
+    schema.$defs.ControlPlaneWebSocketResetRequiredFrame.properties.reloadQueries,
+    undefined,
+  )
+  assert.deepEqual(
+    schema.$defs.ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent
+      .properties.reloadQueries.prefixItems,
+    [
+      { $ref: '#/$defs/ControlPlaneWebSocketDeliveryGetReloadQuery' },
+      { $ref: '#/$defs/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery' },
+    ],
+  )
+  assert.deepEqual(
+    schema.$defs.ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent
+      .properties.reloadQueries.prefixItems,
+    [{ $ref: '#/$defs/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery' }],
+  )
 
   for (const phrase of [
     '最后一个已确认 cursor',
@@ -392,6 +425,10 @@ test('negative transcripts reject commands, missing metadata, and crossed stream
     'non-monotonic-sequence',
     'ack-for-another-stream',
     'event-after-authorization-revocation',
+    'delivery-runtime-invalidation-missing-stage',
+    'product-runtime-invalidation-smuggles-delivery',
+    'product-runtime-invalidation-uses-strongflow-pair',
+    'reset-cannot-hard-code-delivery-reload-queries',
   ])
   assert.deepEqual(
     new Set(invalidFixture.transcripts.map(transcript => transcript.name)),

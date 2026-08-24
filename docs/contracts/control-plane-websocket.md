@@ -74,14 +74,22 @@ Scope 和 EventStream 完全相同。服务端只保留每条订阅最后一个�
 `authorizationEpoch`。
 
 如果 cursor 已被保留策略清理、事件流已重建或权限边界已经改变，Control Plane 返回
-`transport.reset-required.v1` 并以 `4409` 关闭连接。客户端随后通过
-`session.messages.list` 和 `runtime.projection.get` 获取完整的最新 Projection，再建立一条
-新订阅；不能猜测或跳过缺失序号。
+`transport.reset-required.v1` 并以 `4409` 关闭连接。它是通用传输帧，不携带固定
+`reloadQueries`。客户端先丢弃该订阅对应的旧局部状态，再根据自己保存的原始
+`subscription.stream.kind` 执行完整重载；只有重载全部成功后才发布新快照和建立新订阅。
+Delivery 页面先让 `delivery.get` 签发 `StrongFlowReadCursor`，再把它作为
+`runtime.projection.get` 的 `atCursor`，两个结果必须返回完全相同的 cursor。product-session
+页面只读取自己的 runtime snapshot。任一必要请求失败或 cursor 错位时，客户端继续保持旧
+局部状态已丢弃，不猜测、跳过缺失序号或拼接两个独立的 latest 快照。
 
 `product-session.message.appended.v1` 只携带已经保存的 `ChatMessageProjection`：消息角色
 只允许用户或助手，正文有大小上限，不包含原始 Provider 请求/响应、工具负载、Credential
-或 Codex 内部对象。Chat 消息与 `runtime-projection.appended.v1` 是两类事实；运行摘要不能
-代替用户可见的会话历史。
+或 Codex 内部对象。`runtime-projection.invalidated.v1` 不携带运行摘要或详情，并用
+`scopeKind` 严格区分两条路径：`delivery-stage` 必须带非空 `deliveryId + stageRunId`，按上述
+同一读取截面依次读取 `delivery.get` 和 `runtime.projection.get`；`product-session` 不带这两个
+Delivery 字段，只重新读取 `runtime.projection.get`，也不要求 `StrongFlowReadCursor`。浏览器
+因此不会从文字消息拼出第二份运行模型，不会把不同 revision 的 Delivery 与 runtime 拼在
+一起，也不会为了普通 Chat 暗中创建一个 Delivery。
 
 ## 权限变化
 

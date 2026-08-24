@@ -76,6 +76,12 @@ function schemaPropertyConst(documents, document, node, property, seen = new Set
     const value = schemaPropertyConst(documents, document, branch, property, seen)
     if (value !== undefined) return value
   }
+  if (Array.isArray(node.oneOf)) {
+    const values = node.oneOf.map(branch => (
+      schemaPropertyConst(documents, document, branch, property, new Set(seen))
+    ))
+    if (values.length > 0 && values.every(value => value === values[0])) return values[0]
+  }
   return undefined
 }
 
@@ -88,9 +94,14 @@ function schemaRequiresProperty(documents, document, node, property, seen = new 
     const resolved = resolveSchemaRef(documents, document, node.$ref)
     return schemaRequiresProperty(documents, resolved.document, resolved.node, property, seen)
   }
-  return (node.allOf ?? []).some(branch => (
+  if ((node.allOf ?? []).some(branch => (
     schemaRequiresProperty(documents, document, branch, property, seen)
-  ))
+  ))) return true
+  return Array.isArray(node.oneOf)
+    && node.oneOf.length > 0
+    && node.oneOf.every(branch => (
+      schemaRequiresProperty(documents, document, branch, property, new Set(seen))
+    ))
 }
 
 function contractValidator() {
@@ -440,6 +451,7 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   for (const [name, value] of Object.entries({
     revisionConflict: examples.revisionConflict,
     invalidCursor: examples.invalidCursor,
+    readCursorExpired: examples.readCursorExpired,
   })) {
     assertValidation(
       validator(ajv, domainId, 'ErrorEnvelope'),
@@ -470,11 +482,154 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     true,
     'queryPage',
   )
-  for (const name of ['chatMessagesPage', 'runtimeProjection']) {
+  for (const name of [
+    'chatMessagesPage',
+    'deliveryDetailPendingReview',
+    'runtimeProjection',
+    'publicationProjection',
+  ]) {
     assertValidation(
       validator(ajv, httpId, 'QueryResultResponse'),
       examples.responses[name],
       true,
+      name,
+    )
+  }
+  const settledReviewExamples = {
+    approvedReview: {
+      reviewStatus: 'approved',
+      decision: 'approve',
+      comments: null,
+      requestedChanges: null,
+    },
+    changesRequestedReview: {
+      reviewStatus: 'changes_requested',
+      decision: 'request_changes',
+      comments: 'Please keep the retry boundary explicit.',
+      requestedChanges: ['Add the bounded retry check.'],
+    },
+    rejectedReview: {
+      reviewStatus: 'rejected',
+      decision: 'reject',
+      comments: null,
+      requestedChanges: null,
+    },
+  }
+  for (const [name, reviewFields] of Object.entries(settledReviewExamples)) {
+    const response = structuredClone(examples.responses.deliveryDetailPendingReview)
+    Object.assign(response.result.solutionReview, reviewFields, {
+      reviewerId: 'usr_00000000000000000000000000',
+      reviewedAt: '2026-08-24T09:02:00.000Z',
+    })
+    assertValidation(
+      validator(ajv, httpId, 'QueryResultResponse'),
+      response,
+      true,
+      name,
+    )
+  }
+  const pendingReviewWithReviewer = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  pendingReviewWithReviewer.result.solutionReview.reviewerId = 'usr_00000000000000000000000000'
+  pendingReviewWithReviewer.result.solutionReview.reviewedAt = '2026-08-24T09:02:00.000Z'
+  const changesWithoutRequests = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  Object.assign(changesWithoutRequests.result.solutionReview, {
+    reviewStatus: 'changes_requested',
+    decision: 'request_changes',
+    reviewerId: 'usr_00000000000000000000000000',
+    reviewedAt: '2026-08-24T09:02:00.000Z',
+    requestedChanges: null,
+  })
+  const pendingReviewWithComments = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  pendingReviewWithComments.result.solutionReview.comments = 'Caller-authored pending comment'
+  const approvedReviewWithRequests = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  Object.assign(approvedReviewWithRequests.result.solutionReview, {
+    reviewStatus: 'approved',
+    decision: 'approve',
+    reviewerId: 'usr_00000000000000000000000000',
+    reviewedAt: '2026-08-24T09:02:00.000Z',
+    requestedChanges: ['This cannot coexist with approval.'],
+  })
+  const plannerAssignedTaskOwner = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  plannerAssignedTaskOwner.result.solutionReview.taskProposals[0].ownerActorId =
+    'usr_00000000000000000000000000'
+  const legacyApprovedSolution = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  legacyApprovedSolution.result.solution = legacyApprovedSolution.result.solutionReview
+  delete legacyApprovedSolution.result.solutionReview
+  const rawAttentionReview = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  rawAttentionReview.result.solutionReview.context = { raw: true }
+  const codexStageWithoutBinding = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  codexStageWithoutBinding.result.stages
+    .find(stage => stage.actorType === 'codex').sessionBinding = null
+  const humanStageWithExecutionBinding = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  const humanStage = humanStageWithExecutionBinding.result.stages
+    .find(stage => stage.actorType === 'human')
+  humanStage.sessionBinding = structuredClone(
+    examples.responses.deliveryDetailPendingReview.result.stages
+      .find(stage => stage.actorType === 'codex').sessionBinding,
+  )
+  const partialBindingWithThreadOnly = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  const partialBinding = partialBindingWithThreadOnly.result.stages
+    .find(stage => stage.actorType === 'codex').sessionBinding
+  partialBinding.workerSessionId = null
+  const publicationWithArbitraryUrl = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithArbitraryUrl.result.resourceRef =
+    'https://token@example.com/repository/pull/42?access_token=secret#fragment'
+  const publicationWithSecretBearingRepository = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithSecretBearingRepository.result.resourceRef.repository =
+    'openai/winwincode?access_token=secret'
+  const publicationWithWebUrl = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithWebUrl.result.resourceRef.webUrl =
+    'https://github.com/openai/winwincode/pull/42'
+  const publicationWithInvalidNumber = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithInvalidNumber.result.resourceRef.number = 0
+  for (const [name, value] of Object.entries({
+    pendingReviewWithReviewer,
+    pendingReviewWithComments,
+    changesWithoutRequests,
+    approvedReviewWithRequests,
+    plannerAssignedTaskOwner,
+    legacyApprovedSolution,
+    rawAttentionReview,
+    codexStageWithoutBinding,
+    humanStageWithExecutionBinding,
+    partialBindingWithThreadOnly,
+    publicationWithArbitraryUrl,
+    publicationWithSecretBearingRepository,
+    publicationWithWebUrl,
+    publicationWithInvalidNumber,
+  })) {
+    assertValidation(
+      validator(ajv, httpId, 'QueryResultResponse'),
+      value,
+      false,
       name,
     )
   }
@@ -495,12 +650,24 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   swappedId.payload.productSessionId = swappedId.payload.repositoryId
   const extraField = structuredClone(examples.positive.sessionCreate)
   extraField.secret = 'must-not-cross-the-boundary'
+  const callerAuthoredTaskBreakdown = structuredClone(
+    examples.positive.deliveryApproveTaskBreakdown,
+  )
+  callerAuthoredTaskBreakdown.payload.tasks = [{
+    id: 'dtk_01J00000000000000000000000',
+    title: 'Caller replacement',
+    goal: 'Bypass the reviewed task proposals.',
+    acceptanceCriterionIds: ['criterion:1'],
+    blockedByTaskIds: [],
+    ownerActorId: null,
+  }]
   for (const [name, value] of Object.entries({
     wrongVersion,
     missingRevision,
     nullPayload,
     swappedId,
     extraField,
+    callerAuthoredTaskBreakdown,
   })) assertValidation(command, value, false, name)
 
   const leakedCredential = structuredClone(examples.responses.credentialReference)
