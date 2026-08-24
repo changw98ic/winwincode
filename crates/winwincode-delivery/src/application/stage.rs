@@ -1,0 +1,949 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Delivery stage coordination application service.
+
+use winwincode_domain::{
+    AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
+    ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+};
+
+use crate::domain::{
+    AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
+    DeliveryStage, DeliveryStatus, DeliveryTaskStatus, SessionBinding, SessionBindingId, StageRun,
+    StageRunActorType, StageRunStatus,
+};
+
+use super::{CoordinationError, CoordinationErrorCode};
+use super::task::{TaskFact, runnable_task, transition_task_status};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewStageIdentities {
+    pub stage_run_id: StageRunId,
+    pub execution_job_id: ExecutionJobId,
+    pub session_binding_id: SessionBindingId,
+    pub attention_item_id: AttentionItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewAttentionSeed {
+    pub title: String,
+    pub context: String,
+    pub assigned_to: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvanceStageInput {
+    pub expected_revision: u64,
+    pub product_session_id: ProductSessionId,
+    pub identities: NewStageIdentities,
+    pub review: Option<ReviewAttentionSeed>,
+    pub previous_outcome: Option<VerifiedTerminalOutcome>,
+    pub now_millis: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalOutcomeStatus {
+    Succeeded,
+    Failed,
+    InfrastructureError,
+    Cancelled,
+}
+
+/// Scheduler-owned lease identity loaded from durable Control Plane state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveLeaseIdentity {
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+}
+
+/// Terminal fact reported by Worker through ExecutionPort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalWorkerOutcome {
+    pub stage_run_id: StageRunId,
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+    pub status: TerminalOutcomeStatus,
+}
+
+/// A terminal fact that matched the current StageRun, SessionBinding, and
+/// scheduler lease/fencing identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTerminalOutcome {
+    stage_run_id: StageRunId,
+    execution_job_id: ExecutionJobId,
+    worker_session_id: WorkerSessionId,
+    attempt: u64,
+    status: TerminalOutcomeStatus,
+}
+
+impl VerifiedTerminalOutcome {
+    pub fn stage_run_id(&self) -> &StageRunId {
+        &self.stage_run_id
+    }
+
+    pub fn execution_job_id(&self) -> &ExecutionJobId {
+        &self.execution_job_id
+    }
+
+    pub fn worker_session_id(&self) -> &WorkerSessionId {
+        &self.worker_session_id
+    }
+
+    pub const fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    pub const fn status(&self) -> TerminalOutcomeStatus {
+        self.status
+    }
+}
+
+/// Verifies a Worker terminal outcome against both Delivery and scheduler facts.
+///
+/// # Errors
+///
+/// Fails closed when any Delivery, job, attempt, Worker, lease, instance, or
+/// fencing identity differs.
+pub fn verify_terminal_outcome(
+    delivery: &Delivery,
+    lease: &ActiveLeaseIdentity,
+    outcome: TerminalWorkerOutcome,
+) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+    let mut active = delivery.snapshot().stage_runs.iter().filter(|run| is_active(run));
+    let run = active.next().ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "terminal outcome has no active StageRun",
+        )
+    })?;
+    if active.next().is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "terminal outcome cannot choose among multiple active StageRuns",
+        ));
+    }
+    let binding = exact_binding(delivery, run, true)?;
+    let exact = outcome.stage_run_id == run.id
+        && outcome.execution_job_id == binding.execution_job_id
+        && outcome.execution_job_id == lease.execution_job_id
+        && outcome.attempt == run.attempt
+        && outcome.attempt == lease.attempt
+        && binding.worker_session_id.as_ref() == Some(&outcome.worker_session_id)
+        && outcome.worker_session_id == lease.worker_session_id
+        && outcome.lease_id == lease.lease_id
+        && outcome.fencing_token == lease.fencing_token
+        && outcome.worker_id == lease.worker_id
+        && outcome.worker_instance_id == lease.worker_instance_id;
+    if !exact {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "terminal Worker outcome does not match the active StageRun lease and SessionBinding",
+        ));
+    }
+    Ok(VerifiedTerminalOutcome {
+        stage_run_id: outcome.stage_run_id,
+        execution_job_id: outcome.execution_job_id,
+        worker_session_id: outcome.worker_session_id,
+        attempt: outcome.attempt,
+        status: outcome.status,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionIntent {
+    pub execution_job_id: ExecutionJobId,
+    pub product_session_id: ProductSessionId,
+    pub delivery_id: DeliveryId,
+    pub delivery_task_id: Option<DeliveryTaskId>,
+    pub stage_run_id: StageRunId,
+    pub stage: DeliveryStage,
+    pub role: String,
+    pub attempt: u64,
+    pub goal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageAdvanceEffect {
+    Dispatch(ExecutionIntent),
+    Review(AttentionItemId),
+    Resume(ExecutionIntent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageAdvanceResult {
+    pub delivery: Delivery,
+    pub effect: StageAdvanceEffect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelIntent {
+    pub stage_run_id: StageRunId,
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub product_session_id: ProductSessionId,
+    pub worker_session_id: WorkerSessionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelAcknowledgement {
+    pub stage_run_id: StageRunId,
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub worker_session_id: WorkerSessionId,
+}
+
+/// Validates the fixed Delivery-stage actor and StrongFlow role policy.
+///
+/// # Errors
+///
+/// Returns [`CoordinationErrorCode::InvalidRequest`] when an execution owner
+/// does not match the stage policy.
+pub fn validate_stage_executor(
+    stage: DeliveryStage,
+    actor_type: StageRunActorType,
+    role: &str,
+) -> Result<(), CoordinationError> {
+    let valid = match stage {
+        DeliveryStage::Clarifying => {
+            actor_type == StageRunActorType::Codex && role == "requirements"
+        }
+        DeliveryStage::Planning => {
+            actor_type == StageRunActorType::Codex && role == "planner"
+        }
+        DeliveryStage::PlanReview => {
+            actor_type == StageRunActorType::Human && role == "reviewer"
+        }
+        DeliveryStage::Executing => {
+            actor_type == StageRunActorType::Codex && role == "executor"
+        }
+        DeliveryStage::Verifying => {
+            actor_type == StageRunActorType::Codex
+                && matches!(role, "reviewer" | "verifier" | "adversarial-verifier")
+        }
+        DeliveryStage::Reworking => {
+            actor_type == StageRunActorType::Codex && role == "remediator"
+        }
+        DeliveryStage::DeliveryReview => {
+            actor_type == StageRunActorType::Human && role == "approver"
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "stage actor or role does not match the fixed Delivery policy",
+        ))
+    }
+}
+
+/// Selects and starts the only legal next Delivery stage.
+///
+/// The caller supplies fresh identities but cannot supply a stage or attempt.
+///
+/// # Errors
+///
+/// Returns a stable coordination error when the revision or Delivery state is
+/// not valid for one next stage.
+pub fn advance(
+    delivery: &Delivery,
+    input: AdvanceStageInput,
+) -> Result<StageAdvanceResult, CoordinationError> {
+    if delivery.revision() != input.expected_revision {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::RevisionConflict,
+            "Delivery revision changed before stage advance",
+        ));
+    }
+    if delivery
+        .snapshot()
+        .attention_items
+        .iter()
+        .any(|item| item.blocking && item.status == AttentionItemStatus::Open)
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::AttentionRequired,
+            "an open blocking AttentionItem must be resolved before stage advance",
+        ));
+    }
+    let active_count = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| is_active(run))
+        .count();
+    if active_count > 1 {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "Delivery has more than one active StageRun",
+        ));
+    }
+    let previous = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| is_active(run));
+    let previous_stage = previous.map(|run| run.stage);
+    let (stage, next_status, actor_type) =
+        legal_transition(delivery.snapshot().status, previous_stage)?;
+    if let Some(previous) = previous {
+        exact_binding(delivery, previous, true)?;
+        let outcome = input.previous_outcome.as_ref().ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "an active StageRun requires a verified terminal Worker outcome before handoff",
+            )
+        })?;
+        if outcome.stage_run_id != previous.id
+            || outcome.attempt != previous.attempt
+            || outcome.status != TerminalOutcomeStatus::Succeeded
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "only the matching successful terminal outcome permits stage handoff",
+            ));
+        }
+    } else if input.previous_outcome.is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "a terminal outcome was supplied without an active StageRun",
+        ));
+    }
+    let delivery_task_id = select_task_id(delivery, stage, previous)?;
+    let role = role_for_stage(delivery, stage, previous, delivery_task_id.as_ref())?;
+    validate_stage_executor(stage, actor_type, role)?;
+    let attempt = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| {
+            run.stage == stage
+                && run.role == role
+                && run.delivery_task_id == delivery_task_id
+        })
+        .count() as u64
+        + 1;
+    let run = StageRun {
+        schema_version: DELIVERY_SCHEMA_VERSION,
+        id: input.identities.stage_run_id.clone(),
+        delivery_id: delivery.id().clone(),
+        delivery_task_id: delivery_task_id.clone(),
+        stage,
+        actor_type,
+        role: role.to_owned(),
+        status: if actor_type == StageRunActorType::Human {
+            StageRunStatus::Waiting
+        } else {
+            StageRunStatus::Running
+        },
+        attempt,
+        started_at_millis: input.now_millis,
+        finished_at_millis: None,
+    };
+    let mut snapshot = delivery.clone().into_snapshot();
+    snapshot.revision += 1;
+    snapshot.status = next_status;
+    if let Some(previous) = previous {
+        let Some(stored) = snapshot
+            .stage_runs
+            .iter_mut()
+            .find(|run| run.id == previous.id)
+        else {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "the active StageRun disappeared while preparing the handoff",
+            ));
+        };
+        stored.status = StageRunStatus::Succeeded;
+        stored.finished_at_millis = Some(input.now_millis);
+    }
+    if let Some(task_id) = &delivery_task_id {
+        let task = snapshot
+            .tasks
+            .iter_mut()
+            .find(|task| &task.id == task_id)
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "selected DeliveryTask disappeared while preparing the stage",
+                )
+            })?;
+        let fact = match stage {
+            DeliveryStage::Executing => TaskFact::StartExecuting,
+            DeliveryStage::Verifying => TaskFact::StartVerifying,
+            DeliveryStage::Reworking => TaskFact::StartReworking,
+            _ => {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "a Delivery-level stage unexpectedly selected a task",
+                ));
+            }
+        };
+        task.status = transition_task_status(task.status, fact)?;
+    }
+    snapshot.stage_runs.push(run);
+    snapshot.updated_at_millis = input.now_millis;
+    let effect = if actor_type == StageRunActorType::Human {
+        let review = input.review.ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::AttentionRequired,
+                "a human review stage requires frozen linked Attention",
+            )
+        })?;
+        let item_type = match stage {
+            DeliveryStage::PlanReview => AttentionItemType::DecisionRequired,
+            DeliveryStage::DeliveryReview => AttentionItemType::DeliveryApproval,
+            _ => {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "a non-review stage was assigned to a human actor",
+                ));
+            }
+        };
+        snapshot.attention_items.push(AttentionItem {
+            schema_version: DELIVERY_SCHEMA_VERSION,
+            id: input.identities.attention_item_id.clone(),
+            delivery_id: delivery.id().clone(),
+            delivery_spec_id: snapshot.spec.id.clone(),
+            stage_run_id: Some(input.identities.stage_run_id),
+            item_type,
+            title: review.title,
+            context: review.context,
+            options: Vec::new(),
+            assigned_to: Some(review.assigned_to),
+            blocking: true,
+            status: AttentionItemStatus::Open,
+            resolution: None,
+            resolved_by: None,
+            created_at_millis: input.now_millis,
+            resolved_at_millis: None,
+        });
+        StageAdvanceEffect::Review(input.identities.attention_item_id)
+    } else {
+        if input.review.is_some() {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::InvalidRequest,
+                "Codex stages do not create business review Attention",
+            ));
+        }
+        snapshot.session_bindings.push(SessionBinding {
+            schema_version: DELIVERY_SCHEMA_VERSION,
+            id: input.identities.session_binding_id,
+            delivery_id: delivery.id().clone(),
+            delivery_task_id: delivery_task_id.clone(),
+            stage_run_id: input.identities.stage_run_id.clone(),
+            product_session_id: input.product_session_id.clone(),
+            execution_job_id: input.identities.execution_job_id.clone(),
+            worker_session_id: None,
+            codex_thread_id: None,
+            bound_at_millis: input.now_millis,
+        });
+        StageAdvanceEffect::Dispatch(ExecutionIntent {
+            execution_job_id: input.identities.execution_job_id,
+            product_session_id: input.product_session_id,
+            delivery_id: delivery.id().clone(),
+            delivery_task_id: delivery_task_id.clone(),
+            stage_run_id: input.identities.stage_run_id,
+            stage,
+            role: role.to_owned(),
+            attempt,
+            goal: delivery_task_id
+                .as_ref()
+                .and_then(|task_id| {
+                    delivery
+                        .snapshot()
+                        .tasks
+                        .iter()
+                        .find(|task| &task.id == task_id)
+                })
+                .map_or_else(
+                    || delivery.snapshot().spec.goal.clone(),
+                    |task| task.goal.clone(),
+                ),
+        })
+    };
+    let delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
+        CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+    })?;
+    Ok(StageAdvanceResult {
+        delivery,
+        effect,
+    })
+}
+
+/// Rebuilds the immutable ExecutionIntent for the one active Codex StageRun.
+///
+/// Recovery does not append a run, allocate an attempt, or change Delivery
+/// revision. Durable outbox replay may redeliver this same job identity.
+///
+/// # Errors
+///
+/// Fails closed on a stale revision, zero/multiple active runs, a human review
+/// stage, or an incomplete/conflicting exact SessionBinding.
+pub fn resume_active(
+    delivery: &Delivery,
+    expected_revision: u64,
+) -> Result<StageAdvanceResult, CoordinationError> {
+    if delivery.revision() != expected_revision {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::RevisionConflict,
+            "Delivery revision changed before stage resume",
+        ));
+    }
+    let mut active = delivery.snapshot().stage_runs.iter().filter(|run| is_active(run));
+    let run = active.next().ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "Delivery has no active Codex StageRun to resume",
+        )
+    })?;
+    if active.next().is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "Delivery has more than one active StageRun",
+        ));
+    }
+    let binding = exact_binding(delivery, run, true)?;
+    let goal = run
+        .delivery_task_id
+        .as_ref()
+        .and_then(|task_id| {
+            delivery
+                .snapshot()
+                .tasks
+                .iter()
+                .find(|task| &task.id == task_id)
+        })
+        .map_or_else(
+            || delivery.snapshot().spec.goal.clone(),
+            |task| task.goal.clone(),
+        );
+    Ok(StageAdvanceResult {
+        delivery: delivery.clone(),
+        effect: StageAdvanceEffect::Resume(ExecutionIntent {
+            execution_job_id: binding.execution_job_id.clone(),
+            product_session_id: binding.product_session_id.clone(),
+            delivery_id: run.delivery_id.clone(),
+            delivery_task_id: run.delivery_task_id.clone(),
+            stage_run_id: run.id.clone(),
+            stage: run.stage,
+            role: run.role.clone(),
+            attempt: run.attempt,
+            goal,
+        }),
+    })
+}
+
+/// Creates the durable cancellation intent for the current exact job.
+///
+/// The returned value is a pending effect: a Control Plane transaction must
+/// commit it to the outbox before any ExecutionPort adapter sends it.
+///
+/// # Errors
+///
+/// Fails closed on stale revision, ambiguous active state, or incomplete
+/// SessionBinding.
+pub fn request_cancel(
+    delivery: &Delivery,
+    expected_revision: u64,
+) -> Result<CancelIntent, CoordinationError> {
+    if delivery.revision() != expected_revision {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::RevisionConflict,
+            "Delivery revision changed before cancellation",
+        ));
+    }
+    let mut active = delivery.snapshot().stage_runs.iter().filter(|run| is_active(run));
+    let run = active.next().ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "Delivery has no active Codex StageRun to cancel",
+        )
+    })?;
+    if active.next().is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "Delivery has more than one active StageRun",
+        ));
+    }
+    let binding = exact_binding(delivery, run, true)?;
+    let worker_session_id = binding.worker_session_id.clone().ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "the active job has no accepted WorkerSession",
+        )
+    })?;
+    Ok(CancelIntent {
+        stage_run_id: run.id.clone(),
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: run.attempt,
+        product_session_id: binding.product_session_id.clone(),
+        worker_session_id,
+    })
+}
+
+/// Validates a Worker cancellation acknowledgement without settling Delivery.
+///
+/// `job.cancel_ack` only proves receipt of the request. The returned Delivery
+/// is byte-for-byte unchanged; only a verified terminal `job.outcome` may end
+/// the StageRun.
+///
+/// # Errors
+///
+/// Fails closed when the acknowledgement identifies another run or job.
+pub fn acknowledge_cancel(
+    delivery: &Delivery,
+    intent: &CancelIntent,
+    acknowledgement: CancelAcknowledgement,
+) -> Result<Delivery, CoordinationError> {
+    if acknowledgement.stage_run_id != intent.stage_run_id
+        || acknowledgement.execution_job_id != intent.execution_job_id
+        || acknowledgement.attempt != intent.attempt
+        || acknowledgement.worker_session_id != intent.worker_session_id
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "cancellation acknowledgement does not match the requested job",
+        ));
+    }
+    let run = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == intent.stage_run_id && is_active(run))
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "cancellation acknowledgement does not match an active StageRun",
+            )
+        })?;
+    let binding = exact_binding(delivery, run, true)?;
+    if binding.execution_job_id != intent.execution_job_id
+        || binding.worker_session_id.as_ref() != Some(&intent.worker_session_id)
+        || run.attempt != intent.attempt
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "cancellation request no longer matches the active binding",
+        ));
+    }
+    Ok(delivery.clone())
+}
+
+/// Applies the verified terminal cancellation to the same StageRun.
+///
+/// This transition does not create a replacement run. A task returns to the
+/// retry state defined by the cancelled stage.
+///
+/// # Errors
+///
+/// Fails closed on stale revision, non-cancelled outcome, changed active run,
+/// invalid time, or a task state that no longer matches the stage.
+pub fn apply_cancelled_outcome(
+    delivery: &Delivery,
+    expected_revision: u64,
+    outcome: VerifiedTerminalOutcome,
+    finished_at_millis: u64,
+) -> Result<Delivery, CoordinationError> {
+    if delivery.revision() != expected_revision {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::RevisionConflict,
+            "Delivery revision changed before cancellation outcome",
+        ));
+    }
+    if outcome.status != TerminalOutcomeStatus::Cancelled {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "only a verified cancelled outcome can settle cancellation",
+        ));
+    }
+    let run = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == outcome.stage_run_id && is_active(run))
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "cancelled outcome does not match the active StageRun",
+            )
+        })?;
+    let binding = exact_binding(delivery, run, true)?;
+    if run.attempt != outcome.attempt
+        || binding.execution_job_id != outcome.execution_job_id
+        || binding.worker_session_id.as_ref() != Some(&outcome.worker_session_id)
+        || finished_at_millis < run.started_at_millis
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "cancelled outcome no longer matches the active exact binding",
+        ));
+    }
+    let run_id = run.id.clone();
+    let run_stage = run.stage;
+    let task_id = run.delivery_task_id.clone();
+    let mut snapshot = delivery.clone().into_snapshot();
+    let Some(stored_run) = snapshot
+        .stage_runs
+        .iter_mut()
+        .find(|stored| stored.id == run_id)
+    else {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "the active StageRun disappeared while applying cancellation",
+        ));
+    };
+    stored_run.status = StageRunStatus::Cancelled;
+    stored_run.finished_at_millis = Some(finished_at_millis);
+    if let Some(task_id) = task_id {
+        let task = snapshot
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "cancelled StageRun task disappeared",
+                )
+            })?;
+        let expected = match run_stage {
+            DeliveryStage::Executing | DeliveryStage::Reworking => DeliveryTaskStatus::Active,
+            DeliveryStage::Verifying => DeliveryTaskStatus::Verifying,
+            _ => {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "a Delivery-level stage unexpectedly targeted a task",
+                ));
+            }
+        };
+        if task.status != expected {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "DeliveryTask changed before cancellation outcome",
+            ));
+        }
+        task.status = match run_stage {
+            DeliveryStage::Executing => DeliveryTaskStatus::Pending,
+            DeliveryStage::Verifying => DeliveryTaskStatus::Verifying,
+            DeliveryStage::Reworking => DeliveryTaskStatus::Failed,
+            _ => expected,
+        };
+    }
+    snapshot.revision += 1;
+    snapshot.updated_at_millis = finished_at_millis;
+    Delivery::try_from_snapshot(snapshot).map_err(|error| {
+        CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
+    })
+}
+
+fn legal_transition(
+    delivery_status: DeliveryStatus,
+    active_stage: Option<DeliveryStage>,
+) -> Result<
+    (DeliveryStage, DeliveryStatus, StageRunActorType),
+    CoordinationError,
+> {
+    let transition = match (delivery_status, active_stage) {
+        (DeliveryStatus::Draft | DeliveryStatus::Clarifying, None) => (
+            DeliveryStage::Clarifying,
+            DeliveryStatus::Clarifying,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Ready | DeliveryStatus::Planning, None) => (
+            DeliveryStage::Planning,
+            DeliveryStatus::Planning,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Planning, Some(DeliveryStage::Planning)) => (
+            DeliveryStage::PlanReview,
+            DeliveryStatus::NeedsAttention,
+            StageRunActorType::Human,
+        ),
+        (DeliveryStatus::Executing, None) => (
+            DeliveryStage::Executing,
+            DeliveryStatus::Executing,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Executing, Some(DeliveryStage::Executing)) => (
+            DeliveryStage::Verifying,
+            DeliveryStatus::Verifying,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Verifying, None) => (
+            DeliveryStage::Verifying,
+            DeliveryStatus::Verifying,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Verifying, Some(DeliveryStage::Verifying)) => (
+            DeliveryStage::Verifying,
+            DeliveryStatus::Verifying,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Reworking, None) => (
+            DeliveryStage::Reworking,
+            DeliveryStatus::Reworking,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::Reworking, Some(DeliveryStage::Reworking)) => (
+            DeliveryStage::Verifying,
+            DeliveryStatus::Verifying,
+            StageRunActorType::Codex,
+        ),
+        (DeliveryStatus::ReadyToDeliver, None) => (
+            DeliveryStage::DeliveryReview,
+            DeliveryStatus::NeedsAttention,
+            StageRunActorType::Human,
+        ),
+        _ => {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "Delivery status and active StageRun do not have one legal next stage",
+            ));
+        }
+    };
+    Ok(transition)
+}
+
+fn select_task_id(
+    delivery: &Delivery,
+    stage: DeliveryStage,
+    previous: Option<&StageRun>,
+) -> Result<Option<DeliveryTaskId>, CoordinationError> {
+    if !matches!(
+        stage,
+        DeliveryStage::Executing | DeliveryStage::Verifying | DeliveryStage::Reworking
+    ) {
+        return Ok(None);
+    }
+    if delivery.snapshot().tasks.is_empty() {
+        return Ok(None);
+    }
+    if stage == DeliveryStage::Verifying
+        && let Some(previous) = previous
+    {
+        return previous.delivery_task_id.clone().map(Some).ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "task verification cannot follow a Delivery-level writer",
+            )
+        });
+    }
+    Ok(Some(runnable_task(delivery, stage)?.id.clone()))
+}
+
+fn role_for_stage(
+    delivery: &Delivery,
+    stage: DeliveryStage,
+    previous: Option<&StageRun>,
+    delivery_task_id: Option<&DeliveryTaskId>,
+) -> Result<&'static str, CoordinationError> {
+    let fixed = match stage {
+        DeliveryStage::Clarifying => Some("requirements"),
+        DeliveryStage::Planning => Some("planner"),
+        DeliveryStage::PlanReview => Some("reviewer"),
+        DeliveryStage::Executing => Some("executor"),
+        DeliveryStage::Reworking => Some("remediator"),
+        DeliveryStage::DeliveryReview => Some("approver"),
+        DeliveryStage::Verifying => None,
+    };
+    if let Some(role) = fixed {
+        return Ok(role);
+    }
+    if let Some(previous) = previous {
+        return match (previous.stage, previous.role.as_str()) {
+            (DeliveryStage::Executing | DeliveryStage::Reworking, _) => Ok("reviewer"),
+            (DeliveryStage::Verifying, "reviewer") => Ok("verifier"),
+            (DeliveryStage::Verifying, "verifier") => Ok("adversarial-verifier"),
+            (DeliveryStage::Verifying, "adversarial-verifier") => {
+                Err(CoordinationError::new(
+                    CoordinationErrorCode::WrongState,
+                    "all required verification roles completed; submit a DeliveryVerdict",
+                ))
+            }
+            _ => Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "verification progress contains an unexpected role",
+            )),
+        };
+    }
+    let last_writer_index = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .rposition(|run| {
+            matches!(run.stage, DeliveryStage::Executing | DeliveryStage::Reworking)
+                && run.delivery_task_id.as_ref() == delivery_task_id
+        });
+    let completed_roles = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .enumerate()
+        .filter(|(index, run)| {
+            last_writer_index.is_none_or(|writer| *index > writer)
+                && run.stage == DeliveryStage::Verifying
+                && run.delivery_task_id.as_ref() == delivery_task_id
+                && run.status == StageRunStatus::Succeeded
+        })
+        .map(|(_, run)| run.role.as_str())
+        .collect::<Vec<_>>();
+    ["reviewer", "verifier", "adversarial-verifier"]
+        .into_iter()
+        .find(|role| !completed_roles.contains(role))
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "all required verification roles completed; submit a DeliveryVerdict",
+            )
+        })
+}
+
+fn exact_binding<'delivery>(
+    delivery: &'delivery Delivery,
+    run: &StageRun,
+    require_complete: bool,
+) -> Result<&'delivery SessionBinding, CoordinationError> {
+    if run.actor_type == StageRunActorType::Human {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "human review stages are not ExecutionJob SessionBindings",
+        ));
+    }
+    let mut bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.stage_run_id == run.id);
+    let binding = bindings.next().ok_or_else(|| {
+        CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "the active Codex StageRun has no exact SessionBinding",
+        )
+    })?;
+    if bindings.next().is_some()
+        || binding.delivery_id != run.delivery_id
+        || binding.delivery_task_id != run.delivery_task_id
+        || (require_complete
+            && (binding.worker_session_id.is_none() || binding.codex_thread_id.is_none()))
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "the active Codex StageRun SessionBinding is incomplete or conflicting",
+        ));
+    }
+    Ok(binding)
+}
+
+fn is_active(run: &StageRun) -> bool {
+    matches!(run.status, StageRunStatus::Running | StageRunStatus::Waiting)
+}

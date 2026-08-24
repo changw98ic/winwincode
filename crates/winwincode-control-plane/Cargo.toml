@@ -10,7 +10,13 @@ publish = false
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
 [dependencies]
+winwincode-api = { path = "../winwincode-api" }
+winwincode-delivery = { path = "../winwincode-delivery" }
+winwincode-domain.workspace = true
 winwincode-storage = { path = "../winwincode-storage" }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
