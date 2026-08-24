@@ -28,6 +28,31 @@ crate-private 测试入口建立夹具，证明“缺少、过期或不匹配的
 Git、Artifact、checkout 或运行台账 adapter 已经完成。对应 adapter 及集成门禁到位前，生产
 路径保持关闭，不能靠一个 Domain 测试宣布候选或 Evidence 已经可信。
 
+## HTTP 提交边界
+
+`delivery.submit_verdict` 只表示“请 Control Plane 针对当前候选重新计算结论”。外部请求的
+payload 只有两个字段：
+
+```json
+{
+  "deliveryId": "dlv_01J00000000000000000000000",
+  "candidateDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+`candidateDigest` 只用于发现候选已经变化，不是 Evidence，也不是调用方提供的结论。HTTP
+请求还必须带经过认证的 actor、完整 repository scope、requestId 和 expectedRevision。
+Evidence、criterionResults、Verdict、Attention、Delivery status、credential、verification
+结论和原始 runtime facts 都由服务端可信事实产生，出现在请求中会被当作未知字段拒绝。
+
+相同 actor、repository scope、requestId 和完全相同的命令重试时，返回第一次保存的 HTTP
+状态与响应正文，不重新计算。相同 requestId 改了命令内容时返回
+`IDEMPOTENCY_CONFLICT`；revision 已变化时返回 `REVISION_CONFLICT`；候选摘要已经过期时
+返回 `CANDIDATE_STALE`；可信事实接入尚未启用或暂时不可用时返回
+`TRUSTED_FACTS_UNAVAILABLE`。完整机器合同以
+[`control-plane-http.schema.json`](../../schema/winwincode/v1/control-plane-http.schema.json)
+为唯一来源。
+
 ## 1. 什么才是“当前候选”
 
 候选是一次已经冻结的 Git 结果，不是第十一个 Delivery 业务对象。它由这些事实共同确定：
