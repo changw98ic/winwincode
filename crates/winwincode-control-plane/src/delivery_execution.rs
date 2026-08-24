@@ -13,7 +13,8 @@ use std::{collections::HashSet, error::Error, fmt};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope, DeliveryStageExecutionScope,
-    ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, JobCancelAckMessage,
+    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLimits, ExecutionScope,
+    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobCancelAckMessage, JobCancelAckMessageKind,
 };
 use winwincode_delivery::{
     application::{
@@ -229,7 +230,7 @@ pub fn prepare_delivery_advance(
         scope: ExecutionScope::DeliveryStageExecutionScope(DeliveryStageExecutionScope {
             delivery_id: intent.delivery_id.clone(),
             delivery_task_id: intent.delivery_task_id.clone(),
-            kind: "delivery-stage".to_owned(),
+            kind: DeliveryStageExecutionScopeKind::DeliveryStage,
             product_session_id: intent.product_session_id.clone(),
             rework_authorization,
             stage_run_id: intent.stage_run_id.clone(),
@@ -558,7 +559,7 @@ fn validate_request_id(request_id: &RequestId) -> Result<(), DeliveryExecutionEr
 fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionError> {
     let (scope_identity_valid, rework_scope_error) = match &job.scope {
         ExecutionScope::DeliveryStageExecutionScope(scope) => (
-            scope.kind == "delivery-stage"
+            scope.kind == DeliveryStageExecutionScopeKind::DeliveryStage
                 && canonical_identifier(&scope.product_session_id.0, "psn")
                 && canonical_identifier(&scope.delivery_id.0, "dlv")
                 && scope
@@ -591,7 +592,7 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
         ),
         (
             "executionJob.workspace.writeMode",
-            job.workspace.write_mode == "candidate",
+            job.workspace.write_mode == ExecutionWorkspaceWriteMode::Candidate,
         ),
         (
             "executionJob.executionProfile",
@@ -788,7 +789,7 @@ fn validate_cancel_ack(
         .error
         .as_ref()
         .is_none_or(|error| bounded_length(&error.message, 1, 500));
-    let valid = acknowledgement.kind == "job.cancel_ack"
+    let valid = acknowledgement.kind == JobCancelAckMessageKind::JobCancelAck
         && canonical_identifier(&acknowledgement.message_id.0, "xmsg")
         && instant(&acknowledgement.sent_at.0)
         && canonical_identifier(&acknowledgement.request_id.0, "req")

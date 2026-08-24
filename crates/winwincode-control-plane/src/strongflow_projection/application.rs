@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{Actor, RepositoryScope};
+use winwincode_api::generated::{Actor, RepositoryScope, RepositoryScopeKind};
 use winwincode_delivery::{
     domain::{
         AttentionItemStatus, AttentionItemType, Delivery, DeliveryStage, DeliveryVerdictStatus,
@@ -442,7 +442,7 @@ fn validate_limit(limit: i64) -> Result<usize, StrongFlowProjectionError> {
 }
 
 fn validate_scope(scope: &RepositoryScope) -> Result<(), StrongFlowProjectionError> {
-    if scope.kind == "repository"
+    if scope.kind == RepositoryScopeKind::Repository
         && portable(&scope.organization_id.0)
         && portable(&scope.workspace_id.0)
         && portable(&scope.project_id.0)
