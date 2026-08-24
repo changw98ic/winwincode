@@ -1,0 +1,529 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Deterministic, rebuildable Git candidate identity.
+//!
+//! A candidate is deliberately not part of [`super::DeliverySnapshot`]. The
+//! Control Plane rebuilds it from the current Delivery writer and exact Git
+//! facts, then persists only candidate references in Evidence and Verdict.
+
+use std::collections::HashSet;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use super::{
+    Delivery, DeliveryStage, DeliveryValidationError, DeliveryValidationErrorCode, RepositoryRef,
+    SessionBinding, SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
+    validation_error,
+};
+use winwincode_domain::{DeliveryId, StageRunId};
+
+const MAX_CHANGED_PATHS: usize = 100_000;
+const MAX_PATH_LENGTH: usize = 4_096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidatePathState {
+    Present,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidatePathFact {
+    pub path: String,
+    pub state: CandidatePathState,
+    pub object_id: Option<String>,
+}
+
+/// Exact Git and writer identities observed after a writer succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreezeCandidateFacts {
+    pub producer_stage_run_id: StageRunId,
+    pub producer_session_binding_id: SessionBindingId,
+    pub base_commit_id: String,
+    pub base_tree_id: String,
+    pub candidate_commit_id: String,
+    pub candidate_tree_id: String,
+    /// Lowercase SHA-256 hex without a prefix, matching Git diff tooling.
+    pub diff_sha256: String,
+    pub changed_paths: Vec<CandidatePathFact>,
+}
+
+/// One immutable candidate identity derived from canonical Delivery and Git facts.
+///
+/// This value is serializable for projections, but it is not deserializable and
+/// cannot be inserted as an eleventh persisted Delivery object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrozenDeliveryCandidate {
+    candidate_ref: String,
+    delivery_id: DeliveryId,
+    delivery_spec_id: super::DeliverySpecId,
+    delivery_spec_revision: u64,
+    repository: RepositoryRef,
+    base_revision: String,
+    producer_stage_run_id: StageRunId,
+    producer_session_binding_id: SessionBindingId,
+    base_commit_id: String,
+    base_tree_id: String,
+    candidate_commit_id: String,
+    candidate_tree_id: String,
+    diff_sha256: String,
+    changed_paths: Vec<CandidatePathFact>,
+}
+
+impl FrozenDeliveryCandidate {
+    pub fn candidate_ref(&self) -> &str {
+        &self.candidate_ref
+    }
+
+    pub fn delivery_id(&self) -> &DeliveryId {
+        &self.delivery_id
+    }
+
+    pub fn delivery_spec_id(&self) -> &super::DeliverySpecId {
+        &self.delivery_spec_id
+    }
+
+    pub fn delivery_spec_revision(&self) -> u64 {
+        self.delivery_spec_revision
+    }
+
+    pub fn repository(&self) -> &RepositoryRef {
+        &self.repository
+    }
+
+    pub fn base_revision(&self) -> &str {
+        &self.base_revision
+    }
+
+    pub fn producer_stage_run_id(&self) -> &StageRunId {
+        &self.producer_stage_run_id
+    }
+
+    pub fn producer_session_binding_id(&self) -> &SessionBindingId {
+        &self.producer_session_binding_id
+    }
+
+    pub fn base_commit_id(&self) -> &str {
+        &self.base_commit_id
+    }
+
+    pub fn base_tree_id(&self) -> &str {
+        &self.base_tree_id
+    }
+
+    pub fn candidate_commit_id(&self) -> &str {
+        &self.candidate_commit_id
+    }
+
+    pub fn candidate_tree_id(&self) -> &str {
+        &self.candidate_tree_id
+    }
+
+    pub fn diff_sha256(&self) -> &str {
+        &self.diff_sha256
+    }
+
+    pub fn changed_paths(&self) -> &[CandidatePathFact] {
+        &self.changed_paths
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateIdentity<'candidate> {
+    delivery_id: &'candidate DeliveryId,
+    delivery_spec_id: &'candidate super::DeliverySpecId,
+    delivery_spec_revision: u64,
+    repository: &'candidate RepositoryRef,
+    base_revision: &'candidate str,
+    producer_stage_run_id: &'candidate StageRunId,
+    producer_session_binding_id: &'candidate SessionBindingId,
+    base_commit_id: &'candidate str,
+    base_tree_id: &'candidate str,
+    candidate_commit_id: &'candidate str,
+    candidate_tree_id: &'candidate str,
+    diff_sha256: &'candidate str,
+    changed_paths: &'candidate [CandidatePathFact],
+}
+
+/// Freezes exact Git facts against the latest successful Delivery writer.
+///
+/// # Errors
+///
+/// Rejects malformed Git facts, a non-current writer, an incomplete producer
+/// SessionBinding, or a producer outside the executor/remediator policy.
+pub fn freeze_delivery_candidate(
+    delivery: &Delivery,
+    mut facts: FreezeCandidateFacts,
+) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
+    let producer = current_writer(delivery, &facts.producer_stage_run_id)?;
+    exact_producer_binding(delivery, producer, &facts.producer_session_binding_id)?;
+
+    let mut changed_paths = std::mem::take(&mut facts.changed_paths);
+    validate_git_facts(delivery, &facts, &mut changed_paths)?;
+
+    let mut candidate = FrozenDeliveryCandidate {
+        candidate_ref: String::new(),
+        delivery_id: delivery.id().clone(),
+        delivery_spec_id: delivery.snapshot().spec.id.clone(),
+        delivery_spec_revision: delivery.snapshot().spec.revision,
+        repository: delivery.snapshot().spec.repository.clone(),
+        base_revision: delivery.snapshot().spec.base_revision.clone(),
+        producer_stage_run_id: facts.producer_stage_run_id,
+        producer_session_binding_id: facts.producer_session_binding_id,
+        base_commit_id: facts.base_commit_id,
+        base_tree_id: facts.base_tree_id,
+        candidate_commit_id: facts.candidate_commit_id,
+        candidate_tree_id: facts.candidate_tree_id,
+        diff_sha256: facts.diff_sha256,
+        changed_paths,
+    };
+    let identity = CandidateIdentity::from(&candidate);
+    let encoded = serde_json::to_vec(&identity).map_err(|error| {
+        validation_error(
+            DeliveryValidationErrorCode::InvalidValue,
+            "candidate",
+            format!("candidate identity cannot be encoded: {error}"),
+        )
+    })?;
+    candidate.candidate_ref = format!("git-candidate:sha256:{:x}", Sha256::digest(encoded));
+    Ok(candidate)
+}
+
+/// Rebuilds a frozen candidate and rejects stale or modified derived facts.
+///
+/// # Errors
+///
+/// Rejects a candidate after its Spec changes, its facts change, or any later
+/// executor/remediator writer starts.
+pub fn assert_frozen_candidate_current(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+) -> Result<(), DeliveryValidationError> {
+    if candidate.delivery_id != *delivery.id()
+        || candidate.delivery_spec_id != delivery.snapshot().spec.id
+        || candidate.delivery_spec_revision != delivery.snapshot().spec.revision
+        || candidate.repository != delivery.snapshot().spec.repository
+        || candidate.base_revision != delivery.snapshot().spec.base_revision
+    {
+        return Err(stale_candidate(
+            "candidate does not match the current DeliverySpec",
+        ));
+    }
+    let rebuilt = freeze_delivery_candidate(
+        delivery,
+        FreezeCandidateFacts {
+            producer_stage_run_id: candidate.producer_stage_run_id.clone(),
+            producer_session_binding_id: candidate.producer_session_binding_id.clone(),
+            base_commit_id: candidate.base_commit_id.clone(),
+            base_tree_id: candidate.base_tree_id.clone(),
+            candidate_commit_id: candidate.candidate_commit_id.clone(),
+            candidate_tree_id: candidate.candidate_tree_id.clone(),
+            diff_sha256: candidate.diff_sha256.clone(),
+            changed_paths: candidate.changed_paths.clone(),
+        },
+    )
+    .map_err(|_| stale_candidate("candidate producer or Git facts are no longer current"))?;
+    if rebuilt != *candidate {
+        return Err(stale_candidate("candidate facts changed after freezing"));
+    }
+    Ok(())
+}
+
+impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity<'candidate> {
+    fn from(candidate: &'candidate FrozenDeliveryCandidate) -> Self {
+        Self {
+            delivery_id: &candidate.delivery_id,
+            delivery_spec_id: &candidate.delivery_spec_id,
+            delivery_spec_revision: candidate.delivery_spec_revision,
+            repository: &candidate.repository,
+            base_revision: &candidate.base_revision,
+            producer_stage_run_id: &candidate.producer_stage_run_id,
+            producer_session_binding_id: &candidate.producer_session_binding_id,
+            base_commit_id: &candidate.base_commit_id,
+            base_tree_id: &candidate.base_tree_id,
+            candidate_commit_id: &candidate.candidate_commit_id,
+            candidate_tree_id: &candidate.candidate_tree_id,
+            diff_sha256: &candidate.diff_sha256,
+            changed_paths: &candidate.changed_paths,
+        }
+    }
+}
+
+fn current_writer<'delivery>(
+    delivery: &'delivery Delivery,
+    producer_id: &StageRunId,
+) -> Result<&'delivery StageRun, DeliveryValidationError> {
+    let runs = &delivery.snapshot().stage_runs;
+    let (producer_index, producer) = runs
+        .iter()
+        .enumerate()
+        .find(|(_, run)| &run.id == producer_id)
+        .ok_or_else(|| stale_candidate("candidate producer StageRun is missing"))?;
+    let valid_role = matches!(
+        (producer.stage, producer.role.as_str()),
+        (DeliveryStage::Executing, "executor") | (DeliveryStage::Reworking, "remediator")
+    );
+    if producer.actor_type != StageRunActorType::Codex
+        || producer.status != StageRunStatus::Succeeded
+        || !valid_role
+    {
+        return Err(stale_candidate(
+            "candidate producer must be one successful Codex executor or remediator",
+        ));
+    }
+    let later_writer = runs.iter().enumerate().any(|(index, run)| {
+        run.id != producer.id
+            && run.actor_type == StageRunActorType::Codex
+            && matches!(
+                run.stage,
+                DeliveryStage::Executing | DeliveryStage::Reworking
+            )
+            && (index > producer_index
+                || run.started_at_millis > producer.started_at_millis
+                || (run.started_at_millis == producer.started_at_millis
+                    && run.attempt > producer.attempt))
+    });
+    if later_writer {
+        return Err(stale_candidate(
+            "a later executor or remediator writer already started",
+        ));
+    }
+    Ok(producer)
+}
+
+fn exact_producer_binding<'delivery>(
+    delivery: &'delivery Delivery,
+    producer: &StageRun,
+    binding_id: &SessionBindingId,
+) -> Result<&'delivery SessionBinding, DeliveryValidationError> {
+    let binding = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| &binding.id == binding_id)
+        .ok_or_else(|| stale_candidate("candidate producer SessionBinding is missing"))?;
+    let complete = binding.worker_session_id.is_some() && binding.codex_thread_id.is_some();
+    if binding.delivery_id != *delivery.id()
+        || binding.stage_run_id != producer.id
+        || binding.delivery_task_id != producer.delivery_task_id
+        || !complete
+        || binding.bound_at_millis < producer.started_at_millis
+        || producer
+            .finished_at_millis
+            .is_none_or(|finished| binding.bound_at_millis > finished)
+    {
+        return Err(stale_candidate(
+            "candidate producer does not have one exact complete SessionBinding",
+        ));
+    }
+    Ok(binding)
+}
+
+fn validate_git_facts(
+    delivery: &Delivery,
+    facts: &FreezeCandidateFacts,
+    changed_paths: &mut Vec<CandidatePathFact>,
+) -> Result<(), DeliveryValidationError> {
+    let object_ids = [
+        facts.base_commit_id.as_str(),
+        facts.base_tree_id.as_str(),
+        facts.candidate_commit_id.as_str(),
+        facts.candidate_tree_id.as_str(),
+    ];
+    if object_ids.iter().any(|value| !git_object_id(value)) || !lowercase_sha256(&facts.diff_sha256)
+    {
+        return Err(invalid_candidate(
+            "candidate Git objects and diff digest must be lowercase hexadecimal identities",
+        ));
+    }
+    let object_length = object_ids[0].len();
+    if object_ids.iter().any(|value| value.len() != object_length) {
+        return Err(invalid_candidate(
+            "candidate Git object identities must use one repository object format",
+        ));
+    }
+    if git_object_id(&delivery.snapshot().spec.base_revision)
+        && delivery.snapshot().spec.base_revision != facts.base_commit_id
+    {
+        return Err(invalid_candidate(
+            "candidate base commit does not match DeliverySpec.baseRevision",
+        ));
+    }
+    if changed_paths.len() > MAX_CHANGED_PATHS {
+        return Err(invalid_candidate(
+            "candidate changed paths exceed the supported limit",
+        ));
+    }
+    changed_paths.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut paths = HashSet::with_capacity(changed_paths.len());
+    for fact in changed_paths {
+        if !portable_path(&fact.path) || !paths.insert(fact.path.as_str()) {
+            return Err(invalid_candidate(
+                "candidate changed paths must be unique portable repository-relative paths",
+            ));
+        }
+        let valid_object = fact
+            .object_id
+            .as_deref()
+            .is_some_and(|object_id| git_object_id(object_id) && object_id.len() == object_length);
+        if (fact.state == CandidatePathState::Present) != valid_object
+            || (fact.state == CandidatePathState::Deleted && fact.object_id.is_some())
+        {
+            return Err(invalid_candidate(
+                "candidate path state does not match its Git object identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn portable_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PATH_LENGTH
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value.bytes().any(|byte| byte <= 31 || byte == 127)
+        && !value
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        && !value
+            .get(1..2)
+            .is_some_and(|second| second == ":" && value.as_bytes()[0].is_ascii_alphabetic())
+}
+
+fn invalid_candidate(message: &str) -> DeliveryValidationError {
+    validation_error(
+        DeliveryValidationErrorCode::InvalidValue,
+        "candidate",
+        message,
+    )
+}
+
+fn stale_candidate(message: &str) -> DeliveryValidationError {
+    validation_error(
+        DeliveryValidationErrorCode::RelationshipMismatch,
+        "candidate",
+        message,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{DeliveryStatus, test_fixture};
+    use winwincode_domain::{CodexThreadId, ExecutionJobId, ProductSessionId, WorkerSessionId};
+
+    fn writer_delivery() -> Delivery {
+        let mut snapshot = test_fixture();
+        snapshot.status = DeliveryStatus::Verifying;
+        snapshot.evidence.clear();
+        snapshot.verdict = None;
+        let run = &mut snapshot.stage_runs[0];
+        run.id = StageRunId("stage-executor-1".into());
+        run.stage = DeliveryStage::Executing;
+        run.role = "executor".into();
+        run.status = StageRunStatus::Succeeded;
+        run.started_at_millis = 1_800_000_000_010;
+        run.finished_at_millis = Some(1_800_000_000_020);
+        let binding = &mut snapshot.session_bindings[0];
+        binding.id = SessionBindingId("binding-executor-1".into());
+        binding.stage_run_id = run.id.clone();
+        binding.product_session_id = ProductSessionId("product-executor".into());
+        binding.execution_job_id = ExecutionJobId("job-executor".into());
+        binding.worker_session_id = Some(WorkerSessionId("worker-executor".into()));
+        binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
+        binding.bound_at_millis = 1_800_000_000_011;
+        Delivery::try_from_snapshot(snapshot).expect("writer Delivery")
+    }
+
+    fn facts() -> FreezeCandidateFacts {
+        FreezeCandidateFacts {
+            producer_stage_run_id: StageRunId("stage-executor-1".into()),
+            producer_session_binding_id: SessionBindingId("binding-executor-1".into()),
+            base_commit_id: "0123456789012345678901234567890123456789".into(),
+            base_tree_id: "1111111111111111111111111111111111111111".into(),
+            candidate_commit_id: "2222222222222222222222222222222222222222".into(),
+            candidate_tree_id: "3333333333333333333333333333333333333333".into(),
+            diff_sha256: "a".repeat(64),
+            changed_paths: vec![CandidatePathFact {
+                path: "src/invitation.rs".into(),
+                state: CandidatePathState::Present,
+                object_id: Some("4444444444444444444444444444444444444444".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn freezes_candidate_from_exact_writer_facts() {
+        let delivery = writer_delivery();
+        let first = freeze_delivery_candidate(&delivery, facts()).expect("candidate");
+        let second = freeze_delivery_candidate(&delivery, facts()).expect("candidate");
+        assert_eq!(first, second);
+        assert_eq!(
+            first.candidate_ref().len(),
+            "git-candidate:sha256:".len() + 64
+        );
+        assert_frozen_candidate_current(&delivery, &first).expect("current");
+    }
+
+    #[test]
+    fn rejects_candidate_after_spec_or_writer_change() {
+        let delivery = writer_delivery();
+        let candidate = freeze_delivery_candidate(&delivery, facts()).expect("candidate");
+
+        let mut changed_spec = delivery.clone().into_snapshot();
+        changed_spec.spec.revision += 1;
+        changed_spec.revision += 1;
+        let changed_spec = Delivery::try_from_snapshot(changed_spec).expect("new spec");
+        assert!(assert_frozen_candidate_current(&changed_spec, &candidate).is_err());
+
+        let mut later = delivery.into_snapshot();
+        later.stage_runs.push(StageRun {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: StageRunId("stage-remediator-1".into()),
+            delivery_id: later.id.clone(),
+            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
+            stage: DeliveryStage::Reworking,
+            actor_type: StageRunActorType::Codex,
+            role: "remediator".into(),
+            status: StageRunStatus::Running,
+            attempt: 1,
+            started_at_millis: 1_800_000_000_030,
+            finished_at_millis: None,
+        });
+        later.session_bindings.push(SessionBinding {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: SessionBindingId("binding-remediator-1".into()),
+            delivery_id: later.id.clone(),
+            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
+            stage_run_id: StageRunId("stage-remediator-1".into()),
+            product_session_id: ProductSessionId("product-remediator".into()),
+            execution_job_id: ExecutionJobId("job-remediator".into()),
+            worker_session_id: Some(WorkerSessionId("worker-remediator".into())),
+            codex_thread_id: Some(CodexThreadId("thread-remediator".into())),
+            bound_at_millis: 1_800_000_000_031,
+        });
+        later.updated_at_millis = 1_800_000_000_031;
+        later.revision += 1;
+        let later = Delivery::try_from_snapshot(later).expect("later writer");
+        assert!(assert_frozen_candidate_current(&later, &candidate).is_err());
+    }
+}
