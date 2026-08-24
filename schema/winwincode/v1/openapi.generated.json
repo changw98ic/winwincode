@@ -2811,12 +2811,16 @@
             "$ref": "#/components/schemas/CommandEnvelope"
           },
           {
+            "description": "Repository-scoped stale-check request. The authenticated actor, complete repository scope, requestId, and expectedRevision form the command boundary.",
             "properties": {
               "command": {
                 "const": "delivery.submit_verdict"
               },
               "payload": {
                 "$ref": "#/components/schemas/DeliverySubmitVerdictPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
               }
             },
             "type": "object"
@@ -2825,9 +2829,11 @@
       },
       "DeliverySubmitVerdictPayload": {
         "additionalProperties": false,
+        "description": "Requests server-side verdict computation from sealed Control Plane facts. Caller-derived Evidence, criterion results, verdicts, Attention, status, credentials, verification conclusions, and raw runtime facts are rejected.",
         "properties": {
           "candidateDigest": {
-            "$ref": "#/components/schemas/Sha256Digest"
+            "$ref": "#/components/schemas/Sha256Digest",
+            "description": "Current frozen candidate digest used for stale-check only; it is not Evidence, a verdict, or an authorization fact."
           },
           "deliveryId": {
             "$ref": "#/components/schemas/DeliveryId"
@@ -3029,9 +3035,11 @@
           "RESOURCE_NOT_FOUND",
           "IDEMPOTENCY_CONFLICT",
           "REVISION_CONFLICT",
+          "CANDIDATE_STALE",
           "WRONG_STATE",
           "RATE_LIMITED",
           "SERVICE_UNAVAILABLE",
+          "TRUSTED_FACTS_UNAVAILABLE",
           "INTERNAL_ERROR"
         ],
         "type": "string"
@@ -5216,7 +5224,8 @@
       "RetryableErrorCode": {
         "enum": [
           "RATE_LIMITED",
-          "SERVICE_UNAVAILABLE"
+          "SERVICE_UNAVAILABLE",
+          "TRUSTED_FACTS_UNAVAILABLE"
         ],
         "type": "string"
       },
@@ -6048,6 +6057,7 @@
           "RESOURCE_NOT_FOUND",
           "IDEMPOTENCY_CONFLICT",
           "REVISION_CONFLICT",
+          "CANDIDATE_STALE",
           "WRONG_STATE",
           "INTERNAL_ERROR"
         ],
@@ -6759,7 +6769,7 @@
                 }
               }
             },
-            "description": "IDEMPOTENCY_CONFLICT, REVISION_CONFLICT, or WRONG_STATE"
+            "description": "IDEMPOTENCY_CONFLICT, REVISION_CONFLICT, CANDIDATE_STALE, or WRONG_STATE"
           },
           "429": {
             "content": {
@@ -6789,7 +6799,7 @@
                 }
               }
             },
-            "description": "SERVICE_UNAVAILABLE"
+            "description": "SERVICE_UNAVAILABLE or TRUSTED_FACTS_UNAVAILABLE"
           }
         }
       }
@@ -6899,5 +6909,5 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:363af5b8f01d8f0faf24b5f89d959c9c8c623bef5b0926fea77df34695f20494"
+  "x-source-digest": "sha256:1c700d792d6f5cc70cd880e1ab5005b6087edec9e3d4d36de6010ee4f7a0e51f"
 }

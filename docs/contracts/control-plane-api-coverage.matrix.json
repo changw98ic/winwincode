@@ -514,7 +514,7 @@
         "create and update a DeliverySpec with revision and request identity",
         "approve the task breakdown and advance the one legal next stage",
         "resolve business Attention with bounded remediation",
-        "submit candidate-bound criterion results and rebuild the Delivery view"
+        "request server-computed verdicts for one candidate stale-check digest and rebuild the Delivery view"
       ],
       "httpCommands": [
         "delivery.create",
