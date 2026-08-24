@@ -90,7 +90,7 @@ impl ComputedDeliveryVerdict {
         self.next_status
     }
 
-    pub fn into_parts(self) -> (Vec<EvidenceRef>, DeliveryVerdict, DeliveryStatus) {
+    pub(crate) fn into_parts(self) -> (Vec<EvidenceRef>, DeliveryVerdict, DeliveryStatus) {
         (self.evidence, self.verdict, self.next_status)
     }
 }

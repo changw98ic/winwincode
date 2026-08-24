@@ -1314,7 +1314,7 @@ fn relationship_mismatch(path: &str, message: &str) -> DeliveryValidationError {
 ///
 /// These helpers deliberately construct only the validated projection. They
 /// are unavailable to production code and keep every production field private.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     use super::*;
 

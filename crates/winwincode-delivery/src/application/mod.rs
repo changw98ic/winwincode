@@ -13,6 +13,7 @@ pub mod attention;
 pub mod session_binding;
 pub mod stage;
 pub mod task;
+pub mod verdict;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinationErrorCode {

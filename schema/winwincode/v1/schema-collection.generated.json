@@ -2347,39 +2347,6 @@
       ],
       "type": "object"
     },
-    "CriterionVerdictInput": {
-      "additionalProperties": false,
-      "properties": {
-        "criterionId": {
-          "maxLength": 200,
-          "minLength": 1,
-          "type": "string"
-        },
-        "evidenceIds": {
-          "items": {
-            "$ref": "#/$defs/EvidenceId"
-          },
-          "maxItems": 1000,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "verdict": {
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "infra_error"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "criterionId",
-        "verdict",
-        "evidenceIds"
-      ],
-      "type": "object"
-    },
     "DeliveryAdvanceCommand": {
       "allOf": [
         {
@@ -2861,22 +2828,13 @@
         "candidateDigest": {
           "$ref": "#/$defs/Sha256Digest"
         },
-        "criterionResults": {
-          "items": {
-            "$ref": "#/$defs/CriterionVerdictInput"
-          },
-          "maxItems": 1000,
-          "minItems": 1,
-          "type": "array"
-        },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
         }
       },
       "required": [
         "deliveryId",
-        "candidateDigest",
-        "criterionResults"
+        "candidateDigest"
       ],
       "type": "object"
     },
@@ -6713,6 +6671,6 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:a80ef179452018741fc77b9fc62b4fa417526ed8de9319c2715ad6097df2565a",
+  "x-source-digest": "sha256:363af5b8f01d8f0faf24b5f89d959c9c8c623bef5b0926fea77df34695f20494",
   "x-winwincode-license": "Apache-2.0"
 }

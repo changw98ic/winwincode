@@ -815,7 +815,7 @@ fn validate_verdict_relationships(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_fixture() -> DeliverySnapshot {
     serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
         .expect("checked Delivery fixture shape")

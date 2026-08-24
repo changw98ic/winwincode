@@ -625,39 +625,6 @@
         }
       }
     },
-    "CriterionVerdictInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "criterionId",
-        "verdict",
-        "evidenceIds"
-      ],
-      "properties": {
-        "criterionId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "verdict": {
-          "type": "string",
-          "enum": [
-            "pass",
-            "fail",
-            "inconclusive",
-            "infra_error"
-          ]
-        },
-        "evidenceIds": {
-          "type": "array",
-          "items": {
-            "$ref": "./domain.schema.json#/$defs/EvidenceId"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
-        }
-      }
-    },
     "RemediationInput": {
       "type": "object",
       "additionalProperties": false,
@@ -1022,8 +989,7 @@
       "additionalProperties": false,
       "required": [
         "deliveryId",
-        "candidateDigest",
-        "criterionResults"
+        "candidateDigest"
       ],
       "properties": {
         "deliveryId": {
@@ -1031,14 +997,6 @@
         },
         "candidateDigest": {
           "$ref": "./domain.schema.json#/$defs/Sha256Digest"
-        },
-        "criterionResults": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CriterionVerdictInput"
-          },
-          "minItems": 1,
-          "maxItems": 1000
         }
       }
     },
