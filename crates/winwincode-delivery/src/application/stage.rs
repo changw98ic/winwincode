@@ -98,6 +98,22 @@ impl VerifiedTerminalOutcome {
         &self.lease_identity.worker_session_id
     }
 
+    pub fn lease_id(&self) -> &LeaseId {
+        &self.lease_identity.lease_id
+    }
+
+    pub fn fencing_token(&self) -> &FencingToken {
+        &self.lease_identity.fencing_token
+    }
+
+    pub fn worker_id(&self) -> &WorkerId {
+        &self.lease_identity.worker_id
+    }
+
+    pub fn worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.lease_identity.worker_instance_id
+    }
+
     pub const fn attempt(&self) -> u64 {
         self.lease_identity.attempt
     }
