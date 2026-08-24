@@ -7,6 +7,7 @@ use winwincode_domain::{AttentionItemId, StageRunId};
 use crate::domain::{
     AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot, DeliveryStage,
     DeliveryStatus, StageRunActorType, StageRunStatus,
+    rework::{resolved_verdict_attention_action, safest_attention_transition},
 };
 
 use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
@@ -161,7 +162,21 @@ fn apply_resolution(
     {
         DeliveryStatus::NeedsAttention
     } else {
-        next_delivery_status(item_type, run_stage, review_decision)?
+        let actions = snapshot
+            .attention_items
+            .iter()
+            .filter(|item| {
+                item.blocking
+                    && item.stage_run_id.as_ref() == Some(&input.stage_run_id)
+                    && item.delivery_spec_id == snapshot.spec.id
+            })
+            .filter_map(|item| resolved_verdict_attention_action(item.item_type, item.status))
+            .collect::<Vec<_>>();
+        if actions.is_empty() {
+            next_delivery_status(item_type, run_stage, review_decision)?
+        } else {
+            safest_attention_transition(&actions)
+        }
     };
     snapshot.revision += 1;
     snapshot.updated_at_millis = input.now_millis;

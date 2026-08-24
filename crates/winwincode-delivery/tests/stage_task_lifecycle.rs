@@ -1091,6 +1091,101 @@ fn resolving_one_of_multiple_blockers_keeps_delivery_blocked() {
 }
 
 #[test]
+fn resolving_combined_attention_uses_the_safest_transition_in_either_order() {
+    use winwincode_delivery::domain::{
+        AttentionItem, AttentionItemStatus, AttentionItemType, StageRun, StageRunStatus,
+    };
+
+    fn delivery_with_combined_attention() -> Delivery {
+        let mut snapshot = delivery_with_status(DeliveryStatus::Ready).into_snapshot();
+        snapshot.status = DeliveryStatus::NeedsAttention;
+        let run_id = StageRunId("stage-combined-attention".into());
+        snapshot.stage_runs.push(StageRun {
+            schema_version: snapshot.schema_version,
+            id: run_id.clone(),
+            delivery_id: snapshot.id.clone(),
+            delivery_task_id: None,
+            stage: DeliveryStage::Verifying,
+            actor_type: StageRunActorType::Codex,
+            role: "verifier".into(),
+            status: StageRunStatus::Succeeded,
+            attempt: 1,
+            started_at_millis: 1_800_000_000_100,
+            finished_at_millis: Some(1_800_000_000_110),
+        });
+        for (id, item_type, context) in [
+            (
+                "attention-clarify-scope",
+                AttentionItemType::ScopeChange,
+                "clarify the current candidate scope",
+            ),
+            (
+                "attention-retry-verification",
+                AttentionItemType::VerificationBlocked,
+                "retry verification for the current candidate",
+            ),
+        ] {
+            snapshot.attention_items.push(AttentionItem {
+                schema_version: snapshot.schema_version,
+                id: AttentionItemId(id.into()),
+                delivery_id: snapshot.id.clone(),
+                delivery_spec_id: snapshot.spec.id.clone(),
+                stage_run_id: Some(run_id.clone()),
+                item_type,
+                title: context.into(),
+                context: context.into(),
+                options: vec![],
+                assigned_to: Some("reviewer-one".into()),
+                blocking: true,
+                status: AttentionItemStatus::Open,
+                resolution: None,
+                resolved_by: None,
+                created_at_millis: 1_800_000_000_120,
+                resolved_at_millis: None,
+            });
+        }
+        Delivery::try_from_snapshot(snapshot).expect("combined current Attention")
+    }
+
+    fn resolve_in_order(first: &str, second: &str) -> Delivery {
+        let delivery = delivery_with_combined_attention();
+        let resolve = |delivery: &Delivery, id: &str, now_millis| {
+            let item = delivery
+                .snapshot()
+                .attention_items
+                .iter()
+                .find(|item| item.id.0 == id)
+                .expect("current Attention");
+            resolve_attention(
+                delivery,
+                ResolveAttentionInput {
+                    expected_revision: delivery.revision(),
+                    attention_item_id: item.id.clone(),
+                    stage_run_id: item.stage_run_id.clone().expect("verification StageRun"),
+                    expected_context: item.context.clone(),
+                    actor: "reviewer-one".into(),
+                    decision: AttentionDecision::Resolved,
+                    resolution: "acknowledged".into(),
+                    now_millis,
+                },
+            )
+            .expect("current Attention resolves")
+        };
+        let delivery = resolve(&delivery, first, 1_800_000_000_130);
+        assert_eq!(delivery.snapshot().status, DeliveryStatus::NeedsAttention);
+        resolve(&delivery, second, 1_800_000_000_140)
+    }
+
+    for order in [
+        ("attention-clarify-scope", "attention-retry-verification"),
+        ("attention-retry-verification", "attention-clarify-scope"),
+    ] {
+        let resolved = resolve_in_order(order.0, order.1);
+        assert_eq!(resolved.snapshot().status, DeliveryStatus::Clarifying);
+    }
+}
+
+#[test]
 fn replayed_advance_returns_original_stage_run_without_new_state() {
     let journal = Arc::new(InMemoryDeliveryJournal::new());
     let store = DeliveryStore::new(journal);

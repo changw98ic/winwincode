@@ -163,6 +163,31 @@ pub(crate) enum VerdictAttentionAction {
     RetryVerification,
 }
 
+/// Reconstructs the derived Verdict action from one resolved current
+/// `AttentionItem`. The action itself is deliberately not persisted: the
+/// canonical item type and resolution are the authority.
+pub(crate) const fn resolved_verdict_attention_action(
+    item_type: super::AttentionItemType,
+    status: super::AttentionItemStatus,
+) -> Option<VerdictAttentionAction> {
+    match (item_type, status) {
+        (
+            super::AttentionItemType::ScopeChange,
+            super::AttentionItemStatus::Resolved | super::AttentionItemStatus::Dismissed,
+        )
+        | (super::AttentionItemType::RequirementQuestion, super::AttentionItemStatus::Dismissed) => {
+            Some(VerdictAttentionAction::ClarifyDefinition)
+        }
+        (super::AttentionItemType::VerificationBlocked, super::AttentionItemStatus::Dismissed) => {
+            Some(VerdictAttentionAction::StartRework)
+        }
+        (super::AttentionItemType::VerificationBlocked, super::AttentionItemStatus::Resolved) => {
+            Some(VerdictAttentionAction::RetryVerification)
+        }
+        _ => None,
+    }
+}
+
 /// Chooses the safest next state from the complete current action set.
 ///
 /// Clarification always outranks code rework, which outranks a retry. The
