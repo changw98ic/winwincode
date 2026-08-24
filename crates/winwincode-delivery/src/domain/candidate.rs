@@ -83,95 +83,95 @@ pub struct ValidatedGitSnapshotFact {
 }
 
 impl ValidatedGitSnapshotFact {
-    pub fn stage_run_id(&self) -> &StageRunId {
+    pub(crate) fn stage_run_id(&self) -> &StageRunId {
         &self.stage_run_id
     }
 
-    pub fn session_binding_id(&self) -> &SessionBindingId {
+    pub(crate) fn session_binding_id(&self) -> &SessionBindingId {
         &self.session_binding_id
     }
 
-    pub fn product_session_id(&self) -> &ProductSessionId {
+    pub(crate) fn product_session_id(&self) -> &ProductSessionId {
         &self.product_session_id
     }
 
-    pub fn execution_job_id(&self) -> &ExecutionJobId {
+    pub(crate) fn execution_job_id(&self) -> &ExecutionJobId {
         &self.execution_job_id
     }
 
-    pub const fn attempt(&self) -> u64 {
+    pub(crate) const fn attempt(&self) -> u64 {
         self.attempt
     }
 
-    pub fn lease_id(&self) -> &LeaseId {
+    pub(crate) fn lease_id(&self) -> &LeaseId {
         &self.lease_id
     }
 
-    pub fn fencing_token(&self) -> &FencingToken {
+    pub(crate) fn fencing_token(&self) -> &FencingToken {
         &self.fencing_token
     }
 
-    pub fn worker_id(&self) -> &WorkerId {
+    pub(crate) fn worker_id(&self) -> &WorkerId {
         &self.worker_id
     }
 
-    pub fn worker_instance_id(&self) -> &WorkerInstanceId {
+    pub(crate) fn worker_instance_id(&self) -> &WorkerInstanceId {
         &self.worker_instance_id
     }
 
-    pub fn worker_session_id(&self) -> &WorkerSessionId {
+    pub(crate) fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
     }
 
-    pub fn codex_thread_id(&self) -> &CodexThreadId {
+    pub(crate) fn codex_thread_id(&self) -> &CodexThreadId {
         &self.codex_thread_id
     }
 
-    pub fn repository(&self) -> &RepositoryRef {
+    pub(crate) fn repository(&self) -> &RepositoryRef {
         &self.repository
     }
 
-    pub fn base_commit_id(&self) -> &str {
+    pub(crate) fn base_commit_id(&self) -> &str {
         &self.base_commit_id
     }
 
-    pub fn base_tree_id(&self) -> &str {
+    pub(crate) fn base_tree_id(&self) -> &str {
         &self.base_tree_id
     }
 
-    pub fn candidate_commit_id(&self) -> &str {
+    pub(crate) fn candidate_commit_id(&self) -> &str {
         &self.candidate_commit_id
     }
 
-    pub fn candidate_tree_id(&self) -> &str {
+    pub(crate) fn candidate_tree_id(&self) -> &str {
         &self.candidate_tree_id
     }
 
-    pub fn diff_sha256(&self) -> &str {
+    pub(crate) fn diff_sha256(&self) -> &str {
         &self.diff_sha256
     }
 
-    pub fn changed_paths(&self) -> &[CandidatePathFact] {
+    pub(crate) fn changed_paths(&self) -> &[CandidatePathFact] {
         &self.changed_paths
     }
 
-    pub fn changed_hunks(&self) -> &[CandidateHunkFact] {
+    pub(crate) fn changed_hunks(&self) -> &[CandidateHunkFact] {
         &self.changed_hunks
     }
 
-    pub fn artifact_ref(&self) -> &str {
+    pub(crate) fn artifact_ref(&self) -> &str {
         &self.artifact_ref
     }
 
-    pub fn artifact_sha256(&self) -> &str {
+    pub(crate) fn artifact_sha256(&self) -> &str {
         &self.artifact_sha256
     }
 
-    pub const fn last_event_sequence(&self) -> u64 {
+    pub(crate) const fn last_event_sequence(&self) -> u64 {
         self.last_event_sequence
     }
 
-    pub const fn finished_at_millis(&self) -> u64 {
+    pub(crate) const fn finished_at_millis(&self) -> u64 {
         self.finished_at_millis
     }
 }
@@ -371,7 +371,7 @@ pub fn freeze_delivery_candidate(
     let producer = current_writer(delivery, &snapshot.stage_run_id)?;
     let binding = exact_producer_binding(delivery, producer, &snapshot.session_binding_id)?;
 
-    verify_snapshot_seal(&snapshot)?;
+    assert_validated_git_snapshot_fact(snapshot)?;
     validate_git_snapshot(delivery, &snapshot)?;
     verify_terminal_snapshot_binding(producer, binding, &facts.terminal_outcome, &snapshot)?;
 
@@ -575,12 +575,12 @@ fn exact_producer_binding<'delivery>(
     Ok(binding)
 }
 
-fn verify_snapshot_seal(
+pub(crate) fn assert_validated_git_snapshot_fact(
     snapshot: &ValidatedGitSnapshotFact,
 ) -> Result<(), DeliveryValidationError> {
     let expected = seal_git_snapshot(snapshot)?;
     if snapshot.validation_seal == expected {
-        Ok(())
+        validate_git_snapshot_shape(snapshot)
     } else {
         Err(invalid_candidate(
             "candidate requires an unchanged sealed ValidatedGitSnapshotFact",
@@ -597,6 +597,19 @@ fn validate_git_snapshot(
             "candidate Git snapshot belongs to another repository",
         ));
     }
+    if git_object_id(&delivery.snapshot().spec.base_revision)
+        && delivery.snapshot().spec.base_revision != snapshot.base_commit_id
+    {
+        return Err(invalid_candidate(
+            "candidate base commit does not match DeliverySpec.baseRevision",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_git_snapshot_shape(
+    snapshot: &ValidatedGitSnapshotFact,
+) -> Result<(), DeliveryValidationError> {
     let object_ids = [
         snapshot.base_commit_id.as_str(),
         snapshot.base_tree_id.as_str(),
@@ -615,13 +628,6 @@ fn validate_git_snapshot(
     if object_ids.iter().any(|value| value.len() != object_length) {
         return Err(invalid_candidate(
             "candidate Git object identities must use one repository object format",
-        ));
-    }
-    if git_object_id(&delivery.snapshot().spec.base_revision)
-        && delivery.snapshot().spec.base_revision != snapshot.base_commit_id
-    {
-        return Err(invalid_candidate(
-            "candidate base commit does not match DeliverySpec.baseRevision",
         ));
     }
     bounded_text(&snapshot.artifact_ref, "candidate.artifactRef", 4_096)?;
@@ -795,6 +801,36 @@ pub(crate) mod test_support {
         diff_sha256: &str,
         changed_paths: Vec<CandidatePathFact>,
     ) -> ValidatedGitSnapshotFact {
+        let base_commit_id = if git_object_id(&delivery.snapshot().spec.base_revision) {
+            delivery.snapshot().spec.base_revision.clone()
+        } else {
+            "0123456789012345678901234567890123456789".into()
+        };
+        validated_git_snapshot_between(
+            delivery,
+            stage_run_id,
+            session_binding_id,
+            &base_commit_id,
+            "1111111111111111111111111111111111111111",
+            candidate_commit_id,
+            candidate_tree_id,
+            diff_sha256,
+            changed_paths,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn validated_git_snapshot_between(
+        delivery: &Delivery,
+        stage_run_id: &StageRunId,
+        session_binding_id: &SessionBindingId,
+        base_commit_id: &str,
+        base_tree_id: &str,
+        candidate_commit_id: &str,
+        candidate_tree_id: &str,
+        diff_sha256: &str,
+        changed_paths: Vec<CandidatePathFact>,
+    ) -> ValidatedGitSnapshotFact {
         let run = delivery
             .snapshot()
             .stage_runs
@@ -815,11 +851,6 @@ pub(crate) mod test_support {
             .codex_thread_id
             .clone()
             .expect("fixture CodexThread");
-        let base_commit_id = if git_object_id(&delivery.snapshot().spec.base_revision) {
-            delivery.snapshot().spec.base_revision.clone()
-        } else {
-            "0123456789012345678901234567890123456789".into()
-        };
         let mut fact = ValidatedGitSnapshotFact {
             stage_run_id: run.id.clone(),
             session_binding_id: binding.id.clone(),
@@ -833,8 +864,8 @@ pub(crate) mod test_support {
             worker_session_id,
             codex_thread_id,
             repository: delivery.snapshot().spec.repository.clone(),
-            base_commit_id,
-            base_tree_id: "1111111111111111111111111111111111111111".into(),
+            base_commit_id: base_commit_id.into(),
+            base_tree_id: base_tree_id.into(),
             candidate_commit_id: candidate_commit_id.into(),
             candidate_tree_id: candidate_tree_id.into(),
             diff_sha256: diff_sha256.into(),

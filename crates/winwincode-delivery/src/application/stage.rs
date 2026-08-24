@@ -304,6 +304,9 @@ pub fn advance(
     snapshot.status = next.next_status;
     settle_previous_run(&mut snapshot, next.previous, input.now_millis)?;
     start_selected_task(&mut snapshot, &next)?;
+    if next.stage == DeliveryStage::Reworking {
+        crate::domain::rework::invalidate_candidate_authorization_for_writer_start(&mut snapshot);
+    }
     snapshot.stage_runs.push(run);
     snapshot.updated_at_millis = input.now_millis;
     let effect = append_stage_effect(delivery, &mut snapshot, &next, input)?;
