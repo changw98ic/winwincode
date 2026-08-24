@@ -166,8 +166,11 @@
       "previousRevision": 18,
       "currentRevision": 19,
       "result": {
-        "workerId": "wrk_00000000000000000000000000",
-        "state": "draining"
+        "id": "wrk_00000000000000000000000000",
+        "revision": 19,
+        "state": "draining",
+        "capacity": 4,
+        "lastHeartbeatAt": "2026-08-24T10:00:00.000Z"
       }
     },
     "queryPage": {
@@ -175,6 +178,7 @@
       "requestId": "req_01J00000000000000000000003",
       "query": "delivery.list",
       "result": {
+        "kind": "delivery_page",
         "items": []
       },
       "page": {

@@ -2060,9 +2060,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind",
         "items"
       ],
       "properties": {
+        "kind": {
+          "const": "product_session_page"
+        },
         "items": {
           "type": "array",
           "items": {
@@ -2076,9 +2080,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind",
         "items"
       ],
       "properties": {
+        "kind": {
+          "const": "delivery_page"
+        },
         "items": {
           "type": "array",
           "items": {
@@ -2092,9 +2100,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind",
         "items"
       ],
       "properties": {
+        "kind": {
+          "const": "credential_reference_page"
+        },
         "items": {
           "type": "array",
           "items": {
@@ -2108,9 +2120,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind",
         "items"
       ],
       "properties": {
+        "kind": {
+          "const": "approval_page"
+        },
         "items": {
           "type": "array",
           "items": {
@@ -2124,9 +2140,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind",
         "items"
       ],
       "properties": {
+        "kind": {
+          "const": "worker_page"
+        },
         "items": {
           "type": "array",
           "items": {
@@ -2140,9 +2160,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind",
         "items"
       ],
       "properties": {
+        "kind": {
+          "const": "publication_page"
+        },
         "items": {
           "type": "array",
           "items": {
