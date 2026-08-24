@@ -26,6 +26,8 @@
     "start": "node apps/host/dist/cli.js",
     "version:set": "node scripts/set-product-version.mjs",
     "fixture:delivery": "node scripts/run-keyless-delivery-fixture.mjs",
+    "oracle:delivery:export": "pnpm build:ts && node scripts/export-delivery-strongflow-oracle.mjs --write",
+    "oracle:delivery:check": "pnpm build:ts && node scripts/export-delivery-strongflow-oracle.mjs --check",
     "evaluate:live": "node scripts/run-live-evaluation.mjs",
     "measure:evaluation": "node scripts/run-evaluation-measures.mjs",
     "verify:release-native": "node scripts/run-native-release-gate.mjs",
