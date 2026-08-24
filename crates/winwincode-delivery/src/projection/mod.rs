@@ -6,8 +6,10 @@
 //! Delivery-domain facts and returns serializable values. It owns no command,
 //! scheduler, persistence, runtime-log, or credential port.
 
-mod delivery;
-mod solution;
+pub mod delivery;
+pub mod redaction;
+pub mod runtime;
+pub mod solution;
 
 use std::{error::Error, fmt};
 
