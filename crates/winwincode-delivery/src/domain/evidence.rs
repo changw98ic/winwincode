@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exact Evidence source resolution for the current frozen candidate.
+//!
+//! The accepted runtime-ledger source remains internal until its Phase 4
+//! authoritative adapter exists.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::evidence::AcceptedRuntimeSourceFact;
+//! ```
 
 use std::{error::Error, fmt};
 

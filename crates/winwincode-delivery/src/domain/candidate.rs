@@ -6,6 +6,15 @@
 //! Git/Artifact adapter owns construction of [`ValidatedGitSnapshotFact`].
 //! Until that adapter exists, only crate-private unit-test support can create a
 //! sealed snapshot, so production candidate freezing remains fail closed.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::candidate::ValidatedGitSnapshotFact;
+//!
+//! let _caller_built_snapshot = ValidatedGitSnapshotFact {
+//!     stage_run_id: todo!(),
+//!     ..todo!()
+//! };
+//! ```
 
 use std::collections::HashSet;
 
@@ -871,8 +880,8 @@ pub(crate) mod test_support {
 
     use super::*;
     use crate::application::stage::{
-        ActiveLeaseIdentity, TerminalArtifactReference, TerminalOutcomeMetadata,
-        TerminalOutcomeStatus, fixture_verified_terminal_outcome,
+        TerminalArtifactReference, TerminalOutcomeStatus, fixture_verified_terminal_outcome,
+        test_support::{active_lease_identity, terminal_outcome_metadata},
     };
     use winwincode_domain::{ArtifactId, ExecutionAckSequence, Sha256Digest};
 
@@ -1002,28 +1011,28 @@ pub(crate) mod test_support {
     ) -> FreezeCandidateFacts {
         let outcome = fixture_verified_terminal_outcome(
             snapshot.stage_run_id.clone(),
-            ActiveLeaseIdentity {
-                execution_job_id: snapshot.execution_job_id.clone(),
-                attempt: snapshot.attempt,
-                lease_id: snapshot.lease_id.clone(),
-                fencing_token: snapshot.fencing_token.clone(),
-                worker_id: snapshot.worker_id.clone(),
-                worker_instance_id: snapshot.worker_instance_id.clone(),
-                worker_session_id: snapshot.worker_session_id.clone(),
-            },
+            active_lease_identity(
+                snapshot.execution_job_id.clone(),
+                snapshot.attempt,
+                snapshot.lease_id.clone(),
+                snapshot.fencing_token.clone(),
+                snapshot.worker_id.clone(),
+                snapshot.worker_instance_id.clone(),
+                snapshot.worker_session_id.clone(),
+            ),
             TerminalOutcomeStatus::Succeeded,
-            TerminalOutcomeMetadata {
-                codex_thread_id: Some(snapshot.codex_thread_id.clone()),
-                finished_at_millis: snapshot.finished_at_millis,
-                last_event_sequence: ExecutionAckSequence(
+            terminal_outcome_metadata(
+                Some(snapshot.codex_thread_id.clone()),
+                snapshot.finished_at_millis,
+                ExecutionAckSequence(
                     i64::try_from(snapshot.last_event_sequence)
                         .expect("fixture event sequence fits i64"),
                 ),
-                artifacts: vec![TerminalArtifactReference {
+                vec![TerminalArtifactReference {
                     artifact_id: ArtifactId(snapshot.artifact_ref.clone()),
                     digest: snapshot.artifact_digest.clone(),
                 }],
-            },
+            ),
         );
         let _ = delivery;
         FreezeCandidateFacts {
