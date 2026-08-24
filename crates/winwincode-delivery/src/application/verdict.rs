@@ -48,14 +48,6 @@ impl ComputedVerdictTransition {
         &self.event
     }
 
-    pub(crate) const fn source_revision(&self) -> u64 {
-        self.source_revision
-    }
-
-    pub(crate) fn candidate_ref(&self) -> &str {
-        &self.candidate_ref
-    }
-
     pub(crate) fn validate_source(&self, source: &Delivery) -> Result<(), CoordinationError> {
         if source.revision() != self.source_revision
             || source.id() != self.delivery.id()

@@ -20,9 +20,15 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{DeliveryId, RequestId};
 
 use crate::{
-    application::{CoordinationErrorCode, verdict::ComputedVerdictTransition},
+    application::{
+        CoordinationError, CoordinationErrorCode,
+        attention::ResolvedAttentionTransition,
+        session_binding::{SessionBindingIdentity, accept_worker_session, report_codex_thread},
+        stage::StageAdvanceResult,
+        verdict::ComputedVerdictTransition,
+    },
     domain::{
-        Delivery, portable_identifier, request_identifier,
+        Delivery, DeliveryStatus, portable_identifier, request_identifier,
         rework::{ValidatedReworkHistoryFact, derive_validated_rework_history},
         safe_non_negative,
     },
@@ -213,10 +219,33 @@ pub struct SubmitDeliveryVerdict {
     pub transition: ComputedVerdictTransition,
 }
 
+/// Specialized stage-start append created only from [`crate::application::stage::advance`].
+#[derive(Debug, Clone)]
+pub struct StartDeliveryStage {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub transition: StageAdvanceResult,
+}
+
+/// Specialized Attention append created only from
+/// [`crate::application::attention::resolve_attention`].
+#[derive(Debug, Clone)]
+pub struct ResolveDeliveryAttention {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub transition: ResolvedAttentionTransition,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeliveryCommand {
     Create(CreateDelivery),
+    #[cfg(any(test, feature = "test-support"))]
+    SeedForTest(CreateDelivery),
     Append(AppendDelivery),
+    StartStage(StartDeliveryStage),
+    ResolveAttention(ResolveDeliveryAttention),
     SubmitVerdict(SubmitDeliveryVerdict),
 }
 
@@ -468,26 +497,29 @@ impl<'journal> DeliveryStore<'journal> {
         command: CreateDelivery,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
         validate_request(&command.request_id, &command.request_digest)?;
+        validate_initial_delivery(&command.snapshot)?;
+        self.create_authorized(command)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn seed_for_test(
+        &self,
+        command: CreateDelivery,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        validate_request(&command.request_id, &command.request_digest)?;
         if command.snapshot.revision() != 1 {
             return Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
-                "a new Delivery must start at revision 1",
+                "a seeded Delivery journal must start at revision 1",
             ));
         }
-        if command.snapshot.snapshot().verdict.is_some()
-            || !command.snapshot.snapshot().evidence.is_empty()
-            || command
-                .snapshot
-                .snapshot()
-                .attention_items
-                .iter()
-                .any(is_verdict_attention)
-        {
-            return Err(store_error(
-                DeliveryStoreErrorCode::InvalidStoreOptions,
-                "Delivery creation cannot seed computed Evidence, Verdict, or verdict Attention",
-            ));
-        }
+        self.create_authorized(command)
+    }
+
+    fn create_authorized(
+        &self,
+        command: CreateDelivery,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
         let record = materialize_record(
             command.snapshot.id().clone(),
             1,
@@ -554,13 +586,48 @@ impl<'journal> DeliveryStore<'journal> {
         &self,
         command: AppendDelivery,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
-        if command.operation == DeliveryMutationOperation::VerdictSubmitted {
+        if matches!(
+            command.operation,
+            DeliveryMutationOperation::StageStarted
+                | DeliveryMutationOperation::AttentionResolved
+                | DeliveryMutationOperation::VerdictSubmitted
+        ) {
             return Err(store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
-                "verdict.submitted requires the sealed specialized Delivery command",
+                "stage, Attention, and Verdict mutations require their sealed specialized Delivery commands",
             ));
         }
-        self.append_authorized(command, None)
+        self.append_authorized(command, AppendAuthority::Generic)
+    }
+
+    fn start_stage(
+        &self,
+        command: StartDeliveryStage,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        let append = AppendDelivery {
+            delivery_id: command.transition.delivery.id().clone(),
+            request_id: command.request_id,
+            request_digest: command.request_digest,
+            operation: DeliveryMutationOperation::StageStarted,
+            expected_revision: command.expected_revision,
+            snapshot: command.transition.delivery.clone(),
+        };
+        self.append_authorized(append, AppendAuthority::Stage(&command.transition))
+    }
+
+    fn resolve_attention(
+        &self,
+        command: ResolveDeliveryAttention,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        let append = AppendDelivery {
+            delivery_id: command.transition.delivery().id().clone(),
+            request_id: command.request_id,
+            request_digest: command.request_digest,
+            operation: DeliveryMutationOperation::AttentionResolved,
+            expected_revision: command.expected_revision,
+            snapshot: command.transition.delivery().clone(),
+        };
+        self.append_authorized(append, AppendAuthority::Attention(&command.transition))
     }
 
     fn submit_verdict(
@@ -576,14 +643,14 @@ impl<'journal> DeliveryStore<'journal> {
             expected_revision: command.expected_revision,
             snapshot: command.transition.delivery().clone(),
         };
-        self.append_authorized(append, Some(&command.transition))
+        self.append_authorized(append, AppendAuthority::Verdict(&command.transition))
     }
 
     #[allow(clippy::too_many_lines)]
     fn append_authorized(
         &self,
         command: AppendDelivery,
-        verdict_transition: Option<&ComputedVerdictTransition>,
+        authority: AppendAuthority<'_>,
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
         validate_request(&command.request_id, &command.request_digest)?;
         if command.operation == DeliveryMutationOperation::DeliveryCreated {
@@ -628,30 +695,44 @@ impl<'journal> DeliveryStore<'journal> {
                 replayed: true,
             });
         }
-        if let Some(transition) = verdict_transition {
-            transition
-                .validate_source(&stored.snapshot)
-                .map_err(|error| {
-                    if error.code() == CoordinationErrorCode::RevisionConflict {
-                        revision_conflict(
-                            command.expected_revision,
-                            stored.snapshot.revision(),
-                            error.to_string(),
-                        )
-                    } else {
-                        store_error(
-                            DeliveryStoreErrorCode::InvalidStoreOptions,
-                            error.to_string(),
-                        )
-                    }
-                })?;
-        } else if command.operation == DeliveryMutationOperation::VerdictSubmitted {
-            return Err(store_error(
-                DeliveryStoreErrorCode::InvalidStoreOptions,
-                "verdict.submitted is missing its sealed computed transition",
-            ));
-        } else {
-            validate_generic_verdict_delta(command.operation, &stored.snapshot, &command.snapshot)?;
+        match authority {
+            AppendAuthority::Generic => {
+                validate_generic_append_delta(
+                    command.operation,
+                    &stored.snapshot,
+                    &command.snapshot,
+                )?;
+            }
+            AppendAuthority::Stage(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::StageStarted,
+                    "stage.started",
+                )?;
+                transition
+                    .validate_start_source(&stored.snapshot)
+                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+            }
+            AppendAuthority::Attention(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::AttentionResolved,
+                    "attention.resolved",
+                )?;
+                transition
+                    .validate_source(&stored.snapshot)
+                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+            }
+            AppendAuthority::Verdict(transition) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::VerdictSubmitted,
+                    "verdict.submitted",
+                )?;
+                transition
+                    .validate_source(&stored.snapshot)
+                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+            }
         }
         if command.expected_revision != stored.snapshot.revision()
             || command.snapshot.revision() != stored.snapshot.revision() + 1
@@ -746,112 +827,215 @@ impl<'journal> DeliveryStore<'journal> {
     }
 }
 
-fn validate_generic_verdict_delta(
+enum AppendAuthority<'transition> {
+    Generic,
+    Stage(&'transition StageAdvanceResult),
+    Attention(&'transition ResolvedAttentionTransition),
+    Verdict(&'transition ComputedVerdictTransition),
+}
+
+fn validate_authorized_operation(
+    actual: DeliveryMutationOperation,
+    expected: DeliveryMutationOperation,
+    name: &str,
+) -> Result<(), DeliveryStoreError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            format!("sealed {name} transition was used for another operation"),
+        ))
+    }
+}
+
+fn map_transition_error(
+    error: CoordinationError,
+    command: &AppendDelivery,
+    current: &Delivery,
+) -> DeliveryStoreError {
+    if error.code() == CoordinationErrorCode::RevisionConflict {
+        revision_conflict(
+            command.expected_revision,
+            current.revision(),
+            error.to_string(),
+        )
+    } else {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            error.to_string(),
+        )
+    }
+}
+
+fn validate_generic_append_delta(
     operation: DeliveryMutationOperation,
+    before: &Delivery,
+    after: &Delivery,
+) -> Result<(), DeliveryStoreError> {
+    match operation {
+        DeliveryMutationOperation::DeliverySpecUpdated => validate_spec_update_delta(before, after),
+        DeliveryMutationOperation::SessionBound => validate_session_binding_delta(before, after),
+        DeliveryMutationOperation::DeliveryCreated
+        | DeliveryMutationOperation::StageStarted
+        | DeliveryMutationOperation::AttentionResolved
+        | DeliveryMutationOperation::VerdictSubmitted => Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "this Delivery operation requires its dedicated application command",
+        )),
+    }
+}
+
+fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreError> {
+    let snapshot = delivery.snapshot();
+    if snapshot.revision != 1
+        || snapshot.status != DeliveryStatus::Draft
+        || snapshot
+            .tasks
+            .iter()
+            .any(|task| task.status != crate::domain::DeliveryTaskStatus::Pending)
+        || !snapshot.stage_runs.is_empty()
+        || !snapshot.session_bindings.is_empty()
+        || !snapshot.attention_items.is_empty()
+        || !snapshot.evidence.is_empty()
+        || snapshot.verdict.is_some()
+        || snapshot.updated_at_millis != snapshot.created_at_millis
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "delivery.created requires the canonical revision-1 Draft transition with only pending tasks",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_spec_update_delta(
     before: &Delivery,
     after: &Delivery,
 ) -> Result<(), DeliveryStoreError> {
     let before = before.snapshot();
     let after = after.snapshot();
-    let preserved_verdict = after.verdict == before.verdict;
-    let cleared_verdict = before.verdict.is_some() && after.verdict.is_none();
-    if !preserved_verdict && !cleared_verdict {
-        return Err(store_error(
+    let valid = matches!(
+        before.status,
+        DeliveryStatus::Draft | DeliveryStatus::Clarifying | DeliveryStatus::Ready
+    ) && after.schema_version == before.schema_version
+        && after.id == before.id
+        && after.revision == before.revision.saturating_add(1)
+        && after.status == DeliveryStatus::Ready
+        && after.created_at_millis == before.created_at_millis
+        && after.updated_at_millis >= before.updated_at_millis
+        && after.spec.delivery_id == before.id
+        && after.spec.id != before.spec.id
+        && after.spec.revision == before.spec.revision.saturating_add(1)
+        && after.spec.created_at_millis >= before.spec.created_at_millis
+        && after.spec.created_at_millis <= after.updated_at_millis
+        && after.spec.source_ref == before.spec.source_ref
+        && after.spec.publication_target == before.spec.publication_target
+        && after.tasks.is_empty()
+        && after.stage_runs.is_empty()
+        && after.session_bindings.is_empty()
+        && after.attention_items.is_empty()
+        && after.evidence.is_empty()
+        && after.verdict.is_none();
+    if valid {
+        Ok(())
+    } else {
+        Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
-            "only the sealed verdict command may add or replace a Delivery verdict",
-        ));
+            "delivery.spec.updated does not match the canonical Spec replacement delta",
+        ))
     }
+}
 
-    if preserved_verdict && after.evidence != before.evidence {
+fn validate_session_binding_delta(
+    before: &Delivery,
+    after: &Delivery,
+) -> Result<(), DeliveryStoreError> {
+    if before.snapshot().session_bindings.len() != after.snapshot().session_bindings.len() {
         return Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
-            "a generic Delivery operation cannot add, replace, or partially remove computed Evidence",
+            "session.bound cannot add or remove the stage-owned SessionBinding",
         ));
     }
-    if cleared_verdict
-        && (!after.evidence.is_empty()
-            || !verdict_invalidation_is_authorized(operation, before, after))
+    let changed = before
+        .snapshot()
+        .session_bindings
+        .iter()
+        .zip(&after.snapshot().session_bindings)
+        .enumerate()
+        .filter(|(_, (prior, next))| prior != next)
+        .collect::<Vec<_>>();
+    let [(index, (prior, next))] = changed.as_slice() else {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "session.bound must change exactly one current SessionBinding",
+        ));
+    };
+    if prior.id != next.id {
+        return Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "session.bound cannot replace a SessionBinding identity",
+        ));
+    }
+    let identity = SessionBindingIdentity {
+        delivery_id: prior.delivery_id.clone(),
+        delivery_task_id: prior.delivery_task_id.clone(),
+        stage_run_id: prior.stage_run_id.clone(),
+        product_session_id: prior.product_session_id.clone(),
+        execution_job_id: prior.execution_job_id.clone(),
+    };
+    let expected = match (
+        prior.worker_session_id.as_ref(),
+        next.worker_session_id.as_ref(),
+        prior.codex_thread_id.as_ref(),
+        next.codex_thread_id.as_ref(),
+    ) {
+        (None, Some(worker_session_id), prior_thread, next_thread)
+            if prior_thread == next_thread =>
+        {
+            accept_worker_session(
+                before,
+                before.revision(),
+                &identity,
+                worker_session_id.clone(),
+                after.snapshot().updated_at_millis,
+            )
+        }
+        (Some(worker_session_id), Some(next_worker), None, Some(codex_thread_id))
+            if worker_session_id == next_worker =>
+        {
+            report_codex_thread(
+                before,
+                before.revision(),
+                &identity,
+                worker_session_id,
+                codex_thread_id.clone(),
+                after.snapshot().updated_at_millis,
+            )
+        }
+        _ => Err(CoordinationError::new(
+            CoordinationErrorCode::BindingConflict,
+            "session.bound changed an unsupported SessionBinding field",
+        )),
+    }
+    .map_err(|error| {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            error.to_string(),
+        )
+    })?;
+    if expected != *after
+        || expected.snapshot().session_bindings.get(*index)
+            != after.snapshot().session_bindings.get(*index)
     {
         return Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
-            "computed Evidence and Verdict may be cleared only by a new Spec or an exact remediator writer start",
+            "session.bound changed facts outside its exact application delta",
         ));
-    }
-
-    for item in &after.attention_items {
-        match before
-            .attention_items
-            .iter()
-            .find(|stored| stored.id == item.id)
-        {
-            None if is_verdict_attention(item) => {
-                return Err(store_error(
-                    DeliveryStoreErrorCode::InvalidStoreOptions,
-                    "only the sealed verdict command may add verdict-derived Attention",
-                ));
-            }
-            Some(stored)
-                if stored.context != item.context
-                    && (is_verdict_attention(stored) || is_verdict_attention(item)) =>
-            {
-                return Err(store_error(
-                    DeliveryStoreErrorCode::InvalidStoreOptions,
-                    "a generic Delivery operation cannot replace verdict Attention context",
-                ));
-            }
-            None | Some(_) => {}
-        }
     }
     Ok(())
 }
 
-fn verdict_invalidation_is_authorized(
-    operation: DeliveryMutationOperation,
-    before: &crate::domain::DeliverySnapshot,
-    after: &crate::domain::DeliverySnapshot,
-) -> bool {
-    match operation {
-        DeliveryMutationOperation::DeliverySpecUpdated => {
-            after.spec != before.spec && after.spec.revision > before.spec.revision
-        }
-        DeliveryMutationOperation::StageStarted => {
-            let new_runs = after
-                .stage_runs
-                .iter()
-                .filter(|run| !before.stage_runs.iter().any(|stored| stored.id == run.id))
-                .collect::<Vec<_>>();
-            let [run] = new_runs.as_slice() else {
-                return false;
-            };
-            run.stage == crate::domain::DeliveryStage::Reworking
-                && run.actor_type == crate::domain::StageRunActorType::Codex
-                && run.role == "remediator"
-                && run.status == crate::domain::StageRunStatus::Running
-                && after.status == crate::domain::DeliveryStatus::Reworking
-                && after
-                    .session_bindings
-                    .iter()
-                    .any(|binding| binding.stage_run_id == run.id)
-        }
-        DeliveryMutationOperation::DeliveryCreated
-        | DeliveryMutationOperation::SessionBound
-        | DeliveryMutationOperation::AttentionResolved
-        | DeliveryMutationOperation::VerdictSubmitted => false,
-    }
-}
-
-fn is_verdict_attention(item: &crate::domain::AttentionItem) -> bool {
-    serde_json::from_str::<serde_json::Value>(&item.context)
-        .ok()
-        .and_then(|context| {
-            context
-                .get("protocol")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("winwincode.delivery-verdict-attention.v1")
-}
 impl DeliveryCommandPort for DeliveryStore<'_> {
     fn execute(
         &self,
@@ -859,7 +1043,11 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
     ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
         match command {
             DeliveryCommand::Create(create) => self.create(create),
+            #[cfg(any(test, feature = "test-support"))]
+            DeliveryCommand::SeedForTest(seed) => self.seed_for_test(seed),
             DeliveryCommand::Append(append) => self.append(append),
+            DeliveryCommand::StartStage(start) => self.start_stage(start),
+            DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(submit),
         }
     }
@@ -1288,6 +1476,10 @@ impl DeliveryJournalPort for InMemoryDeliveryJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::attention::{
+        AttentionDecision, ResolveAttentionInput, resolve_attention,
+    };
+    use crate::application::stage::{AdvanceStageInput, NewStageIdentities, advance};
     use crate::application::verdict::{
         SubmitVerdictFacts, compute_verdict_transition,
         test_support::{VerdictFixtureOutcome, verdict_fixture},
@@ -1302,7 +1494,16 @@ mod tests {
                 .expect("store fixture JSON");
         value["revision"] = revision.into();
         value["status"] = status.into();
-        value["updatedAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+        value["updatedAtMillis"] = if revision == 1 {
+            1_800_000_000_000_u64.into()
+        } else {
+            (1_800_000_000_000_u64 + revision).into()
+        };
+        if revision > 1 {
+            value["spec"]["id"] = format!("delivery-spec-v{revision}").into();
+            value["spec"]["revision"] = revision.into();
+            value["spec"]["createdAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+        }
         Delivery::decode_json(&serde_json::to_vec(&value).expect("store fixture bytes"))
             .expect("store fixture")
     }
@@ -1320,7 +1521,11 @@ mod tests {
         (backend, store)
     }
 
-    fn create_store_with_failed_verdict() -> (DeliveryStore<'static>, Delivery) {
+    fn create_store_with_failed_verdict() -> (
+        DeliveryStore<'static>,
+        Delivery,
+        crate::domain::FrozenDeliveryCandidate,
+    ) {
         let fixture = verdict_fixture(
             DeliveryId("delivery-store-verdict".into()),
             VerdictFixtureOutcome::Fail,
@@ -1328,7 +1533,7 @@ mod tests {
         let backend = Arc::new(InMemoryDeliveryJournal::new());
         let store = DeliveryStore::new(backend);
         store
-            .execute(DeliveryCommand::Create(CreateDelivery {
+            .execute(DeliveryCommand::SeedForTest(CreateDelivery {
                 request_id: RequestId("create-delivery-verdict".into()),
                 request_digest: REQUEST_A.into(),
                 snapshot: fixture.delivery.clone(),
@@ -1354,12 +1559,12 @@ mod tests {
             }))
             .expect("submit failing verdict")
             .snapshot;
-        (store, failed)
+        (store, failed, fixture.candidate)
     }
 
     #[test]
     fn store_derives_rework_history_from_verified_append_only_records() {
-        let (store, current) = create_store_with_failed_verdict();
+        let (store, current, _) = create_store_with_failed_verdict();
         let stale = store
             .query(DeliveryQuery::GetRevision {
                 delivery_id: current.id().clone(),
@@ -1380,6 +1585,117 @@ mod tests {
     }
 
     #[test]
+    fn attention_resolution_requires_its_sealed_operation_specific_command() {
+        let (store, failed, candidate) = create_store_with_failed_verdict();
+        let item = failed
+            .snapshot()
+            .attention_items
+            .first()
+            .expect("failed verdict Attention")
+            .clone();
+        let transition = resolve_attention(
+            &failed,
+            ResolveAttentionInput {
+                expected_revision: failed.revision(),
+                attention_item_id: item.id,
+                stage_run_id: item.stage_run_id.expect("verification StageRun"),
+                expected_context: item.context,
+                actor: "delivery-reviewer".into(),
+                decision: AttentionDecision::Resolved,
+                resolution: "start the bounded remediation".into(),
+                now_millis: 1_800_000_000_200,
+            },
+        )
+        .expect("current verdict Attention resolves");
+
+        let raw_error = store
+            .execute(DeliveryCommand::Append(AppendDelivery {
+                delivery_id: failed.id().clone(),
+                request_id: RequestId("raw-attention-resolution".into()),
+                request_digest: "d".repeat(64),
+                operation: DeliveryMutationOperation::AttentionResolved,
+                expected_revision: failed.revision(),
+                snapshot: transition.delivery().clone(),
+            }))
+            .expect_err("raw Attention snapshot has no application authority");
+        assert_eq!(
+            raw_error.code(),
+            DeliveryStoreErrorCode::InvalidStoreOptions
+        );
+
+        let resolved = store
+            .execute(DeliveryCommand::ResolveAttention(
+                ResolveDeliveryAttention {
+                    request_id: RequestId("sealed-attention-resolution".into()),
+                    request_digest: "e".repeat(64),
+                    expected_revision: failed.revision(),
+                    transition,
+                },
+            ))
+            .expect("sealed Attention resolution commits");
+        assert_eq!(
+            resolved.snapshot.snapshot().status,
+            DeliveryStatus::Reworking
+        );
+
+        let history = store
+            .validated_rework_history(&resolved.snapshot)
+            .expect("append-only rework history");
+        let authorization = crate::domain::rework::fixture_precise_rework_authorization(
+            &resolved.snapshot,
+            &candidate,
+            &history,
+            "b".repeat(64),
+        );
+        let stage = advance(
+            &resolved.snapshot,
+            AdvanceStageInput {
+                expected_revision: resolved.snapshot.revision(),
+                product_session_id: winwincode_domain::ProductSessionId(
+                    "product-session-bounded-rework".into(),
+                ),
+                identities: NewStageIdentities {
+                    stage_run_id: winwincode_domain::StageRunId("stage-run-bounded-rework".into()),
+                    execution_job_id: winwincode_domain::ExecutionJobId(
+                        "execution-job-bounded-rework".into(),
+                    ),
+                    session_binding_id: crate::domain::SessionBindingId(
+                        "session-binding-bounded-rework".into(),
+                    ),
+                    attention_item_id: winwincode_domain::AttentionItemId(
+                        "attention-unused-bounded-rework".into(),
+                    ),
+                },
+                review: None,
+                previous_outcome: None,
+                current_lease: None,
+                rework_authorization: Some(Box::new(authorization)),
+                now_millis: resolved.snapshot.snapshot().updated_at_millis + 1,
+            },
+        )
+        .expect("authorized rework stage");
+        let reworking = store
+            .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+                request_id: RequestId("sealed-start-bounded-rework".into()),
+                request_digest: "1".repeat(64),
+                expected_revision: resolved.snapshot.revision(),
+                transition: stage,
+            }))
+            .expect("typed rework stage persists")
+            .snapshot;
+        assert_eq!(
+            reworking
+                .snapshot()
+                .stage_runs
+                .last()
+                .map(|run| run.role.as_str()),
+            Some("remediator")
+        );
+        assert!(reworking.snapshot().evidence.is_empty());
+        assert!(reworking.snapshot().verdict.is_none());
+    }
+
+    #[test]
     fn non_verdict_append_cannot_change_evidence_verdict_attention_or_status() {
         for operation in [
             DeliveryMutationOperation::DeliverySpecUpdated,
@@ -1387,7 +1703,7 @@ mod tests {
             DeliveryMutationOperation::SessionBound,
             DeliveryMutationOperation::AttentionResolved,
         ] {
-            let (store, failed) = create_store_with_failed_verdict();
+            let (store, failed, _) = create_store_with_failed_verdict();
             let passing_fixture = verdict_fixture(
                 DeliveryId("delivery-store-verdict".into()),
                 VerdictFixtureOutcome::Pass,
@@ -1418,6 +1734,79 @@ mod tests {
                     snapshot: forged,
                 }))
                 .expect_err("non-verdict append cannot replace verdict facts");
+            assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+        }
+    }
+
+    #[test]
+    fn creation_rejects_a_precomputed_passing_delivery() {
+        let fixture = verdict_fixture(
+            DeliveryId("delivery-create-authority-bypass".into()),
+            VerdictFixtureOutcome::Pass,
+        );
+        let transition = compute_verdict_transition(
+            &fixture.delivery,
+            SubmitVerdictFacts {
+                expected_revision: fixture.delivery.revision(),
+                candidate: &fixture.candidate,
+                verification: &fixture.verification,
+                evidence: &fixture.evidence,
+                produced_at_millis: 1_800_000_000_100,
+            },
+        )
+        .expect("computed pass");
+        let mut forged = transition.delivery().snapshot().clone();
+        forged.revision = 1;
+        let forged = Delivery::try_from_snapshot(forged).expect("valid revision-1 pass");
+        let store = DeliveryStore::new(Arc::new(InMemoryDeliveryJournal::new()));
+
+        let error = store
+            .execute(DeliveryCommand::Create(CreateDelivery {
+                request_id: RequestId("raw-created-pass".into()),
+                request_digest: REQUEST_A.into(),
+                snapshot: forged,
+            }))
+            .expect_err("delivery.created cannot carry a precomputed pass");
+
+        assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+    }
+
+    #[test]
+    fn operation_relabel_cannot_resolve_verdict_attention_or_enter_rework() {
+        for operation in [
+            DeliveryMutationOperation::DeliveryCreated,
+            DeliveryMutationOperation::DeliverySpecUpdated,
+            DeliveryMutationOperation::StageStarted,
+            DeliveryMutationOperation::SessionBound,
+            DeliveryMutationOperation::AttentionResolved,
+            DeliveryMutationOperation::VerdictSubmitted,
+        ] {
+            let (store, failed, _) = create_store_with_failed_verdict();
+            let mut forged = failed.snapshot().clone();
+            forged.revision += 1;
+            forged.updated_at_millis += 1;
+            forged.status = DeliveryStatus::Reworking;
+            forged.tasks[0].status = crate::domain::DeliveryTaskStatus::Active;
+            let item = forged
+                .attention_items
+                .first_mut()
+                .expect("verdict Attention");
+            item.status = crate::domain::AttentionItemStatus::Resolved;
+            item.resolution = Some("forged rework approval".into());
+            item.resolved_by = Some("attacker".into());
+            item.resolved_at_millis = Some(forged.updated_at_millis);
+            let forged = Delivery::try_from_snapshot(forged).expect("valid forged rework state");
+
+            let error = store
+                .execute(DeliveryCommand::Append(AppendDelivery {
+                    delivery_id: failed.id().clone(),
+                    request_id: RequestId(format!("relabel-{operation:?}")),
+                    request_digest: "f".repeat(64),
+                    operation,
+                    expected_revision: failed.revision(),
+                    snapshot: forged,
+                }))
+                .expect_err("operation relabel cannot gain application authority");
             assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
         }
     }
@@ -1479,57 +1868,6 @@ mod tests {
     }
 
     #[test]
-    fn every_generic_append_operation_rejects_a_fabricated_passing_verdict() {
-        for (index, operation) in [
-            DeliveryMutationOperation::DeliverySpecUpdated,
-            DeliveryMutationOperation::StageStarted,
-            DeliveryMutationOperation::SessionBound,
-            DeliveryMutationOperation::AttentionResolved,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let fixture = verdict_fixture(
-                DeliveryId(format!("delivery-verdict-bypass-{index}")),
-                VerdictFixtureOutcome::Pass,
-            );
-            let transition = compute_verdict_transition(
-                &fixture.delivery,
-                SubmitVerdictFacts {
-                    expected_revision: fixture.delivery.revision(),
-                    candidate: &fixture.candidate,
-                    verification: &fixture.verification,
-                    evidence: &fixture.evidence,
-                    produced_at_millis: 1_800_000_000_100,
-                },
-            )
-            .expect("sealed passing transition fixture");
-            let backend = Arc::new(InMemoryDeliveryJournal::new());
-            let store = DeliveryStore::new(Arc::clone(&backend));
-            store
-                .execute(DeliveryCommand::Create(CreateDelivery {
-                    request_id: RequestId(format!("create-verdict-bypass-{index}")),
-                    request_digest: REQUEST_A.into(),
-                    snapshot: fixture.delivery.clone(),
-                }))
-                .expect("create verifying Delivery");
-
-            let error = store
-                .execute(DeliveryCommand::Append(AppendDelivery {
-                    delivery_id: fixture.delivery.id().clone(),
-                    request_id: RequestId(format!("raw-pass-{index}")),
-                    request_digest: REQUEST_B.into(),
-                    operation,
-                    expected_revision: fixture.delivery.revision(),
-                    snapshot: transition.delivery().clone(),
-                }))
-                .expect_err("generic operation must not submit a passing verdict");
-
-            assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
-        }
-    }
-
-    #[test]
     fn delivery_records_form_contiguous_digest_chain() {
         let (_, store) = create_store();
         store
@@ -1550,7 +1888,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_record_digest_matches_typescript_fixture() {
+    fn delivery_record_digest_matches_canonical_fixture() {
         let (_, store) = create_store();
         store
             .append(AppendDelivery {
@@ -1570,8 +1908,8 @@ mod tests {
                 .map(|record| record.digest.as_str())
                 .collect::<Vec<_>>(),
             [
-                "59f1408d8139a10759060bdf3fe30c938448b5cd37d08fc9e70ee3897c0d02fa",
-                "54434ed54bf23eda55e7fcf1704a16ed6373bd0746f858a6070d123481f89852",
+                "252e847b49b5deb592d6490d1479b465bf998382133b38418c47271d5706e913",
+                "2544747a9f138d62316435c442ff611aebf24126a8bc8b0bceac13f7b9db6300",
             ]
         );
     }

@@ -27,9 +27,23 @@ fn snapshot_for(delivery_id: &str, revision: u64, status: &str) -> Delivery {
         )
         .replace(
             "\"updatedAtMillis\": 1800000000001",
-            &format!("\"updatedAtMillis\": {}", 1_800_000_000_000_u64 + revision),
+            &format!(
+                "\"updatedAtMillis\": {}",
+                if revision == 1 {
+                    1_800_000_000_000_u64
+                } else {
+                    1_800_000_000_000_u64 + revision
+                }
+            ),
         );
-    Delivery::decode_json(text.as_bytes()).expect("valid store fixture")
+    let mut value: serde_json::Value = serde_json::from_str(&text).expect("store fixture JSON");
+    if revision > 1 {
+        value["spec"]["id"] = format!("delivery-spec-v{revision}").into();
+        value["spec"]["revision"] = revision.into();
+        value["spec"]["createdAtMillis"] = (1_800_000_000_000_u64 + revision).into();
+    }
+    Delivery::decode_json(&serde_json::to_vec(&value).expect("store fixture bytes"))
+        .expect("valid store fixture")
 }
 
 #[test]

@@ -2,6 +2,8 @@
 
 //! Business Attention transitions.
 
+use std::ops::Deref;
+
 use winwincode_domain::{AttentionItemId, StageRunId};
 
 use crate::domain::{
@@ -33,6 +35,49 @@ pub struct ResolveAttentionInput {
     pub now_millis: u64,
 }
 
+/// One application-owned Attention resolution ready for its dedicated journal command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAttentionTransition {
+    source_delivery: Delivery,
+    delivery: Delivery,
+}
+
+impl ResolvedAttentionTransition {
+    pub fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+
+    pub fn into_delivery(self) -> Delivery {
+        self.delivery
+    }
+
+    pub(crate) fn validate_source(&self, current: &Delivery) -> Result<(), CoordinationError> {
+        if self.source_delivery != *current {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::RevisionConflict,
+                "Attention resolution source is not the exact current Delivery",
+            ));
+        }
+        if self.delivery.id() != current.id()
+            || self.delivery.revision() != current.revision().saturating_add(1)
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "Attention resolution is not the next revision of its source Delivery",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Deref for ResolvedAttentionTransition {
+    type Target = Delivery;
+
+    fn deref(&self) -> &Self::Target {
+        &self.delivery
+    }
+}
+
 /// Resolves one current business Attention item without starting execution.
 ///
 /// # Errors
@@ -42,7 +87,7 @@ pub struct ResolveAttentionInput {
 pub fn resolve_attention(
     delivery: &Delivery,
     input: ResolveAttentionInput,
-) -> Result<Delivery, CoordinationError> {
+) -> Result<ResolvedAttentionTransition, CoordinationError> {
     if delivery.revision() != input.expected_revision {
         return Err(CoordinationError::new(
             CoordinationErrorCode::RevisionConflict,
@@ -114,13 +159,17 @@ pub fn resolve_attention(
             "computed verdict Attention must be resolved before stage movement",
         ));
     }
-    apply_resolution(
+    let resolved = apply_resolution(
         delivery.clone().into_snapshot(),
         input,
         item_index,
         run_index,
         verdict_actions,
-    )
+    )?;
+    Ok(ResolvedAttentionTransition {
+        source_delivery: delivery.clone(),
+        delivery: resolved,
+    })
 }
 
 fn apply_resolution(

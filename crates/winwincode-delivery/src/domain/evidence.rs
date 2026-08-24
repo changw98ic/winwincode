@@ -336,13 +336,6 @@ fn resolution_error(
 /// Rejects a stale candidate, foreign `StageRun` or `SessionBinding`, missing or
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 3/4 adapter gate keeps production construction closed"
-    )
-)]
 pub(crate) fn resolve_delivery_evidence(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,

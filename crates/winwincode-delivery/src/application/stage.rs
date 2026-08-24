@@ -322,6 +322,64 @@ pub enum StageAdvanceEffect {
 pub struct StageAdvanceResult {
     pub delivery: Delivery,
     pub effect: StageAdvanceEffect,
+    source_delivery: Delivery,
+    sealed_delivery: Delivery,
+    sealed_effect: StageAdvanceEffect,
+    kind: StageAdvanceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageAdvanceKind {
+    Start,
+    Resume,
+}
+
+impl StageAdvanceResult {
+    /// Checks that the public projection still matches the application-owned
+    /// transition. Callers may inspect the projection, but cannot turn an
+    /// edited copy into stage-start authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict when either the Delivery or execution effect was
+    /// changed after [`advance`] created this result.
+    pub fn validate_projection(&self) -> Result<(), CoordinationError> {
+        if self.delivery != self.sealed_delivery || self.effect != self.sealed_effect {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "stage advance projection differs from its sealed application transition",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_start_source(
+        &self,
+        current: &Delivery,
+    ) -> Result<(), CoordinationError> {
+        self.validate_projection()?;
+        if self.kind != StageAdvanceKind::Start {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "only a newly selected stage can be committed as stage.started",
+            ));
+        }
+        if self.source_delivery != *current {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::RevisionConflict,
+                "stage advance source is not the exact current Delivery",
+            ));
+        }
+        if self.delivery.id() != current.id()
+            || self.delivery.revision() != current.revision().saturating_add(1)
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "stage advance result is not the next revision of its source Delivery",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,10 +481,17 @@ pub fn advance(
     snapshot.stage_runs.push(run);
     snapshot.updated_at_millis = input.now_millis;
     let effect = append_stage_effect(delivery, &mut snapshot, &next, input)?;
-    let delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
+    let advanced_delivery = Delivery::try_from_snapshot(snapshot).map_err(|error| {
         CoordinationError::new(CoordinationErrorCode::Conflict, error.to_string())
     })?;
-    Ok(StageAdvanceResult { delivery, effect })
+    Ok(StageAdvanceResult {
+        source_delivery: delivery.clone(),
+        sealed_delivery: advanced_delivery.clone(),
+        sealed_effect: effect.clone(),
+        delivery: advanced_delivery,
+        effect,
+        kind: StageAdvanceKind::Start,
+    })
 }
 
 struct NextStage<'delivery> {
@@ -832,20 +897,25 @@ pub fn resume_active(
             || delivery.snapshot().spec.goal.clone(),
             |task| task.goal.clone(),
         );
+    let effect = StageAdvanceEffect::Resume(ExecutionIntent {
+        execution_job_id: binding.execution_job_id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        delivery_id: run.delivery_id.clone(),
+        delivery_task_id: run.delivery_task_id.clone(),
+        stage_run_id: run.id.clone(),
+        stage: run.stage,
+        role: run.role.clone(),
+        attempt: run.attempt,
+        goal,
+        rework_authorization: None,
+    });
     Ok(StageAdvanceResult {
         delivery: delivery.clone(),
-        effect: StageAdvanceEffect::Resume(ExecutionIntent {
-            execution_job_id: binding.execution_job_id.clone(),
-            product_session_id: binding.product_session_id.clone(),
-            delivery_id: run.delivery_id.clone(),
-            delivery_task_id: run.delivery_task_id.clone(),
-            stage_run_id: run.id.clone(),
-            stage: run.stage,
-            role: run.role.clone(),
-            attempt: run.attempt,
-            goal,
-            rework_authorization: None,
-        }),
+        effect: effect.clone(),
+        source_delivery: delivery.clone(),
+        sealed_delivery: delivery.clone(),
+        sealed_effect: effect,
+        kind: StageAdvanceKind::Resume,
     })
 }
 

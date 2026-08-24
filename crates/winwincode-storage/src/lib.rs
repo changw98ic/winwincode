@@ -542,6 +542,22 @@ pub trait ProductStateStorage: Send {
     /// request idempotency, or the adapter transaction fails.
     fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError>;
 
+    /// Loads the original durable result for one scoped command identity.
+    ///
+    /// A matching receipt is returned as an idempotent replay. Reusing the
+    /// same actor, scope, and request id with another command digest fails
+    /// with [`StorageErrorKind::RequestConflict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the digest is malformed, the
+    /// scoped request conflicts, or the read fails.
+    fn load_receipt(
+        &self,
+        identity: &ReceiptIdentity,
+        command_digest: &Sha256Digest,
+    ) -> Result<Option<CommitReceipt>, StorageError>;
+
     /// Loads the current canonical state for one stream.
     ///
     /// # Errors
@@ -664,6 +680,19 @@ impl ProductStateStorage for SqliteStorage {
         Ok(receipt)
     }
 
+    fn load_receipt(
+        &self,
+        identity: &ReceiptIdentity,
+        command_digest: &Sha256Digest,
+    ) -> Result<Option<CommitReceipt>, StorageError> {
+        validate_sha256_digest(command_digest)?;
+        let connection = self.connection()?;
+        let Some(prior) = prior_receipt(connection, identity)? else {
+            return Ok(None);
+        };
+        replay_stored_receipt(connection, identity, command_digest, prior).map(Some)
+    }
+
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         self.connection()?
             .query_row(
@@ -755,10 +784,10 @@ struct StoredReceipt {
 }
 
 fn prior_receipt(
-    transaction: &rusqlite::Transaction<'_>,
+    connection: &Connection,
     identity: &ReceiptIdentity,
 ) -> Result<Option<StoredReceipt>, StorageError> {
-    transaction
+    connection
         .query_row(
             "SELECT command_digest, stream_id, revision FROM command_receipts \
              WHERE actor_key = ?1 AND scope_key = ?2 AND request_id = ?3",
@@ -784,17 +813,29 @@ fn replay_receipt(
     commit: &StateCommit,
     prior: StoredReceipt,
 ) -> Result<CommitReceipt, StorageError> {
-    if prior.command_digest != commit.command_digest.0 {
-        return Err(StorageError::request_conflict(
-            commit.receipt_identity.request_id(),
-        ));
+    replay_stored_receipt(
+        transaction,
+        &commit.receipt_identity,
+        &commit.command_digest,
+        prior,
+    )
+}
+
+fn replay_stored_receipt(
+    connection: &Connection,
+    identity: &ReceiptIdentity,
+    command_digest: &Sha256Digest,
+    prior: StoredReceipt,
+) -> Result<CommitReceipt, StorageError> {
+    if prior.command_digest != command_digest.0 {
+        return Err(StorageError::request_conflict(identity.request_id()));
     }
     Ok(CommitReceipt {
-        receipt_identity: commit.receipt_identity.clone(),
+        receipt_identity: identity.clone(),
         stream_id: prior.stream_id,
         revision: u64::try_from(prior.revision)
             .map_err(|_| StorageError::adapter("stored revision is negative"))?,
-        events: receipt_events(transaction, &commit.receipt_identity)?,
+        events: receipt_events(connection, identity)?,
         idempotent_replay: true,
     })
 }
@@ -1208,10 +1249,10 @@ fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Stora
 }
 
 fn receipt_events(
-    transaction: &rusqlite::Transaction<'_>,
+    connection: &Connection,
     identity: &ReceiptIdentity,
 ) -> Result<Vec<OutboxEvent>, StorageError> {
-    let mut statement = transaction
+    let mut statement = connection
         .prepare(
             "SELECT sequence, event_id, topic, payload FROM outbox \
              WHERE receipt_actor_key = ?1 AND receipt_scope_key = ?2 AND request_id = ?3 \

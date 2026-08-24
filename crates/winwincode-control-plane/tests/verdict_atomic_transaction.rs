@@ -15,14 +15,18 @@ use winwincode_control_plane::{
     EventPublisher, OutboxEvent,
 };
 use winwincode_delivery::{
-    application::verdict::{
-        SubmitVerdictFacts,
-        test_support::{VerdictFixture, VerdictFixtureOutcome, verdict_fixture},
+    application::{
+        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
+        verdict::{
+            SubmitVerdictFacts,
+            test_support::{VerdictFixture, VerdictFixtureOutcome, verdict_fixture},
+        },
     },
     domain::{Delivery, DeliveryStatus, DeliveryTaskStatus},
     store::{
         AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
-        DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
+        DeliveryJournalPort, DeliveryQueryPort, DeliveryStore, JournalBackendError,
+        JournalEntryState, JournalRecordBytes, LoadedDeliveryJournal, ResolveDeliveryAttention,
     },
 };
 use winwincode_domain::{
@@ -91,9 +95,39 @@ fn verdict_facts(fixture: &VerdictFixture, produced_at_millis: u64) -> SubmitVer
     }
 }
 
-#[derive(Default)]
 struct CapturingJournal {
+    loaded: Option<LoadedDeliveryJournal>,
     publication: Mutex<Option<AtomicPublication>>,
+}
+
+impl Default for CapturingJournal {
+    fn default() -> Self {
+        Self {
+            loaded: None,
+            publication: Mutex::new(None),
+        }
+    }
+}
+
+impl CapturingJournal {
+    fn loaded(journal: winwincode_storage::LoadedAggregateJournal) -> Self {
+        Self {
+            loaded: Some(LoadedDeliveryJournal {
+                manifest: journal.manifest,
+                records: journal
+                    .records
+                    .into_iter()
+                    .map(|record| JournalRecordBytes {
+                        sequence: record.sequence,
+                        state: JournalEntryState::Published,
+                        digest: record.digest,
+                        bytes: record.payload,
+                    })
+                    .collect(),
+            }),
+            publication: Mutex::new(None),
+        }
+    }
 }
 
 impl DeliveryJournalPort for CapturingJournal {
@@ -101,7 +135,7 @@ impl DeliveryJournalPort for CapturingJournal {
         &self,
         _delivery_id: &DeliveryId,
     ) -> Result<Option<LoadedDeliveryJournal>, JournalBackendError> {
-        Ok(None)
+        Ok(self.loaded.clone())
     }
 
     fn publish(&self, publication: AtomicPublication) -> Result<(), JournalBackendError> {
@@ -113,7 +147,7 @@ impl DeliveryJournalPort for CapturingJournal {
 fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
     let capture = CapturingJournal::default();
     DeliveryStore::borrowed(&capture)
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("seed-verdict-journal".into()),
             request_digest: "b".repeat(64),
             snapshot: delivery.clone(),
@@ -168,6 +202,96 @@ fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
         .mark_published(&receipt.events[0].event_id)
         .expect("seed event acknowledgement");
     Box::new(storage).close().expect("seed storage close");
+}
+
+fn advance_after_failed_verdict(root: &PathBuf, delivery_id: &DeliveryId) -> Delivery {
+    let mut storage = SqliteStorage::open(root).expect("advance storage");
+    let key = AggregateJournalKey::new("delivery", delivery_id.0.clone()).expect("journal key");
+    let loaded = storage
+        .load_journal(&key)
+        .expect("load verdict journal")
+        .expect("verdict journal");
+    let capture = CapturingJournal::loaded(loaded);
+    let store = DeliveryStore::borrowed(&capture);
+    let failed = store
+        .query(winwincode_delivery::store::DeliveryQuery::Get(
+            delivery_id.clone(),
+        ))
+        .expect("failed verdict Delivery");
+    let item = failed
+        .snapshot()
+        .attention_items
+        .first()
+        .expect("computed blocking Attention")
+        .clone();
+    let transition = resolve_attention(
+        &failed,
+        ResolveAttentionInput {
+            expected_revision: failed.revision(),
+            attention_item_id: item.id,
+            stage_run_id: item.stage_run_id.expect("verification StageRun"),
+            expected_context: item.context,
+            actor: "delivery-reviewer".into(),
+            decision: AttentionDecision::Resolved,
+            resolution: "authorize bounded rework".into(),
+            now_millis: failed.snapshot().updated_at_millis + 1,
+        },
+    )
+    .expect("resolve computed verdict Attention");
+    let resolved = store
+        .execute(DeliveryCommand::ResolveAttention(
+            ResolveDeliveryAttention {
+                request_id: RequestId("advance-after-verdict".into()),
+                request_digest: "c".repeat(64),
+                expected_revision: failed.revision(),
+                transition,
+            },
+        ))
+        .expect("append typed Attention resolution")
+        .snapshot;
+    let publication = capture
+        .publication
+        .into_inner()
+        .expect("publication lock")
+        .expect("Attention journal publication");
+    let AtomicPublication::Append {
+        expected_tail_sequence,
+        expected_tail_digest,
+        record,
+        ..
+    } = publication
+    else {
+        panic!("Attention resolution must append the Delivery journal");
+    };
+    let advance = StateCommit::new(
+        ReceiptIdentity::new(
+            ReceiptActorKey::from_encoded(b"advance-actor".to_vec()).expect("advance actor"),
+            ReceiptScopeKey::from_encoded(b"advance-scope".to_vec()).expect("advance scope"),
+            RequestId("advance-after-verdict-state".into()),
+        )
+        .expect("advance identity"),
+        Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+        format!("delivery:{}", delivery_id.0),
+        failed.revision(),
+        resolved.encode_json().expect("resolved Delivery JSON"),
+        vec![NewOutboxEvent::new(
+            "attention-resolved-after-verdict",
+            "delivery.attention.resolved",
+            b"resolved".to_vec(),
+        )],
+    )
+    .with_journal_publication(AggregateJournalPublication::Append {
+        key,
+        expected_tail_sequence,
+        expected_tail_digest,
+        record: AggregateJournalRecord::new(record.sequence, record.digest, record.bytes),
+    });
+    let receipt = storage.commit(&advance).expect("advance durable Delivery");
+    storage
+        .mark_published(&receipt.events[0].event_id)
+        .expect("advance event acknowledgement");
+    Box::new(storage).close().expect("advance storage close");
+    resolved
 }
 
 struct CapturingPublisher {
@@ -234,6 +358,77 @@ fn verdict_commit_is_atomic_and_replay_returns_the_original_event_once() {
         )
         .expect("atomic fact counts");
     assert_eq!(facts, (2, 1, 1));
+    connection.close().expect("inspection close");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
+fn durable_replay_uses_the_original_verdict_after_facts_and_current_revision_change() {
+    let root = temporary_directory("historical-replay");
+    let original = fixture(10, VerdictFixtureOutcome::Fail);
+    let command = verdict_command(10, &original);
+    seed_delivery(&root, &original.delivery);
+    let first_published = Arc::new(Mutex::new(Vec::new()));
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&first_published),
+        }),
+    )
+    .expect("Control Plane start");
+    let first = control_plane
+        .commit_delivery_verdict(&command, verdict_facts(&original, 1_800_000_000_100))
+        .expect("initial verdict commit");
+    control_plane.shutdown().expect("initial shutdown");
+
+    let advanced = advance_after_failed_verdict(&root, original.delivery.id());
+    assert_eq!(advanced.revision(), first.revision + 1);
+    assert_eq!(advanced.snapshot().status, DeliveryStatus::Reworking);
+
+    let replacement = fixture(999, VerdictFixtureOutcome::Pass);
+    let replay_published = Arc::new(Mutex::new(Vec::new()));
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&replay_published),
+        }),
+    )
+    .expect("replay Control Plane start");
+    let replay = control_plane
+        .commit_delivery_verdict(&command, verdict_facts(&replacement, 1_900_000_000_000))
+        .expect("durable receipt replay must not read replacement facts");
+
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.revision, first.revision);
+    assert_eq!(replay.events, first.events);
+    assert!(replay_published.lock().expect("replay events").is_empty());
+    let current = control_plane
+        .load_state(&format!("delivery:{}", original.delivery.id().0))
+        .expect("current state read")
+        .expect("current state");
+    assert_eq!(current.revision, advanced.revision());
+    assert_eq!(
+        Delivery::decode_json(&current.payload).expect("current Delivery"),
+        advanced
+    );
+
+    control_plane.shutdown().expect("replay shutdown");
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("inspection database");
+    let facts: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_type = 'delivery' AND aggregate_id = ?1), \
+               (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?2), \
+               (SELECT COUNT(*) FROM outbox WHERE topic = 'delivery.verdict.submitted')",
+            [
+                original.delivery.id().0.as_str(),
+                command.request_id.0.as_str(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("historical replay counts");
+    assert_eq!(facts, (3, 1, 1));
     connection.close().expect("inspection close");
     fs::remove_dir_all(root).expect("database cleanup");
 }

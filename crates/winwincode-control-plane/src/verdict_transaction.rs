@@ -19,7 +19,7 @@ use winwincode_storage::{
 };
 
 use crate::{
-    DeliveryVerdictCommitError, StateChange,
+    DeliveryVerdictCommitError, StateChange, command_receipt,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     storage_commit,
 };
@@ -31,24 +31,49 @@ pub(crate) fn execute(
     command: &CommandEnvelope,
     facts: SubmitVerdictFacts<'_>,
 ) -> Result<CommitReceipt, DeliveryVerdictCommitError> {
-    validate_command(command, &facts).map_err(DeliveryVerdictCommitError::Storage)?;
+    let payload =
+        validate_command_envelope(command).map_err(DeliveryVerdictCommitError::Storage)?;
     let expected_revision =
         expected_revision(command).map_err(DeliveryVerdictCommitError::Storage)?;
-    let delivery_id = facts.candidate.delivery_id().clone();
+    let (receipt_identity, command_digest) =
+        command_receipt(command).map_err(DeliveryVerdictCommitError::Storage)?;
+    let delivery_id = payload.delivery_id.clone();
     let journal_key =
         delivery_journal_key(&delivery_id).map_err(DeliveryVerdictCommitError::Storage)?;
     let loaded = storage
         .load_journal(&journal_key)
         .map_err(DeliveryVerdictCommitError::Storage)?;
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
+
+    if let Some(receipt) = storage
+        .load_receipt(&receipt_identity, &command_digest)
+        .map_err(DeliveryVerdictCommitError::Storage)?
+    {
+        let source = DeliveryStore::borrowed(&journal)
+            .query(DeliveryQuery::GetRevision {
+                delivery_id: delivery_id.clone(),
+                revision: expected_revision,
+            })
+            .map_err(delivery_store_error)?;
+        let committed = DeliveryStore::borrowed(&journal)
+            .query(DeliveryQuery::GetRevision {
+                delivery_id,
+                revision: receipt.revision,
+            })
+            .map_err(delivery_store_error)?;
+        validate_receipt(&receipt, &source, &committed, &receipt_identity, true)
+            .map_err(DeliveryVerdictCommitError::Storage)?;
+        return Ok(receipt);
+    }
+
+    validate_command_facts(&payload, expected_revision, &facts)
+        .map_err(DeliveryVerdictCommitError::Storage)?;
     let source = DeliveryStore::borrowed(&journal)
         .query(DeliveryQuery::GetRevision {
             delivery_id: delivery_id.clone(),
             revision: expected_revision,
         })
-        .map_err(|error| {
-            DeliveryVerdictCommitError::Storage(StorageError::invalid_input(error.to_string()))
-        })?;
+        .map_err(delivery_store_error)?;
     let transition = compute_verdict_transition(&source, facts)
         .map_err(DeliveryVerdictCommitError::Coordination)?;
     let event_id = verdict_event_id(transition.event());
@@ -118,10 +143,9 @@ pub(crate) fn execute(
     Ok(receipt)
 }
 
-fn validate_command(
+fn validate_command_envelope(
     command: &CommandEnvelope,
-    facts: &SubmitVerdictFacts<'_>,
-) -> Result<(), StorageError> {
+) -> Result<DeliverySubmitVerdictPayload, StorageError> {
     if command.command != CommandName::DeliverySubmitVerdict {
         return Err(StorageError::invalid_input(
             "Delivery verdict transaction requires delivery.submit_verdict",
@@ -133,9 +157,21 @@ fn validate_command(
                 "delivery.submit_verdict payload is not canonical: {error}"
             ))
         })?;
-    if serde_json::to_value(&payload).map_err(storage_error)? != command.payload
-        || payload.delivery_id != *facts.candidate.delivery_id()
-        || facts.expected_revision != expected_revision(command)?
+    if serde_json::to_value(&payload).map_err(storage_error)? != command.payload {
+        return Err(StorageError::invalid_input(
+            "delivery.submit_verdict payload is not canonical",
+        ));
+    }
+    Ok(payload)
+}
+
+fn validate_command_facts(
+    payload: &DeliverySubmitVerdictPayload,
+    expected_revision: u64,
+    facts: &SubmitVerdictFacts<'_>,
+) -> Result<(), StorageError> {
+    if payload.delivery_id != *facts.candidate.delivery_id()
+        || facts.expected_revision != expected_revision
         || facts
             .candidate
             .candidate_ref()
@@ -147,6 +183,10 @@ fn validate_command(
         ));
     }
     Ok(())
+}
+
+fn delivery_store_error(error: impl std::fmt::Display) -> DeliveryVerdictCommitError {
+    DeliveryVerdictCommitError::Storage(StorageError::invalid_input(error.to_string()))
 }
 
 fn expected_revision(command: &CommandEnvelope) -> Result<u64, StorageError> {

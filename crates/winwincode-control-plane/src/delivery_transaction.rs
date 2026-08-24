@@ -11,9 +11,9 @@ use winwincode_api::generated::{
 };
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
-    AppendDelivery, AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort,
-    DeliveryMutationOperation, DeliveryStore, JournalBackendError, JournalBackendErrorCode,
-    JournalEntryState, JournalRecordBytes, LoadedDeliveryJournal,
+    AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort, DeliveryStore,
+    JournalBackendError, JournalBackendErrorCode, JournalEntryState, JournalRecordBytes,
+    LoadedDeliveryJournal, StartDeliveryStage,
 };
 use winwincode_domain::DeliveryId;
 use winwincode_storage::{
@@ -84,13 +84,11 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             DeliveryExecutionPortError::new("Delivery expectedRevision must not be negative")
         })?;
         let mutation = DeliveryStore::borrowed(&journal)
-            .execute(DeliveryCommand::Append(AppendDelivery {
-                delivery_id: pending.delivery().id().clone(),
+            .execute(DeliveryCommand::StartStage(StartDeliveryStage {
                 request_id: pending.request_id().clone(),
                 request_digest,
-                operation: DeliveryMutationOperation::StageStarted,
                 expected_revision,
-                snapshot: pending.delivery().clone(),
+                transition: pending.stage_transition().clone(),
             }))
             .map_err(port_error)?;
         commit.state = mutation.snapshot.encode_json().map_err(port_error)?;

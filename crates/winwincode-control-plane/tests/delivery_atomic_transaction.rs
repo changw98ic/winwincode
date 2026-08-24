@@ -21,9 +21,9 @@ use winwincode_delivery::domain::{
     SessionBindingId,
 };
 use winwincode_delivery::store::{
-    AppendDelivery, AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort,
-    DeliveryJournalPort, DeliveryMutationOperation, DeliveryQuery, DeliveryQueryPort,
-    DeliveryStore, InMemoryDeliveryJournal, JournalBackendError, LoadedDeliveryJournal,
+    AtomicPublication, CreateDelivery, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort,
+    DeliveryQuery, DeliveryQueryPort, DeliveryStore, InMemoryDeliveryJournal, JournalBackendError,
+    LoadedDeliveryJournal, StartDeliveryStage,
 };
 use winwincode_domain::{
     AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant, OrganizationId,
@@ -166,7 +166,7 @@ impl DeliveryJournalPort for CapturingJournal {
 fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
     let capture = CapturingJournal::default();
     DeliveryStore::borrowed(&capture)
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("c".repeat(64)),
             request_digest: "b".repeat(64),
             snapshot: delivery.clone(),
@@ -391,20 +391,18 @@ fn raw_borrowed_journal_can_publish_before_an_unrelated_outer_commit_fails() {
     let before = delivery_before_advance(99);
     let pending = pending_execution(99, "partial-checkout");
     store
-        .execute(DeliveryCommand::Create(CreateDelivery {
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
             request_id: RequestId("d".repeat(64)),
             request_digest: "d".repeat(64),
             snapshot: before,
         }))
         .expect("seed raw borrowed journal");
     store
-        .execute(DeliveryCommand::Append(AppendDelivery {
-            delivery_id: pending.delivery().id().clone(),
+        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
             request_id: pending.request_id().clone(),
             request_digest: "e".repeat(64),
-            operation: DeliveryMutationOperation::StageStarted,
             expected_revision: 1,
-            snapshot: pending.delivery().clone(),
+            transition: pending.stage_transition().clone(),
         }))
         .expect("borrowed journal publishes before the outer commit");
     let outer_commit: Result<(), &'static str> = Err("injected outer commit failure");
