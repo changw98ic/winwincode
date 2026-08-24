@@ -476,7 +476,10 @@ fn resolve_direct_candidate_source(
             },
         }),
         EvidenceSource::CandidateFile { path } => resolve_direct_candidate_file(candidate, path),
-        EvidenceSource::Runtime { .. } => unreachable!("runtime source resolved separately"),
+        EvidenceSource::Runtime { .. } => Err(resolution_error(
+            EvidenceResolutionErrorCode::InvalidEvidence,
+            "runtime Evidence must use the accepted runtime-source resolver",
+        )),
     }
 }
 

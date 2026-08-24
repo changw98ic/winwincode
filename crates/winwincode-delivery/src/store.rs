@@ -685,7 +685,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_start_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
             AppendAuthority::Attention(transition) => {
                 validate_authorized_operation(
@@ -695,7 +695,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
             AppendAuthority::Verdict(transition) => {
                 validate_authorized_operation(
@@ -705,7 +705,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
         }
         if command.expected_revision != stored.snapshot.revision()
@@ -801,6 +801,7 @@ impl<'journal> DeliveryStore<'journal> {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AppendAuthority<'transition> {
     Generic,
     Stage(&'transition StageAdvanceResult),
@@ -824,7 +825,7 @@ fn validate_authorized_operation(
 }
 
 fn map_transition_error(
-    error: CoordinationError,
+    error: &CoordinationError,
     command: &AppendDelivery,
     current: &Delivery,
 ) -> DeliveryStoreError {

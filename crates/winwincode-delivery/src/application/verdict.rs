@@ -407,7 +407,7 @@ fn attention_action(
             DerivedVerdictAttentionAction::ResolveVerificationConflict
         }
         CriterionVerdict::Inconclusive => DerivedVerdictAttentionAction::CompleteVerification,
-        CriterionVerdict::Pass => unreachable!("passing criteria do not create Attention"),
+        CriterionVerdict::Pass => DerivedVerdictAttentionAction::ClarifyDefinition,
     }
 }
 
