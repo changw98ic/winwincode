@@ -6,6 +6,16 @@
 //! values returned by [`validate_independent_verification`] keep their fields
 //! private, so a verdict can consume only assignments, outcomes, and findings
 //! that were reconciled with the current Delivery and frozen candidate.
+//!
+//! A serialized projection cannot be promoted back into a sealed terminal fact.
+//!
+//! ```compile_fail
+//! use serde::de::DeserializeOwned;
+//! use winwincode_delivery::domain::verification::AcceptedVerificationJobOutcomeFact;
+//!
+//! fn require_deserialize<T: DeserializeOwned>() {}
+//! require_deserialize::<AcceptedVerificationJobOutcomeFact>();
+//! ```
 
 use std::collections::HashSet;
 
@@ -41,7 +51,6 @@ struct FencedExecutionIdentity<'fact> {
     worker_session_id: &'fact WorkerSessionId,
 }
 
-#[allow(dead_code)]
 impl<'fact> FencedExecutionIdentity<'fact> {
     fn verified(outcome: &'fact VerifiedTerminalOutcome) -> Self {
         Self {
@@ -114,7 +123,13 @@ impl VerificationRole {
 /// Workspace policy observed for one verification Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 4 Worker adapter has not exposed non-read-only policy facts"
+    )
+)]
 pub(crate) enum VerificationWorkspaceMode {
     CandidateReadOnly,
     CandidateWrite,
@@ -124,7 +139,13 @@ pub(crate) enum VerificationWorkspaceMode {
 /// Restricted permission profile accepted for an independent verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 4 Worker adapter has not exposed unrestricted policy facts"
+    )
+)]
 pub(crate) enum VerificationPermissionProfile {
     CandidateReadOnlyRestricted,
     Unrestricted,
@@ -133,7 +154,13 @@ pub(crate) enum VerificationPermissionProfile {
 /// Candidate mutation category emitted by the Worker runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 4 Worker adapter has not exposed mutation records"
+    )
+)]
 pub(crate) enum VerificationMutationKind {
     FileWrite,
     PatchApply,
@@ -156,7 +183,13 @@ pub(crate) struct VerificationWorkerMutationRecord {
 }
 
 impl VerificationWorkerMutationRecord {
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 4 Worker adapter is the production constructor"
+        )
+    )]
     pub(crate) fn from_terminal_outcome(
         outcome: &AcceptedVerificationJobOutcomeFact,
         sequence: ExecutionSequence,
@@ -334,10 +367,16 @@ pub struct AcceptedVerificationJobOutcomeFact {
     artifacts: Vec<TerminalArtifactReference>,
 }
 
-#[allow(dead_code)]
 impl AcceptedVerificationJobOutcomeFact {
     /// Joins the stage coordinator's sealed outcome to one adapter-sealed Job
     /// snapshot. No caller-supplied identity or terminal timestamp is copied.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 4 Worker and Git adapters are the production constructors"
+        )
+    )]
     pub(crate) fn from_verified_outcome(
         outcome: &VerifiedTerminalOutcome,
         snapshot: &ValidatedGitSnapshotFact,
@@ -493,12 +532,17 @@ impl VerificationFinding {
         &self.source_refs
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 4 runtime ledger adapter will consume the terminal result position"
+        )
+    )]
     pub(crate) fn result_sequence(&self) -> &ExecutionSequence {
         &self.result_sequence
     }
 
-    #[allow(dead_code)]
     pub(crate) fn source_sequences(&self) -> &[ExecutionSequence] {
         &self.source_sequences
     }
@@ -1374,6 +1418,8 @@ fn relationship_mismatch(path: &str, message: &str) -> DeliveryValidationError {
 /// are unavailable to production code and keep every production field private.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
+    #![allow(dead_code, clippy::wildcard_imports)]
+
     use super::*;
 
     #[allow(dead_code)]
@@ -1597,8 +1643,11 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::application::stage::{
-        ActiveLeaseIdentity, TerminalArtifactReference, TerminalOutcomeMetadata,
-        TerminalWorkerOutcome, verify_terminal_outcome,
+        TerminalArtifactReference,
+        test_support::{
+            active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
+            verify_terminal_outcome,
+        },
     };
     use crate::domain::candidate::test_support::{frozen_candidate, validated_git_snapshot};
     use crate::domain::{
@@ -1822,41 +1871,41 @@ mod tests {
         active_run.status = StageRunStatus::Running;
         active_run.finished_at_millis = None;
         let active = Delivery::try_from_snapshot(active_snapshot).expect("active verification");
-        let lease = ActiveLeaseIdentity {
-            execution_job_id: snapshot.execution_job_id().clone(),
-            attempt: snapshot.attempt(),
-            lease_id: snapshot.lease_id().clone(),
-            fencing_token: snapshot.fencing_token().clone(),
-            worker_id: snapshot.worker_id().clone(),
-            worker_instance_id: snapshot.worker_instance_id().clone(),
-            worker_session_id: snapshot.worker_session_id().clone(),
-        };
+        let lease = active_lease_identity(
+            snapshot.execution_job_id().clone(),
+            snapshot.attempt(),
+            snapshot.lease_id().clone(),
+            snapshot.fencing_token().clone(),
+            snapshot.worker_id().clone(),
+            snapshot.worker_instance_id().clone(),
+            snapshot.worker_session_id().clone(),
+        );
         verify_terminal_outcome(
             &active,
             &lease,
-            TerminalWorkerOutcome {
-                stage_run_id: stage_run_id.clone(),
-                execution_job_id: lease.execution_job_id.clone(),
-                attempt: lease.attempt,
-                lease_id: lease.lease_id.clone(),
-                fencing_token: lease.fencing_token.clone(),
-                worker_id: lease.worker_id.clone(),
-                worker_instance_id: lease.worker_instance_id.clone(),
-                worker_session_id: lease.worker_session_id.clone(),
+            terminal_worker_outcome(
+                stage_run_id.clone(),
+                lease.execution_job_id().clone(),
+                lease.attempt(),
+                lease.lease_id().clone(),
+                lease.fencing_token().clone(),
+                lease.worker_id().clone(),
+                lease.worker_instance_id().clone(),
+                lease.worker_session_id().clone(),
                 status,
-                metadata: TerminalOutcomeMetadata {
-                    codex_thread_id: Some(snapshot.codex_thread_id().clone()),
-                    finished_at_millis: snapshot.finished_at_millis(),
-                    last_event_sequence: ExecutionAckSequence(
+                terminal_outcome_metadata(
+                    Some(snapshot.codex_thread_id().clone()),
+                    snapshot.finished_at_millis(),
+                    ExecutionAckSequence(
                         i64::try_from(snapshot.last_event_sequence())
                             .expect("fixture event sequence fits i64"),
                     ),
-                    artifacts: vec![TerminalArtifactReference {
+                    vec![TerminalArtifactReference {
                         artifact_id: ArtifactId(snapshot.artifact_ref().into()),
                         digest: snapshot.artifact_digest().clone(),
                     }],
-                },
-            },
+                ),
+            ),
         )
         .expect("verified terminal outcome")
     }

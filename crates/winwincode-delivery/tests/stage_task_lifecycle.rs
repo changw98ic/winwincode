@@ -10,8 +10,14 @@ use winwincode_delivery::{
         ActiveLeaseIdentity, AdvanceStageInput, CancelAcknowledgement, NewStageIdentities,
         ReviewAttentionSeed, StageAdvanceEffect, TerminalArtifactReference,
         TerminalOutcomeMetadata, TerminalOutcomeStatus, TerminalWorkerOutcome, acknowledge_cancel,
-        advance, apply_terminal_outcome, request_cancel, resume_active, validate_stage_executor,
-        verify_terminal_outcome,
+        advance, apply_terminal_outcome, request_cancel, resume_active,
+        test_support::{
+            active_lease_identity, duplicate_first_terminal_artifact,
+            set_first_terminal_artifact_digest, set_terminal_codex_thread_id,
+            set_terminal_last_event_sequence, terminal_metadata as raw_terminal_metadata,
+            terminal_outcome_metadata, terminal_worker_outcome, verify_terminal_outcome,
+        },
+        validate_stage_executor,
     },
     application::task::{
         TaskFact, approve_task_breakdown, runnable_task, transition_task_status,
@@ -176,18 +182,18 @@ fn terminal_worker_outcome_at(
         .clone()
         .expect("completed worker binding");
     let lease = active_lease(delivery);
-    TerminalWorkerOutcome {
-        stage_run_id: run.id.clone(),
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: lease.lease_id.clone(),
-        fencing_token: lease.fencing_token.clone(),
-        worker_id: lease.worker_id.clone(),
-        worker_instance_id: lease.worker_instance_id.clone(),
+    terminal_worker_outcome(
+        run.id.clone(),
+        binding.execution_job_id.clone(),
+        run.attempt,
+        lease.lease_id().clone(),
+        lease.fencing_token().clone(),
+        lease.worker_id().clone(),
+        lease.worker_instance_id().clone(),
         worker_session_id,
         status,
-        metadata: terminal_metadata_at(delivery, finished_at_millis),
-    }
+        terminal_metadata_at(delivery, finished_at_millis),
+    )
 }
 
 fn terminal_metadata(delivery: &Delivery) -> TerminalOutcomeMetadata {
@@ -207,15 +213,15 @@ fn terminal_metadata_at(delivery: &Delivery, finished_at_millis: u64) -> Termina
         .iter()
         .find(|binding| binding.stage_run_id == run.id)
         .expect("active binding");
-    TerminalOutcomeMetadata {
-        codex_thread_id: binding.codex_thread_id.clone(),
+    terminal_outcome_metadata(
+        binding.codex_thread_id.clone(),
         finished_at_millis,
-        last_event_sequence: ExecutionAckSequence(1),
-        artifacts: vec![TerminalArtifactReference {
+        ExecutionAckSequence(1),
+        vec![TerminalArtifactReference {
             artifact_id: ArtifactId(format!("artifact:job:{}", binding.execution_job_id.0)),
             digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
         }],
-    }
+    )
 }
 
 fn active_lease(delivery: &Delivery) -> ActiveLeaseIdentity {
@@ -236,18 +242,18 @@ fn active_lease(delivery: &Delivery) -> ActiveLeaseIdentity {
         .iter()
         .find(|binding| binding.stage_run_id == run.id)
         .expect("active binding");
-    ActiveLeaseIdentity {
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId(format!("lease-{}", run.id.0)),
-        fencing_token: FencingToken("1".into()),
-        worker_id: WorkerId("worker-one".into()),
-        worker_instance_id: WorkerInstanceId("worker-instance-one".into()),
-        worker_session_id: binding
+    active_lease_identity(
+        binding.execution_job_id.clone(),
+        run.attempt,
+        LeaseId(format!("lease-{}", run.id.0)),
+        FencingToken("1".into()),
+        WorkerId("worker-one".into()),
+        WorkerInstanceId("worker-instance-one".into()),
+        binding
             .worker_session_id
             .clone()
             .expect("completed worker binding"),
-    }
+    )
 }
 
 fn successful_outcome(
@@ -1245,29 +1251,29 @@ fn replayed_advance_returns_original_stage_run_without_new_state() {
         .expect("seed Delivery");
     let advanced = advance(&draft, advance_input(1, "replay-stage")).expect("stage advance");
     let first = store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             expected_revision: 1,
             transition: advanced.clone(),
-        }))
+        })))
         .expect("first append");
     let replay = store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             expected_revision: 1,
             transition: advanced.clone(),
-        }))
+        })))
         .expect("identical request replays");
 
     let conflict = store
-        .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+        .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
             request_id: RequestId("request-advance-replay".into()),
             request_digest: "b".repeat(64),
             expected_revision: advanced.delivery.revision(),
             transition: advanced,
-        }))
+        })))
         .expect_err("different expectedRevision is conflicting request reuse");
 
     assert!(!first.replayed);
@@ -1378,27 +1384,27 @@ fn active_stage_handoff_requires_exact_terminal_lease_and_fencing_fact() {
     let run = &planning.snapshot().stage_runs[0];
     let binding = &planning.snapshot().session_bindings[0];
     let worker_session_id = binding.worker_session_id.clone().expect("worker session");
-    let lease = ActiveLeaseIdentity {
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId("lease-terminal-required".into()),
-        fencing_token: FencingToken("7".into()),
-        worker_id: WorkerId("worker-one".into()),
-        worker_instance_id: WorkerInstanceId("worker-instance-one".into()),
-        worker_session_id: worker_session_id.clone(),
-    };
-    let wrong_fencing = TerminalWorkerOutcome {
-        stage_run_id: run.id.clone(),
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: lease.lease_id.clone(),
-        fencing_token: FencingToken("6".into()),
-        worker_id: lease.worker_id.clone(),
-        worker_instance_id: lease.worker_instance_id.clone(),
+    let lease = active_lease_identity(
+        binding.execution_job_id.clone(),
+        run.attempt,
+        LeaseId("lease-terminal-required".into()),
+        FencingToken("7".into()),
+        WorkerId("worker-one".into()),
+        WorkerInstanceId("worker-instance-one".into()),
+        worker_session_id.clone(),
+    );
+    let wrong_fencing = terminal_worker_outcome(
+        run.id.clone(),
+        binding.execution_job_id.clone(),
+        run.attempt,
+        lease.lease_id().clone(),
+        FencingToken("6".into()),
+        lease.worker_id().clone(),
+        lease.worker_instance_id().clone(),
         worker_session_id,
-        status: TerminalOutcomeStatus::Succeeded,
-        metadata: terminal_metadata(&planning),
-    };
+        TerminalOutcomeStatus::Succeeded,
+        terminal_metadata(&planning),
+    );
     let error = verify_terminal_outcome(&planning, &lease, wrong_fencing)
         .expect_err("stale fencing token must fail closed");
     assert_eq!(error.code(), CoordinationErrorCode::BindingConflict);
@@ -1420,8 +1426,8 @@ fn terminal_outcome_seals_time_sequence_thread_and_artifact_identity() {
     let lease = active_lease(&planning);
     let accepted_at = 1_800_000_000_200;
     let raw = terminal_worker_outcome_at(&planning, TerminalOutcomeStatus::Succeeded, accepted_at);
-    let expected_thread = raw.metadata.codex_thread_id.clone();
-    let expected_artifacts = raw.metadata.artifacts.clone();
+    let expected_thread = raw_terminal_metadata(&raw).codex_thread_id().cloned();
+    let expected_artifacts = raw_terminal_metadata(&raw).artifacts().to_vec();
     let verified = verify_terminal_outcome(&planning, &lease, raw)
         .expect("exact terminal metadata is accepted");
     assert_eq!(verified.codex_thread_id(), expected_thread.as_ref());
@@ -1431,25 +1437,25 @@ fn terminal_outcome_seals_time_sequence_thread_and_artifact_identity() {
 
     let mut wrong_thread =
         terminal_worker_outcome_at(&planning, TerminalOutcomeStatus::Succeeded, accepted_at);
-    wrong_thread.metadata.codex_thread_id = Some(CodexThreadId("thread-foreign".into()));
+    set_terminal_codex_thread_id(
+        &mut wrong_thread,
+        Some(CodexThreadId("thread-foreign".into())),
+    );
     assert!(verify_terminal_outcome(&planning, &lease, wrong_thread).is_err());
 
     let mut invalid_sequence =
         terminal_worker_outcome_at(&planning, TerminalOutcomeStatus::Succeeded, accepted_at);
-    invalid_sequence.metadata.last_event_sequence = ExecutionAckSequence(-1);
+    set_terminal_last_event_sequence(&mut invalid_sequence, ExecutionAckSequence(-1));
     assert!(verify_terminal_outcome(&planning, &lease, invalid_sequence).is_err());
 
     let mut noncanonical_digest =
         terminal_worker_outcome_at(&planning, TerminalOutcomeStatus::Succeeded, accepted_at);
-    noncanonical_digest.metadata.artifacts[0].digest = Sha256Digest("9".repeat(64));
+    set_first_terminal_artifact_digest(&mut noncanonical_digest, Sha256Digest("9".repeat(64)));
     assert!(verify_terminal_outcome(&planning, &lease, noncanonical_digest).is_err());
 
     let mut duplicate_artifact =
         terminal_worker_outcome_at(&planning, TerminalOutcomeStatus::Succeeded, accepted_at);
-    duplicate_artifact
-        .metadata
-        .artifacts
-        .push(duplicate_artifact.metadata.artifacts[0].clone());
+    duplicate_first_terminal_artifact(&mut duplicate_artifact);
     assert!(verify_terminal_outcome(&planning, &lease, duplicate_artifact).is_err());
 }
 
@@ -1465,41 +1471,41 @@ fn terminal_outcome_rejects_a_lease_that_changed_after_verification() {
     let run = &planning.snapshot().stage_runs[0];
     let binding = &planning.snapshot().session_bindings[0];
     let worker_session_id = binding.worker_session_id.clone().expect("worker session");
-    let verified_lease = ActiveLeaseIdentity {
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId("lease-before-reassignment".into()),
-        fencing_token: FencingToken("8".into()),
-        worker_id: WorkerId("worker-before-reassignment".into()),
-        worker_instance_id: WorkerInstanceId("instance-before-reassignment".into()),
-        worker_session_id: worker_session_id.clone(),
-    };
+    let verified_lease = active_lease_identity(
+        binding.execution_job_id.clone(),
+        run.attempt,
+        LeaseId("lease-before-reassignment".into()),
+        FencingToken("8".into()),
+        WorkerId("worker-before-reassignment".into()),
+        WorkerInstanceId("instance-before-reassignment".into()),
+        worker_session_id.clone(),
+    );
     let verified = verify_terminal_outcome(
         &planning,
         &verified_lease,
-        TerminalWorkerOutcome {
-            stage_run_id: run.id.clone(),
-            execution_job_id: binding.execution_job_id.clone(),
-            attempt: run.attempt,
-            lease_id: verified_lease.lease_id.clone(),
-            fencing_token: verified_lease.fencing_token.clone(),
-            worker_id: verified_lease.worker_id.clone(),
-            worker_instance_id: verified_lease.worker_instance_id.clone(),
-            worker_session_id: worker_session_id.clone(),
-            status: TerminalOutcomeStatus::Succeeded,
-            metadata: terminal_metadata(&planning),
-        },
+        terminal_worker_outcome(
+            run.id.clone(),
+            binding.execution_job_id.clone(),
+            run.attempt,
+            verified_lease.lease_id().clone(),
+            verified_lease.fencing_token().clone(),
+            verified_lease.worker_id().clone(),
+            verified_lease.worker_instance_id().clone(),
+            worker_session_id.clone(),
+            TerminalOutcomeStatus::Succeeded,
+            terminal_metadata(&planning),
+        ),
     )
     .expect("current outcome verifies");
-    let reassigned_lease = ActiveLeaseIdentity {
-        execution_job_id: binding.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId("lease-after-reassignment".into()),
-        fencing_token: FencingToken("9".into()),
-        worker_id: WorkerId("worker-after-reassignment".into()),
-        worker_instance_id: WorkerInstanceId("instance-after-reassignment".into()),
+    let reassigned_lease = active_lease_identity(
+        binding.execution_job_id.clone(),
+        run.attempt,
+        LeaseId("lease-after-reassignment".into()),
+        FencingToken("9".into()),
+        WorkerId("worker-after-reassignment".into()),
+        WorkerInstanceId("instance-after-reassignment".into()),
         worker_session_id,
-    };
+    );
 
     let error =
         apply_terminal_outcome(&planning, planning.revision(), &reassigned_lease, &verified)
@@ -1522,12 +1528,16 @@ fn successful_handoff_rejects_a_lease_that_changed_after_verification() {
         "handoff-released",
     );
     let verified = successful_outcome(&planning);
-    let mut reassigned_lease = active_lease(&planning);
-    reassigned_lease.lease_id = LeaseId("lease-after-handoff-reassignment".into());
-    reassigned_lease.fencing_token = FencingToken("2".into());
-    reassigned_lease.worker_id = WorkerId("worker-after-handoff-reassignment".into());
-    reassigned_lease.worker_instance_id =
-        WorkerInstanceId("instance-after-handoff-reassignment".into());
+    let current_lease = active_lease(&planning);
+    let reassigned_lease = active_lease_identity(
+        current_lease.execution_job_id().clone(),
+        current_lease.attempt(),
+        LeaseId("lease-after-handoff-reassignment".into()),
+        FencingToken("2".into()),
+        WorkerId("worker-after-handoff-reassignment".into()),
+        WorkerInstanceId("instance-after-handoff-reassignment".into()),
+        current_lease.worker_session_id().clone(),
+    );
     let mut input = advance_input(planning.revision(), "stale-success-handoff");
     input.review = Some(ReviewAttentionSeed {
         title: "Review plan".into(),
@@ -1580,30 +1590,30 @@ fn worker_can_cancel_and_finish_before_reporting_a_codex_thread() {
 
     request_cancel(&worker_bound, worker_bound.revision())
         .expect("cancel does not depend on a CodexThread");
-    let lease = ActiveLeaseIdentity {
-        execution_job_id: identity.execution_job_id.clone(),
-        attempt: run.attempt,
-        lease_id: LeaseId("lease-before-thread".into()),
-        fencing_token: FencingToken("3".into()),
-        worker_id: WorkerId("worker-before-thread".into()),
-        worker_instance_id: WorkerInstanceId("instance-before-thread".into()),
-        worker_session_id: worker_session_id.clone(),
-    };
+    let lease = active_lease_identity(
+        identity.execution_job_id.clone(),
+        run.attempt,
+        LeaseId("lease-before-thread".into()),
+        FencingToken("3".into()),
+        WorkerId("worker-before-thread".into()),
+        WorkerInstanceId("instance-before-thread".into()),
+        worker_session_id.clone(),
+    );
     let verified = verify_terminal_outcome(
         &worker_bound,
         &lease,
-        TerminalWorkerOutcome {
-            stage_run_id: identity.stage_run_id,
-            execution_job_id: identity.execution_job_id,
-            attempt: run.attempt,
-            lease_id: lease.lease_id.clone(),
-            fencing_token: lease.fencing_token.clone(),
-            worker_id: lease.worker_id.clone(),
-            worker_instance_id: lease.worker_instance_id.clone(),
+        terminal_worker_outcome(
+            identity.stage_run_id,
+            identity.execution_job_id,
+            run.attempt,
+            lease.lease_id().clone(),
+            lease.fencing_token().clone(),
+            lease.worker_id().clone(),
+            lease.worker_instance_id().clone(),
             worker_session_id,
-            status: TerminalOutcomeStatus::Cancelled,
-            metadata: terminal_metadata_at(&worker_bound, 1_800_000_000_200),
-        },
+            TerminalOutcomeStatus::Cancelled,
+            terminal_metadata_at(&worker_bound, 1_800_000_000_200),
+        ),
     )
     .expect("terminal outcome does not depend on a CodexThread");
     let cancelled =

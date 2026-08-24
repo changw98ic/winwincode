@@ -203,13 +203,14 @@ pub fn compute_delivery_verdict(
             && item.item_type != AttentionItemType::DeliveryApproval
         {
             unresolved_findings.push(format!("blocking-attention:{}", item.id.0));
-            actions.push(match item.item_type {
+            let action = match item.item_type {
                 AttentionItemType::VerificationBlocked => VerdictAttentionAction::RetryVerification,
                 AttentionItemType::RequirementQuestion
                 | AttentionItemType::DecisionRequired
                 | AttentionItemType::ScopeChange => VerdictAttentionAction::ClarifyDefinition,
-                AttentionItemType::DeliveryApproval => unreachable!("excluded above"),
-            });
+                AttentionItemType::DeliveryApproval => continue,
+            };
+            actions.push(action);
         }
     }
 
@@ -800,11 +801,11 @@ fn evaluate_settled_role(
             {
                 Some(claimed)
             }
-            VerifiedEvidenceOutcome::Observed => None,
-            VerifiedEvidenceOutcome::TimedOut
+            VerifiedEvidenceOutcome::Observed
+            | VerifiedEvidenceOutcome::TimedOut
             | VerifiedEvidenceOutcome::PolicyDenied
             | VerifiedEvidenceOutcome::InfrastructureFailed
-            | VerifiedEvidenceOutcome::Cancelled => unreachable!("handled above"),
+            | VerifiedEvidenceOutcome::Cancelled => None,
         };
         let Some(outcome) = outcome else {
             return role_evidence_mismatch(

@@ -20,7 +20,7 @@ use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
 const VERDICT_ATTENTION_PROTOCOL: &str = "winwincode.delivery-verdict-attention.v1";
 
 /// Sealed authoritative facts accepted by the verdict application service.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct SubmitVerdictFacts<'facts> {
     pub expected_revision: u64,
     pub candidate: &'facts FrozenDeliveryCandidate,
@@ -421,7 +421,7 @@ fn attention_action(
             DerivedVerdictAttentionAction::ResolveVerificationConflict
         }
         CriterionVerdict::Inconclusive => DerivedVerdictAttentionAction::CompleteVerification,
-        CriterionVerdict::Pass => unreachable!("passing criteria do not create Attention"),
+        CriterionVerdict::Pass => DerivedVerdictAttentionAction::ClarifyDefinition,
     }
 }
 
@@ -788,7 +788,7 @@ pub mod test_support {
 
     #[must_use]
     pub fn verdict_fixture(
-        delivery_id: DeliveryId,
+        delivery_id: &DeliveryId,
         outcome: VerdictFixtureOutcome,
     ) -> VerdictFixture {
         let delivery = verifying_delivery(delivery_id);
@@ -831,7 +831,7 @@ pub mod test_support {
         }
     }
 
-    fn verifying_delivery(delivery_id: DeliveryId) -> Delivery {
+    fn verifying_delivery(delivery_id: &DeliveryId) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.id = delivery_id.clone();
         snapshot.spec.delivery_id = delivery_id.clone();
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn computed_failure_attention_resolves_to_bounded_rework() {
         let fixture = test_support::verdict_fixture(
-            winwincode_domain::DeliveryId("delivery-verdict-attention-resolution".into()),
+            &winwincode_domain::DeliveryId("delivery-verdict-attention-resolution".into()),
             test_support::VerdictFixtureOutcome::Fail,
         );
         let transition = compute_verdict_transition(

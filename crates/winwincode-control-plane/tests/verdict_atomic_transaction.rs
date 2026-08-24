@@ -54,7 +54,7 @@ fn canonical_id(prefix: &str, value: u64) -> String {
 }
 
 fn fixture(seed: u64, outcome: VerdictFixtureOutcome) -> VerdictFixture {
-    verdict_fixture(DeliveryId(canonical_id("dlv", seed)), outcome)
+    verdict_fixture(&DeliveryId(canonical_id("dlv", seed)), outcome)
 }
 
 fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {
@@ -239,14 +239,14 @@ fn advance_after_failed_verdict(root: &PathBuf, delivery_id: &DeliveryId) -> Del
     )
     .expect("resolve computed verdict Attention");
     let resolved = store
-        .execute(DeliveryCommand::ResolveAttention(
+        .execute(DeliveryCommand::ResolveAttention(Box::new(
             ResolveDeliveryAttention {
                 request_id: RequestId("advance-after-verdict".into()),
                 request_digest: "c".repeat(64),
                 expected_revision: failed.revision(),
                 transition,
             },
-        ))
+        )))
         .expect("append typed Attention resolution")
         .snapshot;
     let publication = capture

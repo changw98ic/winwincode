@@ -218,7 +218,7 @@ remediator StageRun 一开始，前一个候选就失去“当前”资格。历
 
 ## 6. Rust 实现位置与启用方式
 
-阶段 2.4 只在 `crates/winwincode-delivery` 内实现这些领域判断：
+阶段 2.4 在 `crates/winwincode-delivery` 内实现以下领域判断：
 
 ```text
 src/domain/candidate.rs
@@ -229,6 +229,11 @@ src/domain/rework.rs
 ```
 
 `candidate.rs` 是这组实现的启用标记。它尚未出现时，测试核对规则清单、现行 TypeScript 公开入口、已有行为测试和目标测试名；它出现后，五个模块及机器规则中列出的所有 Rust 测试都必须同时存在，并拒绝重新加入旧 `dshSessionId` / `codexSessionId` 字段。这样阶段 2.4 开始编码后，不能只迁成功路径而漏掉失效、冲突和返工边界。
+
+领域计算之外，application/store 与 Rust Control Plane 只接受受限构造的 Stage、Attention 和
+Verdict transition。通用 snapshot append 不能改写或重新标注 Evidence、Verdict、Attention、
+任务状态或 Delivery status；同一原子事务保存 Delivery journal、canonical state、command
+receipt 和需要的 outbox event。调用方提交一份结构合法的完整 Delivery JSON，不构成业务写入权威。
 
 这些模块只计算 Delivery 事实，并以受限构造的已验证值作为外部输入。候选文件、worktree 和
 运行产物仍由 Execution Worker 管理；GitSnapshotResolver、Artifact、outcome 和运行台账

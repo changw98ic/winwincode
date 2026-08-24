@@ -9,6 +9,8 @@ repository.workspace = true
 publish = false
 
 [features]
+# Exposes raw Scheduler/Worker fixture builders only to Rust integration tests.
+# Production Control Plane dependencies do not enable this feature.
 test-support = []
 
 [dependencies]
@@ -16,6 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 winwincode-domain.workspace = true
+
+[[test]]
+name = "stage_task_lifecycle"
+required-features = ["test-support"]
 
 [lints]
 workspace = true

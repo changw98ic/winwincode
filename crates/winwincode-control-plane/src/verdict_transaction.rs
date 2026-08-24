@@ -99,12 +99,14 @@ pub(crate) fn execute(
         .ok_or_else(|| StorageError::invalid_input("command digest is not canonical"))?
         .to_owned();
     let mutation = DeliveryStore::borrowed(&journal)
-        .execute(DeliveryCommand::SubmitVerdict(SubmitDeliveryVerdict {
-            request_id: command.request_id.clone(),
-            request_digest,
-            expected_revision,
-            transition,
-        }))
+        .execute(DeliveryCommand::SubmitVerdict(Box::new(
+            SubmitDeliveryVerdict {
+                request_id: command.request_id.clone(),
+                request_digest,
+                expected_revision,
+                transition,
+            },
+        )))
         .map_err(|error| {
             DeliveryVerdictCommitError::Storage(StorageError::invalid_input(error.to_string()))
         })?;
@@ -338,7 +340,7 @@ mod tests {
         Delivery,
     ) {
         let fixture = verdict_fixture(
-            DeliveryId("delivery-receipt-exactness".into()),
+            &DeliveryId("delivery-receipt-exactness".into()),
             VerdictFixtureOutcome::Fail,
         );
         let transition = compute_verdict_transition(

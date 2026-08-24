@@ -12,8 +12,8 @@ use winwincode_control_plane::delivery_execution::{
 };
 use winwincode_delivery::{
     application::stage::{
-        ActiveLeaseIdentity, AdvanceStageInput, ExecutionIntent, NewStageIdentities,
-        StageAdvanceEffect, StageAdvanceResult, advance, request_cancel,
+        AdvanceStageInput, ExecutionIntent, NewStageIdentities, StageAdvanceEffect,
+        StageAdvanceResult, advance, request_cancel, test_support::active_lease_identity,
     },
     domain::{
         DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
@@ -392,34 +392,34 @@ fn job_cancel_ack_does_not_settle_stage_before_terminal_outcome() {
     binding.codex_thread_id = Some(CodexThreadId(canonical_id("cdx", 4)));
     let delivery = Delivery::try_from_snapshot(snapshot).expect("accepted WorkerSession");
     let intent = request_cancel(&delivery, delivery.revision()).expect("cancel intent");
-    let lease = ActiveLeaseIdentity {
-        execution_job_id: intent.execution_job_id.clone(),
-        attempt: intent.attempt,
-        lease_id: LeaseId(canonical_id("lse", 4)),
-        fencing_token: FencingToken("4".into()),
-        worker_id: WorkerId(canonical_id("wrk", 4)),
-        worker_instance_id: WorkerInstanceId(canonical_id("wki", 4)),
-        worker_session_id: intent.worker_session_id.clone(),
-    };
+    let lease = active_lease_identity(
+        intent.execution_job_id.clone(),
+        intent.attempt,
+        LeaseId(canonical_id("lse", 4)),
+        FencingToken("4".into()),
+        WorkerId(canonical_id("wrk", 4)),
+        WorkerInstanceId(canonical_id("wki", 4)),
+        intent.worker_session_id.clone(),
+    );
     let ack = JobCancelAckMessage {
         error: None,
         kind: "job.cancel_ack".into(),
         lease: ExecutionLeaseStamp {
-            attempt: i64::try_from(lease.attempt).expect("attempt"),
+            attempt: i64::try_from(lease.attempt()).expect("attempt"),
             expires_at: Instant("2026-08-25T12:10:00.000Z".into()),
-            fencing_token: lease.fencing_token.clone(),
+            fencing_token: lease.fencing_token().clone(),
             issued_at: Instant("2026-08-25T12:00:00.000Z".into()),
-            job_id: lease.execution_job_id.clone(),
-            lease_id: lease.lease_id.clone(),
-            worker_id: lease.worker_id.clone(),
-            worker_instance_id: lease.worker_instance_id.clone(),
+            job_id: lease.execution_job_id().clone(),
+            lease_id: lease.lease_id().clone(),
+            worker_id: lease.worker_id().clone(),
+            worker_instance_id: lease.worker_instance_id().clone(),
         },
         message_id: ExecutionMessageId(canonical_id("xmsg", 4)),
         request_id: RequestId(canonical_id("req", 4)),
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2026-08-25T12:00:01.000Z".into()),
         status: "accepted".into(),
-        worker_session_id: lease.worker_session_id.clone(),
+        worker_session_id: lease.worker_session_id().clone(),
     };
 
     let after_ack = acknowledge_job_cancel(

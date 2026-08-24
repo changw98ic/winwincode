@@ -270,7 +270,6 @@ pub(crate) fn next_rework_attempt(delivery: &Delivery) -> u64 {
 /// The transaction may provide the full Delivery history. Only verdicts for
 /// the current Spec revision and an earlier candidate are included. Missing,
 /// reordered, duplicate, foreign, or insufficient history is rejected.
-#[allow(dead_code)] // consumed by the pending Control Plane journal transaction
 pub(crate) fn derive_validated_rework_history(
     delivery: &Delivery,
     append_only_history: &[DeliverySnapshot],

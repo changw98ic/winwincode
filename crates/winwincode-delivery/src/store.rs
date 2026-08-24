@@ -244,9 +244,9 @@ pub enum DeliveryCommand {
     #[cfg(any(test, feature = "test-support"))]
     SeedForTest(CreateDelivery),
     Append(AppendDelivery),
-    StartStage(StartDeliveryStage),
-    ResolveAttention(ResolveDeliveryAttention),
-    SubmitVerdict(SubmitDeliveryVerdict),
+    StartStage(Box<StartDeliveryStage>),
+    ResolveAttention(Box<ResolveDeliveryAttention>),
+    SubmitVerdict(Box<SubmitDeliveryVerdict>),
 }
 
 #[derive(Debug, Clone)]
@@ -695,6 +695,15 @@ impl<'journal> DeliveryStore<'journal> {
                 replayed: true,
             });
         }
+        if command.expected_revision != stored.snapshot.revision()
+            || command.snapshot.revision() != stored.snapshot.revision() + 1
+        {
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
+                "delivery revision changed before mutation",
+            ));
+        }
         match authority {
             AppendAuthority::Generic => {
                 validate_generic_append_delta(
@@ -711,7 +720,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_start_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
             AppendAuthority::Attention(transition) => {
                 validate_authorized_operation(
@@ -721,7 +730,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
             AppendAuthority::Verdict(transition) => {
                 validate_authorized_operation(
@@ -731,17 +740,8 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(|error| map_transition_error(error, &command, &stored.snapshot))?;
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
-        }
-        if command.expected_revision != stored.snapshot.revision()
-            || command.snapshot.revision() != stored.snapshot.revision() + 1
-        {
-            return Err(revision_conflict(
-                command.expected_revision,
-                stored.snapshot.revision(),
-                "delivery revision changed before mutation",
-            ));
         }
         let previous = stored.records.last().ok_or_else(|| {
             store_error(
@@ -827,6 +827,7 @@ impl<'journal> DeliveryStore<'journal> {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AppendAuthority<'transition> {
     Generic,
     Stage(&'transition StageAdvanceResult),
@@ -850,7 +851,7 @@ fn validate_authorized_operation(
 }
 
 fn map_transition_error(
-    error: CoordinationError,
+    error: &CoordinationError,
     command: &AppendDelivery,
     current: &Delivery,
 ) -> DeliveryStoreError {
@@ -890,10 +891,7 @@ fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreErr
     let snapshot = delivery.snapshot();
     if snapshot.revision != 1
         || snapshot.status != DeliveryStatus::Draft
-        || snapshot
-            .tasks
-            .iter()
-            .any(|task| task.status != crate::domain::DeliveryTaskStatus::Pending)
+        || !snapshot.tasks.is_empty()
         || !snapshot.stage_runs.is_empty()
         || !snapshot.session_bindings.is_empty()
         || !snapshot.attention_items.is_empty()
@@ -903,7 +901,7 @@ fn validate_initial_delivery(delivery: &Delivery) -> Result<(), DeliveryStoreErr
     {
         return Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
-            "delivery.created requires the canonical revision-1 Draft transition with only pending tasks",
+            "delivery.created requires the canonical empty revision-1 Draft transition",
         ));
     }
     Ok(())
@@ -1046,9 +1044,9 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             #[cfg(any(test, feature = "test-support"))]
             DeliveryCommand::SeedForTest(seed) => self.seed_for_test(seed),
             DeliveryCommand::Append(append) => self.append(append),
-            DeliveryCommand::StartStage(start) => self.start_stage(start),
-            DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(resolve),
-            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(submit),
+            DeliveryCommand::StartStage(start) => self.start_stage(*start),
+            DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
+            DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
         }
     }
 }
@@ -1527,7 +1525,7 @@ mod tests {
         crate::domain::FrozenDeliveryCandidate,
     ) {
         let fixture = verdict_fixture(
-            DeliveryId("delivery-store-verdict".into()),
+            &DeliveryId("delivery-store-verdict".into()),
             VerdictFixtureOutcome::Fail,
         );
         let backend = Arc::new(InMemoryDeliveryJournal::new());
@@ -1551,12 +1549,14 @@ mod tests {
         )
         .expect("computed failing verdict");
         let failed = store
-            .execute(DeliveryCommand::SubmitVerdict(SubmitDeliveryVerdict {
-                request_id: RequestId("submit-failed-verdict".into()),
-                request_digest: REQUEST_B.into(),
-                expected_revision: fixture.delivery.revision(),
-                transition,
-            }))
+            .execute(DeliveryCommand::SubmitVerdict(Box::new(
+                SubmitDeliveryVerdict {
+                    request_id: RequestId("submit-failed-verdict".into()),
+                    request_digest: REQUEST_B.into(),
+                    expected_revision: fixture.delivery.revision(),
+                    transition,
+                },
+            )))
             .expect("submit failing verdict")
             .snapshot;
         (store, failed, fixture.candidate)
@@ -1624,14 +1624,14 @@ mod tests {
         );
 
         let resolved = store
-            .execute(DeliveryCommand::ResolveAttention(
+            .execute(DeliveryCommand::ResolveAttention(Box::new(
                 ResolveDeliveryAttention {
                     request_id: RequestId("sealed-attention-resolution".into()),
                     request_digest: "e".repeat(64),
                     expected_revision: failed.revision(),
                     transition,
                 },
-            ))
+            )))
             .expect("sealed Attention resolution commits");
         assert_eq!(
             resolved.snapshot.snapshot().status,
@@ -1675,12 +1675,12 @@ mod tests {
         )
         .expect("authorized rework stage");
         let reworking = store
-            .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+            .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
                 request_id: RequestId("sealed-start-bounded-rework".into()),
                 request_digest: "1".repeat(64),
                 expected_revision: resolved.snapshot.revision(),
                 transition: stage,
-            }))
+            })))
             .expect("typed rework stage persists")
             .snapshot;
         assert_eq!(
@@ -1705,7 +1705,7 @@ mod tests {
         ] {
             let (store, failed, _) = create_store_with_failed_verdict();
             let passing_fixture = verdict_fixture(
-                DeliveryId("delivery-store-verdict".into()),
+                &DeliveryId("delivery-store-verdict".into()),
                 VerdictFixtureOutcome::Pass,
             );
             let passing = compute_verdict_transition(
@@ -1741,7 +1741,7 @@ mod tests {
     #[test]
     fn creation_rejects_a_precomputed_passing_delivery() {
         let fixture = verdict_fixture(
-            DeliveryId("delivery-create-authority-bypass".into()),
+            &DeliveryId("delivery-create-authority-bypass".into()),
             VerdictFixtureOutcome::Pass,
         );
         let transition = compute_verdict_transition(

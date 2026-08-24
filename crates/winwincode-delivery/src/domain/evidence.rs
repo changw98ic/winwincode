@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exact Evidence source resolution for the current frozen candidate.
+//!
+//! The accepted runtime-ledger source remains internal until its Phase 4
+//! authoritative adapter exists.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::evidence::AcceptedRuntimeSourceFact;
+//! ```
 
 use std::{error::Error, fmt};
 
@@ -336,6 +343,10 @@ fn resolution_error(
 /// Rejects a stale candidate, foreign `StageRun` or `SessionBinding`, missing or
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the sealed resolver command is single-use application input"
+)]
 pub(crate) fn resolve_delivery_evidence(
     delivery: &Delivery,
     candidate: &FrozenDeliveryCandidate,
@@ -465,7 +476,10 @@ fn resolve_direct_candidate_source(
             },
         }),
         EvidenceSource::CandidateFile { path } => resolve_direct_candidate_file(candidate, path),
-        EvidenceSource::Runtime { .. } => unreachable!("runtime source resolved separately"),
+        EvidenceSource::Runtime { .. } => Err(resolution_error(
+            EvidenceResolutionErrorCode::InvalidEvidence,
+            "runtime Evidence must use the accepted runtime-source resolver",
+        )),
     }
 }
 
@@ -924,6 +938,8 @@ pub(crate) fn validate(evidence: &EvidenceRef, path: &str) -> Result<(), Deliver
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
+    #![allow(dead_code, clippy::needless_pass_by_value, clippy::wildcard_imports)]
+
     use super::*;
     use crate::domain::verification::test_support::{
         VerificationFixtureState, independent_verification,

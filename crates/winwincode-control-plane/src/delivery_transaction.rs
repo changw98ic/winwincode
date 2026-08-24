@@ -84,12 +84,12 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             DeliveryExecutionPortError::new("Delivery expectedRevision must not be negative")
         })?;
         let mutation = DeliveryStore::borrowed(&journal)
-            .execute(DeliveryCommand::StartStage(StartDeliveryStage {
+            .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
                 request_id: pending.request_id().clone(),
                 request_digest,
                 expected_revision,
                 transition: pending.stage_transition().clone(),
-            }))
+            })))
             .map_err(port_error)?;
         commit.state = mutation.snapshot.encode_json().map_err(port_error)?;
         if mutation.replayed {
