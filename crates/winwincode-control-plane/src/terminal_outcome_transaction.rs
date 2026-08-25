@@ -7,8 +7,8 @@ use std::{collections::HashSet, fmt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    ExecutionJob, ExecutionOutcomeStatus, ExecutionScope, JobOutcomeMessage, JobOutcomeMessageKind,
-    RepositoryScope, SchemaVersion,
+    ArtifactReference, ExecutionJob, ExecutionOutcomeStatus, ExecutionScope, JobOutcomeMessage,
+    JobOutcomeMessageKind, RepositoryScope, SchemaVersion,
 };
 use winwincode_delivery::{
     application::stage::{DeliveryTerminalOutcomeFacts, TerminalOutcomeStatus},
@@ -16,8 +16,8 @@ use winwincode_delivery::{
     store::{ApplyDeliveryTerminalOutcome, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
 };
 use winwincode_domain::{
-    ControlPlaneEventId, DeliveryId, DeliveryTaskId, ProductSessionId, RequestId, Sha256Digest,
-    StageRunId,
+    CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionJobId, ExecutionMessageId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
 };
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, NewOutboxEvent, ProductStateStorage, ReceiptIdentity,
@@ -232,11 +232,26 @@ impl DurableExecutionJobRef {
 struct TerminalAcceptedEvent {
     delivery_id: DeliveryId,
     execution_job: DurableExecutionJobRef,
-    message: JobOutcomeMessage,
+    job_id: ExecutionJobId,
+    message_digest: Sha256Digest,
+    message_id: ExecutionMessageId,
+    outcome: AcceptedTerminalOutcome,
     product_session_id: ProductSessionId,
     revision: u64,
     schema_version: u8,
     stage_run_id: StageRunId,
+}
+
+/// Secret-safe terminal facts kept with the accepted message digest. Worker
+/// prose, diagnostics, and raw lease authority never enter the durable event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcceptedTerminalOutcome {
+    artifacts: Vec<ArtifactReference>,
+    codex_thread_id: Option<CodexThreadId>,
+    finished_at_millis: u64,
+    last_event_sequence: ExecutionAckSequence,
+    status: ExecutionOutcomeStatus,
 }
 
 fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageError> {
@@ -281,6 +296,16 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
     if !(0..=9_007_199_254_740_991).contains(&message.outcome.last_event_sequence.0) {
         return Err(StorageError::invalid_input(
             "job.outcome lastEventSequence is outside the public integer range",
+        ));
+    }
+    if message
+        .outcome
+        .error
+        .as_ref()
+        .is_some_and(|error| error.message.is_empty() || error.message.chars().count() > 500)
+    {
+        return Err(StorageError::invalid_input(
+            "job.outcome error message does not match the generated schema",
         ));
     }
     let mut artifact_ids = HashSet::with_capacity(message.outcome.artifacts.len());
@@ -459,7 +484,7 @@ fn commit_terminal(
             StorageError::invalid_input("stage.terminal did not stage a journal publication")
         })?;
     let revision = mutation.snapshot.revision();
-    let accepted = terminal_accepted_event(message, context, revision)?;
+    let accepted = terminal_accepted_event(message, phase, context, revision)?;
     let changed = delivery_changed_event_for_scope(
         &context.scope_key,
         &context.delivery_id,
@@ -506,13 +531,23 @@ fn recover_raced_receipt(
 
 fn terminal_accepted_event(
     message: &JobOutcomeMessage,
+    phase: &TerminalPhase,
     context: &TerminalContext,
     revision: u64,
 ) -> Result<NewOutboxEvent, StorageError> {
     let payload = TerminalAcceptedEvent {
         delivery_id: context.delivery_id.clone(),
         execution_job: context.job_event.clone(),
-        message: message.clone(),
+        job_id: message.lease.job_id.clone(),
+        message_digest: phase.command_digest.clone(),
+        message_id: message.message_id.clone(),
+        outcome: AcceptedTerminalOutcome {
+            artifacts: message.outcome.artifacts.clone(),
+            codex_thread_id: message.outcome.codex_thread_id.clone(),
+            finished_at_millis: instant_millis(&message.outcome.finished_at)?,
+            last_event_sequence: message.outcome.last_event_sequence.clone(),
+            status: message.outcome.status.clone(),
+        },
         product_session_id: context.product_session_id.clone(),
         revision,
         schema_version: 1,
@@ -560,12 +595,18 @@ fn validate_receipt(
     let canonical = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode terminal outcome event: {error}"))
     })?;
+    let expected_finished_at = instant_millis(&message.outcome.finished_at)?;
     if canonical != event.payload
         || payload.schema_version != 1
-        || payload.message != *message
-        || payload.message.lease.job_id.0.is_empty()
-        || payload.execution_job.event_id
-            != format!("execution-job:{}", payload.message.lease.job_id.0)
+        || payload.message_digest != phase.command_digest
+        || payload.message_id != message.message_id
+        || payload.job_id != message.lease.job_id
+        || payload.outcome.artifacts != message.outcome.artifacts
+        || payload.outcome.codex_thread_id != message.outcome.codex_thread_id
+        || payload.outcome.finished_at_millis != expected_finished_at
+        || payload.outcome.last_event_sequence != message.outcome.last_event_sequence
+        || payload.outcome.status != message.outcome.status
+        || payload.execution_job.event_id != format!("execution-job:{}", payload.job_id.0)
         || payload.execution_job.stream_id != delivery_stream_id(&payload.delivery_id)
         || validate_durable_job_ref(&payload.execution_job).is_err()
         || payload.stage_run_id.0.is_empty()
