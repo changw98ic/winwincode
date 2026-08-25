@@ -19,7 +19,8 @@ use winwincode_storage::{
 };
 
 use crate::{
-    DeliveryVerdictCommitError, StateChange, command_receipt, delivery_changed_event,
+    DeliveryChangeKind, DeliveryVerdictCommitError, StateChange, command_receipt,
+    delivery_changed_event,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     storage_commit, validate_delivery_changed_receipt,
 };
@@ -86,7 +87,7 @@ pub(crate) fn execute(
         command,
         &delivery_id,
         transition.delivery().revision(),
-        "verdict-submitted",
+        DeliveryChangeKind::Advanced,
     )
     .map_err(DeliveryVerdictCommitError::Storage)?;
     let stream_id = delivery_stream_id(&delivery_id);
@@ -248,7 +249,7 @@ fn validate_receipt(
         receipt,
         delivery.id(),
         delivery.revision(),
-        "verdict-submitted",
+        DeliveryChangeKind::Advanced,
     )?;
     Ok(())
 }

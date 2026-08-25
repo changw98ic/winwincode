@@ -512,25 +512,7 @@ fn publication(
     let target = publication_target(target_source)?;
     let resource_ref = result
         .resource()
-        .map(|resource| {
-            if resource.repository() != target.repository.0 {
-                return Err(StrongFlowProjectionError::RevisionConflict(
-                    "published resource repository differs from the authorized target".to_owned(),
-                ));
-            }
-            Ok(api::PublicationResourceRef {
-                kind: match resource.kind() {
-                    super::PublicationResourceKind::GitHubIssue => {
-                        api::PublicationResourceKind::GithubIssue
-                    }
-                    super::PublicationResourceKind::GitHubPullRequest => {
-                        api::PublicationResourceKind::GithubPullRequest
-                    }
-                },
-                repository: GitHubRepositorySlug(resource.repository().to_owned()),
-                number: integer(resource.number(), "publication resource number")?,
-            })
-        })
+        .map(|resource| publication_resource_ref(resource, &target))
         .transpose()?;
     let publication_set_sha256 = {
         let bytes = serde_json::to_vec(binding).map_err(|_| {
@@ -570,6 +552,25 @@ fn publication(
         resource_ref,
         updated_at: result.updated_at().clone(),
     }))
+}
+
+fn publication_resource_ref(
+    resource: &super::PublicationResourceFact,
+    target: &api::PublicationTarget,
+) -> Result<api::PublicationResourceRef, StrongFlowProjectionError> {
+    if resource.repository() != target.repository.0
+        || resource.kind() != super::PublicationResourceKind::GitHubPullRequest
+    {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "published resource identity differs from the authorized pull-request target"
+                .to_owned(),
+        ));
+    }
+    Ok(api::PublicationResourceRef {
+        kind: api::PublicationResourceKind::GithubPullRequest,
+        repository: GitHubRepositorySlug(resource.repository().to_owned()),
+        number: integer(resource.number(), "publication resource number")?,
+    })
 }
 
 fn publication_target(
@@ -967,4 +968,46 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strongflow_projection::{PublicationResourceFact, PublicationResourceKind};
+
+    fn pull_request_target() -> api::PublicationTarget {
+        api::PublicationTarget {
+            provider: api::PublicationTargetProvider::Github,
+            repository: GitHubRepositorySlug("owner/repository".to_owned()),
+            base_branch: "main".to_owned(),
+            head_branch: "delivery".to_owned(),
+        }
+    }
+
+    #[test]
+    fn publication_resource_kind_must_match_the_pull_request_target() {
+        let issue = PublicationResourceFact::try_new(
+            PublicationResourceKind::GitHubIssue,
+            "owner/repository",
+            7,
+        )
+        .expect("valid closed issue identity");
+        assert!(matches!(
+            publication_resource_ref(&issue, &pull_request_target()),
+            Err(StrongFlowProjectionError::RevisionConflict(_))
+        ));
+
+        let pull_request = PublicationResourceFact::try_new(
+            PublicationResourceKind::GitHubPullRequest,
+            "owner/repository",
+            7,
+        )
+        .expect("valid closed pull-request identity");
+        let projected = publication_resource_ref(&pull_request, &pull_request_target())
+            .expect("matching pull-request resource");
+        assert_eq!(
+            projected.kind,
+            api::PublicationResourceKind::GithubPullRequest
+        );
+    }
 }

@@ -496,6 +496,23 @@ fn generic_commit_cannot_forge_a_public_projection_stream_event() {
         CommitError::Storage(ref source) if source.kind() == StorageErrorKind::InvalidInput
     ));
     assert!(trace.lock().expect("trace lock").is_empty());
+
+    let internal_event = NewOutboxEvent::internal(
+        "caller-authored-public-topic",
+        "delivery.changed.v1",
+        br#"{"type":"delivery.changed.v1","changeKind":"advanced"}"#.to_vec(),
+    );
+    let error = control_plane
+        .commit(
+            &default_command("req_01J00000000000000000000012", 0),
+            StateChange::new("settings:one", b"state".to_vec(), vec![internal_event]),
+        )
+        .expect_err("an internal event cannot claim a reserved public topic");
+    assert!(matches!(
+        error,
+        CommitError::Storage(ref source) if source.kind() == StorageErrorKind::InvalidInput
+    ));
+    assert!(trace.lock().expect("trace lock").is_empty());
     control_plane.shutdown().expect("shutdown");
 }
 

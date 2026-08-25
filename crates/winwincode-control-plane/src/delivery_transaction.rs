@@ -27,7 +27,8 @@ use crate::delivery_execution::{
     PendingDeliveryExecution, commit_and_dispatch,
 };
 use crate::{
-    StateChange, delivery_changed_event, storage_commit, validate_delivery_changed_receipt,
+    DeliveryChangeKind, StateChange, delivery_changed_event, storage_commit,
+    validate_delivery_changed_receipt,
 };
 
 const DELIVERY_AGGREGATE_TYPE: &str = "delivery";
@@ -62,7 +63,7 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             self.command,
             pending.delivery().id(),
             pending.delivery().revision(),
-            "stage-started",
+            DeliveryChangeKind::Advanced,
         )
         .map_err(port_error)?;
         let stream_id = delivery_stream_id(pending.delivery().id());
@@ -239,8 +240,13 @@ fn committed_delivery_receipt(
             "durable execution job does not match the committed Delivery binding",
         ));
     }
-    validate_delivery_changed_receipt(receipt, delivery.id(), delivery.revision(), "stage-started")
-        .map_err(port_error)?;
+    validate_delivery_changed_receipt(
+        receipt,
+        delivery.id(),
+        delivery.revision(),
+        DeliveryChangeKind::Advanced,
+    )
+    .map_err(port_error)?;
     Ok(DeliveryExecutionCommitReceipt {
         committed_revision: receipt.revision,
         outbox_event_id: event.event_id.clone(),

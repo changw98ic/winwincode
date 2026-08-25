@@ -23,7 +23,7 @@ use winwincode_storage::{
 };
 
 use crate::{
-    StateChange, command_receipt, delivery_changed_event,
+    DeliveryChangeKind, StateChange, command_receipt, delivery_changed_event,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     storage_commit, validate_delivery_changed_receipt,
 };
@@ -102,7 +102,7 @@ pub(crate) fn execute(
         command,
         &delivery_id,
         mutation.snapshot.revision(),
-        "task-breakdown-approved",
+        DeliveryChangeKind::Advanced,
     )?;
     let stream_id = delivery_stream_id(&delivery_id);
     let mut commit = storage_commit(
@@ -286,7 +286,7 @@ fn validate_receipt_projection(
         receipt,
         delivery_id,
         receipt.revision,
-        "task-breakdown-approved",
+        DeliveryChangeKind::Advanced,
     )?;
     Ok(event)
 }

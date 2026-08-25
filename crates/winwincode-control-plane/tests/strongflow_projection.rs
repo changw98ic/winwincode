@@ -536,7 +536,7 @@ fn bounded_projection_replay_is_deterministic() {
     let (first, cursor) = detail_and_cursor(&f);
     let second = StrongFlowProjectionQueryPort::delivery_get(
         &f.control_plane,
-        &delivery_query(&f, Some(cursor), 100),
+        &delivery_query(&f, Some(cursor), 20),
     )
     .expect("replay");
     let QueryResultResponse::DeliveryGetResultResponse(second) = second else {
@@ -582,9 +582,35 @@ fn bounded_projection_replay_is_deterministic() {
     };
     StrongFlowProjectionQueryPort::delivery_get(
         &historical.control_plane,
-        &delivery_query(&historical, Some(old_cursor), 3),
+        &delivery_query(&historical, Some(old_cursor), 20),
     )
     .expect("retained historical cut replays after current revision advances");
+}
+
+#[test]
+fn bounded_projection_cursor_rejects_a_changed_page_limit() {
+    let f = fixture(false, false, false);
+    let (_, cursor) = detail_and_cursor(&f);
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor.clone()), 200),
+    )
+    .expect_err("a cursor cannot be replayed with a different page limit");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::RevisionConflict(_)
+    ));
+
+    let error = StrongFlowProjectionQueryPort::runtime_projection_get(
+        &f.control_plane,
+        &runtime_query(&f, cursor, 1),
+    )
+    .expect_err("the paired runtime read must preserve the Delivery page limit");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::RevisionConflict(_)
+    ));
 }
 #[test]
 fn current_publication_requires_delivery_candidate_verdict_approval_and_target() {
@@ -601,7 +627,7 @@ fn delivery_and_runtime_get_share_one_bounded_snapshot_cursor() {
     let (_, cursor) = detail_and_cursor(&f);
     let response = StrongFlowProjectionQueryPort::runtime_projection_get(
         &f.control_plane,
-        &runtime_query(&f, cursor.clone(), 1),
+        &runtime_query(&f, cursor.clone(), 20),
     )
     .expect("runtime");
     let QueryResultResponse::RuntimeProjectionGetResultResponse(response) = response else {

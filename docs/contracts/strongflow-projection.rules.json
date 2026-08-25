@@ -620,7 +620,7 @@
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-        "testName": "publication_projection_binds_current_candidate_and_verdict"
+        "testName": "current_publication_requires_delivery_candidate_verdict_approval_and_target"
       }
     }
   ],
@@ -845,7 +845,7 @@
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-        "testName": "websocket_reset_requires_projection_snapshot_reload"
+        "testName": "delivery_and_runtime_get_share_one_bounded_snapshot_cursor"
       }
     },
     {
@@ -930,7 +930,7 @@
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-        "testName": "publication_status_requires_current_delivery_candidate_verdict"
+        "testName": "current_publication_requires_delivery_candidate_verdict_approval_and_target"
       }
     },
     {
@@ -951,7 +951,7 @@
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-        "testName": "strongflow_websocket_has_no_business_command_path"
+        "testName": "raw_http_worker_and_websocket_facts_cannot_construct_projection"
       }
     },
     {
@@ -972,7 +972,7 @@
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-        "testName": "strongflow_projection_serializes_generated_api_dto"
+        "testName": "delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto"
       }
     },
     {
@@ -993,7 +993,7 @@
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
         "path": "crates/winwincode-control-plane/src/strongflow_projection.rs",
-        "testName": "strongflow_projection_exposes_no_worker_transport"
+        "testName": "raw_http_worker_and_websocket_facts_cannot_construct_projection"
       }
     }
   ],

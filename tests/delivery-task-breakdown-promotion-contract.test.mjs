@@ -702,9 +702,14 @@ test('implementation trigger activates real Rust seams, test bodies, and executa
     'load_journal',
     'DeliveryCommand::ApproveTaskBreakdown',
     'StateChange::new',
-    'NewOutboxEvent::new',
+    'NewOutboxEvent::internal',
+    'delivery_changed_event',
     'with_journal_publication',
   ]) assert.equal(executeBody.includes(token), true, `transaction omits ${token}`)
+  assert.match(
+    executeBody,
+    /delivery_changed_event\s*\([\s\S]*?mutation\.snapshot\.revision\(\)[\s\S]*?DeliveryChangeKind::Advanced[\s\S]*?vec!\s*\[[\s\S]*?NewOutboxEvent::internal\s*\([\s\S]*?changed_event[\s\S]*?\]/u,
+  )
   assert.match(executeBody, /\bstorage\s*\.\s*commit\s*\(/u)
   assert.ok(
     executeBody.indexOf('load_receipt') < executeBody.indexOf('load_journal'),
@@ -713,6 +718,17 @@ test('implementation trigger activates real Rust seams, test bodies, and executa
   assert.match(transaction, /DeliveryTaskBreakdownApprovedEvent/u)
   assert.match(transaction, /serde_json::to_value[\s\S]*!=/u)
   assert.match(transaction, /delivery\.task_breakdown\.approved/u)
+  const receiptValidator = namedRustFunction(transaction, 'validate_receipt_projection')
+  for (const token of [
+    'receipt.events.len() != 2',
+    'stored_event.projection_cursor.is_some()',
+    'validate_delivery_changed_receipt',
+    'DeliveryChangeKind::Advanced',
+  ]) assert.equal(
+    receiptValidator.includes(token),
+    true,
+    `receipt validation omits ${token}`,
+  )
 
   const domainUnitSource = `${solutionReview}\n${taskBreakdown}`
   for (const specification of [...DOMAIN_UNIT_TESTS, ...SOLUTION_REVIEW_TESTS]) {

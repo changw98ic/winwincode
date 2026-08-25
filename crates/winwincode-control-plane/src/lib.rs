@@ -26,7 +26,8 @@ use delivery_execution::{
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
-    ControlPlaneWebSocketDeliveryChangedEventTypeValue, RepositoryScope, Scope,
+    ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType,
+    RepositoryScope, Scope,
 };
 use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdictFacts};
 use winwincode_domain::{ControlPlaneEventId, DeliveryId, Revision, Sha256Digest};
@@ -43,6 +44,21 @@ use winwincode_storage::{
 const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
 const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
 pub(crate) const DELIVERY_CHANGED_TOPIC: &str = "delivery.changed.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeliveryChangeKind {
+    Advanced,
+    Reworked,
+}
+
+impl DeliveryChangeKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Reworked => "reworked",
+        }
+    }
+}
 
 /// Canonical state and outbox values produced by one validated application command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -473,11 +489,9 @@ impl ControlPlane {
                 "Delivery commands require the atomic Delivery command path",
             )));
         }
-        if change
-            .events
-            .iter()
-            .any(|event| event.projection_stream().is_some())
-        {
+        if change.events.iter().any(|event| {
+            event.projection_stream().is_some() || reserved_public_projection_topic(&event.topic)
+        }) {
             return Err(CommitError::Storage(StorageError::invalid_input(
                 "public projection events require a typed Control Plane transaction",
             )));
@@ -699,6 +713,13 @@ impl ControlPlane {
     }
 }
 
+fn reserved_public_projection_topic(topic: &str) -> bool {
+    serde_json::from_value::<ControlPlaneWebSocketEventType>(serde_json::Value::String(
+        topic.to_owned(),
+    ))
+    .is_ok()
+}
+
 pub(crate) fn storage_commit(
     command: &CommandEnvelope,
     change: StateChange,
@@ -722,23 +743,18 @@ pub(crate) fn delivery_changed_event(
     command: &CommandEnvelope,
     delivery_id: &DeliveryId,
     delivery_revision: u64,
-    change_kind: &str,
+    change_kind: DeliveryChangeKind,
 ) -> Result<NewOutboxEvent, StorageError> {
     let Scope::RepositoryScope(scope) = &command.scope else {
         return Err(StorageError::invalid_input(
             "Delivery change events require repository scope",
         ));
     };
-    if change_kind.is_empty() || change_kind.len() > 100 || !change_kind.is_ascii() {
-        return Err(StorageError::invalid_input(
-            "Delivery change kind is not canonical",
-        ));
-    }
     let revision = i64::try_from(delivery_revision)
         .map(Revision)
         .map_err(|_| StorageError::invalid_input("Delivery revision exceeds the public range"))?;
     let payload = ControlPlaneWebSocketDeliveryChangedEvent {
-        change_kind: change_kind.to_owned(),
+        change_kind: change_kind.as_str().to_owned(),
         delivery_id: delivery_id.clone(),
         revision,
         type_value: ControlPlaneWebSocketDeliveryChangedEventTypeValue::DeliveryChangedV1,
@@ -760,7 +776,7 @@ pub(crate) fn validate_delivery_changed_receipt(
     receipt: &CommitReceipt,
     delivery_id: &DeliveryId,
     delivery_revision: u64,
-    change_kind: &str,
+    change_kind: DeliveryChangeKind,
 ) -> Result<(), StorageError> {
     let matching = receipt
         .events
@@ -783,7 +799,7 @@ pub(crate) fn validate_delivery_changed_receipt(
             != ControlPlaneWebSocketDeliveryChangedEventTypeValue::DeliveryChangedV1
         || payload.delivery_id != *delivery_id
         || payload.revision.0 != i64::try_from(delivery_revision).unwrap_or(-1)
-        || payload.change_kind != change_kind
+        || payload.change_kind != change_kind.as_str()
     {
         return Err(StorageError::invalid_input(
             "durable Delivery change event does not match committed Delivery facts",

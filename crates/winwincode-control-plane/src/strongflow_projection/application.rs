@@ -34,7 +34,6 @@ use crate::{
 };
 
 const MAX_QUERY_LIMIT: usize = 200;
-const MAX_RUNTIME_SOURCE_SESSIONS: usize = 256;
 
 /// Exact current publishable fact set joined to one bounded read cursor.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +97,7 @@ struct CursorSeal<'cut> {
     publication_source_seal: &'cut Sha256Digest,
     publication_content_sha256: &'cut str,
     event_cursor: &'cut DeliveryEventReadCursor,
+    page_limit: i64,
 }
 
 #[derive(Serialize)]
@@ -161,7 +161,7 @@ pub(super) fn establish_delivery_read(
     delivery_id: &DeliveryId,
     limit: i64,
 ) -> Result<EstablishedDeliveryRead, StrongFlowProjectionError> {
-    validate_limit(limit)?;
+    let source_limit = validate_limit(limit)?;
     validate_scope(scope)?;
     let actor_sha256 = actor_digest(actor)?;
     let sources = control_plane.strongflow_sources.as_ref().ok_or_else(|| {
@@ -194,7 +194,7 @@ pub(super) fn establish_delivery_read(
         delivery_id.clone(),
         first.revision(),
         None,
-        MAX_RUNTIME_SOURCE_SESSIONS,
+        source_limit,
     );
     let runtime = sources
         .runtime
@@ -232,7 +232,7 @@ pub(super) fn establish_delivery_read(
                 runtime.ledger_revision().clone(),
                 runtime.accepted_sequence(),
             )),
-            MAX_RUNTIME_SOURCE_SESSIONS,
+            source_limit,
         ))
         .map_err(current_source_error)?;
     if !same_runtime_cut(&runtime, &exact_runtime) {
@@ -258,6 +258,7 @@ pub(super) fn establish_delivery_read(
         &runtime,
         &publication,
         &event_cursor,
+        limit,
     )?;
     let publication_cursor = generated_cursor(&cursor)?;
     let publication_authorization = binding.map(|binding| PublicationAuthorizationSnapshot {
@@ -282,7 +283,7 @@ pub(super) fn replay_delivery_read(
     cursor: &StrongFlowReadCursor,
     limit: i64,
 ) -> Result<EstablishedDeliveryRead, StrongFlowProjectionError> {
-    validate_limit(limit)?;
+    let source_limit = validate_limit(limit)?;
     validate_scope(scope)?;
     if cursor.scope != *scope || cursor.delivery_id != *delivery_id {
         return Err(StrongFlowProjectionError::PermissionDenied(
@@ -348,7 +349,7 @@ pub(super) fn replay_delivery_read(
                 cursor.runtime_ledger_revision.clone(),
                 runtime_sequence,
             )),
-            MAX_RUNTIME_SOURCE_SESSIONS,
+            source_limit,
         ))
         .map_err(cursor_source_error)?;
     validate_runtime_read(scope, &detail, &runtime)?;
@@ -373,7 +374,7 @@ pub(super) fn replay_delivery_read(
                 cursor.runtime_ledger_revision.clone(),
                 runtime_sequence,
             )),
-            MAX_RUNTIME_SOURCE_SESSIONS,
+            source_limit,
         ))
         .map_err(cursor_source_error)?;
     let exact_event_cursor = control_plane
@@ -397,6 +398,7 @@ pub(super) fn replay_delivery_read(
         &runtime,
         &publication,
         &event_cursor,
+        limit,
     )?;
     if bounded.token.0 != cursor.token
         || bounded.runtime_ledger_revision != cursor.runtime_ledger_revision
@@ -1035,6 +1037,7 @@ fn bounded_cursor(
     runtime: &TrustedRuntimeProjectionRead,
     publication: &TrustedPublicationProjectionRead,
     event_cursor: &ProjectionEventCursor,
+    page_limit: i64,
 ) -> Result<BoundedReadCursor, StrongFlowProjectionError> {
     let delivery_content_sha256 = sha256_json(delivery)?;
     let runtime_content_sha256 = sha256_json(&RuntimeContentSeal {
@@ -1070,6 +1073,7 @@ fn bounded_cursor(
         publication_source_seal: publication.source_seal(),
         publication_content_sha256: &publication_content_sha256,
         event_cursor: &event_cursor,
+        page_limit,
     };
     let token = OpaqueCursor(format!("sfc1_{}", sha256_json(&seal)?));
     Ok(BoundedReadCursor {

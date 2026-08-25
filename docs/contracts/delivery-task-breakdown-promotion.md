@@ -222,7 +222,7 @@ Store 从 verified journal tail 读取当前 Delivery，解析当前 approved re
 canonical Delivery state
 Delivery journal record
 actor + full scope + requestId command receipt
-DeliveryTaskBreakdownApprovedEvent outbox row
+outbox rows: internal DeliveryTaskBreakdownApprovedEvent + public delivery.changed.v1
 ```
 
 也就是状态、Delivery journal、命令回执和 outbox 事件一起提交。任何一个 insert、尾部比较
@@ -243,8 +243,10 @@ reviewSetSha256
 tasks（保持批准顺序）
 ```
 
-事件 topic 是 `delivery.task_breakdown.approved`。事件包含第一次提交的有序任务图，便于
-回执重放验证；canonical 权威仍是 Delivery journal，不是 WebSocket 或内存广播。
+内部事件 topic 是 `delivery.task_breakdown.approved`。事件包含第一次提交的有序任务图，便于
+回执重放验证。同一事务还追加 `delivery.changed.v1`，其 canonical `changeKind` 是
+`advanced`，并从该 Delivery 的持久本地 stream sequence 签发 projection
+cursor。canonical 权威仍是 Delivery journal，不是 WebSocket 或内存广播。
 
 ## 10. 回执必须先于当前状态
 
@@ -258,7 +260,7 @@ tasks（保持批准顺序）
 3. 从原 journal revision 验证当时的 Delivery snapshot；
 4. 严格解码回执里的原事件；
 5. 返回第一次提交的任务图、revision 和事件字节；
-6. 不写第二条 journal record 或 outbox row。
+6. 不写第二条 journal record，也不重复写两条原始 outbox row。
 
 这保证第一次成功后即使 Delivery 又进入执行阶段，网络重试也不会被误判为 stale，更不会
 根据新状态重算另一张图。
@@ -271,9 +273,9 @@ tasks（保持批准顺序）
 规则 `outbox.only_committed_event_is_published`：transaction 先返回 durable receipt，
 `ControlPlane` 再 flush outbox。publisher 不接收内存中的 transition 或待提交 event。
 
-如果数据库提交成功但发布失败，四个成员保持 committed，outbox row 保持 pending，结果
-明确表示 publication pending。启动恢复或下一次 flush 发布同一个 event id 和同一份 event
-bytes，不重新执行任务提升。
+如果数据库提交成功但发布失败，四个成员保持 committed，尚未发布的 outbox rows 保持
+pending，结果明确表示 publication pending。启动恢复或下一次 flush 发布同一个 event id、
+同一份 event bytes 和同一个 public projection cursor，不重新执行任务提升。
 
 ## 12. 两条通用旁路都必须关闭
 

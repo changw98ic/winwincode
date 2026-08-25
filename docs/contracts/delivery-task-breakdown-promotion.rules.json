@@ -525,7 +525,7 @@
     },
     {
       "id": "transaction.four_members_commit_or_rollback",
-      "statement": "Canonical Delivery state, journal record, scoped command receipt, and outbox event commit in one storage transaction or all roll back.",
+      "statement": "Canonical Delivery state, journal record, scoped command receipt, and the internal task-breakdown plus public Delivery-change outbox rows commit in one storage transaction or all roll back.",
       "sources": [
         "docs/contracts/control-plane-storage-lifecycle.md",
         "crates/winwincode-storage/src/lib.rs"
@@ -541,7 +541,7 @@
     },
     {
       "id": "outbox.only_committed_event_is_published",
-      "statement": "The publisher reads only the committed DeliveryTaskBreakdownApprovedEvent; publication failure leaves that exact event pending for replay.",
+      "statement": "The publisher reads only the committed internal DeliveryTaskBreakdownApprovedEvent and public delivery.changed.v1 rows; publication failure leaves their exact bytes and projection cursor pending for replay.",
       "sources": [
         "docs/contracts/control-plane-storage-lifecycle.md",
         "crates/winwincode-control-plane/src/lib.rs"

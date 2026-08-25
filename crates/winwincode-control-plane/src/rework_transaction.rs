@@ -13,7 +13,7 @@ use winwincode_storage::{
 };
 
 use crate::{
-    StateChange, command_receipt, delivery_changed_event,
+    DeliveryChangeKind, StateChange, command_receipt, delivery_changed_event,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
     storage_commit, validate_delivery_changed_receipt,
 };
@@ -51,7 +51,7 @@ pub(crate) fn execute(
         command,
         &delivery_id,
         transition.delivery.revision(),
-        "rework-clarified",
+        DeliveryChangeKind::Reworked,
     )?;
     let mut commit = storage_commit(
         command,
@@ -154,7 +154,12 @@ fn validate_receipt(
             "durable rework clarification event does not match the original scoped Delivery command",
         ));
     }
-    validate_delivery_changed_receipt(receipt, delivery_id, receipt.revision, "rework-clarified")?;
+    validate_delivery_changed_receipt(
+        receipt,
+        delivery_id,
+        receipt.revision,
+        DeliveryChangeKind::Reworked,
+    )?;
     Ok(())
 }
 
