@@ -1119,6 +1119,32 @@ pub mod test_support {
         )
     }
 
+    /// Seals one role workspace observation by copying the complete Git
+    /// identity from an already frozen candidate. Runtime ownership still
+    /// comes only from the role's canonical `StageRun` and `SessionBinding`.
+    pub(crate) fn validated_candidate_checkout(
+        delivery: &Delivery,
+        stage_run_id: &StageRunId,
+        session_binding_id: &SessionBindingId,
+        candidate: &FrozenDeliveryCandidate,
+    ) -> ValidatedGitSnapshotFact {
+        let mut fact = validated_git_snapshot_between(
+            delivery,
+            stage_run_id,
+            session_binding_id,
+            candidate.base_commit_id(),
+            candidate.base_tree_id(),
+            candidate.candidate_commit_id(),
+            candidate.candidate_tree_id(),
+            candidate.diff_sha256(),
+            candidate.changed_paths().to_vec(),
+        );
+        fact.changed_hunks = candidate.changed_hunks().to_vec();
+        fact.validation_seal =
+            seal_git_snapshot(&fact).expect("candidate checkout fixture Git snapshot seal");
+        fact
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn validated_git_snapshot_between(
         delivery: &Delivery,
