@@ -17,7 +17,7 @@ const RESULT_SCHEMA: &str = "winwincode.delivery-strongflow-rust-differential-re
     clippy::too_many_lines,
     reason = "the machine entry validates every closed output branch before writing the result"
 )]
-fn rust_runner_executes_every_frozen_transcript_and_writes_complete_actual_json() {
+fn machine_entry_executes_node_authored_plan_when_supplied() {
     let Some((plan_path, output_path)) = env_paths() else {
         return;
     };

@@ -980,6 +980,11 @@ test('Rust runner consumes only the Node-authored execution plan', async () => {
     'crates/winwincode-control-plane/tests/support/differential_runner.rs',
   ].map(path => readFile(join(root, path), 'utf8')))
 
+  assert.match(
+    sources[0],
+    /fn machine_entry_executes_node_authored_plan_when_supplied\(\)/u,
+  )
+
   for (const source of sources) {
     assert.equal(source.includes('delivery-strongflow-typescript.v1.json'), false)
     assert.equal(source.includes('local_plan_paths'), false)
