@@ -100,6 +100,9 @@ impl DeliveryRuntimeReadRequest {
 pub enum TrustedProjectionReadError {
     Unavailable,
     TemporarilyUnavailable,
+    /// The adapter once issued the requested exact cut, but its durable
+    /// retention window no longer contains it.
+    ExactCutNotRetained,
     Stale,
     Invalid,
 }
@@ -109,6 +112,7 @@ impl fmt::Display for TrustedProjectionReadError {
         formatter.write_str(match self {
             Self::Unavailable => "trusted facts are unavailable",
             Self::TemporarilyUnavailable => "trusted fact storage is temporarily unavailable",
+            Self::ExactCutNotRetained => "trusted fact history no longer retains the exact cut",
             Self::Stale => "trusted facts no longer name the requested cut",
             Self::Invalid => "trusted facts are not canonical",
         })
@@ -120,6 +124,7 @@ impl Error for TrustedProjectionReadError {}
 /// One verified accepted-ledger fold plus its durable cut coordinates.
 #[derive(Debug, Clone)]
 pub struct TrustedRuntimeProjectionRead {
+    scope: RepositoryScope,
     delivery_revision: u64,
     ledger_revision: Revision,
     accepted_sequence: u64,
@@ -136,6 +141,7 @@ impl TrustedRuntimeProjectionRead {
     /// Rejects non-positive revisions, incomplete sequence coordinates, an
     /// oversized fold, unsafe timestamps, or a malformed durable source seal.
     pub fn try_new(
+        scope: RepositoryScope,
         delivery_revision: u64,
         ledger_revision: Revision,
         accepted_sequence: u64,
@@ -152,6 +158,8 @@ impl TrustedRuntimeProjectionRead {
             .unwrap_or(0);
         if delivery_revision == 0
             || delivery_revision > MAX_SAFE_INTEGER
+            || !canonical_repository_scope(&scope)
+            || !portable(&snapshot.delivery_id.0, 200)
             || ledger_revision.0 < 0
             || accepted_sequence > MAX_SAFE_INTEGER
             || accepted_sequence < max_session_sequence
@@ -162,6 +170,7 @@ impl TrustedRuntimeProjectionRead {
             return Err(TrustedProjectionReadError::Invalid);
         }
         Ok(Self {
+            scope,
             delivery_revision,
             ledger_revision,
             accepted_sequence,
@@ -169,6 +178,11 @@ impl TrustedRuntimeProjectionRead {
             projection,
             source_seal,
         })
+    }
+
+    #[must_use]
+    pub const fn scope(&self) -> &RepositoryScope {
+        &self.scope
     }
 
     #[must_use]
@@ -245,14 +259,16 @@ pub struct PublicationFactBinding {
 }
 
 /// Closed remote resource identity accepted from the trusted publication owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PublicationResourceKind {
     GitHubIssue,
     GitHubPullRequest,
 }
 
 /// Secret-safe remote publication identity. It never contains a URL or payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicationResourceFact {
     kind: PublicationResourceKind,
     repository: String,
@@ -402,7 +418,8 @@ impl PublicationFactBinding {
 }
 
 /// Safe publication result fields supplied by the publication owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicationResultFact {
     publication_id: winwincode_domain::PublicationId,
     revision: Revision,
@@ -479,8 +496,10 @@ impl PublicationResultFact {
 }
 
 /// Candidate and publication facts read from one durable publication cut.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrustedPublicationProjectionRead {
+    scope: RepositoryScope,
+    delivery_id: DeliveryId,
     delivery_revision: u64,
     publication_revision: Revision,
     candidate: Option<FrozenDeliveryCandidate>,
@@ -495,6 +514,8 @@ impl TrustedPublicationProjectionRead {
     ///
     /// Rejects unsafe revisions, source seals, or a mismatched result revision.
     pub fn try_new(
+        scope: RepositoryScope,
+        delivery_id: DeliveryId,
         delivery_revision: u64,
         publication_revision: Revision,
         candidate: Option<FrozenDeliveryCandidate>,
@@ -503,21 +524,40 @@ impl TrustedPublicationProjectionRead {
     ) -> Result<Self, TrustedProjectionReadError> {
         if delivery_revision == 0
             || delivery_revision > MAX_SAFE_INTEGER
+            || !canonical_repository_scope(&scope)
+            || !portable(&delivery_id.0, 200)
             || publication_revision.0 < 0
             || !canonical_sha256(&source_seal)
-            || result
+            || candidate
                 .as_ref()
-                .is_some_and(|result| result.revision() != &publication_revision)
+                .is_some_and(|candidate| candidate.delivery_id() != &delivery_id)
+            || result.as_ref().is_some_and(|result| {
+                result.revision() != &publication_revision
+                    || result.binding().delivery_id() != &delivery_id
+                    || result.binding().delivery_revision() != delivery_revision
+            })
         {
             return Err(TrustedProjectionReadError::Invalid);
         }
         Ok(Self {
+            scope,
+            delivery_id,
             delivery_revision,
             publication_revision,
             candidate,
             result,
             source_seal,
         })
+    }
+
+    #[must_use]
+    pub const fn scope(&self) -> &RepositoryScope {
+        &self.scope
+    }
+
+    #[must_use]
+    pub const fn delivery_id(&self) -> &DeliveryId {
+        &self.delivery_id
     }
 
     #[must_use]
@@ -614,6 +654,22 @@ fn portable(value: &str, max: usize) -> bool {
         })
 }
 
+fn canonical_repository_scope(scope: &RepositoryScope) -> bool {
+    scope.kind == winwincode_api::generated::RepositoryScopeKind::Repository
+        && portable_scope_id(&scope.organization_id.0)
+        && portable_scope_id(&scope.workspace_id.0)
+        && portable_scope_id(&scope.project_id.0)
+        && portable_scope_id(&scope.repository_id.0)
+}
+
+fn portable_scope_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 200
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +682,16 @@ mod tests {
             },
         },
     };
+
+    fn scope() -> RepositoryScope {
+        RepositoryScope {
+            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            organization_id: winwincode_domain::OrganizationId("org_fixture".into()),
+            workspace_id: winwincode_domain::WorkspaceId("wsp_fixture".into()),
+            project_id: winwincode_domain::ProjectId("prj_fixture".into()),
+            repository_id: winwincode_domain::RepositoryId("rep_fixture".into()),
+        }
+    }
 
     fn runtime_projection() -> RuntimeProjection {
         let aggregate = Delivery::decode_json(include_bytes!(
@@ -657,6 +723,7 @@ mod tests {
         let projection = runtime_projection();
         assert_eq!(projection.snapshot().sessions[0].as_of_sequence, 1);
         let read = TrustedRuntimeProjectionRead::try_new(
+            scope(),
             7,
             Revision(1),
             1,
@@ -669,6 +736,7 @@ mod tests {
 
         assert_eq!(
             TrustedRuntimeProjectionRead::try_new(
+                scope(),
                 7,
                 Revision(1),
                 0,

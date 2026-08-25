@@ -211,6 +211,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                     .runtime
                     .read_product_session(scope, &parameters.product_session_id, limit)
                     .map_err(application::current_source_error)?;
+                application::validate_runtime_scope(scope, &read)?;
                 mapping::runtime_snapshot_for_product_session(
                     &read,
                     &parameters.product_session_id,
