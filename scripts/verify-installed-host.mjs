@@ -375,8 +375,8 @@ try {
   const contracts = await import(pathToFileURL(
     join(packageTargets.contracts, 'dist', 'index.js'),
   ).href)
-  const deliveryId = 'delivery-installed-process-smoke'
   const initialTime = Date.now() - 5_000
+  const deliveryId = contracts.generateDeliveryId(initialTime)
   const spec = revision => ({
     schemaVersion: contracts.DELIVERY_SCHEMA_VERSION,
     id: `${deliveryId}:spec:${String(revision)}`,
