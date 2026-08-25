@@ -1337,6 +1337,10 @@ pub mod test_support {
         },
     };
     use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
+
+    const DEFAULT_TASK_ID_NAMESPACE: &str = "winwincode.solution-review-default-task.v1";
+    const CROCKFORD_BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "kebab-case")]
@@ -1806,9 +1810,9 @@ pub mod test_support {
 
     fn default_task_proposal(delivery: &Delivery) -> SolutionReviewTaskProposalFixture {
         SolutionReviewTaskProposalFixture {
-            id: DeliveryTaskId("task:fixture".to_owned()),
-            title: "Implement the approved Delivery solution".to_owned(),
-            goal: "Satisfy every acceptance criterion in the current DeliverySpec.".to_owned(),
+            id: deterministic_default_task_id(delivery),
+            title: delivery.snapshot().spec.title.clone(),
+            goal: delivery.snapshot().spec.goal.clone(),
             acceptance_criterion_ids: delivery
                 .snapshot()
                 .spec
@@ -1818,6 +1822,27 @@ pub mod test_support {
                 .collect(),
             blocked_by_task_ids: Vec::new(),
         }
+    }
+
+    fn deterministic_default_task_id(delivery: &Delivery) -> DeliveryTaskId {
+        let canonical = [
+            DEFAULT_TASK_ID_NAMESPACE,
+            delivery.id().0.as_str(),
+            delivery.snapshot().spec.id.0.as_str(),
+            &delivery.snapshot().spec.revision.to_string(),
+        ]
+        .join("\0");
+        let digest = Sha256::digest(canonical.as_bytes());
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        let mut value = u128::from_be_bytes(bytes);
+        let mut encoded = [b'0'; 26];
+        for byte in encoded.iter_mut().rev() {
+            *byte = CROCKFORD_BASE32_ALPHABET[(value & 31) as usize];
+            value >>= 5;
+        }
+        let suffix: String = encoded.into_iter().map(char::from).collect();
+        DeliveryTaskId(format!("dtk_{suffix}"))
     }
 
     fn fixture_error(message: impl Into<String>) -> SolutionReviewFixtureError {
@@ -3173,6 +3198,16 @@ mod tests {
         assert_eq!(pending.review_status, ValidatedReviewStatus::Pending);
         assert_eq!(pending.review_set_sha256(), prepared.review_set_sha256());
         assert_eq!(pending.task_proposals.len(), 1);
+        assert!(pending.task_proposals[0].id.0.starts_with("dtk_"));
+        assert_eq!(pending.task_proposals[0].id.0.len(), 30);
+        assert_eq!(
+            pending.task_proposals[0].title,
+            delivery.snapshot().spec.title
+        );
+        assert_eq!(
+            pending.task_proposals[0].goal,
+            delivery.snapshot().spec.goal
+        );
         assert_eq!(
             pending.task_proposals[0].acceptance_criterion_ids,
             delivery
