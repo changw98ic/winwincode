@@ -3,21 +3,21 @@
 use std::sync::{Arc, Mutex};
 
 use winwincode_api::generated::{
-    Actor, DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery,
-    DeliveryStageRuntimeProjectionGetParameters, DeliveryStageRuntimeProjectionGetParametersKind,
-    PageRequest, ProductSessionRuntimeProjectionGetParameters,
-    ProductSessionRuntimeProjectionGetParametersKind, QueryResult, QueryResultResponse,
-    RepositoryScope, RepositoryScopeKind, RuntimeProjectionGetParameters,
-    RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery, SchemaVersion, Scope,
-    StrongFlowReadCursor, UserActor, UserActorKind,
+    Actor, ControlPlaneWebSocketSubscribeStartAt, DeliveryGetParameters, DeliveryGetQuery,
+    DeliveryGetQueryQuery, DeliveryStageRuntimeProjectionGetParameters,
+    DeliveryStageRuntimeProjectionGetParametersKind, EventReadCursor, PageRequest,
+    ProductSessionRuntimeProjectionGetParameters, ProductSessionRuntimeProjectionGetParametersKind,
+    QueryResultResponse, RepositoryScope, RepositoryScopeKind, RuntimeProjectionEventCursor,
+    RuntimeProjectionGetParameters, RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery,
+    SchemaVersion, StrongFlowReadCursor, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, AggregateJournalRecord, CommitReceipt, ControlPlane, EventPublishError,
-    EventPublisher, LoadedAggregateJournal, OutboxEvent, ProductStateStorage, StorageError,
-    StoredState,
+    EventPublisher, LoadedAggregateJournal, OutboxEvent, ProductStateStorage,
+    ProjectionEventCursor, ProjectionEventStream, StorageError, StoredState,
     strongflow_projection::{
-        DeliveryRuntimeReadRequest, StrongFlowProjectionError, StrongFlowProjectionQueryPort,
-        StrongFlowProjectionSources, TrustedProjectionReadError,
+        DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, StrongFlowProjectionError,
+        StrongFlowProjectionQueryPort, StrongFlowProjectionSources, TrustedProjectionReadError,
         TrustedPublicationProjectionAdapter, TrustedPublicationProjectionRead,
         TrustedRuntimeProjectionAdapter, TrustedRuntimeProjectionRead,
     },
@@ -36,7 +36,7 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, Instant, OrganizationId, ProductSessionId, ProjectId,
+    AttentionItemId, ControlPlaneEventId, DeliveryId, Instant, OrganizationId, ProjectId,
     RepositoryId, RequestId, Revision, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_storage::{ReceiptIdentity, StateCommit};
@@ -69,6 +69,27 @@ impl ProductStateStorage for JournalStorage {
         _key: &AggregateJournalKey,
     ) -> Result<Option<LoadedAggregateJournal>, StorageError> {
         Ok(Some(self.journal.lock().expect("journal").clone()))
+    }
+    fn load_projection_event_cursor(
+        &self,
+        key: &winwincode_control_plane::ProjectionEventStreamKey,
+        expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionEventCursor, StorageError> {
+        let event_id = match key.stream() {
+            ProjectionEventStream::Delivery(_) => "evt_delivery_fixture_0001",
+            ProjectionEventStream::ProductSession(_) => "evt_product_session_fixture_0001",
+        };
+        let current = ProjectionEventCursor::try_new(
+            key.clone(),
+            1,
+            Some(ControlPlaneEventId(event_id.to_owned())),
+        )?;
+        if expected.is_some_and(|expected| expected != &current) {
+            return Err(StorageError::invalid_input(
+                "projection event cursor mismatch",
+            ));
+        }
+        Ok(current)
     }
     fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError> {
         Ok(Vec::new())
@@ -128,17 +149,18 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         if *raced {
             return Err(TrustedProjectionReadError::Stale);
         }
-        if request.expected().is_none() && request.scope().repository_id.0 == "rep_race" {
+        if request.expected().is_none()
+            && request.scope().repository_id.0 == "rep_00000000000000000000000002"
+        {
             *raced = true;
         }
         Ok(read.clone())
     }
     fn read_product_session(
         &self,
-        _scope: &RepositoryScope,
-        product_session_id: &ProductSessionId,
-        _limit: usize,
+        request: &ProductSessionRuntimeReadRequest,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        let product_session_id = request.product_session_id();
         if self.unavailable
             || !self
                 .read
@@ -151,7 +173,16 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         {
             Err(TrustedProjectionReadError::Unavailable)
         } else {
-            Ok(self.read.lock().expect("runtime read").clone())
+            let read = self.read.lock().expect("runtime read");
+            if request.scope() != read.scope()
+                || request.expected().is_some_and(|expected| {
+                    expected.ledger_revision() != read.ledger_revision()
+                        || expected.accepted_sequence() != read.accepted_sequence()
+                })
+            {
+                return Err(TrustedProjectionReadError::Stale);
+            }
+            Ok(read.clone())
         }
     }
 }
@@ -237,10 +268,17 @@ fn fixture_with_delivery(
 ) -> Fixture {
     let scope = RepositoryScope {
         kind: RepositoryScopeKind::Repository,
-        organization_id: OrganizationId("org_fixture".into()),
-        workspace_id: WorkspaceId("wsp_fixture".into()),
-        project_id: ProjectId("prj_fixture".into()),
-        repository_id: RepositoryId(if race { "rep_race" } else { "rep_fixture" }.into()),
+        organization_id: OrganizationId("org_00000000000000000000000001".into()),
+        workspace_id: WorkspaceId("wsp_00000000000000000000000001".into()),
+        project_id: ProjectId("prj_00000000000000000000000001".into()),
+        repository_id: RepositoryId(
+            if race {
+                "rep_00000000000000000000000002"
+            } else {
+                "rep_00000000000000000000000001"
+            }
+            .into(),
+        ),
     };
     let memory = Arc::new(InMemoryDeliveryJournal::new());
     DeliveryStore::borrowed(memory.as_ref())
@@ -362,7 +400,7 @@ fn delivery_query(
         query: DeliveryGetQueryQuery::DeliveryGet,
         request_id: RequestId("req_delivery".into()),
         schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::RepositoryScope(f.scope.clone()),
+        scope: f.scope.clone(),
     }
 }
 fn detail_and_cursor(
@@ -374,9 +412,10 @@ fn detail_and_cursor(
     let response: QueryResultResponse =
         StrongFlowProjectionQueryPort::delivery_get(&f.control_plane, &delivery_query(f, None, 20))
             .expect("delivery detail");
-    let QueryResult::DeliveryDetailProjection(detail) = response.result else {
+    let QueryResultResponse::DeliveryGetResultResponse(response) = response else {
         panic!("detail")
     };
+    let detail = response.result;
     let cursor = detail.read_cursor.clone();
     (detail, cursor)
 }
@@ -404,7 +443,7 @@ fn runtime_query(
         query: RuntimeProjectionGetQueryQuery::RuntimeProjectionGet,
         request_id: RequestId("req_runtime".into()),
         schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::RepositoryScope(f.scope.clone()),
+        scope: f.scope.clone(),
     }
 }
 
@@ -426,7 +465,7 @@ fn product_session_runtime_query(f: &Fixture, scope: RepositoryScope) -> Runtime
         query: RuntimeProjectionGetQueryQuery::RuntimeProjectionGet,
         request_id: RequestId("req_product_session_runtime".into()),
         schema_version: SchemaVersion::WinwincodeV1,
-        scope: Scope::RepositoryScope(scope),
+        scope,
     }
 }
 
@@ -439,6 +478,9 @@ fn bounded_projection_replay_is_deterministic() {
         &delivery_query(&f, Some(cursor), 100),
     )
     .expect("replay");
+    let QueryResultResponse::DeliveryGetResultResponse(second) = second else {
+        panic!("detail replay")
+    };
     assert_eq!(
         serde_json::to_value(first).unwrap(),
         serde_json::to_value(second.result).unwrap()
@@ -501,10 +543,39 @@ fn delivery_and_runtime_get_share_one_bounded_snapshot_cursor() {
         &runtime_query(&f, cursor.clone(), 1),
     )
     .expect("runtime");
-    let QueryResult::RuntimeProjectionSnapshot(snapshot) = response.result else {
+    let QueryResultResponse::RuntimeProjectionGetResultResponse(response) = response else {
         panic!("runtime")
     };
-    assert_eq!(snapshot.read_cursor, Some(cursor));
+    let snapshot = response.result;
+    assert_eq!(snapshot.read_cursor, Some(cursor.clone()));
+    assert_eq!(
+        snapshot.event_cursor,
+        RuntimeProjectionEventCursor::DeliveryEventReadCursor(cursor.event_cursor)
+    );
+}
+
+#[test]
+fn product_session_snapshot_has_its_own_exact_event_cursor() {
+    let f = fixture(false, false, false);
+    let response = StrongFlowProjectionQueryPort::runtime_projection_get(
+        &f.control_plane,
+        &product_session_runtime_query(&f, f.scope.clone()),
+    )
+    .expect("product-session runtime");
+    let QueryResultResponse::RuntimeProjectionGetResultResponse(response) = response else {
+        panic!("runtime")
+    };
+    let RuntimeProjectionEventCursor::ProductSessionEventReadCursor(cursor) =
+        response.result.event_cursor
+    else {
+        panic!("product-session event cursor")
+    };
+    assert_eq!(cursor.scope, f.scope);
+    assert_eq!(cursor.sequence.0, 1);
+    assert_eq!(
+        cursor.event_id.expect("event id").0,
+        "evt_product_session_fixture_0001"
+    );
 }
 #[test]
 fn delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto() {
@@ -634,16 +705,43 @@ fn websocket_projection_events_use_only_committed_cursors() {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     );
+    assert_eq!(cursor.event_cursor.sequence.0, 1);
+    assert_eq!(
+        cursor.event_cursor.event_id.as_ref().expect("event id").0,
+        "evt_delivery_fixture_0001"
+    );
+    let start = ControlPlaneWebSocketSubscribeStartAt::EventReadCursor(
+        EventReadCursor::DeliveryEventReadCursor(cursor.event_cursor.clone()),
+    );
+    let start_json = serde_json::to_value(start).expect("subscription cursor JSON");
+    assert_eq!(
+        start_json,
+        serde_json::to_value(cursor.event_cursor).expect("HTTP cursor JSON")
+    );
+}
+
+#[test]
+fn event_cursor_is_part_of_the_authenticated_delivery_cut() {
+    let f = fixture(false, false, false);
+    let (_, mut cursor) = detail_and_cursor(&f);
+    cursor.event_cursor.event_id = Some(ControlPlaneEventId("evt_delivery_fixture_forged".into()));
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("another durable event cannot be substituted under the same token");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::RevisionConflict(_)
+    ));
 }
 
 #[test]
 fn foreign_repository_scope_cannot_relabel_a_delivery_projection() {
     let f = fixture(false, false, false);
     let mut query = delivery_query(&f, None, 20);
-    let Scope::RepositoryScope(scope) = &mut query.scope else {
-        panic!("repository scope")
-    };
-    scope.repository_id = RepositoryId("rep_foreign".into());
+    query.scope.repository_id = RepositoryId("rep_00000000000000000000000003".into());
 
     let error = StrongFlowProjectionQueryPort::delivery_get(&f.control_plane, &query)
         .expect_err("trusted facts must prove the exact repository scope");
@@ -658,7 +756,7 @@ fn foreign_repository_scope_cannot_relabel_a_delivery_projection() {
 fn foreign_repository_scope_cannot_read_a_product_session_projection() {
     let f = fixture(false, false, false);
     let mut foreign = f.scope.clone();
-    foreign.repository_id = RepositoryId("rep_foreign".into());
+    foreign.repository_id = RepositoryId("rep_00000000000000000000000003".into());
 
     let error = StrongFlowProjectionQueryPort::runtime_projection_get(
         &f.control_plane,

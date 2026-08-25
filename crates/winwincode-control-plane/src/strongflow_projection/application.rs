@@ -5,7 +5,9 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, RepositoryScope, RepositoryScopeKind, StrongFlowReadCursor,
+    Actor, DeliveryEventReadCursor, DeliveryEventReadStream, DeliveryEventReadStreamKind,
+    ProductSessionEventReadCursor, ProductSessionEventReadStream,
+    ProductSessionEventReadStreamKind, RepositoryScope, RepositoryScopeKind, StrongFlowReadCursor,
 };
 use winwincode_delivery::{
     domain::{
@@ -19,13 +21,17 @@ use winwincode_delivery::{
         LoadedDeliveryJournal,
     },
 };
-use winwincode_domain::{DeliveryId, OpaqueCursor, Revision, Sha256Digest};
+use winwincode_domain::{DeliveryId, EventReadPosition, OpaqueCursor, Revision, Sha256Digest};
 
 use super::{
-    DeliveryRuntimeReadRequest, PublicationFactBinding, StrongFlowProjectionError,
-    TrustedProjectionReadError, TrustedPublicationProjectionRead, TrustedRuntimeProjectionRead,
+    DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, PublicationFactBinding,
+    StrongFlowProjectionError, TrustedProjectionReadError, TrustedPublicationProjectionRead,
+    TrustedRuntimeProjectionRead,
 };
-use crate::{AggregateJournalKey, ControlPlane};
+use crate::{
+    AggregateJournalKey, ControlPlane, ProjectionEventCursor, ProjectionEventStream,
+    ProjectionEventStreamKey, StorageErrorKind, repository_scope_key,
+};
 
 const MAX_QUERY_LIMIT: usize = 200;
 const MAX_RUNTIME_SOURCE_SESSIONS: usize = 256;
@@ -58,6 +64,12 @@ pub(super) struct EstablishedDeliveryRead {
     pub publication_authorization: Option<PublicationAuthorizationSnapshot>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct EstablishedProductSessionRead {
+    pub runtime: TrustedRuntimeProjectionRead,
+    pub event_cursor: ProductSessionEventReadCursor,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BoundedReadCursor {
     pub token: OpaqueCursor,
@@ -67,6 +79,7 @@ pub(super) struct BoundedReadCursor {
     pub runtime_ledger_revision: Revision,
     pub runtime_accepted_sequence: u64,
     pub publication_revision: Revision,
+    pub event_cursor: DeliveryEventReadCursor,
 }
 
 #[derive(Serialize)]
@@ -84,6 +97,7 @@ struct CursorSeal<'cut> {
     publication_revision: &'cut Revision,
     publication_source_seal: &'cut Sha256Digest,
     publication_content_sha256: &'cut str,
+    event_cursor: &'cut DeliveryEventReadCursor,
 }
 
 #[derive(Serialize)]
@@ -139,6 +153,7 @@ struct CurrentPublicationApproval<'delivery> {
     resolved_at: u64,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn establish_delivery_read(
     control_plane: &ControlPlane,
     actor: &Actor,
@@ -180,6 +195,12 @@ pub(super) fn establish_delivery_read(
         .read_delivery(&runtime_request)
         .map_err(current_source_error)?;
     validate_runtime_read(scope, &detail, &runtime)?;
+    let event_key = delivery_event_stream_key(scope, delivery_id)?;
+    let event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, None)
+        .map_err(current_event_storage_error)?;
 
     let second = load_current(control_plane, delivery_id)?;
     if second != first {
@@ -219,8 +240,25 @@ pub(super) fn establish_delivery_read(
             "runtime facts changed while the read cut was established".to_owned(),
         ));
     }
+    let exact_event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, Some(&event_cursor))
+        .map_err(current_event_storage_error)?;
+    if exact_event_cursor != event_cursor {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "the Delivery event stream changed while the read cut was established".to_owned(),
+        ));
+    }
 
-    let cursor = bounded_cursor(&actor_sha256, scope, &first, &runtime, &publication)?;
+    let cursor = bounded_cursor(
+        &actor_sha256,
+        scope,
+        &first,
+        &runtime,
+        &publication,
+        &event_cursor,
+    )?;
     let publication_cursor = generated_cursor(&cursor)?;
     let publication_authorization = binding.map(|binding| PublicationAuthorizationSnapshot {
         binding,
@@ -261,6 +299,14 @@ pub(super) fn replay_delivery_read(
             "the read cursor shape is invalid".to_owned(),
         ));
     }
+    let expected_event_cursor =
+        parse_delivery_event_cursor(scope, delivery_id, &cursor.event_cursor)?;
+    let event_key = expected_event_cursor.key().clone();
+    let event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, Some(&expected_event_cursor))
+        .map_err(cursor_event_storage_error)?;
     let delivery_revision = u64::try_from(cursor.delivery_revision.0).map_err(|_| {
         StrongFlowProjectionError::InvalidRequest("read cursor revision is invalid".to_owned())
     })?;
@@ -330,19 +376,33 @@ pub(super) fn replay_delivery_read(
             MAX_RUNTIME_SOURCE_SESSIONS,
         ))
         .map_err(cursor_source_error)?;
+    let exact_event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, Some(&event_cursor))
+        .map_err(cursor_event_storage_error)?;
     if second != first
         || exact_publication != publication
         || !same_runtime_cut(&runtime, &exact_runtime)
+        || exact_event_cursor != event_cursor
     {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "trusted facts changed while the exact read cut was replayed".to_owned(),
         ));
     }
-    let bounded = bounded_cursor(&actor_sha256, scope, &first, &runtime, &publication)?;
+    let bounded = bounded_cursor(
+        &actor_sha256,
+        scope,
+        &first,
+        &runtime,
+        &publication,
+        &event_cursor,
+    )?;
     if bounded.token.0 != cursor.token
         || bounded.runtime_ledger_revision != cursor.runtime_ledger_revision
         || bounded.runtime_accepted_sequence != runtime_sequence
         || bounded.publication_revision != cursor.publication_revision
+        || bounded.event_cursor != cursor.event_cursor
     {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "the read cursor signature or trusted cut is stale".to_owned(),
@@ -359,6 +419,66 @@ pub(super) fn replay_delivery_read(
         publication,
         cursor: bounded,
         publication_authorization,
+    })
+}
+
+pub(super) fn establish_product_session_read(
+    control_plane: &ControlPlane,
+    scope: &RepositoryScope,
+    product_session_id: &winwincode_domain::ProductSessionId,
+    limit: usize,
+) -> Result<EstablishedProductSessionRead, StrongFlowProjectionError> {
+    let sources = control_plane.strongflow_sources.as_ref().ok_or_else(|| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "trusted runtime facts are unavailable".to_owned(),
+        )
+    })?;
+    let request = ProductSessionRuntimeReadRequest::new(
+        scope.clone(),
+        product_session_id.clone(),
+        None,
+        limit,
+    );
+    let runtime = sources
+        .runtime
+        .read_product_session(&request)
+        .map_err(current_source_error)?;
+    validate_product_session_runtime(scope, product_session_id, &runtime)?;
+    let event_key = product_session_event_stream_key(scope, product_session_id)?;
+    let event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, None)
+        .map_err(current_event_storage_error)?;
+    let exact_runtime = sources
+        .runtime
+        .read_product_session(&ProductSessionRuntimeReadRequest::new(
+            scope.clone(),
+            product_session_id.clone(),
+            Some(super::RuntimeCutExpectation::new(
+                runtime.ledger_revision().clone(),
+                runtime.accepted_sequence(),
+            )),
+            limit,
+        ))
+        .map_err(current_source_error)?;
+    let exact_event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, Some(&event_cursor))
+        .map_err(current_event_storage_error)?;
+    if !same_runtime_cut(&runtime, &exact_runtime) || exact_event_cursor != event_cursor {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "ProductSession runtime facts changed while the read cut was established".to_owned(),
+        ));
+    }
+    Ok(EstablishedProductSessionRead {
+        runtime,
+        event_cursor: generated_product_session_event_cursor(
+            scope,
+            product_session_id,
+            &event_cursor,
+        )?,
     })
 }
 
@@ -567,6 +687,26 @@ pub(super) fn validate_runtime_scope(
     }
 }
 
+fn validate_product_session_runtime(
+    scope: &RepositoryScope,
+    product_session_id: &winwincode_domain::ProductSessionId,
+    runtime: &TrustedRuntimeProjectionRead,
+) -> Result<(), StrongFlowProjectionError> {
+    validate_runtime_scope(scope, runtime)?;
+    if runtime.snapshot().sessions.is_empty()
+        || runtime
+            .snapshot()
+            .sessions
+            .iter()
+            .any(|session| &session.product_session_id != product_session_id)
+    {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "runtime facts do not exactly belong to the requested ProductSession".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn derive_publication_binding(
     delivery: &Delivery,
@@ -749,6 +889,144 @@ fn validate_publication_read(
     }
 }
 
+pub(super) fn delivery_event_stream_key(
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+) -> Result<ProjectionEventStreamKey, StrongFlowProjectionError> {
+    let scope_key = repository_scope_key(scope).map_err(|_| {
+        StrongFlowProjectionError::PermissionDenied(
+            "a canonical repository scope is required".to_owned(),
+        )
+    })?;
+    ProjectionEventStreamKey::new(
+        scope_key,
+        ProjectionEventStream::Delivery(delivery_id.clone()),
+    )
+    .map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest(
+            "the Delivery event stream identity is invalid".to_owned(),
+        )
+    })
+}
+
+pub(super) fn product_session_event_stream_key(
+    scope: &RepositoryScope,
+    product_session_id: &winwincode_domain::ProductSessionId,
+) -> Result<ProjectionEventStreamKey, StrongFlowProjectionError> {
+    let scope_key = repository_scope_key(scope).map_err(|_| {
+        StrongFlowProjectionError::PermissionDenied(
+            "a canonical repository scope is required".to_owned(),
+        )
+    })?;
+    ProjectionEventStreamKey::new(
+        scope_key,
+        ProjectionEventStream::ProductSession(product_session_id.clone()),
+    )
+    .map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest(
+            "the ProductSession event stream identity is invalid".to_owned(),
+        )
+    })
+}
+
+fn parse_delivery_event_cursor(
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+    cursor: &DeliveryEventReadCursor,
+) -> Result<ProjectionEventCursor, StrongFlowProjectionError> {
+    if cursor.scope != *scope
+        || cursor.stream.kind != DeliveryEventReadStreamKind::Delivery
+        || cursor.stream.delivery_id != *delivery_id
+        || cursor.sequence.0 < 0
+        || (cursor.sequence.0 == 0) != cursor.event_id.is_none()
+    {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "the Delivery event cursor shape or stream identity is invalid".to_owned(),
+        ));
+    }
+    let sequence = u64::try_from(cursor.sequence.0).map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest(
+            "the Delivery event cursor sequence is invalid".to_owned(),
+        )
+    })?;
+    ProjectionEventCursor::try_new(
+        delivery_event_stream_key(scope, delivery_id)?,
+        sequence,
+        cursor.event_id.clone(),
+    )
+    .map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest("the Delivery event cursor is invalid".to_owned())
+    })
+}
+
+fn generated_delivery_event_cursor(
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+    cursor: &ProjectionEventCursor,
+) -> Result<DeliveryEventReadCursor, StrongFlowProjectionError> {
+    if cursor.key() != &delivery_event_stream_key(scope, delivery_id)? {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "the durable event cursor belongs to another repository stream".to_owned(),
+        ));
+    }
+    Ok(DeliveryEventReadCursor {
+        event_id: cursor.event_id().cloned(),
+        scope: scope.clone(),
+        sequence: EventReadPosition(i64::try_from(cursor.sequence()).map_err(|_| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "the durable event sequence exceeds the public integer range".to_owned(),
+            )
+        })?),
+        stream: DeliveryEventReadStream {
+            delivery_id: delivery_id.clone(),
+            kind: DeliveryEventReadStreamKind::Delivery,
+        },
+    })
+}
+
+fn generated_product_session_event_cursor(
+    scope: &RepositoryScope,
+    product_session_id: &winwincode_domain::ProductSessionId,
+    cursor: &ProjectionEventCursor,
+) -> Result<ProductSessionEventReadCursor, StrongFlowProjectionError> {
+    if cursor.key() != &product_session_event_stream_key(scope, product_session_id)? {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "the durable event cursor belongs to another ProductSession stream".to_owned(),
+        ));
+    }
+    Ok(ProductSessionEventReadCursor {
+        event_id: cursor.event_id().cloned(),
+        scope: scope.clone(),
+        sequence: EventReadPosition(i64::try_from(cursor.sequence()).map_err(|_| {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "the durable event sequence exceeds the public integer range".to_owned(),
+            )
+        })?),
+        stream: ProductSessionEventReadStream {
+            kind: ProductSessionEventReadStreamKind::ProductSession,
+            product_session_id: product_session_id.clone(),
+        },
+    })
+}
+
+fn current_event_storage_error(_source: crate::StorageError) -> StrongFlowProjectionError {
+    StrongFlowProjectionError::ServiceUnavailable(
+        "the durable projection event cut is unavailable".to_owned(),
+    )
+}
+
+fn cursor_event_storage_error(source: crate::StorageError) -> StrongFlowProjectionError {
+    match source.kind() {
+        StorageErrorKind::EventCursorExpired => StrongFlowProjectionError::ReadCursorExpired(
+            "the Delivery event cursor is outside the retained stream window".to_owned(),
+        ),
+        StorageErrorKind::InvalidInput => StrongFlowProjectionError::RevisionConflict(
+            "the Delivery event cursor does not match durable stream history".to_owned(),
+        ),
+        _ => current_event_storage_error(source),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bounded_cursor(
     actor_sha256: &str,
@@ -756,6 +1034,7 @@ fn bounded_cursor(
     delivery: &Delivery,
     runtime: &TrustedRuntimeProjectionRead,
     publication: &TrustedPublicationProjectionRead,
+    event_cursor: &ProjectionEventCursor,
 ) -> Result<BoundedReadCursor, StrongFlowProjectionError> {
     let delivery_content_sha256 = sha256_json(delivery)?;
     let runtime_content_sha256 = sha256_json(&RuntimeContentSeal {
@@ -776,6 +1055,7 @@ fn bounded_cursor(
         result: publication.result(),
         source_seal: publication.source_seal(),
     })?;
+    let event_cursor = generated_delivery_event_cursor(scope, delivery.id(), event_cursor)?;
     let seal = CursorSeal {
         actor_sha256,
         scope,
@@ -789,6 +1069,7 @@ fn bounded_cursor(
         publication_revision: publication.publication_revision(),
         publication_source_seal: publication.source_seal(),
         publication_content_sha256: &publication_content_sha256,
+        event_cursor: &event_cursor,
     };
     let token = OpaqueCursor(format!("sfc1_{}", sha256_json(&seal)?));
     Ok(BoundedReadCursor {
@@ -799,6 +1080,7 @@ fn bounded_cursor(
         runtime_ledger_revision: runtime.ledger_revision().clone(),
         runtime_accepted_sequence: runtime.accepted_sequence(),
         publication_revision: publication.publication_revision().clone(),
+        event_cursor,
     })
 }
 
@@ -833,6 +1115,7 @@ pub(super) fn generated_cursor(
             )
         })?,
         publication_revision: cut.publication_revision.clone(),
+        event_cursor: cut.event_cursor.clone(),
     })
 }
 
@@ -848,12 +1131,7 @@ pub(super) fn validate_limit(limit: i64) -> Result<usize, StrongFlowProjectionEr
 }
 
 pub(super) fn validate_scope(scope: &RepositoryScope) -> Result<(), StrongFlowProjectionError> {
-    if scope.kind == RepositoryScopeKind::Repository
-        && portable(&scope.organization_id.0)
-        && portable(&scope.workspace_id.0)
-        && portable(&scope.project_id.0)
-        && portable(&scope.repository_id.0)
-    {
+    if scope.kind == RepositoryScopeKind::Repository && repository_scope_key(scope).is_ok() {
         Ok(())
     } else {
         Err(StrongFlowProjectionError::PermissionDenied(
@@ -913,14 +1191,6 @@ fn cursor_source_error(source: TrustedProjectionReadError) -> StrongFlowProjecti
         }
         other => current_source_error(other),
     }
-}
-
-fn portable(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 200
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
-        })
 }
 
 fn canonical_cursor_token(value: &str) -> bool {

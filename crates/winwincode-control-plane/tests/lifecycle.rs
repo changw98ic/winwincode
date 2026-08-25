@@ -124,6 +124,7 @@ impl ProductStateStorage for TraceStorage {
                 event_id: event.event_id.clone(),
                 topic: event.topic.clone(),
                 payload: event.payload.clone(),
+                projection_cursor: None,
             })
             .collect();
         Ok(CommitReceipt {
@@ -139,6 +140,7 @@ impl ProductStateStorage for TraceStorage {
                     event_id: event.event_id.clone(),
                     topic: event.topic.clone(),
                     payload: event.payload.clone(),
+                    projection_cursor: None,
                 })
                 .collect(),
             idempotent_replay: false,
@@ -225,6 +227,7 @@ fn committed_event(sequence: u64, event_id: &str) -> OutboxEvent {
         event_id: event_id.to_owned(),
         topic: "control-plane.state.changed".to_owned(),
         payload: b"event".to_vec(),
+        projection_cursor: None,
     }
 }
 

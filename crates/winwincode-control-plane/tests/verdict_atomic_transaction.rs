@@ -332,7 +332,11 @@ fn verdict_commit_is_atomic_and_replay_returns_the_original_event_once() {
     assert_eq!(first.revision, fixture.delivery.revision() + 1);
     assert_eq!(replay.revision, first.revision);
     assert_eq!(replay.events, first.events);
-    assert_eq!(published.lock().expect("published events").len(), 1);
+    assert_eq!(first.events.len(), 2);
+    assert!(first.events[0].projection_cursor.is_none());
+    assert_eq!(first.events[1].topic, "delivery.changed.v1");
+    assert!(first.events[1].projection_cursor.is_some());
+    assert_eq!(published.lock().expect("published events").len(), 2);
     let state = control_plane
         .load_state(&format!("delivery:{}", fixture.delivery.id().0))
         .expect("state read")

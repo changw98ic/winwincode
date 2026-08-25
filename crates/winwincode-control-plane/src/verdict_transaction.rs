@@ -19,9 +19,9 @@ use winwincode_storage::{
 };
 
 use crate::{
-    DeliveryVerdictCommitError, StateChange, command_receipt,
+    DeliveryVerdictCommitError, StateChange, command_receipt, delivery_changed_event,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
-    storage_commit,
+    storage_commit, validate_delivery_changed_receipt,
 };
 
 const VERDICT_SUBMITTED_TOPIC: &str = "delivery.verdict.submitted";
@@ -82,17 +82,23 @@ pub(crate) fn execute(
         .map_err(DeliveryVerdictCommitError::Coordination)?;
     let event_id = verdict_event_id(transition.event());
     let event_payload = serde_json::to_vec(transition.event()).map_err(storage_error)?;
+    let changed_event = delivery_changed_event(
+        command,
+        &delivery_id,
+        transition.delivery().revision(),
+        "verdict-submitted",
+    )
+    .map_err(DeliveryVerdictCommitError::Storage)?;
     let stream_id = delivery_stream_id(&delivery_id);
     let mut commit = storage_commit(
         command,
         StateChange::new(
             &stream_id,
             transition.delivery().encode_json().map_err(storage_error)?,
-            vec![NewOutboxEvent::internal(
-                &event_id,
-                VERDICT_SUBMITTED_TOPIC,
-                event_payload,
-            )],
+            vec![
+                NewOutboxEvent::internal(&event_id, VERDICT_SUBMITTED_TOPIC, event_payload),
+                changed_event,
+            ],
         ),
     )
     .map_err(DeliveryVerdictCommitError::Storage)?;
@@ -216,7 +222,12 @@ fn validate_receipt(
             "durable verdict receipt does not match its scoped request, replay state, or Delivery revision",
         ));
     }
-    let [event] = receipt.events.as_slice() else {
+    let events = receipt
+        .events
+        .iter()
+        .filter(|event| event.topic == VERDICT_SUBMITTED_TOPIC)
+        .collect::<Vec<_>>();
+    let [event] = events.as_slice() else {
         return Err(StorageError::invalid_input(
             "durable verdict receipt must contain exactly one verdict event",
         ));
@@ -233,6 +244,12 @@ fn validate_receipt(
             "durable verdict event does not match the committed Delivery facts",
         ));
     }
+    validate_delivery_changed_receipt(
+        receipt,
+        delivery.id(),
+        delivery.revision(),
+        "verdict-submitted",
+    )?;
     Ok(())
 }
 

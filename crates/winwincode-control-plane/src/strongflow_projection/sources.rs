@@ -52,6 +52,51 @@ pub struct DeliveryRuntimeReadRequest {
     limit: usize,
 }
 
+/// Exact bounded accepted-ledger request for one `ProductSession`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductSessionRuntimeReadRequest {
+    scope: RepositoryScope,
+    product_session_id: ProductSessionId,
+    expected: Option<RuntimeCutExpectation>,
+    limit: usize,
+}
+
+impl ProductSessionRuntimeReadRequest {
+    #[must_use]
+    pub const fn scope(&self) -> &RepositoryScope {
+        &self.scope
+    }
+
+    #[must_use]
+    pub const fn product_session_id(&self) -> &ProductSessionId {
+        &self.product_session_id
+    }
+
+    #[must_use]
+    pub const fn expected(&self) -> Option<&RuntimeCutExpectation> {
+        self.expected.as_ref()
+    }
+
+    #[must_use]
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub(crate) const fn new(
+        scope: RepositoryScope,
+        product_session_id: ProductSessionId,
+        expected: Option<RuntimeCutExpectation>,
+        limit: usize,
+    ) -> Self {
+        Self {
+            scope,
+            product_session_id,
+            expected,
+            limit,
+        }
+    }
+}
+
 impl DeliveryRuntimeReadRequest {
     #[must_use]
     pub const fn scope(&self) -> &RepositoryScope {
@@ -234,9 +279,7 @@ pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
     /// The default remains closed until the accepted-ledger adapter implements it.
     fn read_product_session(
         &self,
-        _scope: &RepositoryScope,
-        _product_session_id: &ProductSessionId,
-        _limit: usize,
+        _request: &ProductSessionRuntimeReadRequest,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
         Err(TrustedProjectionReadError::Unavailable)
     }

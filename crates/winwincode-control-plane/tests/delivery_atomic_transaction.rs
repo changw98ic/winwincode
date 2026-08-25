@@ -516,8 +516,17 @@ fn delivery_advance_commits_every_durable_fact_before_dispatch() {
             |row| row.get(0),
         )
         .expect("published job event count");
+    let published_delivery_events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE topic = 'delivery.changed.v1' \
+             AND published = 1 AND projection_stream_sequence = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("published Delivery event count");
     assert_eq!(journal_records, 2);
     assert_eq!(published_job_events, 1);
+    assert_eq!(published_delivery_events, 1);
     connection.close().expect("inspection connection close");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -927,8 +936,11 @@ fn dispatch_failure_keeps_the_committed_job_pending_for_restart_replay() {
         ControlPlane::start_local(ControlPlaneConfig::local(&root), Box::new(publisher))
             .expect("restart should replay the committed job intent");
     let replayed_events = replayed_events.lock().expect("replayed event lock");
-    assert_eq!(replayed_events.len(), 1);
+    assert_eq!(replayed_events.len(), 2);
     assert_eq!(replayed_events[0].topic, "execution.job.dispatch");
+    assert!(replayed_events[0].projection_cursor.is_none());
+    assert_eq!(replayed_events[1].topic, "delivery.changed.v1");
+    assert!(replayed_events[1].projection_cursor.is_some());
     assert_eq!(replayed_events[0].event_id, committed.outbox_event_id);
     let replayed_job: serde_json::Value =
         serde_json::from_slice(&replayed_events[0].payload).expect("replayed job JSON");
@@ -1004,8 +1016,11 @@ fn acknowledgement_failure_keeps_the_dispatched_job_pending_for_restart_replay()
     )
     .expect("restart should replay the unacknowledged job");
     let replayed_events = replayed_events.lock().expect("replayed event lock");
-    assert_eq!(replayed_events.len(), 1);
+    assert_eq!(replayed_events.len(), 2);
     assert_eq!(replayed_events[0].topic, "execution.job.dispatch");
+    assert!(replayed_events[0].projection_cursor.is_none());
+    assert_eq!(replayed_events[1].topic, "delivery.changed.v1");
+    assert!(replayed_events[1].projection_cursor.is_some());
     drop(replayed_events);
     restarted.shutdown().expect("restart shutdown");
     fs::remove_dir_all(root).expect("database directory release");
@@ -1186,8 +1201,11 @@ fn repeated_rework_replay_returns_original_receipt_before_stale_facts_or_broken_
         .commit_delivery_rework_clarification(&command, &fixture.transition)
         .expect("bounded rework clarification");
     assert!(!first.idempotent_replay);
-    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.events.len(), 2);
     assert_eq!(first.events[0].topic, "delivery.rework.clarified");
+    assert!(first.events[0].projection_cursor.is_none());
+    assert_eq!(first.events[1].topic, "delivery.changed.v1");
+    assert!(first.events[1].projection_cursor.is_some());
     let state = control_plane
         .load_state(&format!("delivery:{}", fixture.source_delivery.id().0))
         .expect("clarified state read")
@@ -1235,7 +1253,7 @@ fn repeated_rework_replay_returns_original_receipt_before_stale_facts_or_broken_
     assert!(replay.idempotent_replay);
     assert_eq!(replay.revision, first.revision);
     assert_eq!(replay.events, first.events);
-    assert_eq!(published.lock().expect("published events").len(), 1);
+    assert_eq!(published.lock().expect("published events").len(), 2);
     control_plane
         .shutdown()
         .expect("replay shutdown should succeed");

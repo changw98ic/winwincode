@@ -209,7 +209,7 @@ fn attention(
                 description: option.description().to_owned(),
             })
             .collect(),
-        assigned_to: source.assigned_to().map(str::to_owned),
+        assigned_to: source.assigned_to().map(actor_id).transpose()?,
         blocking: source.blocking(),
         status: match source.status() {
             AttentionItemStatus::Open => "open",
@@ -218,7 +218,7 @@ fn attention(
         }
         .to_owned(),
         resolution_summary: source.resolution_summary().map(str::to_owned),
-        resolved_by: source.resolved_by().map(str::to_owned),
+        resolved_by: source.resolved_by().map(actor_id).transpose()?,
         created_at: millis_to_instant(source.created_at())?,
         resolved_at: source.resolved_at().map(millis_to_instant).transpose()?,
     })
@@ -562,7 +562,7 @@ fn publication(
         delivery_verdict_id: binding.verdict_id().0.clone(),
         verdict_status: api::PublicationProjectionVerdictStatus::Pass,
         approval_attention_item_id: binding.approval_id().clone(),
-        approved_by: approved_by.to_owned(),
+        approved_by: actor_id(approved_by)?,
         approved_at: millis_to_instant(approved_at)?,
         publication_set_sha256,
         target,
@@ -614,6 +614,9 @@ pub(super) fn runtime_snapshot_for_delivery(
     }
     Ok(api::RuntimeProjectionSnapshot {
         kind: api::RuntimeProjectionSnapshotKind::RuntimeProjection,
+        event_cursor: api::RuntimeProjectionEventCursor::DeliveryEventReadCursor(
+            read.cursor.event_cursor.clone(),
+        ),
         revision: read.runtime.ledger_revision().clone(),
         read_cursor: Some(cursor(read)?),
         product_session_id: product_session_id.clone(),
@@ -629,10 +632,11 @@ pub(super) fn runtime_snapshot_for_delivery(
 }
 
 pub(super) fn runtime_snapshot_for_product_session(
-    read: &super::TrustedRuntimeProjectionRead,
+    read: &super::application::EstablishedProductSessionRead,
     product_session_id: &winwincode_domain::ProductSessionId,
 ) -> Result<api::RuntimeProjectionSnapshot, StrongFlowProjectionError> {
     let sessions = read
+        .runtime
         .snapshot()
         .sessions
         .iter()
@@ -641,14 +645,20 @@ pub(super) fn runtime_snapshot_for_product_session(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(api::RuntimeProjectionSnapshot {
         kind: api::RuntimeProjectionSnapshotKind::RuntimeProjection,
-        revision: read.ledger_revision().clone(),
+        event_cursor: api::RuntimeProjectionEventCursor::ProductSessionEventReadCursor(
+            read.event_cursor.clone(),
+        ),
+        revision: read.runtime.ledger_revision().clone(),
         read_cursor: None,
         product_session_id: product_session_id.clone(),
         delivery_id: None,
         stage_run_id: None,
-        last_projection_sequence: integer(read.accepted_sequence(), "runtime accepted sequence")?,
+        last_projection_sequence: integer(
+            read.runtime.accepted_sequence(),
+            "runtime accepted sequence",
+        )?,
         sessions,
-        rebuilt_at: read.rebuilt_at().clone(),
+        rebuilt_at: read.runtime.rebuilt_at().clone(),
     })
 }
 

@@ -13,16 +13,17 @@ mod sources;
 use std::fmt;
 
 use winwincode_api::generated::{
-    DeliveryGetQuery, ErrorCode, PageInfo, QueryName, QueryResult, QueryResultResponse,
-    RuntimeProjectionGetParameters, RuntimeProjectionGetQuery, Scope,
+    DeliveryGetQuery, DeliveryGetResultResponse, DeliveryGetResultResponseQuery, ErrorCode,
+    PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
+    RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
 };
 
 use crate::ControlPlane;
 
 pub use application::PublicationAuthorizationSnapshot;
 pub use sources::{
-    DeliveryRuntimeReadRequest, PublicationFactBinding, PublicationResourceFact,
-    PublicationResourceKind, PublicationResultFact, RuntimeCutExpectation,
+    DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, PublicationFactBinding,
+    PublicationResourceFact, PublicationResourceKind, PublicationResultFact, RuntimeCutExpectation,
     StrongFlowProjectionSources, TrustedProjectionReadError, TrustedPublicationProjectionAdapter,
     TrustedPublicationProjectionRead, TrustedRuntimeProjectionAdapter,
     TrustedRuntimeProjectionRead,
@@ -44,10 +45,6 @@ pub enum StrongFlowProjectionError {
 impl StrongFlowProjectionError {
     pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
         Self::InvalidRequest(message.into())
-    }
-
-    pub(crate) fn trusted_facts_unavailable(message: impl Into<String>) -> Self {
-        Self::TrustedFactsUnavailable(message.into())
     }
 
     /// Returns the generated public error code without exposing source details.
@@ -125,11 +122,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         &self,
         query: &DeliveryGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
-        let Scope::RepositoryScope(scope) = &query.scope else {
-            return Err(StrongFlowProjectionError::PermissionDenied(
-                "delivery detail requires repository scope".to_owned(),
-            ));
-        };
+        let scope = &query.scope;
         if query.page.cursor.is_some() {
             return Err(StrongFlowProjectionError::invalid_request(
                 "StrongFlow exact reads use atCursor rather than page cursor",
@@ -152,10 +145,14 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 query.page.limit,
             )?,
         };
-        Ok(response(
-            QueryName::DeliveryGet,
-            query.request_id.clone(),
-            QueryResult::DeliveryDetailProjection(mapping::delivery_detail(&read)?),
+        Ok(QueryResultResponse::DeliveryGetResultResponse(
+            DeliveryGetResultResponse {
+                schema_version: winwincode_api::generated::SchemaVersion::WinwincodeV1,
+                request_id: query.request_id.clone(),
+                query: DeliveryGetResultResponseQuery::DeliveryGet,
+                result: mapping::delivery_detail(&read)?,
+                page: page(),
+            },
         ))
     }
 
@@ -163,11 +160,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         &self,
         query: &RuntimeProjectionGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
-        let Scope::RepositoryScope(scope) = &query.scope else {
-            return Err(StrongFlowProjectionError::PermissionDenied(
-                "runtime projection requires repository scope".to_owned(),
-            ));
-        };
+        let scope = &query.scope;
         if query.page.cursor.is_some() {
             return Err(StrongFlowProjectionError::invalid_request(
                 "StrongFlow exact reads do not accept a page cursor",
@@ -175,11 +168,6 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         }
         application::validate_scope(scope)?;
         let limit = application::validate_limit(query.page.limit)?;
-        let sources = self.strongflow_sources.as_ref().ok_or_else(|| {
-            StrongFlowProjectionError::trusted_facts_unavailable(
-                "trusted runtime and publication facts are unavailable",
-            )
-        })?;
         let snapshot = match &query.parameters {
             RuntimeProjectionGetParameters::DeliveryStageRuntimeProjectionGetParameters(
                 parameters,
@@ -207,38 +195,33 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
             RuntimeProjectionGetParameters::ProductSessionRuntimeProjectionGetParameters(
                 parameters,
             ) => {
-                let read = sources
-                    .runtime
-                    .read_product_session(scope, &parameters.product_session_id, limit)
-                    .map_err(application::current_source_error)?;
-                application::validate_runtime_scope(scope, &read)?;
+                let read = application::establish_product_session_read(
+                    self,
+                    scope,
+                    &parameters.product_session_id,
+                    limit,
+                )?;
                 mapping::runtime_snapshot_for_product_session(
                     &read,
                     &parameters.product_session_id,
                 )?
             }
         };
-        Ok(response(
-            QueryName::RuntimeProjectionGet,
-            query.request_id.clone(),
-            QueryResult::RuntimeProjectionSnapshot(snapshot),
+        Ok(QueryResultResponse::RuntimeProjectionGetResultResponse(
+            RuntimeProjectionGetResultResponse {
+                schema_version: winwincode_api::generated::SchemaVersion::WinwincodeV1,
+                request_id: query.request_id.clone(),
+                query: RuntimeProjectionGetResultResponseQuery::RuntimeProjectionGet,
+                result: snapshot,
+                page: page(),
+            },
         ))
     }
 }
 
-fn response(
-    query: QueryName,
-    request_id: winwincode_domain::RequestId,
-    result: QueryResult,
-) -> QueryResultResponse {
-    QueryResultResponse {
-        schema_version: winwincode_api::generated::SchemaVersion::WinwincodeV1,
-        request_id,
-        query,
-        result,
-        page: PageInfo {
-            has_more: false,
-            next_cursor: None,
-        },
+fn page() -> PageInfo {
+    PageInfo {
+        has_more: false,
+        next_cursor: None,
     }
 }
