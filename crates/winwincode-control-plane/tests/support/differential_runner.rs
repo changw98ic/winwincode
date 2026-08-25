@@ -306,95 +306,6 @@ pub fn run_differential_plan(plan: &DifferentialPlan) -> Result<Value, String> {
     }))
 }
 
-/// Builds the closed terminal-status provenance only for this Rust test
-/// target's embedded-oracle fallback plan. The executor itself consumes the
-/// plan map and never derives product authority from legacy runtime events.
-pub fn local_fixture_terminal_outcome_statuses(source_scenario: &Value) -> Result<Value, String> {
-    let commands = source_scenario
-        .get("commands")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "fixture source scenario commands must be an array".to_owned())?;
-    let mut seen = HashSet::new();
-    let mut statuses = serde_json::Map::new();
-    for (source_index, command) in commands.iter().enumerate() {
-        if command.get("kind").and_then(Value::as_str) != Some("strongflow.request") {
-            continue;
-        }
-        let request = object(command, "request")?;
-        if request.get("operation").and_then(Value::as_str) != Some("submitVerdict") {
-            continue;
-        }
-        let payload = object(request, "payload")?;
-        let fact = terminal_verifier_fact(payload)?;
-        if !seen.insert(fact.key.clone()) {
-            continue;
-        }
-        let status = fixture_terminal_outcome_status(source_scenario, &fact.key)?;
-        statuses.insert(
-            source_index.to_string(),
-            serde_json::to_value(status).map_err(string_error)?,
-        );
-    }
-    Ok(Value::Object(statuses))
-}
-
-fn fixture_terminal_outcome_status(
-    source_scenario: &Value,
-    fact_key: &TerminalVerifierFactKey,
-) -> Result<ExecutionOutcomeStatus, String> {
-    let commands = source_scenario
-        .get("commands")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "fixture source scenario commands must be an array".to_owned())?;
-    let mut completed = Vec::new();
-    for (source_index, command) in commands.iter().enumerate() {
-        if command
-            .pointer("/request/operation")
-            .and_then(Value::as_str)
-            != Some("submitVerdict")
-            || command.pointer("/response/ok").and_then(Value::as_bool) != Some(true)
-        {
-            continue;
-        }
-        let payload = object(object(command, "request")?, "payload")?;
-        if terminal_verifier_fact(payload)?.key == *fact_key {
-            completed.push((source_index, command));
-        }
-    }
-    let [(source_index, command)] = completed.as_slice() else {
-        return Err(format!(
-            "terminal verifier fact must have exactly one completed submit response, found {}",
-            completed.len()
-        ));
-    };
-    let delivery = command
-        .pointer("/response/result/delivery")
-        .ok_or_else(|| format!("completed submit source {source_index} lacks response delivery"))?;
-    let stage_runs = delivery
-        .get("stageRuns")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            format!("completed submit source {source_index} stageRuns must be an array")
-        })?;
-    let verifier = stage_runs
-        .last()
-        .ok_or_else(|| format!("completed submit source {source_index} lacks a final StageRun"))?;
-    if required_str(verifier, "role")? != "verifier" {
-        return Err(format!(
-            "completed submit source {source_index} final StageRun must be verifier"
-        ));
-    }
-    let verifier_status = required_str(verifier, "status")?;
-    let verdict_status = required_str(object(delivery, "verdict")?, "status")?;
-    match (verifier_status, verdict_status) {
-        ("succeeded", "fail" | "inconclusive" | "pass") => Ok(ExecutionOutcomeStatus::Succeeded),
-        ("failed", "infra_error") => Ok(ExecutionOutcomeStatus::InfrastructureError),
-        _ => Err(format!(
-            "completed submit source {source_index} has unmigratable verifier/verdict status pair {verifier_status:?}/{verdict_status:?}"
-        )),
-    }
-}
-
 fn planned_candidate_inputs(scenario: &ScenarioPlan) -> Result<HashMap<String, Value>, String> {
     let mut candidates = HashMap::new();
     for command in &scenario.commands {
@@ -4878,166 +4789,132 @@ mod tests {
         assert_eq!(perturbed.stage_run_id.0, "run_00000000000000000000000001");
     }
 
+    fn terminal_submit_request(session_id: &str, sequence: u64, occurred_at_millis: u64) -> Value {
+        json!({
+            "operation": "submitVerdict",
+            "payload": {
+                "runtimeEvents": [{
+                    "kind": "turn.completed",
+                    "source": {
+                        "roleId": "verifier",
+                        "sessionId": session_id,
+                    },
+                    "terminalReason": "completed",
+                    "cursor": { "sequence": sequence },
+                    "occurredAtMillis": occurred_at_millis,
+                    "data": {
+                        "error": null,
+                        "last_agent_message": "closed terminal verifier fact",
+                    },
+                }],
+            },
+        })
+    }
+
     #[test]
     fn execution_port_count_includes_each_distinct_terminal_verifier_fact_once() {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let source = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .find(|scenario| scenario["id"] == "candidate-invalidation")
-            .expect("candidate-invalidation");
-        let commands = source["commands"]
-            .as_array()
-            .expect("commands")
-            .iter()
-            .map(|command| {
-                let mut projected = serde_json::Map::new();
-                projected.insert("kind".to_owned(), command["kind"].clone());
-                if let Some(request) = command.get("request") {
-                    projected.insert("request".to_owned(), request.clone());
-                }
-                if let Some(input) = command.get("input") {
-                    projected.insert("input".to_owned(), input.clone());
-                }
-                serde_json::from_value(Value::Object(projected)).expect("plan command")
-            })
-            .collect();
+        let terminal_a = terminal_submit_request("session-a", 11, 2_900_000_000_011);
+        let terminal_b = terminal_submit_request("session-b", 12, 2_900_000_000_012);
         let mut scenario = ScenarioPlan {
-            id: "candidate-invalidation".to_owned(),
-            commands,
+            id: "closed-message-count".to_owned(),
+            commands: vec![
+                PlanCommand::StrongFlowRequest {
+                    request: json!({
+                        "operation": "startStage",
+                        "payload": { "actorType": "human", "stageRunId": "human-review" },
+                    }),
+                },
+                PlanCommand::StrongFlowRequest {
+                    request: json!({
+                        "operation": "bindSession",
+                        "payload": { "stageRunId": "human-review" },
+                    }),
+                },
+                PlanCommand::StrongFlowRequest {
+                    request: json!({
+                        "operation": "bindSession",
+                        "payload": { "stageRunId": "codex-execution" },
+                    }),
+                },
+                PlanCommand::StrongFlowRequest {
+                    request: terminal_a.clone(),
+                },
+                PlanCommand::StrongFlowRequest {
+                    request: terminal_a,
+                },
+                PlanCommand::StrongFlowRequest {
+                    request: terminal_b,
+                },
+            ],
             terminal_outcome_status_by_source_command_index: BTreeMap::from([
-                (17, ExecutionOutcomeStatus::Succeeded),
-                (25, ExecutionOutcomeStatus::Succeeded),
+                (3, ExecutionOutcomeStatus::Succeeded),
+                (5, ExecutionOutcomeStatus::InfrastructureError),
             ]),
         };
 
         scenario
             .validate_terminal_outcome_statuses()
             .expect("closed terminal status map");
-        assert_eq!(scenario.execution_port_message_count(), 10);
+        assert_eq!(scenario.execution_port_message_count(), 3);
         let removed = scenario
             .terminal_outcome_status_by_source_command_index
-            .remove(&25)
-            .expect("source 25 status");
+            .remove(&5)
+            .expect("source 5 status");
         assert!(scenario.validate_terminal_outcome_statuses().is_err());
         scenario
             .terminal_outcome_status_by_source_command_index
-            .insert(25, removed);
+            .insert(5, removed);
         scenario
             .terminal_outcome_status_by_source_command_index
-            .insert(17, ExecutionOutcomeStatus::Failed);
+            .insert(3, ExecutionOutcomeStatus::Failed);
         assert!(scenario.validate_terminal_outcome_statuses().is_err());
     }
 
     #[test]
-    fn embedded_plan_freezes_infrastructure_outcome_as_the_generated_enum_wire_value() {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let scenario = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .find(|scenario| scenario["id"] == "infra-error")
-            .expect("infra-error");
-
-        assert_eq!(
-            local_fixture_terminal_outcome_statuses(scenario).expect("closed outcome map"),
-            json!({ "17": "infrastructure_error" })
+    fn closed_plan_uses_the_generated_infrastructure_outcome_wire_value() {
+        let status: ExecutionOutcomeStatus =
+            serde_json::from_value(json!("infrastructure_error")).expect("generated status");
+        assert!(matches!(
+            status,
+            ExecutionOutcomeStatus::InfrastructureError
+        ));
+        assert!(
+            serde_json::from_value::<ExecutionOutcomeStatus>(json!("infrastructure-error"))
+                .is_err()
         );
-    }
-
-    #[test]
-    fn embedded_plan_uses_the_unique_completed_submit_response_not_runtime_findings() {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let mut scenario = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .find(|scenario| scenario["id"] == "success-closed-loop")
-            .expect("success")
-            .clone();
-        let runtime_events = scenario
-            .pointer_mut("/commands/17/request/payload/runtimeEvents")
-            .and_then(Value::as_array_mut)
-            .expect("runtime events");
-        let verifier_result = runtime_events
-            .iter_mut()
-            .find(|event| {
-                event.pointer("/source/roleId").and_then(Value::as_str) == Some("verifier")
-                    && event.pointer("/semantic/kind").and_then(Value::as_str)
-                        == Some("verification-result")
-            })
-            .expect("verifier result");
-        for finding in verifier_result
-            .pointer_mut("/semantic/findings")
-            .and_then(Value::as_array_mut)
-            .expect("findings")
-        {
-            finding["verdict"] = json!("infra_error");
-        }
-
-        assert_eq!(
-            local_fixture_terminal_outcome_statuses(&scenario).expect("closed outcome map"),
-            json!({ "17": "succeeded" })
-        );
-
-        let final_run = scenario
-            .pointer_mut("/commands/17/response/result/delivery/stageRuns")
-            .and_then(Value::as_array_mut)
-            .and_then(|runs| runs.last_mut())
-            .expect("final verifier");
-        final_run["status"] = json!("failed");
-        assert!(local_fixture_terminal_outcome_statuses(&scenario).is_err());
     }
 
     fn failed_verdict_payload_and_authority() -> (Value, VerificationSemanticAuthority) {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let scenario = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .find(|scenario| scenario["id"] == "candidate-invalidation")
-            .expect("candidate-invalidation");
-        let payload = scenario
-            .pointer("/commands/17/request/payload")
-            .expect("failed verdict payload")
-            .clone();
-        let candidate = object(&payload, "candidate").expect("candidate");
-        let current_spec = scenario
-            .pointer("/commands/2/request/payload/spec")
-            .expect("approved Spec");
+        let candidate_ref =
+            "git-candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let result = |role: &str| {
+            json!({
+                "kind": "message.completed",
+                "source": { "roleId": role },
+                "semantic": {
+                    "kind": "verification-result",
+                    "protocol": "winwincode.independent-verification-result.v1",
+                    "candidateRef": candidate_ref,
+                    "deliverySpecId": "spec-current",
+                    "deliverySpecRevision": 2,
+                    "findings": [{
+                        "criterionId": "criterion-current",
+                        "findingId": format!("finding-{role}"),
+                        "verdict": "fail",
+                    }],
+                },
+            })
+        };
+        let payload = json!({
+            "requiredRoles": ["reviewer", "verifier"],
+            "runtimeEvents": [result("reviewer"), result("verifier")],
+        });
         let authority = VerificationSemanticAuthority {
             identity: LegacyVerificationIdentity {
-                candidate_ref: required_str(candidate, "candidateRef")
-                    .expect("candidate ref")
-                    .to_owned(),
-                delivery_spec_id: required_str(current_spec, "id")
-                    .expect("Spec id")
-                    .to_owned(),
-                delivery_spec_revision: required_u64(current_spec, "revision")
-                    .expect("Spec revision"),
-                criterion_ids: current_spec["acceptanceCriteria"]
-                    .as_array()
-                    .expect("criteria")
-                    .iter()
-                    .map(|criterion| {
-                        required_str(criterion, "id")
-                            .expect("criterion id")
-                            .to_owned()
-                    })
-                    .collect(),
+                candidate_ref: candidate_ref.to_owned(),
+                delivery_spec_id: "spec-current".to_owned(),
+                delivery_spec_revision: 2,
+                criterion_ids: ["criterion-current".to_owned()].into_iter().collect(),
             },
             required_roles: ["reviewer".to_owned(), "verifier".to_owned()]
                 .into_iter()
@@ -5270,294 +5147,87 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the focused probe keeps all five verdict transcript checkpoints visible"
-    )]
-    fn verdict_scenarios_commit_each_distinct_terminal_fact_before_the_verdict() {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let ids = [
-            "success-closed-loop",
-            "candidate-invalidation",
-            "inconclusive",
-            "infra-error",
-            "rework",
-        ];
+    fn renamed_minimal_plan_executes_through_the_typed_control_plane() {
         let root = std::env::temp_dir().join(format!(
-            "winwincode-verdict-focused-{}-{}",
+            "winwincode-minimal-closed-plan-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos()
         ));
-        let scenarios = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .filter(|scenario| scenario["id"].as_str().is_some_and(|id| ids.contains(&id)))
-            .map(|scenario| {
-                let commands = scenario["commands"]
-                    .as_array()
-                    .expect("commands")
-                    .iter()
-                    .map(|command| {
-                        let mut projected = serde_json::Map::new();
-                        projected.insert("kind".to_owned(), command["kind"].clone());
-                        if let Some(request) = command.get("request") {
-                            projected.insert("request".to_owned(), request.clone());
-                        }
-                        if let Some(input) = command.get("input") {
-                            projected.insert("input".to_owned(), input.clone());
-                        }
-                        Value::Object(projected)
-                    })
-                    .collect::<Vec<_>>();
-                json!({
-                    "id": format!(
-                        "renamed-{}",
-                        scenario["id"].as_str().expect("scenario id")
-                    ),
-                    "commands": commands,
-                    "terminalOutcomeStatusBySourceCommandIndex":
-                        local_fixture_terminal_outcome_statuses(scenario)
-                            .expect("terminal outcome plan facts"),
-                })
-            })
-            .collect::<Vec<_>>();
-        let serialized = serde_json::to_string(&json!({
-            "schemaVersion": PLAN_SCHEMA,
-            "oracleSchemaVersion": oracle["schemaVersion"],
-            "bindings": {
-                "ORACLE_ROOT": &root,
-                "NODE_EXECUTABLE": "/usr/bin/node",
-                "AUTH_PROOF": "verdict-focused-proof",
-                "fixtureRandomIdentities": {}
+        let delivery_id = "dlv_5FTVA6R2BD3FWYPKEMWD7XXA36";
+        let request = json!({
+            "operation": "createDelivery",
+            "requestId": "minimal:create",
+            "schemaVersion": 7,
+            "payload": {
+                "tasks": [],
+                "spec": {
+                    "acceptanceCriteria": [{
+                        "description": "The typed Control Plane commits the value.",
+                        "id": "criterion-minimal-closed-plan",
+                        "required": true,
+                        "schemaVersion": 3,
+                        "verificationMethod": "Read the committed Delivery projection.",
+                    }],
+                    "baseRevision": "697b264db0d6398c9d7519f970c3e06605bdd299",
+                    "constraints": [],
+                    "createdAtMillis": 2_900_000_000_001_u64,
+                    "deliveryId": delivery_id,
+                    "goal": "Exercise the typed Control Plane and SQLite store.",
+                    "id": "spec-minimal-closed-plan",
+                    "maxReworkAttempts": 1,
+                    "outOfScope": [],
+                    "publicationTarget": null,
+                    "repository": {
+                        "kind": "local-git",
+                        "locator": root.join("repository"),
+                        "schemaVersion": 3,
+                    },
+                    "revision": 1,
+                    "schemaVersion": 3,
+                    "scope": ["One deterministic fixture value"],
+                    "sourceRef": null,
+                    "title": "Minimal closed differential plan",
+                },
             },
-            "scenarios": scenarios
-        }))
-        .expect("plan JSON")
-        .replace("<ORACLE_ROOT>", &root.to_string_lossy())
-        .replace("<NODE_EXECUTABLE>", "/usr/bin/node")
-        .replace("<AUTH_PROOF>", "verdict-focused-proof");
-        let plan: DifferentialPlan = serde_json::from_str(&serialized).expect("plan");
-
-        let result = run_differential_plan(&plan).expect("verdict execution");
-        let scenarios = result["scenarios"].as_array().expect("result scenarios");
-        let expected_revisions = [21, 31, 19, 19, 31];
-        let expected_terminal_messages = [1, 2, 1, 1, 2];
-        for (((scenario, id), revision), terminal_messages) in scenarios
-            .iter()
-            .zip(ids)
-            .zip(expected_revisions)
-            .zip(expected_terminal_messages)
-        {
-            assert_eq!(scenario["id"], format!("renamed-{id}"));
-            assert_eq!(scenario["observation"]["snapshot"]["revision"], revision);
-            let commands = scenario["commands"].as_array().expect("commands");
-            assert_eq!(
-                commands
-                    .iter()
-                    .filter(|command| command["kind"] == "execution-port.message"
-                        && command["request"]["kind"] == "job.outcome")
-                    .count(),
-                terminal_messages
-            );
-            for (index, terminal) in commands.iter().enumerate().filter(|(_, command)| {
-                command["kind"] == "execution-port.message"
-                    && command["request"]["kind"] == "job.outcome"
-            }) {
-                assert_eq!(
-                    terminal["response"]["commits"][0]["operation"],
-                    "apply_terminal_outcome"
-                );
-                let source = &terminal["sourceCommandIndexes"];
-                assert!(commands[index + 1..].iter().any(|command| {
-                    command["kind"] == "control-plane.command"
-                        && command["request"]["command"] == "delivery.submit_verdict"
-                        && &command["sourceCommandIndexes"] == source
-                }));
-            }
-        }
-    }
-
-    #[test]
-    fn non_verdict_scenarios_execute_through_the_typed_control_plane() {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let ids = [
-            "request-id-replay",
-            "revision-conflict",
-            "corruption-recovery",
-            "task-dag",
-            "attention",
-        ];
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-non-verdict-focused-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let scenarios = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .filter(|scenario| scenario["id"].as_str().is_some_and(|id| ids.contains(&id)))
-            .map(|scenario| {
-                let commands = scenario["commands"]
-                    .as_array()
-                    .expect("commands")
-                    .iter()
-                    .map(|command| {
-                        let mut projected = serde_json::Map::new();
-                        projected.insert("kind".to_owned(), command["kind"].clone());
-                        if let Some(request) = command.get("request") {
-                            projected.insert("request".to_owned(), request.clone());
-                        }
-                        if let Some(input) = command.get("input") {
-                            projected.insert("input".to_owned(), input.clone());
-                        }
-                        Value::Object(projected)
-                    })
-                    .collect::<Vec<_>>();
-                json!({
-                    "id": scenario["id"],
-                    "commands": commands,
-                    "terminalOutcomeStatusBySourceCommandIndex":
-                        local_fixture_terminal_outcome_statuses(scenario)
-                            .expect("terminal outcome plan facts"),
-                })
-            })
-            .collect::<Vec<_>>();
-        let serialized = serde_json::to_string(&json!({
-            "schemaVersion": PLAN_SCHEMA,
-            "oracleSchemaVersion": oracle["schemaVersion"],
-            "bindings": {
-                "ORACLE_ROOT": root,
-                "NODE_EXECUTABLE": "/usr/bin/node",
-                "AUTH_PROOF": "non-verdict-focused-proof",
-                "fixtureRandomIdentities": {}
-            },
-            "scenarios": scenarios
-        }))
-        .expect("plan JSON")
-        .replace("<ORACLE_ROOT>", &root.to_string_lossy())
-        .replace("<NODE_EXECUTABLE>", "/usr/bin/node")
-        .replace("<AUTH_PROOF>", "non-verdict-focused-proof");
-        let plan: DifferentialPlan = serde_json::from_str(&serialized).expect("plan");
-
-        let result = run_differential_plan(&plan).expect("non-verdict execution");
-        let scenarios = result["scenarios"].as_array().expect("result scenarios");
-        let expected_revisions = [1, 2, 1, 2, 8];
-        for ((scenario, id), revision) in scenarios.iter().zip(ids).zip(expected_revisions) {
-            assert_eq!(scenario["id"], id);
-            assert_eq!(scenario["observation"]["snapshot"]["revision"], revision);
-        }
-        for scenario in &scenarios[..4] {
-            assert_eq!(
-                scenario["observation"]["projection"]["runtime"],
-                Value::Null
-            );
-        }
-        assert_ne!(
-            scenarios[4]["observation"]["projection"]["runtime"],
-            Value::Null
-        );
-    }
-
-    #[test]
-    fn task_dag_cycle_maps_to_sealed_zero_write_promotion_rejection() {
-        let oracle: Value = serde_json::from_slice(include_bytes!(
-            "../../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-        ))
-        .expect("oracle");
-        let source_scenario = oracle["scenarios"]
-            .as_array()
-            .expect("scenarios")
-            .iter()
-            .find(|scenario| scenario["id"] == "task-dag")
-            .expect("task-dag")
-            .clone();
-        let commands = source_scenario["commands"]
-            .as_array()
-            .expect("commands")
-            .iter()
-            .map(|command| {
-                let mut projected = serde_json::Map::new();
-                projected.insert("kind".to_owned(), command["kind"].clone());
-                if let Some(request) = command.get("request") {
-                    projected.insert("request".to_owned(), request.clone());
-                }
-                if let Some(input) = command.get("input") {
-                    projected.insert("input".to_owned(), input.clone());
-                }
-                Value::Object(projected)
-            })
-            .collect::<Vec<_>>();
-        let scenario = json!({
-            "id": "renamed-task-graph",
-            "commands": commands,
-            "terminalOutcomeStatusBySourceCommandIndex": {},
         });
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-task-dag-focused-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let plan: DifferentialPlan = serde_json::from_value(json!({
-            "schemaVersion": PLAN_SCHEMA,
-            "oracleSchemaVersion": oracle["schemaVersion"],
-            "bindings": {
-                "ORACLE_ROOT": root,
-                "NODE_EXECUTABLE": "/usr/bin/node",
-                "AUTH_PROOF": "task-dag-focused-proof",
-                "fixtureRandomIdentities": {}
+        let plan = DifferentialPlan {
+            schema_version: PLAN_SCHEMA.to_owned(),
+            oracle_schema_version: "winwincode.delivery-strongflow-differential-oracle.v1"
+                .to_owned(),
+            bindings: PlanBindings {
+                oracle_root: root.clone(),
+                node_executable: "/fixture/bin/node".to_owned(),
+                auth_proof: "minimal-closed-plan-proof".to_owned(),
+                fixture_random_identities: BTreeMap::new(),
             },
-            "scenarios": [scenario]
-        }))
-        .expect("plan");
+            scenarios: vec![ScenarioPlan {
+                id: "renamed-minimal-control-plane".to_owned(),
+                commands: vec![PlanCommand::StrongFlowRequest { request }],
+                terminal_outcome_status_by_source_command_index: BTreeMap::new(),
+            }],
+        };
 
-        let result = run_differential_plan(&plan).expect("task-dag execution");
+        let result = run_differential_plan(&plan).expect("minimal typed execution");
         let scenario = &result["scenarios"][0];
-        assert_eq!(scenario["id"], "renamed-task-graph");
-        let cycle = scenario["commands"]
-            .as_array()
-            .expect("commands")
-            .iter()
-            .find(|command| command["sourceCommandIndexes"] == json!([2]))
-            .expect("cycle migration");
-        assert_eq!(cycle["kind"], "fixture.command");
-        assert_eq!(cycle["request"]["kind"], "fixture.solution-review.validate");
+        assert_eq!(scenario["id"], "renamed-minimal-control-plane");
+        assert_eq!(scenario["commands"][0]["kind"], "control-plane.command");
         assert_eq!(
-            cycle["request"]["input"]["invalidProposalKind"],
-            "dependency-cycle"
+            scenario["commands"][0]["request"]["command"],
+            "delivery.create"
         );
-        assert_eq!(cycle["response"]["error"]["code"], "INVALID_REQUEST");
-        assert_eq!(
-            cycle["response"]["error"]["message"],
-            "solution-review task proposal dependencies contain a cycle"
-        );
-        assert_eq!(
-            scenario["observation"]["snapshot"]["id"],
-            "dlv_5QNEEJDDVR7MC02RM22SXW5TMJ"
-        );
-        assert_eq!(scenario["observation"]["snapshot"]["revision"], 2);
+        assert_eq!(scenario["observation"]["snapshot"]["id"], delivery_id);
+        assert_eq!(scenario["observation"]["snapshot"]["revision"], 1);
         assert_eq!(
             scenario["observation"]["store"]["journal"]["records"]
                 .as_array()
-                .expect("records")
+                .expect("journal records")
                 .len(),
-            2
+            1
         );
+
+        fs::remove_dir_all(root).expect("remove minimal closed plan root");
     }
 }

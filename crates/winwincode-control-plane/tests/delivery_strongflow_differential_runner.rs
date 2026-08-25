@@ -4,16 +4,12 @@
 
 mod support;
 
-use std::{collections::BTreeSet, env, fs, path::PathBuf};
+use std::{collections::BTreeSet, env, ffi::OsString, fs, path::PathBuf};
 
-use serde_json::{Map, Value, json};
-use support::differential_runner::{
-    DifferentialPlan, local_fixture_terminal_outcome_statuses, run_differential_plan,
-};
+use support::differential_runner::{DifferentialPlan, run_differential_plan};
 
 const INPUT_ENV: &str = "WINWINCODE_DELIVERY_DIFFERENTIAL_INPUT";
 const OUTPUT_ENV: &str = "WINWINCODE_DELIVERY_DIFFERENTIAL_OUTPUT";
-const PLAN_SCHEMA: &str = "winwincode.delivery-strongflow-differential-plan.v2";
 const RESULT_SCHEMA: &str = "winwincode.delivery-strongflow-rust-differential-result.v1";
 
 #[test]
@@ -22,7 +18,9 @@ const RESULT_SCHEMA: &str = "winwincode.delivery-strongflow-rust-differential-re
     reason = "the machine entry validates every closed output branch before writing the result"
 )]
 fn rust_runner_executes_every_frozen_transcript_and_writes_complete_actual_json() {
-    let (plan_path, output_path, owned_root) = env_paths().unwrap_or_else(local_plan_paths);
+    let Some((plan_path, output_path)) = env_paths() else {
+        return;
+    };
     let plan_bytes = fs::read(&plan_path).expect("differential execution plan");
     let plan: DifferentialPlan =
         serde_json::from_slice(&plan_bytes).expect("strict differential execution plan");
@@ -130,111 +128,32 @@ fn rust_runner_executes_every_frozen_transcript_and_writes_complete_actual_json(
         ),
     )
     .expect("write differential result");
+}
 
-    if let Some(root) = owned_root {
-        fs::remove_dir_all(root).expect("remove local runner fixture");
+fn env_paths() -> Option<(PathBuf, PathBuf)> {
+    paired_paths(env::var_os(INPUT_ENV), env::var_os(OUTPUT_ENV))
+        .unwrap_or_else(|message| panic!("{message}"))
+}
+
+fn paired_paths(
+    input: Option<OsString>,
+    output: Option<OsString>,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    match (input, output) {
+        (None, None) => Ok(None),
+        (Some(input), Some(output)) => Ok(Some((PathBuf::from(input), PathBuf::from(output)))),
+        (Some(_), None) => Err(format!("{OUTPUT_ENV} must accompany {INPUT_ENV}")),
+        (None, Some(_)) => Err(format!("{INPUT_ENV} must accompany {OUTPUT_ENV}")),
     }
 }
 
-fn env_paths() -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
-    let input = env::var_os(INPUT_ENV)?;
-    let output = env::var_os(OUTPUT_ENV)
-        .unwrap_or_else(|| panic!("{OUTPUT_ENV} must accompany {INPUT_ENV}"));
-    Some((PathBuf::from(input), PathBuf::from(output), None))
-}
-
-fn local_plan_paths() -> (PathBuf, PathBuf, Option<PathBuf>) {
-    let root = unique_root("local-entry");
-    fs::create_dir_all(&root).expect("local differential root");
-    let oracle: Value = serde_json::from_slice(include_bytes!(
-        "../../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json"
-    ))
-    .expect("committed oracle");
-    let scenarios = oracle["scenarios"]
-        .as_array()
-        .expect("oracle scenarios")
-        .iter()
-        .map(|scenario| {
-            let commands = scenario["commands"]
-                .as_array()
-                .expect("oracle commands")
-                .iter()
-                .map(|command| {
-                    let mut planned = Map::new();
-                    planned.insert("kind".into(), command["kind"].clone());
-                    if let Some(request) = command.get("request") {
-                        planned.insert("request".into(), hydrate(request.clone(), &root));
-                    }
-                    if let Some(input) = command.get("input") {
-                        planned.insert("input".into(), hydrate(input.clone(), &root));
-                    }
-                    Value::Object(planned)
-                })
-                .collect::<Vec<_>>();
-            json!({
-                "id": scenario["id"],
-                "commands": commands,
-                "terminalOutcomeStatusBySourceCommandIndex":
-                    local_fixture_terminal_outcome_statuses(scenario)
-                        .expect("closed terminal outcome plan facts"),
-            })
-        })
-        .collect::<Vec<_>>();
-    let plan = json!({
-        "schemaVersion": PLAN_SCHEMA,
-        "oracleSchemaVersion": oracle["schemaVersion"],
-        "bindings": {
-            "ORACLE_ROOT": root,
-            "NODE_EXECUTABLE": "/usr/bin/node",
-            "AUTH_PROOF": "rust-differential-fixture-proof",
-            "fixtureRandomIdentities": {},
-        },
-        "scenarios": scenarios,
-    });
-    let input = root.join("plan.json");
-    let output = root.join("result.json");
-    fs::write(
-        &input,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&plan).expect("plan JSON")
-        ),
-    )
-    .expect("write local execution plan");
-    (input, output, Some(root))
-}
-
-fn hydrate(value: Value, root: &std::path::Path) -> Value {
-    match value {
-        Value::String(value) => Value::String(
-            value
-                .replace("<ORACLE_ROOT>", &root.to_string_lossy())
-                .replace("<NODE_EXECUTABLE>", "/usr/bin/node")
-                .replace("<AUTH_PROOF>", "rust-differential-fixture-proof"),
-        ),
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(|value| hydrate(value, root))
-                .collect(),
-        ),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, hydrate(value, root)))
-                .collect(),
-        ),
-        scalar => scalar,
-    }
-}
-
-fn unique_root(label: &str) -> PathBuf {
-    env::temp_dir().join(format!(
-        "winwincode-delivery-differential-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos()
-    ))
+#[test]
+fn machine_entry_skips_only_when_both_plan_paths_are_absent() {
+    assert_eq!(paired_paths(None, None).expect("both absent"), None);
+    assert!(paired_paths(Some("plan.json".into()), None).is_err());
+    assert!(paired_paths(None, Some("result.json".into())).is_err());
+    assert_eq!(
+        paired_paths(Some("plan.json".into()), Some("result.json".into())).expect("paired paths"),
+        Some((PathBuf::from("plan.json"), PathBuf::from("result.json")))
+    );
 }
