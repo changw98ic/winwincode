@@ -206,11 +206,17 @@ async function rejectingOpenAiServer(secret) {
 }
 
 async function interruptingOpenAiServer(interrupt) {
-  const server = createServer(async (request, response) => {
-    for await (const _chunk of request) {
-      // Drain the request so the live provider route has really been reached.
+  let interruptCount = 0
+  let requestCount = 0
+  const requestStarted = Promise.withResolvers()
+  const server = createServer((request, response) => {
+    requestCount += 1
+    if (requestCount === 1) {
+      requestStarted.resolve()
+      interruptCount += 1
+      interrupt()
     }
-    interrupt()
+    request.resume()
     response.writeHead(503, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ error: { message: 'interrupted fixture request' } }))
   })
@@ -219,6 +225,9 @@ async function interruptingOpenAiServer(interrupt) {
   const address = server.address()
   return Object.freeze({
     server,
+    interruptCount: () => interruptCount,
+    requestCount: () => requestCount,
+    requestStarted: requestStarted.promise,
     baseURL: `http://127.0.0.1:${String(address.port)}/v1`,
   })
 }
@@ -952,24 +961,39 @@ test('persists an inspectable interrupted result after the provider route starts
     controller.abort(new LiveEvaluationError('INTERRUPTED', 'fixture interruption'))
   })
   t.after(() => new Promise(resolveClose => provider.server.close(resolveClose)))
-  let failure
-  try {
-    await runLiveEvaluation({
-      optIn: true,
-      config: configFor(repository, provider.baseURL),
-      outputDirectory: join(directory, 'results'),
-      environment: {
-        ...process.env,
-        WINWINCODE_EVALUATION_TEST_API_KEY: 'fixture-interruption-key',
-      },
-      signal: controller.signal,
-    })
-  } catch (error) {
-    failure = error
-  }
-  assert.notEqual(failure, undefined)
+  const evaluation = runLiveEvaluation({
+    optIn: true,
+    config: configFor(repository, provider.baseURL),
+    outputDirectory: join(directory, 'results'),
+    environment: {
+      ...process.env,
+      WINWINCODE_EVALUATION_TEST_API_KEY: 'fixture-interruption-key',
+    },
+    signal: controller.signal,
+  }).then(
+    () => undefined,
+    error => error,
+  )
+  const routeOutcome = await Promise.race([
+    provider.requestStarted.then(() => ({ kind: 'request' })),
+    evaluation.then(error => ({ kind: 'evaluation', error })),
+  ])
+  assert.equal(
+    routeOutcome.kind,
+    'request',
+    `evaluation ended before the provider route: ${routeOutcome.error?.code ?? 'completed'}`,
+  )
+  const interruptedWhenRouteStarted = controller.signal.aborted
+  const failure = await evaluation
+  assert.equal(interruptedWhenRouteStarted, true)
+  assert.equal(provider.requestCount() > 0, true)
+  assert.equal(provider.interruptCount(), 1)
+  assert.equal(controller.signal.aborted, true)
+  assert.equal(controller.signal.reason?.code, 'INTERRUPTED')
+  assert.equal(failure?.code, 'CODEX_TURN_FAILED')
   assert.equal(typeof failure.evaluationResultPath, 'string')
-  const result = JSON.parse(await readFile(failure.evaluationResultPath, 'utf8'))
+  const stored = await readFile(failure.evaluationResultPath, 'utf8')
+  const result = JSON.parse(stored)
   assert.equal(result.state, 'interrupted')
   assert.equal(result.phase, 'interrupted')
   assert.equal(result.preflight.status, 'passed')
@@ -978,5 +1002,10 @@ test('persists an inspectable interrupted result after the provider route starts
   assert.notEqual(result.measures, null)
   assert.deepEqual(measureLiveEvaluationResult(result), result.measures)
   assert.equal(result.measures.outcome.successClaimPresent.value, false)
-  assert.equal(result.error.phase, 'planning')
+  assert.deepEqual(result.error, {
+    phase: 'planning',
+    code: 'INTERRUPTED',
+    category: 'evaluation',
+  })
+  assert.equal(stored.includes('fixture-interruption-key'), false)
 })
