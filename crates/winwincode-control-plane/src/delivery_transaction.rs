@@ -15,9 +15,9 @@ use winwincode_delivery::store::{
     JournalBackendError, JournalBackendErrorCode, JournalEntryState, JournalRecordBytes,
     LoadedDeliveryJournal, StartDeliveryStage,
 };
-use winwincode_domain::DeliveryId;
+use winwincode_domain::{DeliveryId, ExecutionJobId};
 use winwincode_storage::{
-    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, DurableOutboxEvent,
     LoadedAggregateJournal, NewOutboxEvent, ProductStateStorage, StorageError, StorageErrorKind,
 };
 
@@ -278,6 +278,36 @@ pub(crate) fn strict_execution_job(
         return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB));
     }
     Ok(job)
+}
+
+/// Loads and validates the one immutable dispatch intent owned by a generated
+/// `ExecutionPort` message. Session binding and terminal outcome transactions
+/// share this authority join rather than interpreting Worker-supplied scope.
+pub(crate) fn load_durable_execution_job(
+    storage: &dyn ProductStateStorage,
+    job_id: &ExecutionJobId,
+) -> Result<(DurableOutboxEvent, ExecutionJob), StorageError> {
+    let event_id = format!("execution-job:{}", job_id.0);
+    let durable = storage
+        .load_outbox_event(&event_id)?
+        .ok_or_else(|| StorageError::invalid_input("ExecutionJob event does not exist"))?;
+    let event = durable.event();
+    if event.event_id != event_id
+        || event.topic != EXECUTION_JOB_TOPIC
+        || event.projection_cursor.is_some()
+    {
+        return Err(StorageError::invalid_input(
+            "durable event is not the exact internal ExecutionJob intent",
+        ));
+    }
+    let job = strict_execution_job(&event.payload)
+        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    if &job.job_id != job_id {
+        return Err(StorageError::invalid_input(
+            "durable ExecutionJob event identity does not match its payload",
+        ));
+    }
+    Ok((durable, job))
 }
 
 pub(crate) fn delivery_stream_id(delivery_id: &DeliveryId) -> String {

@@ -1061,8 +1061,11 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
             .clone()
             .expect("authorized rework task")
     );
-    assert_eq!(authorization.targets[0].diagram_id, "diagram-main");
-    assert_eq!(authorization.targets[0].node_id, "node-api");
+    assert_eq!(
+        authorization.targets[0].diagram_id,
+        "diagram-current-verdict"
+    );
+    assert_eq!(authorization.targets[0].node_id, "node-current-failure");
     assert_eq!(authorization.targets[0].file_path, "src/invitation.rs");
     assert_eq!(authorization.targets[0].source_hunk_sha256, "b".repeat(64));
     assert_eq!(
