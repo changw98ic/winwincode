@@ -76,11 +76,38 @@ struct CursorSeal<'cut> {
     scope: &'cut RepositoryScope,
     delivery_id: &'cut DeliveryId,
     delivery_revision: u64,
+    delivery_content_sha256: &'cut str,
     runtime_ledger_revision: &'cut Revision,
     runtime_accepted_sequence: u64,
     runtime_source_seal: &'cut Sha256Digest,
+    runtime_content_sha256: &'cut str,
     publication_revision: &'cut Revision,
     publication_source_seal: &'cut Sha256Digest,
+    publication_content_sha256: &'cut str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeContentSeal<'cut> {
+    scope: &'cut RepositoryScope,
+    delivery_revision: u64,
+    ledger_revision: &'cut Revision,
+    accepted_sequence: u64,
+    rebuilt_at: &'cut winwincode_domain::Instant,
+    snapshot: &'cut winwincode_delivery::projection::runtime::RuntimeFoldSnapshot,
+    source_seal: &'cut Sha256Digest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicationContentSeal<'cut> {
+    scope: &'cut RepositoryScope,
+    delivery_id: &'cut DeliveryId,
+    delivery_revision: u64,
+    publication_revision: &'cut Revision,
+    candidate: Option<&'cut winwincode_delivery::domain::FrozenDeliveryCandidate>,
+    result: Option<&'cut super::PublicationResultFact>,
+    source_seal: &'cut Sha256Digest,
 }
 
 #[derive(Serialize)]
@@ -124,7 +151,7 @@ pub(super) fn establish_delivery_read(
         .publication
         .read_current(scope, delivery_id, first.revision(), None)
         .map_err(current_source_error)?;
-    require_publication_revision(&publication, first.revision())?;
+    validate_publication_read(scope, delivery_id, &publication, first.revision())?;
     let detail = project_delivery_detail(publication.candidate().map_or_else(
         || ProjectionInput::new(&first),
         |candidate| ProjectionInput::new(&first).with_candidate(candidate),
@@ -143,7 +170,7 @@ pub(super) fn establish_delivery_read(
         .runtime
         .read_delivery(&runtime_request)
         .map_err(current_source_error)?;
-    validate_runtime_read(&detail, &runtime)?;
+    validate_runtime_read(scope, &detail, &runtime)?;
 
     let second = load_current(control_plane, delivery_id)?;
     if second != first {
@@ -184,14 +211,7 @@ pub(super) fn establish_delivery_read(
         ));
     }
 
-    let cursor = bounded_cursor(
-        &actor_sha256,
-        scope,
-        delivery_id,
-        first.revision(),
-        &runtime,
-        &publication,
-    )?;
+    let cursor = bounded_cursor(&actor_sha256, scope, &first, &runtime, &publication)?;
     let publication_cursor = generated_cursor(&cursor)?;
     let publication_authorization = binding.map(|binding| PublicationAuthorizationSnapshot {
         binding,
@@ -253,7 +273,7 @@ pub(super) fn replay_delivery_read(
             Some(&cursor.publication_revision),
         )
         .map_err(cursor_source_error)?;
-    require_publication_revision(&publication, delivery_revision)?;
+    validate_publication_read(scope, delivery_id, &publication, delivery_revision)?;
     let detail = project_delivery_detail(publication.candidate().map_or_else(
         || ProjectionInput::new(&first),
         |candidate| ProjectionInput::new(&first).with_candidate(candidate),
@@ -273,7 +293,7 @@ pub(super) fn replay_delivery_read(
             MAX_RUNTIME_SOURCE_SESSIONS,
         ))
         .map_err(cursor_source_error)?;
-    validate_runtime_read(&detail, &runtime)?;
+    validate_runtime_read(scope, &detail, &runtime)?;
 
     let second = load_revision(control_plane, delivery_id, delivery_revision)?;
     let exact_publication = sources
@@ -306,14 +326,7 @@ pub(super) fn replay_delivery_read(
             "trusted facts changed while the exact read cut was replayed".to_owned(),
         ));
     }
-    let bounded = bounded_cursor(
-        &actor_sha256,
-        scope,
-        delivery_id,
-        delivery_revision,
-        &runtime,
-        &publication,
-    )?;
+    let bounded = bounded_cursor(&actor_sha256, scope, &first, &runtime, &publication)?;
     if bounded.token.0 != cursor.token
         || bounded.runtime_ledger_revision != cursor.runtime_ledger_revision
         || bounded.runtime_accepted_sequence != runtime_sequence
@@ -430,7 +443,23 @@ fn load_revision(
                 .collect(),
         },
     };
-    DeliveryStore::borrowed(&journal)
+    let store = DeliveryStore::borrowed(&journal);
+    let current = store
+        .query(DeliveryQuery::Get(delivery_id.clone()))
+        .map_err(|_| {
+            StrongFlowProjectionError::ServiceUnavailable(
+                "canonical journal verification failed".to_owned(),
+            )
+        })?;
+    if revision > current.revision() {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "read cursor names a Delivery revision that has never been issued".to_owned(),
+        ));
+    }
+    if revision == current.revision() {
+        return Ok(current);
+    }
+    store
         .query(DeliveryQuery::GetRevision {
             delivery_id: delivery_id.clone(),
             revision,
@@ -470,9 +499,11 @@ impl DeliveryJournalPort for ReadOnlyJournal {
 }
 
 fn validate_runtime_read(
+    scope: &RepositoryScope,
     detail: &DeliveryProjection,
     runtime: &TrustedRuntimeProjectionRead,
 ) -> Result<(), StrongFlowProjectionError> {
+    validate_runtime_scope(scope, runtime)?;
     if runtime.delivery_revision() != detail.delivery_revision()
         || runtime.snapshot().delivery_id != *detail.delivery_id()
     {
@@ -509,6 +540,19 @@ fn validate_runtime_read(
         }
     }
     Ok(())
+}
+
+pub(super) fn validate_runtime_scope(
+    scope: &RepositoryScope,
+    runtime: &TrustedRuntimeProjectionRead,
+) -> Result<(), StrongFlowProjectionError> {
+    if runtime.scope() == scope {
+        Ok(())
+    } else {
+        Err(StrongFlowProjectionError::PermissionDenied(
+            "runtime facts belong to another repository scope".to_owned(),
+        ))
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -641,11 +685,20 @@ fn validate_publication_result(
     }
 }
 
-fn require_publication_revision(
+fn validate_publication_read(
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
     publication: &TrustedPublicationProjectionRead,
     delivery_revision: u64,
 ) -> Result<(), StrongFlowProjectionError> {
-    if publication.delivery_revision() == delivery_revision {
+    if publication.scope() != scope {
+        return Err(StrongFlowProjectionError::PermissionDenied(
+            "publication facts belong to another repository scope".to_owned(),
+        ));
+    }
+    if publication.delivery_id() == delivery_id
+        && publication.delivery_revision() == delivery_revision
+    {
         Ok(())
     } else {
         Err(StrongFlowProjectionError::RevisionConflict(
@@ -658,28 +711,49 @@ fn require_publication_revision(
 fn bounded_cursor(
     actor_sha256: &str,
     scope: &RepositoryScope,
-    delivery_id: &DeliveryId,
-    delivery_revision: u64,
+    delivery: &Delivery,
     runtime: &TrustedRuntimeProjectionRead,
     publication: &TrustedPublicationProjectionRead,
 ) -> Result<BoundedReadCursor, StrongFlowProjectionError> {
+    let delivery_content_sha256 = sha256_json(delivery)?;
+    let runtime_content_sha256 = sha256_json(&RuntimeContentSeal {
+        scope: runtime.scope(),
+        delivery_revision: runtime.delivery_revision(),
+        ledger_revision: runtime.ledger_revision(),
+        accepted_sequence: runtime.accepted_sequence(),
+        rebuilt_at: runtime.rebuilt_at(),
+        snapshot: runtime.snapshot(),
+        source_seal: runtime.source_seal(),
+    })?;
+    let publication_content_sha256 = sha256_json(&PublicationContentSeal {
+        scope: publication.scope(),
+        delivery_id: publication.delivery_id(),
+        delivery_revision: publication.delivery_revision(),
+        publication_revision: publication.publication_revision(),
+        candidate: publication.candidate(),
+        result: publication.result(),
+        source_seal: publication.source_seal(),
+    })?;
     let seal = CursorSeal {
         actor_sha256,
         scope,
-        delivery_id,
-        delivery_revision,
+        delivery_id: delivery.id(),
+        delivery_revision: delivery.revision(),
+        delivery_content_sha256: &delivery_content_sha256,
         runtime_ledger_revision: runtime.ledger_revision(),
         runtime_accepted_sequence: runtime.accepted_sequence(),
         runtime_source_seal: runtime.source_seal(),
+        runtime_content_sha256: &runtime_content_sha256,
         publication_revision: publication.publication_revision(),
         publication_source_seal: publication.source_seal(),
+        publication_content_sha256: &publication_content_sha256,
     };
     let token = OpaqueCursor(format!("sfc1_{}", sha256_json(&seal)?));
     Ok(BoundedReadCursor {
         token,
         scope: scope.clone(),
-        delivery_id: delivery_id.clone(),
-        delivery_revision,
+        delivery_id: delivery.id().clone(),
+        delivery_revision: delivery.revision(),
         runtime_ledger_revision: runtime.ledger_revision().clone(),
         runtime_accepted_sequence: runtime.accepted_sequence(),
         publication_revision: publication.publication_revision().clone(),
@@ -774,6 +848,11 @@ pub(super) fn current_source_error(
                 "trusted projection facts are temporarily unavailable".to_owned(),
             )
         }
+        TrustedProjectionReadError::ExactCutNotRetained => {
+            StrongFlowProjectionError::TrustedFactsUnavailable(
+                "trusted projection facts do not retain a required current source".to_owned(),
+            )
+        }
         TrustedProjectionReadError::Stale => StrongFlowProjectionError::RevisionConflict(
             "trusted projection facts changed while a current cut was established".to_owned(),
         ),
@@ -785,9 +864,11 @@ pub(super) fn current_source_error(
 
 fn cursor_source_error(source: TrustedProjectionReadError) -> StrongFlowProjectionError {
     match source {
-        TrustedProjectionReadError::Stale => StrongFlowProjectionError::ReadCursorExpired(
-            "trusted projection facts no longer retain the requested cut".to_owned(),
-        ),
+        TrustedProjectionReadError::ExactCutNotRetained => {
+            StrongFlowProjectionError::ReadCursorExpired(
+                "trusted projection facts no longer retain the requested cut".to_owned(),
+            )
+        }
         other => current_source_error(other),
     }
 }

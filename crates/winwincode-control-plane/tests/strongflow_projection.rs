@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 use winwincode_api::generated::{
     Actor, DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery,
     DeliveryStageRuntimeProjectionGetParameters, DeliveryStageRuntimeProjectionGetParametersKind,
-    PageRequest, QueryResult, QueryResultResponse, RepositoryScope, RepositoryScopeKind,
-    RuntimeProjectionGetParameters, RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery,
-    SchemaVersion, Scope, StrongFlowReadCursor, UserActor, UserActorKind,
+    PageRequest, ProductSessionRuntimeProjectionGetParameters,
+    ProductSessionRuntimeProjectionGetParametersKind, QueryResult, QueryResultResponse,
+    RepositoryScope, RepositoryScopeKind, RuntimeProjectionGetParameters,
+    RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery, SchemaVersion, Scope,
+    StrongFlowReadCursor, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, AggregateJournalRecord, CommitReceipt, ControlPlane, EventPublishError,
@@ -87,8 +89,10 @@ impl EventPublisher for NoopPublisher {
 
 #[derive(Clone)]
 struct RuntimeAdapter {
-    read: TrustedRuntimeProjectionRead,
+    read: Arc<Mutex<TrustedRuntimeProjectionRead>>,
     race: Arc<Mutex<bool>>,
+    read_count: Arc<Mutex<usize>>,
+    expire_after_reads: Option<usize>,
     unavailable: bool,
 }
 impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
@@ -96,17 +100,27 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         &self,
         request: &DeliveryRuntimeReadRequest,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        let mut read_count = self.read_count.lock().expect("read count");
+        if self
+            .expire_after_reads
+            .is_some_and(|threshold| *read_count >= threshold)
+        {
+            return Err(TrustedProjectionReadError::ExactCutNotRetained);
+        }
+        *read_count += 1;
+        drop(read_count);
         if self.unavailable {
             return Err(TrustedProjectionReadError::Unavailable);
         }
-        if request.delivery_id() != &self.read.snapshot().delivery_id
-            || request.delivery_revision() != self.read.delivery_revision()
+        let read = self.read.lock().expect("runtime read");
+        if request.delivery_id() != &read.snapshot().delivery_id
+            || request.delivery_revision() != read.delivery_revision()
         {
             return Err(TrustedProjectionReadError::Stale);
         }
         if request.expected().is_some_and(|expected| {
-            expected.ledger_revision() != self.read.ledger_revision()
-                || expected.accepted_sequence() != self.read.accepted_sequence()
+            expected.ledger_revision() != read.ledger_revision()
+                || expected.accepted_sequence() != read.accepted_sequence()
         }) {
             return Err(TrustedProjectionReadError::Stale);
         }
@@ -117,7 +131,7 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         if request.expected().is_none() && request.scope().repository_id.0 == "rep_race" {
             *raced = true;
         }
-        Ok(self.read.clone())
+        Ok(read.clone())
     }
     fn read_product_session(
         &self,
@@ -128,6 +142,8 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         if self.unavailable
             || !self
                 .read
+                .lock()
+                .expect("runtime read")
                 .snapshot()
                 .sessions
                 .iter()
@@ -135,7 +151,7 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         {
             Err(TrustedProjectionReadError::Unavailable)
         } else {
-            Ok(self.read.clone())
+            Ok(self.read.lock().expect("runtime read").clone())
         }
     }
 }
@@ -172,6 +188,7 @@ struct Fixture {
     scope: RepositoryScope,
     journal: Arc<Mutex<LoadedAggregateJournal>>,
     domain_journal: Arc<InMemoryDeliveryJournal>,
+    runtime: Arc<Mutex<TrustedRuntimeProjectionRead>>,
 }
 
 fn fixture(runtime_unavailable: bool, publication_unavailable: bool, race: bool) -> Fixture {
@@ -180,7 +197,34 @@ fn fixture(runtime_unavailable: bool, publication_unavailable: bool, race: bool)
         runtime_unavailable,
         publication_unavailable,
         race,
+        None,
     )
+}
+
+fn runtime_projection_for(delivery: &Delivery) -> RuntimeProjection {
+    let Some(session) = delivery.snapshot().session_bindings.first() else {
+        return RuntimeProjection::new(delivery, Vec::new()).expect("empty runtime");
+    };
+    let binding = accepted_binding(
+        delivery,
+        &session.id,
+        RuntimeAuthorityFixture::default(),
+        Some(1),
+    )
+    .expect("binding");
+    let event = accepted_event(
+        &binding,
+        1,
+        "event-runtime-1",
+        RuntimeFactFixture::LiveDiff {
+            changed_file_count: 2,
+            additions: 7,
+            deletions: 3,
+            source_ref: "runtime:event:1".into(),
+        },
+    )
+    .expect("event");
+    RuntimeProjection::replay(delivery, vec![binding], &[event]).expect("runtime replay")
 }
 
 #[allow(clippy::too_many_lines)]
@@ -189,7 +233,15 @@ fn fixture_with_delivery(
     runtime_unavailable: bool,
     publication_unavailable: bool,
     race: bool,
+    expire_after_reads: Option<usize>,
 ) -> Fixture {
+    let scope = RepositoryScope {
+        kind: RepositoryScopeKind::Repository,
+        organization_id: OrganizationId("org_fixture".into()),
+        workspace_id: WorkspaceId("wsp_fixture".into()),
+        project_id: ProjectId("prj_fixture".into()),
+        repository_id: RepositoryId(if race { "rep_race" } else { "rep_fixture" }.into()),
+    };
     let memory = Arc::new(InMemoryDeliveryJournal::new());
     DeliveryStore::borrowed(memory.as_ref())
         .execute(DeliveryCommand::SeedForTest(CreateDelivery {
@@ -207,48 +259,23 @@ fn fixture_with_delivery(
             .map(|record| AggregateJournalRecord::new(record.sequence, record.digest, record.bytes))
             .collect(),
     };
-    let (projection, accepted_sequence) = if let Some(session) =
-        delivery.snapshot().session_bindings.first()
-    {
-        let binding = accepted_binding(
-            &delivery,
-            &session.id,
-            RuntimeAuthorityFixture::default(),
-            Some(1),
+    let accepted_sequence = u64::from(!delivery.snapshot().session_bindings.is_empty());
+    let projection = runtime_projection_for(&delivery);
+    let runtime = Arc::new(Mutex::new(
+        TrustedRuntimeProjectionRead::try_new(
+            scope.clone(),
+            delivery.revision(),
+            Revision(4),
+            accepted_sequence,
+            Instant("2026-08-25T00:00:00Z".into()),
+            projection,
+            Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         )
-        .expect("binding");
-        let event = accepted_event(
-            &binding,
-            1,
-            "event-runtime-1",
-            RuntimeFactFixture::LiveDiff {
-                changed_file_count: 2,
-                additions: 7,
-                deletions: 3,
-                source_ref: "runtime:event:1".into(),
-            },
-        )
-        .expect("event");
-        (
-            RuntimeProjection::replay(&delivery, vec![binding], &[event]).expect("runtime replay"),
-            1,
-        )
-    } else {
-        (
-            RuntimeProjection::new(&delivery, Vec::new()).expect("empty runtime"),
-            0,
-        )
-    };
-    let runtime = TrustedRuntimeProjectionRead::try_new(
-        delivery.revision(),
-        Revision(4),
-        accepted_sequence,
-        Instant("2026-08-25T00:00:00Z".into()),
-        projection,
-        Sha256Digest(format!("sha256:{}", "a".repeat(64))),
-    )
-    .expect("trusted runtime");
+        .expect("trusted runtime"),
+    ));
     let publication = TrustedPublicationProjectionRead::try_new(
+        scope.clone(),
+        delivery.id().clone(),
         delivery.revision(),
         Revision(0),
         None,
@@ -256,13 +283,6 @@ fn fixture_with_delivery(
         Sha256Digest(format!("sha256:{}", "b".repeat(64))),
     )
     .expect("trusted publication");
-    let scope = RepositoryScope {
-        kind: RepositoryScopeKind::Repository,
-        organization_id: OrganizationId("org_fixture".into()),
-        workspace_id: WorkspaceId("wsp_fixture".into()),
-        project_id: ProjectId("prj_fixture".into()),
-        repository_id: RepositoryId(if race { "rep_race" } else { "rep_fixture" }.into()),
-    };
     let journal = Arc::new(Mutex::new(aggregate));
     let mut control_plane = ControlPlane::start(
         Box::new(JournalStorage {
@@ -274,8 +294,10 @@ fn fixture_with_delivery(
     control_plane
         .install_strongflow_projection_sources(StrongFlowProjectionSources::new(
             Box::new(RuntimeAdapter {
-                read: runtime,
+                read: Arc::clone(&runtime),
                 race: Arc::new(Mutex::new(false)),
+                read_count: Arc::new(Mutex::new(0)),
+                expire_after_reads,
                 unavailable: runtime_unavailable,
             }),
             Box::new(PublicationAdapter {
@@ -290,6 +312,7 @@ fn fixture_with_delivery(
         scope,
         journal,
         domain_journal: memory,
+        runtime,
     }
 }
 
@@ -385,6 +408,28 @@ fn runtime_query(
     }
 }
 
+fn product_session_runtime_query(f: &Fixture, scope: RepositoryScope) -> RuntimeProjectionGetQuery {
+    RuntimeProjectionGetQuery {
+        actor: actor(),
+        page: PageRequest {
+            cursor: None,
+            limit: 20,
+        },
+        parameters: RuntimeProjectionGetParameters::ProductSessionRuntimeProjectionGetParameters(
+            ProductSessionRuntimeProjectionGetParameters {
+                kind: ProductSessionRuntimeProjectionGetParametersKind::ProductSession,
+                product_session_id: f.delivery.snapshot().session_bindings[0]
+                    .product_session_id
+                    .clone(),
+            },
+        ),
+        query: RuntimeProjectionGetQueryQuery::RuntimeProjectionGet,
+        request_id: RequestId("req_product_session_runtime".into()),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: Scope::RepositoryScope(scope),
+    }
+}
+
 #[test]
 fn bounded_projection_replay_is_deterministic() {
     let f = fixture(false, false, false);
@@ -399,7 +444,7 @@ fn bounded_projection_replay_is_deterministic() {
         serde_json::to_value(second.result).unwrap()
     );
 
-    let historical = fixture_with_delivery(delivery_fixture(true), false, false, false);
+    let historical = fixture_with_delivery(delivery_fixture(true), false, false, false, None);
     let (_, old_cursor) = detail_and_cursor(&historical);
     let mut next = historical.delivery.clone().into_snapshot();
     next.revision = 2;
@@ -553,4 +598,157 @@ fn websocket_projection_events_use_only_committed_cursors() {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     );
+}
+
+#[test]
+fn foreign_repository_scope_cannot_relabel_a_delivery_projection() {
+    let f = fixture(false, false, false);
+    let mut query = delivery_query(&f, None, 20);
+    let Scope::RepositoryScope(scope) = &mut query.scope else {
+        panic!("repository scope")
+    };
+    scope.repository_id = RepositoryId("rep_foreign".into());
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(&f.control_plane, &query)
+        .expect_err("trusted facts must prove the exact repository scope");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::PermissionDenied(_)
+            | StrongFlowProjectionError::RevisionConflict(_)
+    ));
+}
+
+#[test]
+fn foreign_repository_scope_cannot_read_a_product_session_projection() {
+    let f = fixture(false, false, false);
+    let mut foreign = f.scope.clone();
+    foreign.repository_id = RepositoryId("rep_foreign".into());
+
+    let error = StrongFlowProjectionQueryPort::runtime_projection_get(
+        &f.control_plane,
+        &product_session_runtime_query(&f, foreign),
+    )
+    .expect_err("product-session runtime facts must prove the exact repository scope");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::PermissionDenied(_)
+            | StrongFlowProjectionError::RevisionConflict(_)
+    ));
+}
+
+#[test]
+fn forged_future_delivery_revision_is_not_reported_as_retention_loss() {
+    let f = fixture(false, false, false);
+    let (_, mut cursor) = detail_and_cursor(&f);
+    cursor.delivery_revision = Revision(cursor.delivery_revision.0 + 100);
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("a future revision cannot be a previously retained cut");
+    assert!(!matches!(
+        error,
+        StrongFlowProjectionError::ReadCursorExpired(_)
+    ));
+}
+
+#[test]
+fn mismatched_runtime_cursor_is_not_reported_as_retention_loss() {
+    let f = fixture(false, false, false);
+    let (_, mut cursor) = detail_and_cursor(&f);
+    cursor.runtime_accepted_sequence += 1;
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("a mismatched cut must fail as stale or invalid");
+    assert!(!matches!(
+        error,
+        StrongFlowProjectionError::ReadCursorExpired(_)
+    ));
+}
+
+#[test]
+fn only_an_exact_cut_removed_from_retention_reports_cursor_expired() {
+    let f = fixture_with_delivery(delivery_fixture(false), false, false, false, Some(2));
+    let (_, cursor) = detail_and_cursor(&f);
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("the adapter explicitly reports a formerly issued cut was removed");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::ReadCursorExpired(_)
+    ));
+}
+
+#[test]
+fn cursor_rejects_rewritten_delivery_content_at_the_same_revision() {
+    let f = fixture(false, false, false);
+    let (_, cursor) = detail_and_cursor(&f);
+    let mut changed = f.delivery.clone().into_snapshot();
+    changed.spec.title = "Rewritten title at the same revision".into();
+    let changed = Delivery::try_from_snapshot(changed).expect("valid rewritten delivery");
+    let replacement = InMemoryDeliveryJournal::new();
+    DeliveryStore::borrowed(&replacement)
+        .execute(DeliveryCommand::SeedForTest(CreateDelivery {
+            request_id: RequestId("3".repeat(64)),
+            request_digest: "3".repeat(64),
+            snapshot: changed,
+        }))
+        .expect("seed replacement journal");
+    let loaded = replacement
+        .load(f.delivery.id())
+        .expect("load replacement")
+        .expect("replacement journal");
+    *f.journal.lock().expect("journal") = LoadedAggregateJournal {
+        manifest: loaded.manifest,
+        records: loaded
+            .records
+            .into_iter()
+            .map(|record| AggregateJournalRecord::new(record.sequence, record.digest, record.bytes))
+            .collect(),
+    };
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("a cursor must seal the exact canonical Delivery content");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::RevisionConflict(_)
+    ));
+}
+
+#[test]
+fn cursor_rejects_changed_runtime_content_behind_reused_source_seal() {
+    let f = fixture(false, false, false);
+    let (_, cursor) = detail_and_cursor(&f);
+    let current = f.runtime.lock().expect("runtime read").clone();
+    let replacement = TrustedRuntimeProjectionRead::try_new(
+        f.scope.clone(),
+        current.delivery_revision(),
+        current.ledger_revision().clone(),
+        current.accepted_sequence(),
+        Instant("2026-08-25T00:00:01Z".into()),
+        runtime_projection_for(&f.delivery),
+        Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+    )
+    .expect("replacement runtime read");
+    *f.runtime.lock().expect("runtime read") = replacement;
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("a cursor must seal runtime content, not trust a reused owner seal");
+    assert!(matches!(
+        error,
+        StrongFlowProjectionError::RevisionConflict(_)
+    ));
 }
