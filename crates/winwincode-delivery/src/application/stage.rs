@@ -613,7 +613,6 @@ fn validate_terminal_metadata(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn lowercase_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -621,7 +620,6 @@ fn lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn portable_execution_identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
     value.len() <= 200

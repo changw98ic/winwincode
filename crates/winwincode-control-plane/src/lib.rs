@@ -713,10 +713,12 @@ impl ControlPlane {
             )));
         }
         if change.events.iter().any(|event| {
-            event.projection_stream().is_some() || reserved_public_projection_topic(&event.topic)
+            event.projection_stream().is_some()
+                || reserved_public_projection_topic(&event.topic)
+                || reserved_delivery_transaction_topic(&event.topic)
         }) {
             return Err(CommitError::Storage(StorageError::invalid_input(
-                "public projection events require a typed Control Plane transaction",
+                "Delivery and public projection events require a typed Control Plane transaction",
             )));
         }
         let commit = storage_commit(command, change).map_err(CommitError::Storage)?;
@@ -1035,6 +1037,10 @@ fn reserved_public_projection_topic(topic: &str) -> bool {
         topic.to_owned(),
     ))
     .is_ok()
+}
+
+fn reserved_delivery_transaction_topic(topic: &str) -> bool {
+    topic.starts_with("delivery.")
 }
 
 pub(crate) fn storage_commit(

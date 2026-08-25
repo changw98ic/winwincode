@@ -281,7 +281,7 @@ pub(crate) fn strict_execution_job(
 }
 
 /// Loads and validates the one immutable dispatch intent owned by a generated
-/// ExecutionPort message. Session binding and terminal outcome transactions
+/// `ExecutionPort` message. Session binding and terminal outcome transactions
 /// share this authority join rather than interpreting Worker-supplied scope.
 pub(crate) fn load_durable_execution_job(
     storage: &dyn ProductStateStorage,

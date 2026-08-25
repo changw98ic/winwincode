@@ -1182,6 +1182,33 @@ fn generic_control_plane_commit_cannot_forge_terminal_delivery_state() {
         CommitError::Storage(ref source)
             if source.kind() == winwincode_control_plane::StorageErrorKind::InvalidInput
     ));
+    command.expected_revision = Revision(0);
+    command.request_id = RequestId(canonical_id("req", seed + 2_001));
+    let error = control_plane
+        .commit(
+            &command,
+            StateChange::new(
+                "worker:terminal-topic-bypass",
+                b"unrelated-state".to_vec(),
+                vec![NewOutboxEvent::internal(
+                    "forged-terminal-topic",
+                    "delivery.stage.terminal",
+                    b"forged".to_vec(),
+                )],
+            ),
+        )
+        .expect_err("generic commit must not publish a reserved terminal topic");
+    assert!(matches!(
+        error,
+        CommitError::Storage(ref source)
+            if source.kind() == winwincode_control_plane::StorageErrorKind::InvalidInput
+    ));
+    assert!(
+        control_plane
+            .load_state("worker:terminal-topic-bypass")
+            .expect("generic bypass state read")
+            .is_none()
+    );
     assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
