@@ -51,6 +51,69 @@ function requireDeepEqual(actual, expected, label) {
   if (difference !== null) fail(`${label} differs at ${difference.path || '<root>'}`)
 }
 
+const CROCKFORD_BASE32_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+const CANONICAL_DELIVERY_TASK_ID = /^dtk_[0-9A-HJKMNP-TV-Z]{26}$/u
+
+export function migrateLegacyTaskId(deliveryId, legacyTaskId) {
+  if (typeof deliveryId !== 'string' || deliveryId.length === 0) {
+    fail('legacy task deliveryId must be a non-empty string')
+  }
+  if (typeof legacyTaskId !== 'string' || legacyTaskId.length === 0) {
+    fail('legacy task id must be a non-empty string')
+  }
+  if (CANONICAL_DELIVERY_TASK_ID.test(legacyTaskId)) return legacyTaskId
+  const digest = createHash('sha256')
+    .update(`winwincode.oracle-task-id-migration.v1\0${deliveryId}\0${legacyTaskId}`, 'utf8')
+    .digest()
+  let value = BigInt(`0x${digest.subarray(0, 16).toString('hex')}`)
+  let suffix = ''
+  for (let index = 0; index < 26; index += 1) {
+    suffix = CROCKFORD_BASE32_ALPHABET[Number(value & 31n)] + suffix
+    value >>= 5n
+  }
+  return `dtk_${suffix}`
+}
+
+export function migrateLegacyTaskGraph(deliveryId, tasks) {
+  requireArray(tasks, 'legacy task graph')
+  const idMap = new Map()
+  const canonicalIds = new Set()
+  for (let index = 0; index < tasks.length; index += 1) {
+    const task = requireObject(tasks[index], `legacy task graph[${index}]`)
+    if (typeof task.id !== 'string' || task.id.length === 0) {
+      fail(`legacy task graph[${index}].id must be a non-empty string`)
+    }
+    if (idMap.has(task.id)) fail(`legacy task graph has duplicate task id ${task.id}`)
+    const canonicalId = migrateLegacyTaskId(deliveryId, task.id)
+    if (canonicalIds.has(canonicalId)) {
+      fail(`legacy task graph maps more than one task to ${canonicalId}`)
+    }
+    idMap.set(task.id, canonicalId)
+    canonicalIds.add(canonicalId)
+  }
+
+  return tasks.map((task, taskIndex) => {
+    const dependencies = requireArray(
+      task.blockedByTaskIds,
+      `legacy task graph[${taskIndex}].blockedByTaskIds`,
+    ).map(legacyDependencyId => {
+      const canonicalDependencyId = idMap.get(legacyDependencyId)
+      if (canonicalDependencyId === undefined) {
+        fail(
+          `legacy task graph[${taskIndex}] has unknown dependency ${legacyDependencyId}`,
+        )
+      }
+      return canonicalDependencyId
+    })
+    return {
+      ...structuredClone(task),
+      blockedByTaskIds: dependencies,
+      id: idMap.get(task.id),
+      owner: null,
+    }
+  })
+}
+
 function commandSignature(command, label) {
   requireObject(command, label)
   if (command.kind === 'strongflow.request') {
@@ -263,6 +326,250 @@ function validateRuntimeProjectionRules(rules) {
   }
 }
 
+function terminalVerifierFact(command, label) {
+  requireEqual(command.kind, 'strongflow.request', `${label} kind`)
+  requireEqual(command.request.operation, 'submitVerdict', `${label} operation`)
+  const runtimeEvents = requireArray(
+    command.request.payload.runtimeEvents,
+    `${label}.request.payload.runtimeEvents`,
+  )
+  const terminalEvents = runtimeEvents.filter(event => (
+    event.kind === 'turn.completed'
+      && event.source?.roleId === 'verifier'
+      && event.terminalReason === 'completed'
+      && event.data?.error === null
+  ))
+  requireEqual(terminalEvents.length, 1, `${label} terminal verifier fact count`)
+  const event = terminalEvents[0]
+  for (const [field, value] of [
+    ['cursor.sequence', event.cursor?.sequence],
+    ['occurredAtMillis', event.occurredAtMillis],
+    ['source.sessionId', event.source?.sessionId],
+  ]) {
+    if ((typeof value !== 'string' && typeof value !== 'number') || value === '') {
+      fail(`${label} terminal verifier fact ${field} is missing`)
+    }
+  }
+  return event
+}
+
+function terminalVerifierFactKey(command, label) {
+  const event = terminalVerifierFact(command, label)
+  return JSON.stringify([
+    event.source.sessionId,
+    event.cursor.sequence,
+    event.occurredAtMillis,
+  ])
+}
+
+function validateTerminalOutcomeRules(rules, oracle) {
+  const policy = rules.canonicalMigration.terminalOutcomeMessages
+  requireExactKeys(policy, [
+    'deduplicationPolicy',
+    'kind',
+    'requestAuthority',
+    'requestType',
+    'requestValueSources',
+    'revisionIncrementPerSuccessfulMessage',
+    'revisionMapPolicy',
+    'sourceCommandIndexesByScenario',
+    'sourceFactSelection',
+    'sourceOperation',
+    'successfulMessageCommitSequence',
+  ], 'terminal outcome message policy')
+  requireEqual(policy.kind, 'execution-port.message', 'terminal outcome kind')
+  requireEqual(policy.requestType, 'JobOutcomeMessage', 'terminal outcome request type')
+  requireEqual(policy.sourceOperation, 'submitVerdict', 'terminal outcome source operation')
+  requireEqual(
+    policy.revisionIncrementPerSuccessfulMessage,
+    1,
+    'terminal outcome revision increment',
+  )
+  requireDeepEqual(
+    policy.successfulMessageCommitSequence,
+    ['apply_terminal_outcome'],
+    'terminal outcome commit sequence',
+  )
+  requireDeepEqual(
+    rules.canonicalMigration.commandMappings
+      .find(mapping => mapping.legacy === policy.sourceOperation)?.canonicalTargets,
+    ['execution-port.message:job.outcome', 'delivery.submit_verdict'],
+    'terminal outcome command mapping',
+  )
+  requireDeepEqual(policy.requestValueSources, {
+    artifacts: 'empty array because the legacy terminal fact has no ExecutionPort ArtifactReference',
+    codexThreadId: 'exact current verifier SessionBinding.codexThreadId',
+    finishedAt: 'selected terminal turn.completed occurredAtMillis encoded as an exact UTC Instant',
+    lastEventSequence: 'selected terminal turn.completed cursor.sequence',
+    lease: 'exact current verifier ExecutionJob active lease',
+    messageId: 'deterministic terminal-outcome identity mapping v1',
+    sentAt: 'same exact Instant as outcome.finishedAt',
+    status: 'succeeded',
+    summary: 'selected terminal turn.completed data.last_agent_message',
+    workerSessionId: 'exact current verifier SessionBinding.workerSessionId',
+  }, 'terminal outcome request value sources')
+
+  const sourceIndexesByScenario = requireObject(
+    policy.sourceCommandIndexesByScenario,
+    'terminal outcome source indexes',
+  )
+  requireDeepEqual(
+    Object.keys(sourceIndexesByScenario).toSorted(),
+    rules.scenarios.map(scenario => scenario.id).toSorted(),
+    'terminal outcome scenario partition',
+  )
+  for (let scenarioIndex = 0; scenarioIndex < oracle.scenarios.length; scenarioIndex += 1) {
+    const source = oracle.scenarios[scenarioIndex]
+    const mapping = rules.scenarios[scenarioIndex]
+    const seenFacts = new Set()
+    const derivedSourceIndexes = []
+    for (let commandIndex = 0; commandIndex < source.commands.length; commandIndex += 1) {
+      const command = source.commands[commandIndex]
+      if (command.request?.operation !== policy.sourceOperation) continue
+      const factKey = terminalVerifierFactKey(
+        command,
+        `${mapping.id} source command ${commandIndex}`,
+      )
+      if (!seenFacts.has(factKey)) {
+        seenFacts.add(factKey)
+        derivedSourceIndexes.push(commandIndex)
+      }
+    }
+    requireDeepEqual(
+      sourceIndexesByScenario[mapping.id],
+      derivedSourceIndexes,
+      `${mapping.id} terminal outcome source indexes`,
+    )
+    const outcomeGroups = mapping.canonicalGroups.filter(group => group.target === 'job.outcome')
+    requireDeepEqual(
+      outcomeGroups.map(group => group.sourceCommandIndexes[0]),
+      derivedSourceIndexes,
+      `${mapping.id} terminal outcome groups`,
+    )
+    for (const group of outcomeGroups) {
+      requireEqual(group.kind, policy.kind, `${mapping.id} terminal outcome group kind`)
+      requireDeepEqual(
+        group.revisionEffect,
+        { delta: policy.revisionIncrementPerSuccessfulMessage },
+        `${mapping.id} terminal outcome revision effect`,
+      )
+      const groupIndex = mapping.canonicalGroups.indexOf(group)
+      const verdict = mapping.canonicalGroups[groupIndex + 1]
+      requireEqual(verdict?.target, 'delivery.submit_verdict', `${mapping.id} outcome successor`)
+      requireDeepEqual(
+        verdict.sourceCommandIndexes,
+        group.sourceCommandIndexes,
+        `${mapping.id} outcome provenance`,
+      )
+    }
+  }
+}
+
+function validateLegacyTaskIdMigrationRules(rules, oracle) {
+  const policy = rules.canonicalMigration.legacyTaskIdMigration
+  requireExactKeys(policy, [
+    'alphabet',
+    'canonicalPrefix',
+    'digest',
+    'digestBytes',
+    'encoding',
+    'invalidCycleValidation',
+    'knownVectors',
+    'namespace',
+    'owner',
+    'passOrder',
+    'preserveCanonicalTaskIds',
+    'preservedFields',
+  ], 'legacy task id migration policy')
+  requireEqual(
+    policy.namespace,
+    'winwincode.oracle-task-id-migration.v1\0',
+    'legacy task id namespace',
+  )
+  requireEqual(policy.digest, 'SHA-256', 'legacy task id digest')
+  requireEqual(policy.digestBytes, 16, 'legacy task id digest bytes')
+  requireEqual(policy.encoding, 'big-endian-u128-crockford-base32-26', 'legacy task id encoding')
+  requireEqual(policy.alphabet, CROCKFORD_BASE32_ALPHABET, 'legacy task id alphabet')
+  requireEqual(policy.canonicalPrefix, 'dtk_', 'legacy task id prefix')
+  requireEqual(policy.preserveCanonicalTaskIds, true, 'canonical task id preservation')
+  requireDeepEqual(policy.passOrder, ['map-task-ids', 'map-dependencies'], 'task migration passes')
+  requireEqual(policy.owner, null, 'migrated task owner')
+  requireDeepEqual(
+    policy.preservedFields,
+    ['order', 'title', 'goal', 'acceptanceCriterionIds'],
+    'migrated task preserved fields',
+  )
+  requireDeepEqual(
+    rules.canonicalMigration.commandMappings
+      .find(mapping => mapping.legacy === 'createDelivery')?.canonicalTargets,
+    ['delivery.create', 'fixture.solution-review.validate'],
+    'createDelivery command mappings',
+  )
+
+  const sourceScenario = oracle.scenarios.find(scenario => scenario.id === 'task-dag')
+  if (sourceScenario === undefined) fail('task-dag source scenario is missing')
+  const seed = sourceScenario.commands[0]
+  requireEqual(seed.kind, 'fixture.store.seed-snapshot', 'task-dag seed command')
+  const sourceSnapshot = requireObject(seed.input.snapshot, 'task-dag seed snapshot')
+  const migrated = migrateLegacyTaskGraph(sourceSnapshot.id, sourceSnapshot.tasks)
+  const knownVectors = sourceSnapshot.tasks.map((task, index) => ({
+    canonicalTaskId: migrated[index].id,
+    deliveryId: sourceSnapshot.id,
+    legacyTaskId: task.id,
+  }))
+  requireDeepEqual(policy.knownVectors, knownVectors, 'legacy task id known vectors')
+
+  const cycle = policy.invalidCycleValidation
+  requireExactKeys(cycle, [
+    'errorCode',
+    'invalidProposalKind',
+    'mainScenarioStoreWrites',
+    'proposalBuilder',
+    'resolver',
+    'setup',
+    'sourceCommandIndex',
+    'specSource',
+    'target',
+  ], 'task-dag invalid cycle policy')
+  requireDeepEqual(cycle, {
+    errorCode: 'INVALID_REQUEST',
+    invalidProposalKind: 'dependency-cycle',
+    mainScenarioStoreWrites: 0,
+    proposalBuilder: 'invalid_task_proposals_fixture(DependencyCycle)',
+    resolver: 'prepare_solution_review_fixture',
+    setup: 'isolated canonical planning handoff built from the source spec',
+    sourceCommandIndex: 2,
+    specSource: 'legacy source command 2 payload.spec',
+    target: 'fixture.solution-review.validate',
+  }, 'task-dag invalid cycle policy')
+  requireEqual(
+    sourceScenario.commands[cycle.sourceCommandIndex].request?.operation,
+    'createDelivery',
+    'task-dag invalid cycle source operation',
+  )
+  const taskDagMapping = rules.scenarios.find(scenario => scenario.id === 'task-dag')
+  const cycleGroups = taskDagMapping.canonicalGroups.filter(group => (
+    group.sourceCommandIndexes.includes(cycle.sourceCommandIndex)
+  ))
+  requireEqual(cycleGroups.length, 1, 'task-dag invalid cycle group count')
+  requireDeepEqual(cycleGroups[0], {
+    kind: 'fixture.command',
+    revisionEffect: { delta: 0 },
+    sourceCommandIndexes: [cycle.sourceCommandIndex],
+    target: cycle.target,
+  }, 'task-dag invalid cycle group')
+  requireDeepEqual(
+    taskDagMapping.canonicalAssertions.durableTaskOrder,
+    migrated.map(task => task.id),
+    'task-dag durable task order',
+  )
+  requireEqual(
+    taskDagMapping.canonicalAssertions.advancedTaskId,
+    migrated[0].id,
+    'task-dag advanced task id',
+  )
+}
+
 export function validateDifferentialContract(rules, oracle, options = {}) {
   requireEqual(
     rules.schemaVersion,
@@ -338,8 +645,17 @@ export function validateDifferentialContract(rules, oracle, options = {}) {
         if (!Number.isSafeInteger(effect.delta) || effect.delta < 0) {
           fail(`${mapping.id} revision delta must be a safe non-negative integer`)
         }
-        if (group.kind === 'execution-port.message' && ![0, 2].includes(effect.delta)) {
-          fail(`${mapping.id} session.binding revision delta must be zero or two`)
+        if (group.kind === 'execution-port.message') {
+          const allowed = group.target === 'session.binding'
+            ? [0, 2]
+            : group.target === 'job.outcome'
+              ? [1]
+              : []
+          if (!allowed.includes(effect.delta)) {
+            fail(
+              `${mapping.id} ${group.target} revision delta must be ${allowed.join(' or ')}`,
+            )
+          }
         }
         calculatedRevision += effect.delta
       }
@@ -359,7 +675,7 @@ export function validateDifferentialContract(rules, oracle, options = {}) {
   const successfulMessages = Object.fromEntries(scenarioRules.map(mapping => [
     mapping.id,
     mapping.canonicalGroups.filter(group => (
-      group.kind === 'execution-port.message' && group.revisionEffect.delta === 2
+      group.target === 'session.binding' && group.revisionEffect.delta === 2
     )).length,
   ]))
   requireDeepEqual(
@@ -371,6 +687,8 @@ export function validateDifferentialContract(rules, oracle, options = {}) {
   validateMigrationRules(rules, oracle)
   validateNormalizationRules(rules)
   validateRuntimeProjectionRules(rules)
+  validateTerminalOutcomeRules(rules, oracle)
+  validateLegacyTaskIdMigrationRules(rules, oracle)
   return {
     scenarioCount: oracleScenarios.length,
     scenarioIds: oracleScenarios.map(scenario => scenario.id),
@@ -576,6 +894,23 @@ function validateFixtureCommand(command, target, requestContract, responseContra
   if (!requestContract.targets.includes(target)) {
     fail(`${label} has unknown fixture target ${target}`)
   }
+  const inputKeys = requestContract.inputExactKeysByTarget[target]
+  if (inputKeys === undefined) fail(`${label} has no fixture input contract for ${target}`)
+  requireExactKeys(command.request.input, inputKeys, `${label} fixture input`)
+  const constants = requestContract.inputConstantsByTarget[target] ?? {}
+  for (const [name, expected] of Object.entries(constants)) {
+    requireDeepEqual(command.request.input[name], expected, `${label} fixture input ${name}`)
+  }
+  if (responseContracts.fixtureRejectedTargets.includes(target)) {
+    requireExactKeys(
+      command.response,
+      responseContracts.fixtureRejectedExactKeys,
+      `${label} rejected fixture response`,
+    )
+    requireEqual(command.response.outcome, 'rejected', `${label} fixture outcome`)
+    validateCanonicalError(command.response.error, responseContracts, label)
+    return
+  }
   requireExactKeys(
     command.response,
     responseContracts.fixtureSuccessExactKeys,
@@ -590,10 +925,35 @@ function validateFixtureCommand(command, target, requestContract, responseContra
 function validateExecutionPortMessage(command, group, rules, label) {
   const requestContract = rules.canonicalExpected.requestContracts['execution-port.message']
   const responseContracts = rules.canonicalExpected.responseContracts
-  requireExactKeys(command.request, requestContract.exactKeys, `${label} message request`)
-  requireEqual(command.request.kind, requestContract.kind, `${label} message kind`)
+  const requestKeys = requestContract.exactKeysByTarget[group.target]
+  if (requestKeys === undefined) fail(`${label} has unknown message target ${group.target}`)
+  requireExactKeys(command.request, requestKeys, `${label} message request`)
+  requireEqual(command.request.kind, group.target, `${label} message kind`)
   requireEqual(command.request.schemaVersion, 'winwincode/v1', `${label} message schemaVersion`)
   requireExactKeys(command.request.lease, requestContract.leaseExactKeys, `${label} message lease`)
+  if (group.target === 'job.outcome') {
+    requireExactKeys(
+      command.request.outcome,
+      requestContract.outcomeExactKeysByTarget[group.target],
+      `${label} message outcome`,
+    )
+    requireEqual(
+      command.request.outcome.status,
+      requestContract.outcomeStatusByTarget[group.target],
+      `${label} message outcome status`,
+    )
+    const artifacts = requireArray(
+      command.request.outcome.artifacts,
+      `${label} message outcome artifacts`,
+    )
+    for (let index = 0; index < artifacts.length; index += 1) {
+      requireExactKeys(
+        artifacts[index],
+        requestContract.artifactExactKeys,
+        `${label} message outcome artifacts[${index}]`,
+      )
+    }
+  }
 
   if (group.revisionEffect.delta === 0) {
     requireExactKeys(
@@ -616,18 +976,20 @@ function validateExecutionPortMessage(command, group, rules, label) {
   requireEqual(command.response.messageId, command.request.messageId, `${label} response messageId`)
   requireEqual(
     command.response.currentRevision,
-    command.response.previousRevision + 2,
+    command.response.previousRevision + group.revisionEffect.delta,
     `${label} message revision span`,
   )
   const commits = requireArray(command.response.commits, `${label} message commits`)
-  requireEqual(commits.length, 2, `${label} message commit count`)
+  const operations = responseContracts.executionPortCommitOperationsByTarget[group.target]
+  if (operations === undefined) fail(`${label} has no message response contract for ${group.target}`)
+  requireEqual(commits.length, operations.length, `${label} message commit count`)
   for (let index = 0; index < commits.length; index += 1) {
     const commit = commits[index]
     const commitLabel = `${label} message commits[${index}]`
     requireExactKeys(commit, responseContracts.executionPortCommitExactKeys, commitLabel)
     requireEqual(
       commit.operation,
-      responseContracts.executionPortCommitOperations[index],
+      operations[index],
       `${commitLabel}.operation`,
     )
     requireEqual(
@@ -654,13 +1016,15 @@ function validateExecutionPortMessage(command, group, rules, label) {
     command.response.previousRevision,
     `${label} first commit revision`,
   )
+  for (let index = 1; index < commits.length; index += 1) {
+    requireEqual(
+      commits[index].previousRevision,
+      commits[index - 1].currentRevision,
+      `${label} commit ${index} continuity`,
+    )
+  }
   requireEqual(
-    commits[1].previousRevision,
-    commits[0].currentRevision,
-    `${label} commit continuity`,
-  )
-  requireEqual(
-    commits[1].currentRevision,
+    commits.at(-1).currentRevision,
     command.response.currentRevision,
     `${label} final commit revision`,
   )
@@ -945,7 +1309,7 @@ function deriveCanonicalAssertions(scenario) {
       return {
         advancedTaskId: snapshot.tasks.find(task => task.status === 'active')?.id ?? null,
         ...canonicalCheckpoint(snapshot),
-        cycleError: responseErrorCode(scenario, 2, 'delivery.approve_task_breakdown'),
+        cycleError: responseErrorCode(scenario, 2, 'fixture.solution-review.validate'),
         cycleRejectedWithoutWrite: scenario.observation.store.state.revision
           === commandFromSource(scenario, 1, 'delivery.advance').response.currentRevision,
         durableTaskOrder: snapshot.tasks.map(task => task.id),
@@ -1015,6 +1379,95 @@ function validateCanonicalAssertions(mapping, scenario) {
       continue
     }
     requireDeepEqual(derived[name], expected, `${scenario.id} canonical assertion ${name}`)
+  }
+}
+
+function validateTaskDagCanonicalScenario(sourceScenario, scenario) {
+  if (scenario.id !== 'task-dag') return
+  const seed = commandFromSource(scenario, 0, 'fixture.store.seed-snapshot')
+  const sourceSnapshot = sourceScenario.commands[0].input.snapshot
+  const expectedSnapshot = structuredClone(sourceSnapshot)
+  expectedSnapshot.tasks = migrateLegacyTaskGraph(expectedSnapshot.id, expectedSnapshot.tasks)
+  requireDeepEqual(
+    seed.request.input.snapshot,
+    expectedSnapshot,
+    'task-dag migrated seed snapshot',
+  )
+
+  const cycle = commandFromSource(scenario, 2, 'fixture.solution-review.validate')
+  requireDeepEqual(
+    cycle.request.input.spec,
+    sourceScenario.commands[2].request.payload.spec,
+    'task-dag cycle spec',
+  )
+  requireEqual(
+    cycle.request.input.invalidProposalKind,
+    'dependency-cycle',
+    'task-dag invalid proposal kind',
+  )
+  requireEqual(cycle.response.outcome, 'rejected', 'task-dag cycle fixture outcome')
+  requireEqual(cycle.response.error.code, 'INVALID_REQUEST', 'task-dag cycle fixture error')
+}
+
+function validateTerminalOutcomeCanonicalScenario(sourceScenario, mapping, scenario) {
+  const groups = mapping.canonicalGroups.filter(group => group.target === 'job.outcome')
+  for (const group of groups) {
+    const sourceCommandIndex = group.sourceCommandIndexes[0]
+    const sourceCommand = sourceScenario.commands[sourceCommandIndex]
+    const terminal = terminalVerifierFact(
+      sourceCommand,
+      `${scenario.id} source command ${sourceCommandIndex}`,
+    )
+    const outcome = commandFromSource(scenario, sourceCommandIndex, 'job.outcome')
+    const outcomeIndex = scenario.commands.indexOf(outcome)
+    const binding = scenario.commands.slice(0, outcomeIndex).findLast(command => (
+      command.request.kind === 'session.binding'
+        && command.response.outcome === 'completed'
+    ))
+    if (binding === undefined) {
+      fail(`${scenario.id} terminal outcome has no preceding completed SessionBindingMessage`)
+    }
+    requireDeepEqual(
+      outcome.request.lease,
+      binding.request.lease,
+      `${scenario.id} terminal outcome lease`,
+    )
+    requireEqual(
+      outcome.request.workerSessionId,
+      binding.request.workerSessionId,
+      `${scenario.id} terminal outcome workerSessionId`,
+    )
+    requireEqual(
+      outcome.request.outcome.codexThreadId,
+      binding.request.codexThreadId,
+      `${scenario.id} terminal outcome codexThreadId`,
+    )
+    const finishedAt = new Date(terminal.occurredAtMillis).toISOString()
+    requireEqual(
+      outcome.request.outcome.finishedAt,
+      finishedAt,
+      `${scenario.id} terminal outcome finishedAt`,
+    )
+    requireEqual(
+      outcome.request.sentAt,
+      finishedAt,
+      `${scenario.id} terminal outcome sentAt`,
+    )
+    requireEqual(
+      outcome.request.outcome.lastEventSequence,
+      Number(terminal.cursor.sequence),
+      `${scenario.id} terminal outcome lastEventSequence`,
+    )
+    requireEqual(
+      outcome.request.outcome.summary,
+      terminal.data.last_agent_message,
+      `${scenario.id} terminal outcome summary`,
+    )
+    requireDeepEqual(
+      outcome.request.outcome.artifacts,
+      [],
+      `${scenario.id} terminal outcome artifacts`,
+    )
   }
 }
 
@@ -1170,6 +1623,8 @@ export function validateCanonicalExpected(rules, oracle, expected) {
       )
     }
     validateRuntimeProjectionScenario(mapping, scenario, rules, label)
+    validateTaskDagCanonicalScenario(oracle.scenarios[index], scenario)
+    validateTerminalOutcomeCanonicalScenario(oracle.scenarios[index], mapping, scenario)
     validateCanonicalAssertions(mapping, scenario)
   }
   return { scenarioCount: scenarios.length }

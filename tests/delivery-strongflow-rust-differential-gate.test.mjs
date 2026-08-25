@@ -10,6 +10,8 @@ import {
   buildCanonicalMigrationPlan,
   buildDifferentialExecutionPlan,
   findFirstJsonDifference,
+  migrateLegacyTaskGraph,
+  migrateLegacyTaskId,
   normalizeDifferentialResult,
   runDifferentialGate,
   validateCanonicalExpected,
@@ -140,6 +142,11 @@ test('machine rules freeze the ten scenario execution plan and complete result s
       'rework',
     ],
   )
+  assert.deepEqual(
+    rules.canonicalMigration.commandMappings
+      .find(mapping => mapping.legacy === 'createDelivery').canonicalTargets,
+    ['delivery.create', 'fixture.solution-review.validate'],
+  )
   assert.match(
     rules.canonicalMigration.taskPromotionInsertion.taskIdentityAlgorithm,
     /winwincode\.solution-review-default-task\.v1\\0/u,
@@ -178,10 +185,50 @@ test('machine rules freeze the ten scenario execution plan and complete result s
     assert.equal(groups[approvalIndex - 1].target, 'delivery.resolve_attention', id)
     assert.deepEqual(groups[approvalIndex].sourceCommandIndexes, [10], id)
   }
+  const terminalOutcomeSources = {
+    'attention': [],
+    'candidate-invalidation': [17, 25],
+    'corruption-recovery': [],
+    'inconclusive': [17],
+    'infra-error': [17],
+    'request-id-replay': [],
+    'revision-conflict': [],
+    'rework': [17, 25],
+    'success-closed-loop': [17],
+    'task-dag': [],
+  }
+  assert.deepEqual(
+    rules.canonicalMigration.terminalOutcomeMessages.sourceCommandIndexesByScenario,
+    terminalOutcomeSources,
+  )
+  for (const [id, sourceIndexes] of Object.entries(terminalOutcomeSources)) {
+    const groups = rules.scenarios.find(scenario => scenario.id === id).canonicalGroups
+    assert.deepEqual(
+      groups.filter(group => group.target === 'job.outcome')
+        .map(group => group.sourceCommandIndexes[0]),
+      sourceIndexes,
+      id,
+    )
+    for (const sourceIndex of sourceIndexes) {
+      const outcomeIndex = groups.findIndex(group => (
+        group.target === 'job.outcome'
+          && group.sourceCommandIndexes.includes(sourceIndex)
+      ))
+      assert.equal(groups[outcomeIndex].kind, 'execution-port.message', id)
+      assert.deepEqual(groups[outcomeIndex].revisionEffect, { delta: 1 }, id)
+      assert.equal(groups[outcomeIndex + 1].target, 'delivery.submit_verdict', id)
+      assert.deepEqual(groups[outcomeIndex + 1].sourceCommandIndexes, [sourceIndex], id)
+    }
+  }
   assert.equal(
     rules.scenarios.find(scenario => scenario.id === 'task-dag')
       .canonicalGroups.find(group => group.sourceCommandIndexes.includes(2)).target,
-    'delivery.approve_task_breakdown',
+    'fixture.solution-review.validate',
+  )
+  assert.equal(
+    rules.scenarios.find(scenario => scenario.id === 'task-dag')
+      .canonicalGroups.find(group => group.sourceCommandIndexes.includes(2)).kind,
+    'fixture.command',
   )
   assert.deepEqual(
     rules.scenarios.find(scenario => scenario.id === 'corruption-recovery')
@@ -211,25 +258,165 @@ test('machine rules freeze the ten scenario execution plan and complete result s
     ),
     {
       'attention': [8, 2, 1, 1],
-      'candidate-invalidation': [29, 8, 7, 1],
-      'inconclusive': [18, 5, 4, 1],
-      'infra-error': [18, 5, 4, 1],
-      'rework': [29, 8, 7, 1],
-      'success-closed-loop': [20, 6, 4, 1],
+      'candidate-invalidation': [31, 8, 7, 1],
+      'inconclusive': [19, 5, 4, 1],
+      'infra-error': [19, 5, 4, 1],
+      'rework': [31, 8, 7, 1],
+      'success-closed-loop': [21, 6, 4, 1],
     },
   )
   assert.deepEqual(
     rules.scenarios.find(scenario => scenario.id === 'task-dag').canonicalAssertions,
     {
-      advancedTaskId: 'oracle-task-prerequisite',
+      advancedTaskId: 'dtk_59X1F156B8YGG0P7G1K9KR5KB1',
       cycleError: 'INVALID_REQUEST',
       cycleRejectedWithoutWrite: true,
-      durableTaskOrder: ['oracle-task-prerequisite', 'oracle-task-dependent'],
+      durableTaskOrder: [
+        'dtk_59X1F156B8YGG0P7G1K9KR5KB1',
+        'dtk_7HT0EYAWGG4MD098E2F2Z5XNTW',
+      ],
       finalRevision: 2,
       sessionBindingCount: 1,
       stageRunCount: 1,
       taskCount: 2,
     },
+  )
+})
+
+test('task-dag migration remaps legacy task identities and rejects the cycle before sealing', async () => {
+  const [rules, oracle] = await Promise.all([json(rulesPath), json(oraclePath)])
+  const taskDag = oracle.scenarios.find(scenario => scenario.id === 'task-dag')
+  const seeded = taskDag.commands[0].input.snapshot
+  const expectedPrerequisite = 'dtk_59X1F156B8YGG0P7G1K9KR5KB1'
+  const expectedDependent = 'dtk_7HT0EYAWGG4MD098E2F2Z5XNTW'
+
+  assert.equal(
+    migrateLegacyTaskId(seeded.id, 'oracle-task-prerequisite'),
+    expectedPrerequisite,
+  )
+  assert.equal(
+    migrateLegacyTaskId(seeded.id, 'oracle-task-dependent'),
+    expectedDependent,
+  )
+  assert.equal(
+    migrateLegacyTaskId(seeded.id, expectedPrerequisite),
+    expectedPrerequisite,
+  )
+
+  const migrated = migrateLegacyTaskGraph(seeded.id, seeded.tasks)
+  assert.deepEqual(migrated.map(task => task.id), [expectedPrerequisite, expectedDependent])
+  assert.deepEqual(migrated[1].blockedByTaskIds, [expectedPrerequisite])
+  assert.deepEqual(migrated.map(task => task.owner), [null, null])
+  assert.deepEqual(
+    migrated.map(task => [task.title, task.goal, task.acceptanceCriterionIds]),
+    seeded.tasks.map(task => [task.title, task.goal, task.acceptanceCriterionIds]),
+  )
+
+  const policy = rules.canonicalMigration.legacyTaskIdMigration
+  assert.equal(policy.namespace, 'winwincode.oracle-task-id-migration.v1\0')
+  assert.equal(policy.preserveCanonicalTaskIds, true)
+  assert.deepEqual(policy.passOrder, ['map-task-ids', 'map-dependencies'])
+  assert.deepEqual(policy.knownVectors, [
+    {
+      canonicalTaskId: expectedPrerequisite,
+      deliveryId: seeded.id,
+      legacyTaskId: 'oracle-task-prerequisite',
+    },
+    {
+      canonicalTaskId: expectedDependent,
+      deliveryId: seeded.id,
+      legacyTaskId: 'oracle-task-dependent',
+    },
+  ])
+  assert.deepEqual(policy.invalidCycleValidation, {
+    errorCode: 'INVALID_REQUEST',
+    invalidProposalKind: 'dependency-cycle',
+    mainScenarioStoreWrites: 0,
+    proposalBuilder: 'invalid_task_proposals_fixture(DependencyCycle)',
+    resolver: 'prepare_solution_review_fixture',
+    setup: 'isolated canonical planning handoff built from the source spec',
+    sourceCommandIndex: 2,
+    specSource: 'legacy source command 2 payload.spec',
+    target: 'fixture.solution-review.validate',
+  })
+
+  const expected = canonicalExpectedFixture(oracle, rules)
+  validateCanonicalExpected(rules, oracle, expected)
+  const migratedTaskDag = expected.result.scenarios.find(scenario => scenario.id === 'task-dag')
+  const seedCommand = migratedTaskDag.commands.find(command => (
+    command.sourceCommandIndexes.includes(0)
+  ))
+  assert.deepEqual(
+    seedCommand.request.input.snapshot.tasks.map(task => task.id),
+    [expectedPrerequisite, expectedDependent],
+  )
+  assert.deepEqual(seedCommand.request.input.snapshot.tasks[1].blockedByTaskIds, [
+    expectedPrerequisite,
+  ])
+  const cycle = migratedTaskDag.commands.find(command => (
+    command.sourceCommandIndexes.includes(2)
+  ))
+  assert.deepEqual(Object.keys(cycle.request.input).sort(), [
+    'invalidProposalKind',
+    'spec',
+  ])
+  assert.equal(cycle.request.input.invalidProposalKind, 'dependency-cycle')
+  assert.deepEqual(cycle.request.input.spec, taskDag.commands[2].request.payload.spec)
+  assert.equal(cycle.response.outcome, 'rejected')
+  assert.equal(cycle.response.error.code, 'INVALID_REQUEST')
+
+  const wrongCycleSpec = structuredClone(expected)
+  const wrongCycle = wrongCycleSpec.result.scenarios
+    .find(scenario => scenario.id === 'task-dag').commands
+    .find(command => command.request.kind === 'fixture.solution-review.validate')
+  wrongCycle.request.input.spec.title = 'A different DeliverySpec'
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, wrongCycleSpec),
+    /task-dag cycle spec differs/u,
+  )
+})
+
+test('terminal outcome messages bind the exact final verifier fact before verdict', async () => {
+  const [rules, oracle] = await Promise.all([json(rulesPath), json(oraclePath)])
+  const expected = canonicalExpectedFixture(oracle, rules)
+  const source = oracle.scenarios.find(scenario => scenario.id === 'success-closed-loop')
+  const scenario = expected.result.scenarios.find(entry => entry.id === source.id)
+  const sourceVerdict = source.commands[17]
+  const terminal = sourceVerdict.request.payload.runtimeEvents.find(event => (
+    event.kind === 'turn.completed'
+      && event.source.roleId === 'verifier'
+  ))
+  const outcomeIndex = scenario.commands.findIndex(command => (
+    command.request.kind === 'job.outcome'
+  ))
+  const outcome = scenario.commands[outcomeIndex]
+  const binding = scenario.commands.slice(0, outcomeIndex).findLast(command => (
+    command.request.kind === 'session.binding'
+      && command.response.outcome === 'completed'
+  ))
+
+  assert.deepEqual(outcome.sourceCommandIndexes, [17])
+  assert.deepEqual(outcome.request.lease, binding.request.lease)
+  assert.equal(outcome.request.workerSessionId, binding.request.workerSessionId)
+  assert.equal(outcome.request.outcome.codexThreadId, binding.request.codexThreadId)
+  assert.equal(
+    outcome.request.outcome.finishedAt,
+    new Date(terminal.occurredAtMillis).toISOString(),
+  )
+  assert.equal(outcome.request.sentAt, outcome.request.outcome.finishedAt)
+  assert.equal(outcome.request.outcome.lastEventSequence, Number(terminal.cursor.sequence))
+  assert.equal(outcome.request.outcome.summary, terminal.data.last_agent_message)
+  assert.deepEqual(outcome.request.outcome.artifacts, [])
+  assert.equal(scenario.commands[outcomeIndex + 1].request.command, 'delivery.submit_verdict')
+  validateCanonicalExpected(rules, oracle, expected)
+
+  const wrongTerminalFact = structuredClone(expected)
+  wrongTerminalFact.result.scenarios.find(entry => entry.id === source.id).commands
+    .find(command => command.request.kind === 'job.outcome')
+    .request.outcome.finishedAt = '2026-01-01T00:00:00Z'
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, wrongTerminalFact),
+    /terminal outcome finishedAt/u,
   )
 })
 
@@ -483,6 +670,36 @@ test('canonical expected rejects open public and fixture envelopes', async () =>
   assert.throws(
     () => validateCanonicalExpected(rules, oracle, openFixtureResult),
     /fixture result keys differ/u,
+  )
+
+  const openJobOutcome = structuredClone(expected)
+  const jobOutcome = openJobOutcome.result.scenarios[0].commands.find(command => (
+    command.request.kind === 'job.outcome'
+  ))
+  jobOutcome.request.candidateDigest = `sha256:${'0'.repeat(64)}`
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, openJobOutcome),
+    /message request keys differ/u,
+  )
+
+  const foldedJobOutcome = structuredClone(expected)
+  const folded = foldedJobOutcome.result.scenarios[0].commands.find(command => (
+    command.request.kind === 'job.outcome'
+  ))
+  folded.response.commits[0].operation = 'delivery.submit_verdict'
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, foldedJobOutcome),
+    /operation must be "apply_terminal_outcome"/u,
+  )
+
+  const openCycleFixture = structuredClone(expected)
+  const cycleFixture = openCycleFixture.result.scenarios
+    .find(scenario => scenario.id === 'task-dag').commands
+    .find(command => command.request.kind === 'fixture.solution-review.validate')
+  cycleFixture.request.input.legacyTasks = []
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, openCycleFixture),
+    /fixture input keys differ/u,
   )
 
   const openJournalRecord = structuredClone(expected)
@@ -751,6 +968,7 @@ function applyCanonicalFixtureFacts(scenario, mapping) {
   }
   if (scenario.id === 'task-dag') {
     snapshot.revision = 2
+    snapshot.tasks = migrateLegacyTaskGraph(snapshot.id, snapshot.tasks)
     snapshot.tasks[0].status = 'active'
     snapshot.tasks[1].status = 'blocked'
   }
@@ -760,6 +978,11 @@ function applyCanonicalFixtureFacts(scenario, mapping) {
   scenario.observation.store.journal.snapshot = structuredClone(snapshot)
   const lastRecord = scenario.observation.store.journal.records.at(-1)
   if (lastRecord !== undefined) lastRecord.snapshot = structuredClone(snapshot)
+  if (scenario.id === 'task-dag') {
+    for (const record of scenario.observation.store.journal.records) {
+      record.snapshot.tasks = migrateLegacyTaskGraph(record.snapshot.id, record.snapshot.tasks)
+    }
+  }
 }
 
 function canonicalFixtureJournal(scenario) {
@@ -808,6 +1031,23 @@ function migrateFixtureResponse(response, legacy, rules) {
 
 function canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping) {
   if (group.kind === 'fixture.command') {
+    if (group.target === 'fixture.store.seed-snapshot') {
+      const input = structuredClone(sourceCommand.input)
+      input.snapshot.tasks = migrateLegacyTaskGraph(
+        input.snapshot.id,
+        input.snapshot.tasks,
+      )
+      return { input, kind: group.target }
+    }
+    if (group.target === 'fixture.solution-review.validate') {
+      return {
+        input: {
+          invalidProposalKind: 'dependency-cycle',
+          spec: structuredClone(sourceCommand.request.payload.spec),
+        },
+        kind: group.target,
+      }
+    }
     return { input: structuredClone(sourceCommand.input ?? sourceCommand.request.payload), kind: group.target }
   }
   const source = sourceCommand.request
@@ -825,24 +1065,49 @@ function canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping) {
   }
   if (group.kind === 'execution-port.message') {
     const instant = '2026-01-01T00:00:00Z'
+    const messageId = `xmsg_${canonicalFixtureRequestId(
+      group.sourceCommandIndexes[0],
+      targetIndex,
+    ).slice(4)}`
+    const lease = {
+      attempt: 1,
+      expiresAt: '2026-01-01T00:01:00Z',
+      fencingToken: '1',
+      issuedAt: instant,
+      jobId: 'job_00000000000000000000000000',
+      leaseId: 'lea_00000000000000000000000000',
+      workerId: 'wrk_00000000000000000000000000',
+      workerInstanceId: 'wri_00000000000000000000000000',
+    }
+    if (group.target === 'job.outcome') {
+      const terminal = source.payload.runtimeEvents.findLast(event => (
+        event.kind === 'turn.completed'
+          && event.source?.roleId === 'verifier'
+      ))
+      const terminalInstant = new Date(terminal.occurredAtMillis).toISOString()
+      return {
+        kind: 'job.outcome',
+        lease,
+        messageId,
+        outcome: {
+          artifacts: [],
+          codexThreadId: 'cdx_00000000000000000000000000',
+          finishedAt: terminalInstant,
+          lastEventSequence: Number(terminal.cursor.sequence),
+          status: 'succeeded',
+          summary: terminal.data.last_agent_message,
+        },
+        schemaVersion: 'winwincode/v1',
+        sentAt: terminalInstant,
+        workerSessionId: 'wsn_00000000000000000000000000',
+      }
+    }
     return {
       boundAt: instant,
       codexThreadId: 'cdx_00000000000000000000000000',
       kind: 'session.binding',
-      lease: {
-        attempt: 1,
-        expiresAt: '2026-01-01T00:01:00Z',
-        fencingToken: '1',
-        issuedAt: instant,
-        jobId: 'job_00000000000000000000000000',
-        leaseId: 'lea_00000000000000000000000000',
-        workerId: 'wrk_00000000000000000000000000',
-        workerInstanceId: 'wri_00000000000000000000000000',
-      },
-      messageId: `xmsg_${canonicalFixtureRequestId(
-        group.sourceCommandIndexes[0],
-        targetIndex,
-      ).slice(4)}`,
+      lease,
+      messageId,
       productSessionId: 'psn_00000000000000000000000000',
       schemaVersion: 'winwincode/v1',
       sentAt: instant,
@@ -1051,13 +1316,15 @@ function canonicalFixtureResponse(
   if (scenario.id === 'task-dag'
     && group.target === 'delivery.advance'
     && group.sourceCommandIndexes.includes(1)) {
+    const result = structuredClone(scenario.observation.snapshot)
+    result.tasks = migrateLegacyTaskGraph(result.id, result.tasks)
     return {
       command: group.target,
       currentRevision: 2,
       outcome: 'completed',
       previousRevision: 1,
       requestId,
-      result: structuredClone(scenario.observation.snapshot),
+      result,
       schemaVersion: 'winwincode/v1',
     }
   }
@@ -1117,7 +1384,10 @@ function canonicalFixtureMessageResponse(group, sourceCommand, targetIndex, mapp
       outcome: 'rejected',
     }
   }
-  const commits = ['accept_worker_session', 'report_codex_thread'].map((operation, index) => ({
+  const operations = group.target === 'session.binding'
+    ? ['accept_worker_session', 'report_codex_thread']
+    : ['apply_terminal_outcome']
+  const commits = operations.map((operation, index) => ({
     currentRevision: previousRevision + index + 1,
     operation,
     previousRevision: previousRevision + index,
@@ -1125,7 +1395,7 @@ function canonicalFixtureMessageResponse(group, sourceCommand, targetIndex, mapp
   }))
   return {
     commits,
-    currentRevision: previousRevision + 2,
+    currentRevision: previousRevision + group.revisionEffect.delta,
     messageId: request.messageId,
     outcome: 'completed',
     previousRevision,
@@ -1168,6 +1438,16 @@ function canonicalFixtureCommandResponse(target, sourceCommand) {
     case 'fixture.store.corrupt-record':
     case 'fixture.store.restore-record':
       return { outcome: 'completed', result: { sequence: input.sequence } }
+    case 'fixture.solution-review.validate':
+      return {
+        error: {
+          code: 'INVALID_REQUEST',
+          details: {},
+          message: 'solution-review task proposals contain a dependency cycle',
+          retryable: false,
+        },
+        outcome: 'rejected',
+      }
     default:
       throw new Error(`unknown fixture response target: ${target}`)
   }

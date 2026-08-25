@@ -98,7 +98,8 @@
       {
         "legacy": "createDelivery",
         "canonicalTargets": [
-          "delivery.create"
+          "delivery.create",
+          "fixture.solution-review.validate"
         ]
       },
       {
@@ -128,6 +129,7 @@
       {
         "legacy": "submitVerdict",
         "canonicalTargets": [
+          "execution-port.message:job.outcome",
           "delivery.submit_verdict"
         ]
       },
@@ -239,7 +241,6 @@
         "status": "pending"
       },
       "createPolicy": "delivery.create tasks is always empty; task graph is promoted only after sealed review",
-      "taskDagPolicy": "the legacy cyclic create(tasks) branch becomes a sealed cyclic task-proposal promotion rejected by delivery.approve_task_breakdown",
       "recomputePolicy": "The inserted command changes revision, events, task status, snapshot, projections, receipts, outbox, and the entire journal digest chain; the typed builder recomputes every value.",
       "failurePolicy": "missing current review authority, deterministic preparedAt, reviewSetSha256, required criterion, or deterministic default task rejects migration",
       "reviewDigestPolicy": "Task identity does not use an old review digest. The sealed fixture inserts the deterministic default task into the complete current v1 review context, uses deterministic preparedAt and all other current review fields, then calls the internal review_set_digest; the decision and approve_task_breakdown payload bind that new digest.",
@@ -270,7 +271,7 @@
       },
       "finalCheckpointByScenario": {
         "success-closed-loop": {
-          "revision": 20,
+          "revision": 21,
           "stageRunCount": 6,
           "sessionBindingCount": 4,
           "taskCount": 1
@@ -282,25 +283,25 @@
           "taskCount": 1
         },
         "inconclusive": {
-          "revision": 18,
+          "revision": 19,
           "stageRunCount": 5,
           "sessionBindingCount": 4,
           "taskCount": 1
         },
         "infra-error": {
-          "revision": 18,
+          "revision": 19,
           "stageRunCount": 5,
           "sessionBindingCount": 4,
           "taskCount": 1
         },
         "candidate-invalidation": {
-          "revision": 29,
+          "revision": 31,
           "stageRunCount": 8,
           "sessionBindingCount": 7,
           "taskCount": 1
         },
         "rework": {
-          "revision": 29,
+          "revision": 31,
           "stageRunCount": 8,
           "sessionBindingCount": 7,
           "taskCount": 1
@@ -354,6 +355,98 @@
       "failedDeliveryGetPolicy": "no runtime query",
       "pendingBindingPolicy": "not eligible",
       "noFallbackIdentities": true
+    },
+    "terminalOutcomeMessages": {
+      "kind": "execution-port.message",
+      "requestType": "JobOutcomeMessage",
+      "requestAuthority": "schema/winwincode/v1/execution-port.schema.json#/$defs/JobOutcomeMessage",
+      "sourceOperation": "submitVerdict",
+      "sourceFactSelection": "For each distinct current final verifier SessionBinding and ExecutionJob, select exactly one successful terminal turn.completed Worker fact from the legacy submitVerdict runtimeEvents; repeated submissions carrying that exact fact reuse its accepted durable outcome.",
+      "deduplicationPolicy": "The exact tuple of verifier legacy sessionId, terminal event cursor.sequence, and occurredAtMillis is emitted once before its first delivery.submit_verdict; a later request carrying the same tuple adds no second job.outcome message.",
+      "sourceCommandIndexesByScenario": {
+        "success-closed-loop": [
+          17
+        ],
+        "request-id-replay": [],
+        "revision-conflict": [],
+        "corruption-recovery": [],
+        "task-dag": [],
+        "candidate-invalidation": [
+          17,
+          25
+        ],
+        "attention": [],
+        "inconclusive": [
+          17
+        ],
+        "infra-error": [
+          17
+        ],
+        "rework": [
+          17,
+          25
+        ]
+      },
+      "requestValueSources": {
+        "lease": "exact current verifier ExecutionJob active lease",
+        "workerSessionId": "exact current verifier SessionBinding.workerSessionId",
+        "codexThreadId": "exact current verifier SessionBinding.codexThreadId",
+        "finishedAt": "selected terminal turn.completed occurredAtMillis encoded as an exact UTC Instant",
+        "lastEventSequence": "selected terminal turn.completed cursor.sequence",
+        "status": "succeeded",
+        "summary": "selected terminal turn.completed data.last_agent_message",
+        "artifacts": "empty array because the legacy terminal fact has no ExecutionPort ArtifactReference",
+        "sentAt": "same exact Instant as outcome.finishedAt",
+        "messageId": "deterministic terminal-outcome identity mapping v1"
+      },
+      "successfulMessageCommitSequence": [
+        "apply_terminal_outcome"
+      ],
+      "revisionIncrementPerSuccessfulMessage": 1,
+      "revisionMapPolicy": "The accepted outcome is an independent durable step. Every later expectedRevision, response revision, event, receipt, outbox item, projection cursor, and journal digest uses the resulting canonical revision."
+    },
+    "legacyTaskIdMigration": {
+      "namespace": "winwincode.oracle-task-id-migration.v1\u0000",
+      "digest": "SHA-256",
+      "digestBytes": 16,
+      "encoding": "big-endian-u128-crockford-base32-26",
+      "alphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+      "canonicalPrefix": "dtk_",
+      "preserveCanonicalTaskIds": true,
+      "passOrder": [
+        "map-task-ids",
+        "map-dependencies"
+      ],
+      "owner": null,
+      "preservedFields": [
+        "order",
+        "title",
+        "goal",
+        "acceptanceCriterionIds"
+      ],
+      "knownVectors": [
+        {
+          "canonicalTaskId": "dtk_59X1F156B8YGG0P7G1K9KR5KB1",
+          "deliveryId": "dlv_5QNEEJDDVR7MC02RM22SXW5TMJ",
+          "legacyTaskId": "oracle-task-prerequisite"
+        },
+        {
+          "canonicalTaskId": "dtk_7HT0EYAWGG4MD098E2F2Z5XNTW",
+          "deliveryId": "dlv_5QNEEJDDVR7MC02RM22SXW5TMJ",
+          "legacyTaskId": "oracle-task-dependent"
+        }
+      ],
+      "invalidCycleValidation": {
+        "sourceCommandIndex": 2,
+        "target": "fixture.solution-review.validate",
+        "invalidProposalKind": "dependency-cycle",
+        "specSource": "legacy source command 2 payload.spec",
+        "resolver": "prepare_solution_review_fixture",
+        "errorCode": "INVALID_REQUEST",
+        "mainScenarioStoreWrites": 0,
+        "proposalBuilder": "invalid_task_proposals_fixture(DependencyCycle)",
+        "setup": "isolated canonical planning handoff built from the source spec"
+      }
     }
   },
   "canonicalExpected": {
@@ -505,22 +598,39 @@
           "fixture.service.restart",
           "fixture.store.seed-snapshot",
           "fixture.store.corrupt-record",
-          "fixture.store.restore-record"
-        ]
+          "fixture.store.restore-record",
+          "fixture.solution-review.validate"
+        ],
+        "inputExactKeysByTarget": {
+          "fixture.runtime-source.replace": [
+            "candidate",
+            "runtimeEvents"
+          ],
+          "fixture.service.restart": [
+            "clock"
+          ],
+          "fixture.store.seed-snapshot": [
+            "snapshot"
+          ],
+          "fixture.store.corrupt-record": [
+            "mutation",
+            "sequence"
+          ],
+          "fixture.store.restore-record": [
+            "sequence"
+          ],
+          "fixture.solution-review.validate": [
+            "invalidProposalKind",
+            "spec"
+          ]
+        },
+        "inputConstantsByTarget": {
+          "fixture.solution-review.validate": {
+            "invalidProposalKind": "dependency-cycle"
+          }
+        }
       },
       "execution-port.message": {
-        "exactKeys": [
-          "boundAt",
-          "codexThreadId",
-          "kind",
-          "lease",
-          "messageId",
-          "productSessionId",
-          "schemaVersion",
-          "sentAt",
-          "workerSessionId"
-        ],
-        "kind": "session.binding",
         "leaseExactKeys": [
           "attempt",
           "expiresAt",
@@ -530,6 +640,45 @@
           "leaseId",
           "workerId",
           "workerInstanceId"
+        ],
+        "exactKeysByTarget": {
+          "session.binding": [
+            "boundAt",
+            "codexThreadId",
+            "kind",
+            "lease",
+            "messageId",
+            "productSessionId",
+            "schemaVersion",
+            "sentAt",
+            "workerSessionId"
+          ],
+          "job.outcome": [
+            "kind",
+            "lease",
+            "messageId",
+            "outcome",
+            "schemaVersion",
+            "sentAt",
+            "workerSessionId"
+          ]
+        },
+        "outcomeExactKeysByTarget": {
+          "job.outcome": [
+            "artifacts",
+            "codexThreadId",
+            "finishedAt",
+            "lastEventSequence",
+            "status",
+            "summary"
+          ]
+        },
+        "outcomeStatusByTarget": {
+          "job.outcome": "succeeded"
+        },
+        "artifactExactKeys": [
+          "artifactId",
+          "digest"
         ]
       }
     },
@@ -628,10 +777,6 @@
         "previousRevision",
         "receipt"
       ],
-      "executionPortCommitOperations": [
-        "accept_worker_session",
-        "report_codex_thread"
-      ],
       "runtimeProjectionGetResultExactKeys": [
         "deliveryId",
         "eventCursor",
@@ -664,6 +809,22 @@
         "stageRunId",
         "usage",
         "workerSessionId"
+      ],
+      "executionPortCommitOperationsByTarget": {
+        "session.binding": [
+          "accept_worker_session",
+          "report_codex_thread"
+        ],
+        "job.outcome": [
+          "apply_terminal_outcome"
+        ]
+      },
+      "fixtureRejectedExactKeys": [
+        "error",
+        "outcome"
+      ],
+      "fixtureRejectedTargets": [
+        "fixture.solution-review.validate"
       ]
     },
     "exactStoreStateKeys": [
@@ -979,6 +1140,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             17
@@ -1053,14 +1224,14 @@
         "verdict": "pass"
       },
       "canonicalAssertions": {
-        "finalRevision": 20,
+        "finalRevision": 21,
         "finalStatus": "delivered",
         "sessionBindingCount": 4,
         "stageRunCount": 6,
         "taskCount": 1,
         "verdict": "pass"
       },
-      "canonicalFinalRevision": 20
+      "canonicalFinalRevision": 21
     },
     {
       "order": 1,
@@ -1362,11 +1533,11 @@
           }
         },
         {
-          "kind": "control-plane.command",
+          "kind": "fixture.command",
           "sourceCommandIndexes": [
             2
           ],
-          "target": "delivery.approve_task_breakdown",
+          "target": "fixture.solution-review.validate",
           "revisionEffect": {
             "delta": 0
           }
@@ -1408,12 +1579,12 @@
         ]
       },
       "canonicalAssertions": {
-        "advancedTaskId": "oracle-task-prerequisite",
+        "advancedTaskId": "dtk_59X1F156B8YGG0P7G1K9KR5KB1",
         "cycleError": "INVALID_REQUEST",
         "cycleRejectedWithoutWrite": true,
         "durableTaskOrder": [
-          "oracle-task-prerequisite",
-          "oracle-task-dependent"
+          "dtk_59X1F156B8YGG0P7G1K9KR5KB1",
+          "dtk_7HT0EYAWGG4MD098E2F2Z5XNTW"
         ],
         "finalRevision": 2,
         "stageRunCount": 1,
@@ -1631,6 +1802,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             17
@@ -1711,6 +1892,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            25
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             25
@@ -1774,13 +1965,13 @@
       },
       "canonicalAssertions": {
         "candidateChanged": true,
-        "finalRevision": 29,
+        "finalRevision": 31,
         "sessionBindingCount": 7,
         "stageRunCount": 8,
         "staleCandidateError": "CANDIDATE_STALE",
         "taskCount": 1
       },
-      "canonicalFinalRevision": 29
+      "canonicalFinalRevision": 31
     },
     {
       "order": 6,
@@ -2168,6 +2359,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             17
@@ -2225,13 +2426,13 @@
         "attentionTypes": [
           "verification_blocked"
         ],
-        "finalRevision": 18,
+        "finalRevision": 19,
         "sessionBindingCount": 4,
         "stageRunCount": 5,
         "taskCount": 1,
         "verdictStatus": "inconclusive"
       },
-      "canonicalFinalRevision": 18
+      "canonicalFinalRevision": 19
     },
     {
       "order": 8,
@@ -2433,6 +2634,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             17
@@ -2490,13 +2701,13 @@
         "attentionTypes": [
           "verification_blocked"
         ],
-        "finalRevision": 18,
+        "finalRevision": 19,
         "sessionBindingCount": 4,
         "stageRunCount": 5,
         "taskCount": 1,
         "verdictStatus": "infra_error"
       },
-      "canonicalFinalRevision": 18
+      "canonicalFinalRevision": 19
     },
     {
       "order": 9,
@@ -2706,6 +2917,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             17
@@ -2786,6 +3007,16 @@
           }
         },
         {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            25
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
           "kind": "control-plane.command",
           "sourceCommandIndexes": [
             25
@@ -2844,7 +3075,7 @@
       "canonicalAssertions": {
         "candidateChanged": true,
         "enteredRework": true,
-        "finalRevision": 29,
+        "finalRevision": 31,
         "sessionBindingCount": 7,
         "stageRunCount": 8,
         "taskCount": 1,
@@ -2853,7 +3084,7 @@
           "pass"
         ]
       },
-      "canonicalFinalRevision": 29
+      "canonicalFinalRevision": 31
     }
   ]
 }
