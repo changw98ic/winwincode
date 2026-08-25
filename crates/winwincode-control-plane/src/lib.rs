@@ -487,9 +487,9 @@ impl ControlPlane {
         command: &CommandEnvelope,
         change: StateChange,
     ) -> Result<CommitReceipt, CommitError> {
-        if delivery_command(&command.command) {
+        if delivery_command(&command.command) || change.stream_id.starts_with("delivery:") {
             return Err(CommitError::Storage(StorageError::invalid_input(
-                "Delivery commands require the atomic Delivery command path",
+                "Delivery commands and state streams require a typed atomic Delivery transaction",
             )));
         }
         if change.events.iter().any(|event| {
@@ -545,28 +545,29 @@ impl ControlPlane {
     }
 
     /// Persists one authoritative Worker `session.binding` message as the two
-    /// canonical Delivery mutations that attach its WorkerSession and then its
-    /// CodexThread.
+    /// canonical Delivery mutations that attach its `WorkerSession` and then its
+    /// `CodexThread`.
     ///
     /// The generated message is the only wire input. The second argument is an
-    /// opaque scheduler-owned lease fact; the message cannot authorize itself.
+    /// opaque scheduler-owned `SessionBinding` authority; the message cannot
+    /// authorize itself.
     ///
     /// # Errors
     ///
     /// Returns before the first write for a foreign job, stale binding, lease
-    /// mismatch, or malformed message. If the WorkerSession phase committed
-    /// but the CodexThread phase failed, the returned error carries the first
+    /// mismatch, or malformed message. If the `WorkerSession` phase committed
+    /// but the `CodexThread` phase failed, the returned error carries the first
     /// durable receipt so an exact retry can continue receipt-first.
     pub fn commit_delivery_session_binding(
         &mut self,
         message: &winwincode_api::generated::SessionBindingMessage,
-        active_lease: &winwincode_delivery::application::stage::ActiveLeaseIdentity,
+        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliverySessionBindingCommitError::Storage)?;
-            session_binding_transaction::execute(storage, message, active_lease)?
+            session_binding_transaction::execute(storage, message, authority)?
         };
         self.flush_outbox().map_err(|source| {
             DeliverySessionBindingCommitError::PublicationPending {

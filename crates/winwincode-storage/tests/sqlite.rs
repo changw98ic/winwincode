@@ -100,6 +100,50 @@ fn delivery_projection_stream_rejects_a_retired_delivery_identity() {
     assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
 }
 
+#[test]
+fn exact_durable_event_lookup_reads_published_rows_after_restart() {
+    let root = temporary_directory("exact-durable-event");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let mut storage = SqliteStorage::open(&root).expect("storage open");
+    let commit = state_commit(
+        ("worker-one", "repository-one", "req_event_lookup"),
+        &digest,
+        "delivery:one",
+        0,
+        b"state",
+        "execution-job:job_one",
+    );
+    let receipt = storage.commit(&commit).expect("event commit");
+    let pending = storage
+        .load_outbox_event("execution-job:job_one")
+        .expect("pending exact read")
+        .expect("pending event");
+    assert_eq!(pending.event(), &receipt.events[0]);
+    assert_eq!(pending.receipt_identity(), &receipt.receipt_identity);
+    assert_eq!(pending.command_digest(), &receipt.command_digest);
+    assert_eq!(pending.stream_id(), receipt.stream_id);
+    assert_eq!(pending.revision(), receipt.revision);
+    storage
+        .mark_published("execution-job:job_one")
+        .expect("publish acknowledgement");
+    Box::new(storage).close().expect("first storage close");
+
+    let restarted = SqliteStorage::open(&root).expect("restart storage");
+    let published = restarted
+        .load_outbox_event("execution-job:job_one")
+        .expect("published exact read")
+        .expect("published event");
+    assert_eq!(published.event(), &receipt.events[0]);
+    assert!(
+        restarted
+            .load_outbox_event("execution-job:missing")
+            .expect("missing exact read")
+            .is_none()
+    );
+    Box::new(restarted).close().expect("restart close");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
 fn write_interleaved_projection_events(
     storage: &mut SqliteStorage,
     delivery_one: &ProjectionEventStream,

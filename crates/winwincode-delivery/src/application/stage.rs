@@ -20,6 +20,22 @@
 //! ```
 //!
 //! ```compile_fail
+//! use winwincode_delivery::application::stage::SessionBindingAuthority;
+//!
+//! let _caller_built_authority = SessionBindingAuthority {
+//!     active_lease: todo!(),
+//!     issued_at: todo!(),
+//!     expires_at: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::SessionBindingAuthority;
+//!
+//! let _deserialized: SessionBindingAuthority = serde_json::from_str("{}").unwrap();
+//! ```
+//!
+//! ```compile_fail
 //! use winwincode_delivery::application::stage::TerminalWorkerOutcome;
 //!
 //! let _caller_built_outcome = TerminalWorkerOutcome {
@@ -48,8 +64,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionJobId, FencingToken, LeaseId, ProductSessionId, Sha256Digest, StageRunId, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, Sha256Digest, StageRunId,
+    WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 use crate::domain::{
@@ -140,6 +156,32 @@ impl ActiveLeaseIdentity {
 
     pub fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
+    }
+}
+
+/// Scheduler-owned authority for accepting one Worker `session.binding`.
+///
+/// The active lease identity alone does not contain its issued/expiry window.
+/// This sealed fact binds that exact window to the scheduler-owned lease so a
+/// Worker message cannot extend or replace its own authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBindingAuthority {
+    active_lease: ActiveLeaseIdentity,
+    issued_at: Instant,
+    expires_at: Instant,
+}
+
+impl SessionBindingAuthority {
+    pub const fn active_lease(&self) -> &ActiveLeaseIdentity {
+        &self.active_lease
+    }
+
+    pub const fn issued_at(&self) -> &Instant {
+        &self.issued_at
+    }
+
+    pub const fn expires_at(&self) -> &Instant {
+        &self.expires_at
     }
 }
 
@@ -335,9 +377,10 @@ pub(crate) fn verify_terminal_outcome(
 pub mod test_support {
     use super::{
         ActiveLeaseIdentity, CodexThreadId, CoordinationError, Delivery, ExecutionAckSequence,
-        ExecutionJobId, FencingToken, LeaseId, Sha256Digest, StageRunId, TerminalArtifactReference,
-        TerminalOutcomeMetadata, TerminalOutcomeStatus, TerminalWorkerOutcome,
-        VerifiedTerminalOutcome, WorkerId, WorkerInstanceId, WorkerSessionId,
+        ExecutionJobId, FencingToken, Instant, LeaseId, SessionBindingAuthority, Sha256Digest,
+        StageRunId, TerminalArtifactReference, TerminalOutcomeMetadata, TerminalOutcomeStatus,
+        TerminalWorkerOutcome, VerifiedTerminalOutcome, WorkerId, WorkerInstanceId,
+        WorkerSessionId,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -358,6 +401,21 @@ pub mod test_support {
             worker_id,
             worker_instance_id,
             worker_session_id,
+        }
+    }
+
+    /// Seals one exact active-lease window for a `SessionBinding` integration
+    /// fixture. Production schedulers construct the equivalent fact inside
+    /// their trusted adapter; raw fields remain unavailable to callers.
+    pub fn session_binding_authority(
+        active_lease: ActiveLeaseIdentity,
+        issued_at: Instant,
+        expires_at: Instant,
+    ) -> SessionBindingAuthority {
+        SessionBindingAuthority {
+            active_lease,
+            issued_at,
+            expires_at,
         }
     }
 
