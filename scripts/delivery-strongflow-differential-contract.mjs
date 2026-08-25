@@ -202,6 +202,58 @@ function validateNormalizationRules(rules) {
   requireEqual(rules.comparison.noTestNameEvidence, true, 'noTestNameEvidence')
 }
 
+function validateExecutionPlanRules(rules) {
+  requireEqual(
+    rules.runner.inputSchemaVersion,
+    'winwincode.delivery-strongflow-differential-plan.v2',
+    'runner input schemaVersion',
+  )
+  const contract = rules.executionPlan
+  requireExactKeys(contract, [
+    'exactScenarioKeys',
+    'exactTopLevelKeys',
+    'expectedStateInputPolicy',
+    'fixtureCommandKeys',
+    'forbiddenExpectedKeys',
+    'strongFlowCommandKeys',
+  ], 'execution plan contract')
+  requireDeepEqual(contract.exactTopLevelKeys, [
+    'bindings',
+    'oracleSchemaVersion',
+    'scenarios',
+    'schemaVersion',
+  ], 'execution plan top-level keys')
+  requireDeepEqual(contract.exactScenarioKeys, [
+    'commands',
+    'id',
+    'terminalOutcomeStatusBySourceCommandIndex',
+  ], 'execution plan scenario keys')
+  requireDeepEqual(
+    contract.strongFlowCommandKeys,
+    ['kind', 'request'],
+    'execution plan StrongFlow command keys',
+  )
+  requireDeepEqual(
+    contract.fixtureCommandKeys,
+    ['input', 'kind'],
+    'execution plan fixture command keys',
+  )
+  requireDeepEqual(
+    contract.forbiddenExpectedKeys,
+    ['assertions', 'observation', 'response'],
+    'execution plan forbidden expected keys',
+  )
+  requireEqual(
+    contract.expectedStateInputPolicy,
+    'Only fixture.store.seed-snapshot.input.snapshot may carry seeded Delivery state. '
+      + 'terminalOutcomeStatusBySourceCommandIndex is the sole additional closed migration '
+      + 'provenance derived from a legacy completed response; it is not expected product state. '
+      + 'No raw command response, assertion, final observation, journal record, manifest, '
+      + 'receipt, outbox, or final snapshot enters the runner plan.',
+    'execution plan expected-state input policy',
+  )
+}
+
 function validateRuntimeProjectionRules(rules) {
   const policy = rules.canonicalMigration.runtimeProjectionFollowup
   requireExactKeys(policy, [
@@ -362,11 +414,68 @@ function terminalVerifierFactKey(command, label) {
   ])
 }
 
+function terminalOutcomeStatusForFact(sourceScenario, sourceCommandIndex, label) {
+  const sourceCommand = sourceScenario.commands[sourceCommandIndex]
+  const factKey = terminalVerifierFactKey(sourceCommand, `${label} source`)
+  const completedSubmissions = []
+  for (let commandIndex = 0; commandIndex < sourceScenario.commands.length; commandIndex += 1) {
+    const command = sourceScenario.commands[commandIndex]
+    if (command.request?.operation !== 'submitVerdict' || command.response?.ok !== true) {
+      continue
+    }
+    const candidateKey = terminalVerifierFactKey(
+      command,
+      `${label} completed source command ${commandIndex}`,
+    )
+    if (candidateKey === factKey) completedSubmissions.push({ command, commandIndex })
+  }
+  requireEqual(
+    completedSubmissions.length,
+    1,
+    `${label} completed submit response count`,
+  )
+
+  const [{ command, commandIndex }] = completedSubmissions
+  const delivery = requireObject(
+    command.response.result?.delivery,
+    `${label} completed source command ${commandIndex} delivery`,
+  )
+  const stageRuns = requireArray(
+    delivery.stageRuns,
+    `${label} completed source command ${commandIndex} stageRuns`,
+  )
+  const verifier = requireObject(
+    stageRuns.at(-1),
+    `${label} completed source command ${commandIndex} final stageRun`,
+  )
+  requireEqual(
+    verifier.role,
+    'verifier',
+    `${label} completed source command ${commandIndex} final stageRun role`,
+  )
+  const verdict = requireObject(
+    delivery.verdict,
+    `${label} completed source command ${commandIndex} verdict`,
+  )
+  if (verifier.status === 'succeeded'
+    && ['fail', 'inconclusive', 'pass'].includes(verdict.status)) {
+    return 'succeeded'
+  }
+  if (verifier.status === 'failed' && verdict.status === 'infra_error') {
+    return 'infrastructure_error'
+  }
+  fail(
+    `${label} has unmigratable verifier/verdict status pair `
+      + `${JSON.stringify(verifier.status)}/${JSON.stringify(verdict.status)}`,
+  )
+}
+
 function validateTerminalOutcomeRules(rules, oracle) {
   const policy = rules.canonicalMigration.terminalOutcomeMessages
   requireExactKeys(policy, [
     'deduplicationPolicy',
     'kind',
+    'outcomeStatusByScenario',
     'requestAuthority',
     'requestType',
     'requestValueSources',
@@ -404,10 +513,26 @@ function validateTerminalOutcomeRules(rules, oracle) {
     lease: 'exact current verifier ExecutionJob active lease',
     messageId: 'deterministic terminal-outcome identity mapping v1',
     sentAt: 'same exact Instant as outcome.finishedAt',
-    status: 'succeeded',
+    status: 'exact status derived from the completed legacy submit response current verifier StageRun and Verdict',
     summary: 'selected terminal turn.completed data.last_agent_message',
     workerSessionId: 'exact current verifier SessionBinding.workerSessionId',
   }, 'terminal outcome request value sources')
+
+  const outcomeStatusByScenario = requireObject(
+    policy.outcomeStatusByScenario,
+    'terminal outcome status by scenario',
+  )
+  requireDeepEqual(
+    Object.keys(outcomeStatusByScenario).toSorted(),
+    rules.scenarios.map(scenario => scenario.id).toSorted(),
+    'terminal outcome status scenario partition',
+  )
+  requireDeepEqual(
+    rules.canonicalExpected.requestContracts['execution-port.message']
+      .outcomeStatusesByTarget,
+    { 'job.outcome': ['infrastructure_error', 'succeeded'] },
+    'terminal outcome request status contract',
+  )
 
   const sourceIndexesByScenario = requireObject(
     policy.sourceCommandIndexesByScenario,
@@ -439,6 +564,22 @@ function validateTerminalOutcomeRules(rules, oracle) {
       sourceIndexesByScenario[mapping.id],
       derivedSourceIndexes,
       `${mapping.id} terminal outcome source indexes`,
+    )
+    const derivedStatuses = derivedSourceIndexes.map(sourceCommandIndex => (
+      terminalOutcomeStatusForFact(
+        source,
+        sourceCommandIndex,
+        `${mapping.id} terminal outcome`,
+      )
+    ))
+    const uniqueStatuses = [...new Set(derivedStatuses)]
+    if (uniqueStatuses.length > 1) {
+      fail(`${mapping.id} terminal outcome statuses must have one scenario value`)
+    }
+    requireEqual(
+      outcomeStatusByScenario[mapping.id],
+      uniqueStatuses[0] ?? null,
+      `${mapping.id} terminal outcome status policy`,
     )
     const outcomeGroups = mapping.canonicalGroups.filter(group => group.target === 'job.outcome')
     requireDeepEqual(
@@ -686,6 +827,7 @@ export function validateDifferentialContract(rules, oracle, options = {}) {
 
   validateMigrationRules(rules, oracle)
   validateNormalizationRules(rules)
+  validateExecutionPlanRules(rules)
   validateRuntimeProjectionRules(rules)
   validateTerminalOutcomeRules(rules, oracle)
   validateLegacyTaskIdMigrationRules(rules, oracle)
@@ -746,29 +888,122 @@ function mapJson(value, mapString) {
   )
 }
 
+function differentialPlanCommands(scenario, bindings, rules) {
+  return scenario.commands.map(command => {
+    if (command.kind === 'strongflow.request') {
+      return {
+        kind: command.kind,
+        request: mapJson(command.request, value => hydrateString(value, bindings, rules)),
+      }
+    }
+    return {
+      input: mapJson(command.input, value => hydrateString(value, bindings, rules)),
+      kind: command.kind,
+    }
+  })
+}
+
+function terminalOutcomePlanStatusMap(sourceScenario, rules) {
+  const policy = rules.canonicalMigration.terminalOutcomeMessages
+  const sourceIndexes = policy.sourceCommandIndexesByScenario[sourceScenario.id]
+  const declaredStatus = policy.outcomeStatusByScenario[sourceScenario.id]
+  return Object.fromEntries(sourceIndexes.map(sourceCommandIndex => {
+    const derivedStatus = terminalOutcomeStatusForFact(
+      sourceScenario,
+      sourceCommandIndex,
+      `${sourceScenario.id} terminal outcome plan`,
+    )
+    requireEqual(
+      declaredStatus,
+      derivedStatus,
+      `${sourceScenario.id} terminal outcome plan status policy`,
+    )
+    return [String(sourceCommandIndex), declaredStatus]
+  }))
+}
+
+export function validateDifferentialExecutionPlan(plan, oracle, rules) {
+  validateExecutionPlanRules(rules)
+  requireExactKeys(
+    plan,
+    rules.executionPlan.exactTopLevelKeys,
+    'differential execution plan',
+  )
+  requireEqual(plan.schemaVersion, rules.runner.inputSchemaVersion, 'plan schemaVersion')
+  requireEqual(plan.oracleSchemaVersion, oracle.schemaVersion, 'plan oracle schemaVersion')
+  validateBindings(plan.bindings, rules)
+  const scenarios = requireArray(plan.scenarios, 'plan scenarios')
+  requireEqual(scenarios.length, oracle.scenarios.length, 'plan scenario count')
+  const allowedStatuses = rules.canonicalExpected
+    .requestContracts['execution-port.message'].outcomeStatusesByTarget['job.outcome']
+  for (let scenarioIndex = 0; scenarioIndex < scenarios.length; scenarioIndex += 1) {
+    const scenario = scenarios[scenarioIndex]
+    const sourceScenario = oracle.scenarios[scenarioIndex]
+    const label = `plan scenarios[${scenarioIndex}]`
+    requireExactKeys(
+      scenario,
+      rules.executionPlan.exactScenarioKeys,
+      label,
+    )
+    requireEqual(scenario.id, sourceScenario.id, `${label}.id`)
+    const commands = requireArray(scenario.commands, `${label}.commands`)
+    requireEqual(commands.length, sourceScenario.commands.length, `${label} command count`)
+    for (let commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
+      const sourceCommand = sourceScenario.commands[commandIndex]
+      requireExactKeys(
+        commands[commandIndex],
+        sourceCommand.kind === 'strongflow.request'
+          ? rules.executionPlan.strongFlowCommandKeys
+          : rules.executionPlan.fixtureCommandKeys,
+        `${label}.commands[${commandIndex}]`,
+      )
+    }
+    requireDeepEqual(
+      commands,
+      differentialPlanCommands(sourceScenario, plan.bindings, rules),
+      `${scenario.id} plan commands`,
+    )
+    const statuses = requireObject(
+      scenario.terminalOutcomeStatusBySourceCommandIndex,
+      `${scenario.id} terminal outcome plan statuses`,
+    )
+    const expectedStatuses = terminalOutcomePlanStatusMap(sourceScenario, rules)
+    requireDeepEqual(
+      Object.keys(statuses).toSorted(),
+      Object.keys(expectedStatuses).toSorted(),
+      `${scenario.id} terminal outcome plan source indexes`,
+    )
+    for (const [sourceCommandIndex, status] of Object.entries(statuses)) {
+      if (!allowedStatuses.includes(status)) {
+        fail(`${scenario.id} terminal outcome plan status is not allowed`)
+      }
+      requireEqual(
+        status,
+        expectedStatuses[sourceCommandIndex],
+        `${scenario.id} terminal outcome plan status`,
+      )
+    }
+  }
+  return { scenarioCount: scenarios.length }
+}
+
 export function buildDifferentialExecutionPlan(oracle, bindings, rules) {
   validateBindings(bindings, rules)
-  const scenarios = oracle.scenarios.map(scenario => ({
-    id: scenario.id,
-    commands: scenario.commands.map(command => {
-      if (command.kind === 'strongflow.request') {
-        return {
-          kind: command.kind,
-          request: mapJson(command.request, value => hydrateString(value, bindings, rules)),
-        }
-      }
-      return {
-        input: mapJson(command.input, value => hydrateString(value, bindings, rules)),
-        kind: command.kind,
-      }
-    }),
-  }))
-  return {
+  const plan = {
     bindings: structuredClone(bindings),
     oracleSchemaVersion: oracle.schemaVersion,
-    scenarios,
+    scenarios: oracle.scenarios.map(scenario => ({
+      commands: differentialPlanCommands(scenario, bindings, rules),
+      id: scenario.id,
+      terminalOutcomeStatusBySourceCommandIndex: terminalOutcomePlanStatusMap(
+        scenario,
+        rules,
+      ),
+    })),
     schemaVersion: rules.runner.inputSchemaVersion,
   }
+  validateDifferentialExecutionPlan(plan, oracle, rules)
+  return plan
 }
 
 export function buildCanonicalMigrationPlan(oracle, rules) {
@@ -937,11 +1172,11 @@ function validateExecutionPortMessage(command, group, rules, label) {
       requestContract.outcomeExactKeysByTarget[group.target],
       `${label} message outcome`,
     )
-    requireEqual(
-      command.request.outcome.status,
-      requestContract.outcomeStatusByTarget[group.target],
-      `${label} message outcome status`,
-    )
+    const allowedStatuses = requestContract.outcomeStatusesByTarget[group.target]
+    if (!Array.isArray(allowedStatuses)
+      || !allowedStatuses.includes(command.request.outcome.status)) {
+      fail(`${label} message outcome status is not allowed`)
+    }
     const artifacts = requireArray(
       command.request.outcome.artifacts,
       `${label} message outcome artifacts`,
@@ -1409,7 +1644,7 @@ function validateTaskDagCanonicalScenario(sourceScenario, scenario) {
   requireEqual(cycle.response.error.code, 'INVALID_REQUEST', 'task-dag cycle fixture error')
 }
 
-function validateTerminalOutcomeCanonicalScenario(sourceScenario, mapping, scenario) {
+function validateTerminalOutcomeCanonicalScenario(sourceScenario, mapping, scenario, rules) {
   const groups = mapping.canonicalGroups.filter(group => group.target === 'job.outcome')
   for (const group of groups) {
     const sourceCommandIndex = group.sourceCommandIndexes[0]
@@ -1419,6 +1654,22 @@ function validateTerminalOutcomeCanonicalScenario(sourceScenario, mapping, scena
       `${scenario.id} source command ${sourceCommandIndex}`,
     )
     const outcome = commandFromSource(scenario, sourceCommandIndex, 'job.outcome')
+    const expectedStatus = terminalOutcomeStatusForFact(
+      sourceScenario,
+      sourceCommandIndex,
+      `${scenario.id} terminal outcome`,
+    )
+    requireEqual(
+      rules.canonicalMigration.terminalOutcomeMessages
+        .outcomeStatusByScenario[scenario.id],
+      expectedStatus,
+      `${scenario.id} terminal outcome status policy`,
+    )
+    requireEqual(
+      outcome.request.outcome.status,
+      expectedStatus,
+      `${scenario.id} terminal outcome status`,
+    )
     const outcomeIndex = scenario.commands.indexOf(outcome)
     const binding = scenario.commands.slice(0, outcomeIndex).findLast(command => (
       command.request.kind === 'session.binding'
@@ -1624,7 +1875,7 @@ export function validateCanonicalExpected(rules, oracle, expected) {
     }
     validateRuntimeProjectionScenario(mapping, scenario, rules, label)
     validateTaskDagCanonicalScenario(oracle.scenarios[index], scenario)
-    validateTerminalOutcomeCanonicalScenario(oracle.scenarios[index], mapping, scenario)
+    validateTerminalOutcomeCanonicalScenario(oracle.scenarios[index], mapping, scenario, rules)
     validateCanonicalAssertions(mapping, scenario)
   }
   return { scenarioCount: scenarios.length }
