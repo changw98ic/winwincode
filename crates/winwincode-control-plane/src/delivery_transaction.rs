@@ -32,7 +32,7 @@ use crate::{
 };
 
 const DELIVERY_AGGREGATE_TYPE: &str = "delivery";
-const EXECUTION_JOB_TOPIC: &str = "execution.job.dispatch";
+pub(crate) const EXECUTION_JOB_TOPIC: &str = "execution.job.dispatch";
 const NON_CANONICAL_EXECUTION_JOB: &str =
     "durable execution job payload has unknown or non-canonical fields";
 
@@ -255,7 +255,9 @@ fn committed_delivery_receipt(
     })
 }
 
-fn strict_execution_job(payload: &[u8]) -> Result<ExecutionJob, DeliveryExecutionPortError> {
+pub(crate) fn strict_execution_job(
+    payload: &[u8],
+) -> Result<ExecutionJob, DeliveryExecutionPortError> {
     let value: Value = serde_json::from_slice(payload).map_err(port_error)?;
     let mut job: ExecutionJob = serde_json::from_value(value.clone())
         .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
@@ -288,7 +290,7 @@ pub(crate) fn delivery_journal_key(
     AggregateJournalKey::new(DELIVERY_AGGREGATE_TYPE, &delivery_id.0)
 }
 
-fn execution_job_event_id(job: &ExecutionJob) -> String {
+pub(crate) fn execution_job_event_id(job: &ExecutionJob) -> String {
     format!("execution-job:{}", job.job_id.0)
 }
 

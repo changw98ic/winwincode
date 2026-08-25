@@ -568,6 +568,48 @@ pub struct OutboxEvent {
     pub projection_cursor: Option<ProjectionEventCursor>,
 }
 
+/// One exact durable outbox row together with the receipt that authorized it.
+///
+/// Unlike [`ProductStateStorage::pending_events`], this read is independent of
+/// publication acknowledgement. Application transactions use it to join a
+/// Worker message to the immutable `ExecutionJob` that was committed before
+/// dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableOutboxEvent {
+    event: OutboxEvent,
+    receipt_identity: ReceiptIdentity,
+    command_digest: Sha256Digest,
+    stream_id: String,
+    revision: u64,
+}
+
+impl DurableOutboxEvent {
+    #[must_use]
+    pub const fn event(&self) -> &OutboxEvent {
+        &self.event
+    }
+
+    #[must_use]
+    pub const fn receipt_identity(&self) -> &ReceiptIdentity {
+        &self.receipt_identity
+    }
+
+    #[must_use]
+    pub const fn command_digest(&self) -> &Sha256Digest {
+        &self.command_digest
+    }
+
+    #[must_use]
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
 /// The durable result of one state commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitReceipt {
@@ -758,6 +800,22 @@ pub trait ProductStateStorage: Send {
         command_digest: &Sha256Digest,
     ) -> Result<Option<CommitReceipt>, StorageError>;
 
+    /// Loads one exact durable event by stable event id, whether or not it was
+    /// already acknowledged as published.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral read failure. Adapters that have not yet
+    /// implemented exact durable event lookup fail closed.
+    fn load_outbox_event(
+        &self,
+        _event_id: &str,
+    ) -> Result<Option<DurableOutboxEvent>, StorageError> {
+        Err(StorageError::adapter(
+            "exact durable outbox event lookup is unavailable",
+        ))
+    }
+
     /// Loads the current canonical state for one stream.
     ///
     /// # Errors
@@ -908,6 +966,111 @@ impl ProductStateStorage for SqliteStorage {
             return Ok(None);
         };
         replay_stored_receipt(connection, identity, command_digest, prior).map(Some)
+    }
+
+    fn load_outbox_event(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<DurableOutboxEvent>, StorageError> {
+        if event_id.is_empty() {
+            return Err(StorageError::invalid_input("event_id must not be empty"));
+        }
+        let row = self
+            .connection()?
+            .query_row(
+                "SELECT o.sequence, o.event_id, o.topic, o.payload, o.receipt_actor_key, \
+                        o.receipt_scope_key, o.request_id, o.projection_stream_kind, \
+                        o.projection_resource_id, o.projection_stream_sequence, \
+                        r.command_digest, r.stream_id, r.revision \
+                 FROM outbox o JOIN command_receipts r \
+                   ON r.actor_key = o.receipt_actor_key \
+                  AND r.scope_key = o.receipt_scope_key \
+                  AND r.request_id = o.request_id \
+                 WHERE o.event_id = ?1",
+                [event_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, i64>(12)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let Some((
+            sequence,
+            stored_event_id,
+            topic,
+            payload,
+            actor_key,
+            scope_key,
+            request_id,
+            stream_kind,
+            resource_id,
+            stream_sequence,
+            command_digest,
+            stream_id,
+            revision,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let receipt_scope_key = ReceiptScopeKey::from_encoded(scope_key.clone())?;
+        let event = OutboxEvent {
+            sequence: u64::try_from(sequence)
+                .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
+            event_id: stored_event_id.clone(),
+            topic,
+            payload,
+            projection_cursor: stored_projection_cursor(
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+                &stored_event_id,
+            )?,
+        };
+        let receipt_identity = ReceiptIdentity::new(
+            ReceiptActorKey::from_encoded(actor_key)?,
+            receipt_scope_key,
+            RequestId(request_id),
+        )?;
+        let receipt_events = receipt_events(self.connection()?, &receipt_identity)?;
+        let matching = receipt_events
+            .iter()
+            .filter(|receipt_event| receipt_event.event_id == stored_event_id)
+            .collect::<Vec<_>>();
+        let [receipt_event] = matching.as_slice() else {
+            return Err(StorageError::adapter(
+                "durable outbox event is not owned exactly once by its receipt",
+            ));
+        };
+        if *receipt_event != &event {
+            return Err(StorageError::adapter(
+                "durable outbox event differs from its receipt event",
+            ));
+        }
+        let command_digest = Sha256Digest(command_digest);
+        validate_sha256_digest(&command_digest)?;
+        Ok(Some(DurableOutboxEvent {
+            event,
+            receipt_identity,
+            command_digest,
+            stream_id,
+            revision: u64::try_from(revision)
+                .map_err(|_| StorageError::adapter("stored receipt revision is negative"))?,
+        }))
     }
 
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError> {
