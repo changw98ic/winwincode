@@ -28,6 +28,7 @@
     "fixture:delivery": "node scripts/run-keyless-delivery-fixture.mjs",
     "oracle:delivery:export": "pnpm build:ts && node scripts/export-delivery-strongflow-oracle.mjs --write",
     "oracle:delivery:check": "pnpm build:ts && node scripts/export-delivery-strongflow-oracle.mjs --check",
+    "oracle:delivery:rust:check": "node scripts/run-delivery-strongflow-rust-differential.mjs --check",
     "evaluate:live": "node scripts/run-live-evaluation.mjs",
     "measure:evaluation": "node scripts/run-evaluation-measures.mjs",
     "verify:release-native": "node scripts/run-native-release-gate.mjs",
