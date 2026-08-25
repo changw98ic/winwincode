@@ -1867,15 +1867,11 @@ mod tests {
             DeliveryStatus::Reworking
         );
 
-        let history = store
-            .validated_rework_history(&resolved.snapshot)
-            .expect("append-only rework history");
-        let authorization = crate::domain::rework::fixture_precise_rework_authorization(
-            &resolved.snapshot,
-            &candidate,
-            &history,
-            "b".repeat(64),
-        );
+        let authorization =
+            crate::domain::rework::test_support::precise_rework_authorization_fixture(
+                &resolved.snapshot,
+                &candidate,
+            );
         let stage = advance(
             &resolved.snapshot,
             AdvanceStageInput {

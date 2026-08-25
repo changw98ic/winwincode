@@ -24,6 +24,12 @@
 //!     terminal_outcome: todo!(),
 //! };
 //! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::candidate::FrozenDeliveryCandidate;
+//!
+//! let _: FrozenDeliveryCandidate = serde_json::from_str("{}").unwrap();
+//! ```
 
 use std::collections::HashSet;
 
@@ -269,6 +275,8 @@ pub struct FrozenDeliveryCandidate {
     candidate_tree_id: String,
     diff_sha256: String,
     changed_paths: Vec<CandidatePathFact>,
+    #[serde(skip)]
+    changed_hunks: Vec<CandidateHunkFact>,
 }
 
 impl FrozenDeliveryCandidate {
@@ -391,6 +399,10 @@ impl FrozenDeliveryCandidate {
     pub fn changed_paths(&self) -> &[CandidatePathFact] {
         &self.changed_paths
     }
+
+    pub(crate) fn changed_hunks(&self) -> &[CandidateHunkFact] {
+        &self.changed_hunks
+    }
 }
 
 #[derive(Serialize)]
@@ -453,6 +465,7 @@ struct CandidateIdentity<'candidate> {
     candidate_tree_id: &'candidate str,
     diff_sha256: &'candidate str,
     changed_paths: &'candidate [CandidatePathFact],
+    changed_hunks: &'candidate [CandidateHunkFact],
 }
 
 /// Freezes the current successful executor writer from sealed facts.
@@ -544,6 +557,7 @@ fn freeze_candidate_for_stage(
         candidate_tree_id: snapshot.candidate_tree_id.clone(),
         diff_sha256: snapshot.diff_sha256.clone(),
         changed_paths,
+        changed_hunks: snapshot.changed_hunks.clone(),
     };
     candidate.candidate_ref = candidate_reference(&candidate)?;
     Ok(candidate)
@@ -642,6 +656,7 @@ impl<'candidate> From<&'candidate FrozenDeliveryCandidate> for CandidateIdentity
             candidate_tree_id: &candidate.candidate_tree_id,
             diff_sha256: &candidate.diff_sha256,
             changed_paths: &candidate.changed_paths,
+            changed_hunks: &candidate.changed_hunks,
         }
     }
 }
@@ -1351,6 +1366,42 @@ mod tests {
         assert_eq!(candidate.producer_last_event_sequence(), 12);
         assert_eq!(candidate.candidate_commit_id(), "2".repeat(40));
         assert_frozen_candidate_current(&delivery, &candidate).expect("current fixture candidate");
+    }
+
+    #[test]
+    fn frozen_candidate_identity_changes_with_exact_sealed_hunk() {
+        let delivery = writer_delivery();
+        let first = freeze_candidate_fixture(
+            &delivery,
+            &StageRunId("stage-executor-1".into()),
+            &SessionBindingId("binding-executor-1".into()),
+            high_level_input(),
+        );
+        let mut changed = high_level_input();
+        changed.changed_hunks[0].hunk_sha256 = "c".repeat(64);
+        let second = freeze_candidate_fixture(
+            &delivery,
+            &StageRunId("stage-executor-1".into()),
+            &SessionBindingId("binding-executor-1".into()),
+            changed,
+        );
+
+        assert_ne!(first.candidate_ref(), second.candidate_ref());
+    }
+
+    #[test]
+    fn frozen_candidate_serialization_keeps_exact_hunks_internal() {
+        let delivery = writer_delivery();
+        let candidate = freeze_candidate_fixture(
+            &delivery,
+            &StageRunId("stage-executor-1".into()),
+            &SessionBindingId("binding-executor-1".into()),
+            high_level_input(),
+        );
+
+        let projection = serde_json::to_value(candidate).expect("candidate projection");
+        assert!(projection.get("changedHunks").is_none());
+        assert!(!projection.to_string().contains(&"b".repeat(64)));
     }
 
     #[test]
