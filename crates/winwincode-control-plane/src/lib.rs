@@ -6,6 +6,7 @@
 //! durable event publication. It has no dependency on Codex Core, an HTTP
 //! server, or an Execution Worker runtime.
 
+mod delivery_command_transaction;
 pub mod delivery_execution;
 mod delivery_transaction;
 mod rework_transaction;
@@ -13,6 +14,8 @@ mod session_binding_transaction;
 pub mod strongflow_projection;
 mod task_breakdown_transaction;
 mod verdict_transaction;
+
+pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -45,11 +48,118 @@ use winwincode_storage::{
     ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
 };
 
+/// Deterministic trusted-fact fixtures for exercising the typed Control Plane
+/// seam without exposing production authority constructors.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use winwincode_api::generated::{CommandEnvelope, RepositoryScope};
+    use winwincode_delivery::{
+        application::{attention::ResolvedAttentionTransition, stage::StageAdvanceResult},
+        domain::{DeliverySourceRef, RepositoryRef},
+    };
+
+    use super::{
+        DeliveryCommandFacts, DeliverySpecFacts, StorageError,
+        delivery_command_transaction::TrustedDeliverySpecFacts,
+    };
+
+    /// Complete product-owned Spec semantics used by integration fixtures.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct DeliverySpecFactsFixture {
+        pub repository_scope: RepositoryScope,
+        pub now_millis: u64,
+        pub repository: RepositoryRef,
+        pub source_ref: Option<DeliverySourceRef>,
+        pub scope: Vec<String>,
+        pub out_of_scope: Vec<String>,
+        pub constraints: Vec<String>,
+        pub max_rework_attempts: u64,
+        pub criterion_verification_methods: Vec<(String, String)>,
+    }
+
+    /// Adapter-confirmed repository authority used by sealed stage fixtures.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct DeliveryRepositoryFactsFixture {
+        pub repository_scope: RepositoryScope,
+        pub repository: RepositoryRef,
+        pub source_ref: Option<DeliverySourceRef>,
+    }
+
+    /// Binds trusted repository, time, and exact criterion verification facts
+    /// to one create or Spec-replacement command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command and adapter-confirmed repository
+    /// scope do not identify the same canonical authority.
+    pub fn delivery_spec_command_facts(
+        command: &CommandEnvelope,
+        fixture: DeliverySpecFactsFixture,
+    ) -> Result<DeliveryCommandFacts, StorageError> {
+        let repository_scope = fixture.repository_scope.clone();
+        DeliveryCommandFacts::specification_from_trusted_adapter(
+            command,
+            repository_scope,
+            DeliverySpecFacts::from_trusted_adapter(TrustedDeliverySpecFacts {
+                now_millis: fixture.now_millis,
+                repository: fixture.repository,
+                source_ref: fixture.source_ref,
+                scope: fixture.scope,
+                out_of_scope: fixture.out_of_scope,
+                constraints: fixture.constraints,
+                max_rework_attempts: fixture.max_rework_attempts,
+                criterion_verification_methods: fixture.criterion_verification_methods,
+            }),
+        )
+    }
+
+    /// Binds one production-sealed human stage transition to its exact command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command and adapter-confirmed repository
+    /// scope do not identify the same canonical authority.
+    pub fn delivery_advance_command_facts(
+        command: &CommandEnvelope,
+        repository: DeliveryRepositoryFactsFixture,
+        transition: StageAdvanceResult,
+    ) -> Result<DeliveryCommandFacts, StorageError> {
+        DeliveryCommandFacts::advance_from_trusted_adapter(
+            command,
+            repository.repository_scope,
+            repository.repository,
+            repository.source_ref,
+            transition,
+        )
+    }
+
+    /// Binds one production-sealed Attention transition to its exact command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command and adapter-confirmed repository
+    /// scope do not identify the same canonical authority.
+    pub fn delivery_attention_command_facts(
+        command: &CommandEnvelope,
+        repository: DeliveryRepositoryFactsFixture,
+        transition: ResolvedAttentionTransition,
+    ) -> Result<DeliveryCommandFacts, StorageError> {
+        DeliveryCommandFacts::attention_from_trusted_adapter(
+            command,
+            repository.repository_scope,
+            repository.repository,
+            repository.source_ref,
+            transition,
+        )
+    }
+}
+
 const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
 const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryChangeKind {
+    Created,
     Advanced,
     Reworked,
 }
@@ -57,6 +167,7 @@ pub(crate) enum DeliveryChangeKind {
 impl DeliveryChangeKind {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Created => "created",
             Self::Advanced => "advanced",
             Self::Reworked => "reworked",
         }
@@ -245,6 +356,111 @@ impl fmt::Display for CommitError {
 }
 
 impl std::error::Error for CommitError {}
+
+/// Failure of the canonical base Delivery command transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeliveryCommandCommitError {
+    /// No durable member committed because command or storage validation failed.
+    Storage(StorageError),
+    /// The scoped Delivery required by a mutation does not exist.
+    NotFound { delivery_id: DeliveryId },
+    /// A different scoped request tried to create an existing Delivery.
+    AlreadyExists { delivery_id: DeliveryId },
+    /// The atomic transaction committed and only publication remains pending.
+    PublicationPending {
+        receipt: Box<CommitReceipt>,
+        source: OutboxError,
+    },
+}
+
+impl DeliveryCommandCommitError {
+    #[must_use]
+    pub fn public_code(&self) -> winwincode_api::generated::ErrorCode {
+        use winwincode_api::generated::ErrorCode;
+        match self {
+            Self::NotFound { .. } => ErrorCode::ResourceNotFound,
+            Self::AlreadyExists { .. } => ErrorCode::WrongState,
+            Self::PublicationPending { .. } => ErrorCode::ServiceUnavailable,
+            Self::Storage(error) => match error.kind() {
+                StorageErrorKind::InvalidInput => ErrorCode::InvalidRequest,
+                StorageErrorKind::RevisionConflict => ErrorCode::RevisionConflict,
+                StorageErrorKind::RequestConflict => ErrorCode::IdempotencyConflict,
+                StorageErrorKind::JournalNotFound => ErrorCode::ResourceNotFound,
+                StorageErrorKind::RequestReplayMissing
+                | StorageErrorKind::JournalAlreadyExists
+                | StorageErrorKind::JournalConflict
+                | StorageErrorKind::EventCursorExpired
+                | StorageErrorKind::Adapter
+                | StorageErrorKind::Closed => ErrorCode::ServiceUnavailable,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn public_details(&self) -> winwincode_api::generated::ErrorDetails {
+        use winwincode_api::generated::ErrorDetailValue;
+        let mut details = winwincode_api::generated::ErrorDetails::new();
+        if let Self::NotFound { delivery_id } | Self::AlreadyExists { delivery_id } = self {
+            details.insert(
+                "field".to_owned(),
+                ErrorDetailValue::Variant4("deliveryId".to_owned()),
+            );
+            details.insert(
+                "deliveryId".to_owned(),
+                ErrorDetailValue::Variant4(delivery_id.0.clone()),
+            );
+        }
+        details
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(self, Self::PublicationPending { .. })
+            || matches!(self, Self::Storage(error) if matches!(
+                error.kind(),
+                StorageErrorKind::RequestReplayMissing
+                    | StorageErrorKind::JournalAlreadyExists
+                    | StorageErrorKind::JournalConflict
+                    | StorageErrorKind::EventCursorExpired
+                    | StorageErrorKind::Adapter
+                    | StorageErrorKind::Closed
+            ))
+    }
+
+    #[must_use]
+    pub fn committed_receipt(&self) -> Option<&CommitReceipt> {
+        match self {
+            Self::PublicationPending { receipt, .. } => Some(receipt),
+            Self::Storage(_) | Self::NotFound { .. } | Self::AlreadyExists { .. } => None,
+        }
+    }
+}
+
+impl From<StorageError> for DeliveryCommandCommitError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl fmt::Display for DeliveryCommandCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(error) => write!(formatter, "Delivery command failed: {error}"),
+            Self::NotFound { delivery_id } => {
+                write!(formatter, "Delivery {} was not found", delivery_id.0)
+            }
+            Self::AlreadyExists { delivery_id } => {
+                write!(formatter, "Delivery {} already exists", delivery_id.0)
+            }
+            Self::PublicationPending { source, .. } => write!(
+                formatter,
+                "Delivery command committed, but publication remains pending: {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeliveryCommandCommitError {}
 
 /// Failure of the specialized atomic Delivery verdict command.
 #[derive(Debug)]
@@ -508,6 +724,33 @@ impl ControlPlane {
         drop(commit);
         self.flush_outbox()
             .map_err(|source| CommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })?;
+        Ok(receipt)
+    }
+
+    /// Atomically commits one canonical non-dispatch Delivery command and its
+    /// public Delivery event through the single typed Delivery transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns before persistence for an unsupported command, invalid scope,
+    /// stale revision, or failed atomic member. Publication failure retains
+    /// the committed event for startup replay.
+    pub fn commit_delivery_command(
+        &mut self,
+        command: &CommandEnvelope,
+        facts: &DeliveryCommandFacts,
+    ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
+        let receipt = {
+            let storage = self
+                .storage_mut()
+                .map_err(DeliveryCommandCommitError::Storage)?;
+            delivery_command_transaction::execute(storage, command, facts)?
+        };
+        self.flush_outbox()
+            .map_err(|source| DeliveryCommandCommitError::PublicationPending {
                 receipt: Box::new(receipt.clone()),
                 source,
             })?;

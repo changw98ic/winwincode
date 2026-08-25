@@ -9,6 +9,11 @@ repository.workspace = true
 publish = false
 include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 
+[features]
+# Exposes deterministic trusted-authority fixture builders only to Rust tests.
+# The production Control Plane keeps Delivery command facts opaque by default.
+test-support = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +26,10 @@ winwincode-storage = { path = "../winwincode-storage" }
 [dev-dependencies]
 rusqlite.workspace = true
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
+
+[[test]]
+name = "delivery_command_transaction"
+required-features = ["test-support"]
 
 [lints]
 workspace = true
