@@ -1285,7 +1285,13 @@ fn review_error(code: SolutionReviewErrorCode, message: &str) -> SolutionReviewE
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) use tests::{
+    ReviewFixtureState, duplicate_task_and_criterion_fixtures, empty_task_proposals_fixture,
+    invalid_dependency_fixtures, review_delivery, with_newer_review_attempt,
+};
+
+#[cfg(test)]
+mod tests {
     use std::sync::Arc;
 
     use serde_json::{Value, json};

@@ -243,12 +243,9 @@ mod tests {
     use winwincode_domain::DeliveryTaskId;
 
     use crate::application::solution_review::{
-        resolve_current_solution_review,
-        tests::{
-            ReviewFixtureState, duplicate_task_and_criterion_fixtures,
-            empty_task_proposals_fixture, invalid_dependency_fixtures, review_delivery,
-            with_newer_review_attempt,
-        },
+        ReviewFixtureState, duplicate_task_and_criterion_fixtures, empty_task_proposals_fixture,
+        invalid_dependency_fixtures, resolve_current_solution_review, review_delivery,
+        with_newer_review_attempt,
     };
 
     #[test]
