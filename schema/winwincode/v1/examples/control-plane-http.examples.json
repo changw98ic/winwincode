@@ -159,7 +159,22 @@
           "deliveryRevision": 11,
           "runtimeLedgerRevision": 11,
           "runtimeAcceptedSequence": 42,
-          "publicationRevision": 0
+          "publicationRevision": 0,
+          "eventCursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_00000000000000000000000000",
+              "workspaceId": "wsp_00000000000000000000000000",
+              "projectId": "prj_00000000000000000000000000",
+              "repositoryId": "rep_00000000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_00000000000000000000000000"
+            },
+            "sequence": 42,
+            "eventId": "evt_00000000000000000000000042"
+          }
         }
       },
       "page": {
@@ -320,7 +335,22 @@
       "deliveryRevision": 11,
       "runtimeLedgerRevision": 11,
       "runtimeAcceptedSequence": 42,
-      "publicationRevision": 0
+      "publicationRevision": 0,
+      "eventCursor": {
+        "scope": {
+          "kind": "repository",
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "stream": {
+          "kind": "delivery",
+          "deliveryId": "dlv_00000000000000000000000000"
+        },
+        "sequence": 42,
+        "eventId": "evt_00000000000000000000000042"
+      }
     },
     "runtimeCursor": {
       "token": "sfread_00000000000000000000000000000002",
@@ -335,7 +365,22 @@
       "deliveryRevision": 11,
       "runtimeLedgerRevision": 11,
       "runtimeAcceptedSequence": 43,
-      "publicationRevision": 0
+      "publicationRevision": 0,
+      "eventCursor": {
+        "scope": {
+          "kind": "repository",
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "stream": {
+          "kind": "delivery",
+          "deliveryId": "dlv_00000000000000000000000000"
+        },
+        "sequence": 43,
+        "eventId": "evt_00000000000000000000000042"
+      }
     },
     "expected": {
       "schemaVersion": "winwincode/v1",
@@ -431,7 +476,22 @@
           "deliveryRevision": 11,
           "runtimeLedgerRevision": 11,
           "runtimeAcceptedSequence": 42,
-          "publicationRevision": 0
+          "publicationRevision": 0,
+          "eventCursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_00000000000000000000000000",
+              "workspaceId": "wsp_00000000000000000000000000",
+              "projectId": "prj_00000000000000000000000000",
+              "repositoryId": "rep_00000000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_00000000000000000000000000"
+            },
+            "sequence": 42,
+            "eventId": "evt_00000000000000000000000042"
+          }
         },
         "productSessionId": "psn_00000000000000000000000000",
         "deliveryId": "dlv_00000000000000000000000000",
@@ -511,7 +571,22 @@
               "sourceRef": "runtime-event:42"
             }
           }
-        ]
+        ],
+        "eventCursor": {
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_00000000000000000000000000",
+            "workspaceId": "wsp_00000000000000000000000000",
+            "projectId": "prj_00000000000000000000000000",
+            "repositoryId": "rep_00000000000000000000000000"
+          },
+          "stream": {
+            "kind": "delivery",
+            "deliveryId": "dlv_00000000000000000000000000"
+          },
+          "sequence": 42,
+          "eventId": "evt_00000000000000000000000042"
+        }
       },
       "page": {
         "nextCursor": null,
@@ -538,7 +613,22 @@
           "deliveryRevision": 11,
           "runtimeLedgerRevision": 11,
           "runtimeAcceptedSequence": 42,
-          "publicationRevision": 0
+          "publicationRevision": 0,
+          "eventCursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_00000000000000000000000000",
+              "workspaceId": "wsp_00000000000000000000000000",
+              "projectId": "prj_00000000000000000000000000",
+              "repositoryId": "rep_00000000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_00000000000000000000000000"
+            },
+            "sequence": 42,
+            "eventId": "evt_00000000000000000000000042"
+          }
         },
         "deliveryId": "dlv_00000000000000000000000000",
         "deliveryRevision": 11,

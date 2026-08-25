@@ -237,16 +237,34 @@ function visitSchema(value, callback) {
   for (const entry of Object.values(value)) visitSchema(entry, callback)
 }
 
-function constDiscriminatorValue(schema, propertyName, document, context) {
+function constDiscriminatorValue(schema, propertyName, document, context, seen = new Set()) {
   let resolved = schema
+  let sourceDocument = document
   if (typeof schema.$ref === 'string') {
     const name = referencedDefinitionName(schema.$ref, document, context)
-    resolved = context.registry.get(name).schema
+    const entry = context.registry.get(name)
+    const key = `${entry.document.id}#/$defs/${name}`
+    if (seen.has(key)) return undefined
+    seen.add(key)
+    resolved = entry.schema
+    sourceDocument = entry.document
   }
   const property = resolved.properties?.[propertyName]
-  return isObject(property) && (typeof property.const === 'string' || typeof property.const === 'number')
-    ? property.const
-    : undefined
+  if (isObject(property) && (typeof property.const === 'string' || typeof property.const === 'number')) {
+    return property.const
+  }
+  for (const branch of resolved.allOf ?? []) {
+    if (!isObject(branch)) continue
+    const value = constDiscriminatorValue(
+      branch,
+      propertyName,
+      sourceDocument,
+      context,
+      new Set(seen),
+    )
+    if (value !== undefined) return value
+  }
+  return undefined
 }
 
 function validateDocuments(documents, context) {
@@ -375,11 +393,68 @@ function tsObjectShapeType(shape, context) {
   return body
 }
 
+function typescriptEnumMemberType(baseProperty, value, document, context) {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined
+  const candidates = [baseProperty, ...(baseProperty.oneOf ?? []), ...(baseProperty.anyOf ?? [])]
+  for (const candidate of candidates) {
+    if (!isObject(candidate) || typeof candidate.$ref !== 'string') continue
+    const name = referenceName(candidate, document, context)
+    const definition = context.registry.get(name)?.schema
+    if (!Array.isArray(definition?.enum) || !definition.enum.includes(value)) continue
+    const used = new Set()
+    for (const enumValue of definition.enum) {
+      const variant = typescriptEnumVariant(enumValue, used)
+      if (enumValue === value) return `${name}.${variant}`
+    }
+  }
+  return undefined
+}
+
+function tsObjectOneOfBranchType(branch, baseProperties, baseRequired, document, context) {
+  if (!isObject(branch)) return 'never'
+  if (branch.properties === undefined) return tsType(branch, document, context)
+  const required = new Set([
+    ...(branch.required ?? []),
+    ...Object.keys(branch.properties).filter(name => baseRequired.has(name)),
+  ])
+  const properties = Object.entries(branch.properties)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, property]) => {
+      const constraint = isObject(property) ? property : {}
+      const baseProperty = isObject(baseProperties[name]) ? baseProperties[name] : {}
+      const enumMember = constraint.const === undefined
+        ? undefined
+        : typescriptEnumMemberType(baseProperty, constraint.const, document, context)
+      const type = enumMember ?? tsType(constraint, document, context)
+      return `  readonly ${JSON.stringify(name)}${required.has(name) ? '' : '?'}: ${type}`
+    })
+  return properties.length === 0 ? '{}' : `{
+${properties.join('\n')}
+}`
+}
+
+function tsObjectOneOfType(schema, document, context) {
+  const base = tsObjectType(schema, document, context)
+  const baseRequired = new Set(schema.required ?? [])
+  const branches = schema.oneOf.map(branch => tsObjectOneOfBranchType(
+    branch,
+    schema.properties ?? {},
+    baseRequired,
+    document,
+    context,
+  ))
+  return `${base} & (${unique(branches).join(' | ')})`
+}
+
 function tsType(schema, document, context) {
   if (!isObject(schema)) return 'unknown'
   if (typeof schema.$ref === 'string') return referenceName(schema, document, context)
   if (schema.const !== undefined) return tsLiteral(schema.const)
   if (Array.isArray(schema.enum)) return unique(schema.enum.map(tsLiteral)).join(' | ') || 'never'
+  if (
+    Array.isArray(schema.oneOf)
+    && (schema.type === 'object' || schema.properties !== undefined)
+  ) return tsObjectOneOfType(schema, document, context)
   if (Array.isArray(schema.oneOf)) {
     return unique(schema.oneOf.map(branch => tsType(branch, document, context))).join(' | ')
   }
@@ -472,6 +547,10 @@ function renderTypescriptDefinition(entry, context) {
     }
   }
   if (schema.type === 'object' || schema.properties !== undefined) {
+    if (Array.isArray(schema.oneOf)) {
+      lines.push(`export type ${name} = ${tsObjectOneOfType(schema, document, context)}`)
+      return lines.join('\n')
+    }
     if (
       isObject(schema.additionalProperties)
       && Object.keys(schema.properties ?? {}).length === 0
@@ -673,6 +752,7 @@ function rustObjectShapeFields(
   existingNames,
   qualifyShared,
   typeOverrides = new Map(),
+  includeDeserializeAttributes = true,
 ) {
   const fields = []
   for (const [jsonName, property] of [...shape.properties.entries()]
@@ -691,6 +771,9 @@ function rustObjectShapeFields(
     if (optional && !type.startsWith('Option<')) type = `Option<${type}>`
     fields.push(...rustDocumentation(resolvedSchema.description).map(line => `    ${line}`))
     if (optional) fields.push('    #[serde(default, skip_serializing_if = "Option::is_none")]')
+    else if (includeDeserializeAttributes && type.startsWith('Option<')) {
+      fields.push('    #[serde(deserialize_with = "deserialize_required_nullable")]')
+    }
     fields.push(`    #[serde(rename = ${JSON.stringify(jsonName)})]`)
     fields.push(`    pub ${fieldName}: ${type},`)
   }
@@ -715,6 +798,198 @@ function rustObjectShapeFields(
   return fields
 }
 
+function rustObjectShapeFieldNames(shape) {
+  const names = []
+  const existingNames = new Set()
+  for (const [jsonName] of [...shape.properties.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))) {
+    let fieldName = rustFieldName(jsonName)
+    let suffix = 2
+    while (existingNames.has(fieldName)) {
+      fieldName = `${rustFieldName(jsonName)}_${String(suffix)}`
+      suffix += 1
+    }
+    existingNames.add(fieldName)
+    names.push(fieldName)
+  }
+  return names
+}
+
+function rustIntegerLiteral(value, sourcePath) {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${sourcePath}: Rust integer constraint must be a safe integer`)
+  }
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/gu, '_')
+}
+
+function rustJsonValueConstraint(
+  schema,
+  accessor,
+  sourcePath,
+  document,
+  context,
+  qualifyShared,
+) {
+  if (!isObject(schema)) {
+    throw new Error(`${sourcePath}: oneOf property constraint must be an object`)
+  }
+  if (schema.const !== undefined) {
+    if (typeof schema.const === 'string') {
+      return `matches!(${accessor}, Some(serde_json::Value::String(value)) if value == ${JSON.stringify(schema.const)})`
+    }
+    if (typeof schema.const === 'boolean') {
+      return `${accessor}.and_then(serde_json::Value::as_bool) == Some(${String(schema.const)})`
+    }
+    if (typeof schema.const === 'number') {
+      return `${accessor}.and_then(serde_json::Value::as_f64) == Some(${String(schema.const)}f64)`
+    }
+    if (schema.const === null) return `${accessor}.is_some_and(serde_json::Value::is_null)`
+  }
+  if (typeof schema.$ref === 'string') {
+    const type = rustType(schema, document, context, qualifyShared)
+    return `${accessor}.is_some_and(|value| serde_json::from_value::<${type}>(value.clone()).is_ok())`
+  }
+  const types = schemaTypes(schema)
+  if (types.length === 1 && types[0] === 'null') {
+    return `${accessor}.is_some_and(serde_json::Value::is_null)`
+  }
+  if (types.length === 1 && types[0] === 'string') {
+    const checks = [`let Some(value) = value.as_str() else { return false; };`]
+    if (schema.minLength !== undefined) checks.push(`if value.chars().count() < ${String(schema.minLength)} { return false; }`)
+    if (schema.maxLength !== undefined) checks.push(`if value.chars().count() > ${String(schema.maxLength)} { return false; }`)
+    checks.push('true')
+    return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+  }
+  if (types.length === 1 && types[0] === 'integer') {
+    let predicate = 'true'
+    if (schema.minimum !== undefined && schema.maximum !== undefined) {
+      const minimum = rustIntegerLiteral(schema.minimum, sourcePath)
+      const maximum = rustIntegerLiteral(schema.maximum, sourcePath)
+      predicate = `(${minimum}..=${maximum}).contains(&value)`
+    } else if (schema.minimum !== undefined) {
+      predicate = `value >= ${rustIntegerLiteral(schema.minimum, sourcePath)}`
+    } else if (schema.maximum !== undefined) {
+      predicate = `value <= ${rustIntegerLiteral(schema.maximum, sourcePath)}`
+    }
+    return `${accessor}.and_then(serde_json::Value::as_i64).is_some_and(|value| ${predicate})`
+  }
+  if (types.length === 1 && types[0] === 'array') {
+    const checks = ['let Some(items) = value.as_array() else { return false; };']
+    if (schema.minItems === 1) checks.push('if items.is_empty() { return false; }')
+    else if (schema.minItems !== undefined) checks.push(`if items.len() < ${String(schema.minItems)} { return false; }`)
+    if (schema.maxItems !== undefined) checks.push(`if items.len() > ${String(schema.maxItems)} { return false; }`)
+    if (isObject(schema.items) && schemaTypes(schema.items).includes('string')) {
+      const itemChecks = ['let Some(value) = item.as_str() else { return false; };']
+      if (schema.items.minLength !== undefined) itemChecks.push(`if value.chars().count() < ${String(schema.items.minLength)} { return false; }`)
+      if (schema.items.maxLength !== undefined) itemChecks.push(`if value.chars().count() > ${String(schema.items.maxLength)} { return false; }`)
+      itemChecks.push('true')
+      checks.push(`if !items.iter().all(|item| {\n${itemChecks.join('\n')}\n}) { return false; }`)
+    }
+    checks.push('true')
+    return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+  }
+  throw new Error(`${sourcePath}: unsupported object-level oneOf property constraint`)
+}
+
+function rustObjectOneOfBranchExpression(branch, entry, index, context, qualifyShared) {
+  if (!isObject(branch) || !isObject(branch.properties)) {
+    throw new Error(
+      `${entry.document.path}: ${entry.name} oneOf branch ${String(index + 1)} must use property constraints`,
+    )
+  }
+  const checks = Object.entries(branch.properties).map(([name, constraint]) => (
+    rustJsonValueConstraint(
+      constraint,
+      `value.get(${JSON.stringify(name)})`,
+      `${entry.document.path}: ${entry.name}.oneOf[${String(index)}].${name}`,
+      entry.document,
+      context,
+      qualifyShared,
+    )
+  ))
+  return checks.length === 0 ? 'true' : checks.join(' && ')
+}
+
+function renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTypes) {
+  const shape = {
+    properties: new Map(Object.entries(entry.schema.properties ?? {}).map(([name, property]) => [
+      name,
+      { schema: isObject(property) ? property : {}, document: entry.document },
+    ])),
+    required: new Set(entry.schema.required ?? []),
+    additionalProperties: entry.schema.additionalProperties,
+  }
+  const wireName = `${entry.name}Wire`
+  const fieldNames = rustObjectShapeFieldNames(shape)
+  lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize)]')
+  lines.push(`pub struct ${entry.name} {`)
+  lines.push(...rustObjectShapeFields(
+    shape,
+    context,
+    new Set(),
+    qualifyShared,
+    constTypes,
+    false,
+  ))
+  lines.push('}')
+  lines.push('')
+  lines.push('#[derive(serde::Serialize, serde::Deserialize)]')
+  if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
+  lines.push(`struct ${wireName} {`)
+  lines.push(...rustObjectShapeFields(
+    shape,
+    context,
+    new Set(),
+    qualifyShared,
+    constTypes,
+    true,
+  ))
+  lines.push('}')
+  lines.push('')
+  lines.push('#[rustfmt::skip]')
+  lines.push(`impl ${entry.name} {`)
+  lines.push(`    fn from_wire(wire: ${wireName}) -> Result<Self, String> {`)
+  lines.push('        let value = serde_json::to_value(&wire)')
+  lines.push(`            .map_err(|error| format!(${JSON.stringify(`${entry.name} validation failed: {error}`)}))?;`)
+  lines.push('        let matching_branches = [')
+  entry.schema.oneOf.forEach((branch, index) => {
+    lines.push(`            ${rustObjectOneOfBranchExpression(
+      branch,
+      entry,
+      index,
+      context,
+      qualifyShared,
+    )},`)
+  })
+  lines.push('        ]')
+  lines.push('        .into_iter()')
+  lines.push('        .filter(|matches| *matches)')
+  lines.push('        .count();')
+  lines.push('        if matching_branches != 1 {')
+  lines.push(`            return Err(${JSON.stringify(`${entry.name} must match exactly one oneOf branch`)}.to_owned());`)
+  lines.push('        }')
+  lines.push(`        let ${wireName} {`)
+  for (const name of fieldNames) lines.push(`            ${name},`)
+  lines.push('        } = wire;')
+  lines.push('        Ok(Self {')
+  for (const name of fieldNames) lines.push(`            ${name},`)
+  lines.push('        })')
+  lines.push('    }')
+  lines.push('}')
+  lines.push('')
+  lines.push('#[rustfmt::skip]')
+  lines.push(`impl<'de> serde::Deserialize<'de> for ${entry.name} {`)
+  lines.push('    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>')
+  lines.push('    where')
+  lines.push("        D: serde::Deserializer<'de>,")
+  lines.push('    {')
+  lines.push(`        let wire = <${wireName} as serde::Deserialize>::deserialize(deserializer)?;`)
+  lines.push('        Self::from_wire(wire).map_err(serde::de::Error::custom)')
+  lines.push('    }')
+  lines.push('}')
+  return lines.join('\n')
+}
+
 function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
   const constTypes = new Map()
@@ -728,6 +1003,9 @@ function renderRustObject(entry, context, qualifyShared) {
     lines.push(`    ${rustVariantName(property.const)},`)
     lines.push('}')
     lines.push('')
+  }
+  if (Array.isArray(entry.schema.oneOf)) {
+    return renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTypes)
   }
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
   if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
@@ -884,6 +1162,15 @@ function renderRustApi(context, digest) {
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared scalar value objects are defined once in `winwincode-domain`.',
     '',
+    '#[allow(clippy::missing_errors_doc)]',
+    "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",
+    'where',
+    "    D: serde::Deserializer<'de>,",
+    "    T: serde::Deserialize<'de>,",
+    '{',
+    '    <Option<T> as serde::Deserialize>::deserialize(deserializer)',
+    '}',
+    '',
     '/// Canonical Control Plane routes and projection refresh behavior for generated clients.',
     `pub const WINWINCODE_CLIENT_METADATA_JSON: &str = ${rustRawString(JSON.stringify(context.clientMetadata))};`,
     '',
@@ -961,11 +1248,38 @@ function mergedOpenApiPaths(documents, context) {
   return paths
 }
 
+function mergedOpenApiSecuritySchemes(documents) {
+  const securitySchemes = {}
+  for (const document of documents) {
+    const extension = document.schema['x-winwincode-openapi']
+    if (extension === undefined) continue
+    const schemes = extension.securitySchemes
+    if (schemes === undefined) continue
+    if (!isObject(schemes)) {
+      throw new Error(`${document.path}: x-winwincode-openapi.securitySchemes must be an object`)
+    }
+    for (const [name, scheme] of Object.entries(schemes)) {
+      if (!isObject(scheme)) {
+        throw new Error(`${document.path}: OpenAPI security scheme ${name} must be an object`)
+      }
+      if (Object.hasOwn(securitySchemes, name)) {
+        throw new Error(`${document.path}: duplicate OpenAPI security scheme ${name}`)
+      }
+      securitySchemes[name] = canonicalValue(scheme)
+    }
+  }
+  return securitySchemes
+}
+
 function renderOpenApi(documents, context, digest) {
   const schemas = {}
   for (const entry of [...context.registry.values()].sort((left, right) => left.name.localeCompare(right.name))) {
     schemas[entry.name] = rewriteReferences(entry.schema, entry.document, context, 'openapi')
   }
+  const securitySchemes = mergedOpenApiSecuritySchemes(documents)
+  const components = Object.keys(securitySchemes).length === 0
+    ? { schemas }
+    : { schemas, securitySchemes }
   return canonicalJson({
     openapi: '3.1.0',
     jsonSchemaDialect: JSON_SCHEMA_DIALECT,
@@ -979,7 +1293,7 @@ function renderOpenApi(documents, context, digest) {
       },
     },
     paths: mergedOpenApiPaths(documents, context),
-    components: { schemas },
+    components,
     'x-generated-from': documents.map(document => document.id).sort((left, right) => left.localeCompare(right)),
     'x-source-digest': `sha256:${digest}`,
     'x-winwincode-client-metadata': context.clientMetadata,

@@ -71,7 +71,7 @@ Session 投影则只接受已经同时绑定 WorkerSession 和 CodexThread 的�
 
 页面首次打开时先读取 `delivery.get`。Control Plane 在结果中签发一个
 `StrongFlowReadCursor`，它精确绑定 repository scope、Delivery revision、runtime ledger
-revision、已接受运行事实序号和 publication revision。页面把同一个 cursor 作为 `atCursor`
+revision、已接受运行事实序号、publication revision 和 Delivery 事件流的 `eventCursor`。页面把同一个 cursor 作为 `atCursor`
 提交给 `runtime.projection.get`；第二个结果必须返回完全相同的 cursor。cursor 不使用生成时间，
 也不能由浏览器自行拼装。每次查询的 envelope scope 和 deliveryId 都必须与 cursor 完全一致；
 认证和授权检查仍按当前 actor 执行，cursor 不是跨 scope 的访问凭据。
@@ -87,11 +87,14 @@ Delivery-stage 失效分支带 `scopeKind=delivery-stage` 和非空 Delivery/Sta
 后，页面重新执行上述两步：先用
 `delivery.get` 建立新读取截面，再让 `runtime.projection.get` 使用该截面。任何一步失败，
 或者两个结果的 cursor 不一致，页面丢弃整对结果并重新读取，不能显示一半新、一半旧的内容。
-两项都成功后才从新快照继续订阅。页面不拿旧内存状态猜测缺失内容。
+两项都成功后，页面把 read cursor 中已经签名的 `eventCursor` 原样放进
+`transport.subscribe.v1.startAt`。Control Plane 接受的 sequence 是连续基线，第一条新事件
+必须是基线加一。页面不把 `startAt` 改成 latest，也不拿旧内存状态猜测缺失内容。
 
 普通 Chat 的 product-session 失效分支带 `scopeKind=product-session`，不带 DeliveryId 或
 StageRunId，只重新读取 `runtime.projection.get`，其快照 `readCursor=null`。它不会为了复用
-StrongFlow 刷新路径而制造隐藏 Delivery。
+StrongFlow 刷新路径而制造隐藏 Delivery。它仍返回 product-session 流的 `eventCursor`，页面
+从这个位置建立订阅，所以 HTTP 响应与 WebSocket 连接之间发生的失效通知不会漏掉。
 
 通用 `transport.reset-required.v1` 不携带固定 reload query。客户端收到 reset、WebSocket cursor
 过期或权限 epoch 改变时，先丢弃原订阅的旧局部状态，再按保存的
@@ -146,12 +149,20 @@ Web 只使用生成的 HTTP 和 WebSocket 客户端。页面代码可以负责�
 - `runtime-projection.invalidated.v1` 只通知页面重新读取 HTTP 快照。delivery-stage 分支执行
   paired read，product-session 分支只重载 runtime；旧的文字摘要追加事件已删除。
 - `DeliveryDetailProjection` 和 delivery-stage `RuntimeProjectionSnapshot` 都携带同一个
-  `StrongFlowReadCursor`。`delivery.get` 建立截面，`runtime.projection.get` 只重放该截面，
-  Web 不拼接两个独立的 latest 结果。
+  `StrongFlowReadCursor`。该 cursor 还签名覆盖 Delivery 流的 `eventCursor`；
+  `delivery.get` 建立截面，`runtime.projection.get` 只重放该截面，Web 随后从该 eventCursor
+  订阅，不拼接两个独立的 latest 结果。
+- product-session `RuntimeProjectionSnapshot` 不使用 StrongFlow read cursor，但必须返回
+  自己流的 `eventCursor`，作为 HTTP 快照到 WebSocket 的唯一连续起点。
 - Publication summary 与当前 Delivery、Spec、候选、通过 Verdict、人工批准和目标在同一个
   `delivery.get` 读取截面中核对；已有 publication 事实只要任一字段过期，就拒绝整份截面。
   `resourceRef` 只公开 closed `kind + owner/repository + number`，repository 必须等于 target；
   不返回任意 URL、query、fragment、userinfo 或原始 Provider payload。
+- `solutionReview.reviewerId`、Attention 的 `assignedTo/resolvedBy` 和 Publication 的
+  `approvedBy` 都使用 canonical `ActorId`，不接受任意显示文本、Authorization 内容或凭据值。
+- HTTP 成功响应按 `query` 或 `command` 组成精确判别联合；StrongFlow 请求使用完整
+  repository scope。两个 HTTP 路由只接受 `wwc_session` cookie 或 Bearer JWT，包络 actor
+  必须与认证 principal 一致。
 - ExecutionPort 在 `runtime.event` 前接受一条完整的 `session.binding`，并要求事件携带相同
   `codexThreadId`。未绑定或不一致的事件在保存和投影之前被拒绝。
 - canonical schema 中的 HTTP 路由、查询结果、WebSocket 失效事件和 reset reload metadata

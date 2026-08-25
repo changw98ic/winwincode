@@ -13,6 +13,12 @@
 WebSocket 只推送投影、运行事件、审批请求和通知。业务变更统一提交到 command
 入口，避免 HTTP 与 WebSocket 各自形成一套写入规则。
 
+两个 HTTP 路由都必须显式认证，且只接受两种方式之一：同源 Web/本地 Host 使用
+`wwc_session` cookie，服务账号和企业客户端使用 `Authorization: Bearer <JWT>`。认证材料
+不进入 query、command body 或 URL query；包络中的 `actor` 必须等于服务端认证出的
+principal。OpenAPI 的 `sessionCookie` 与 `bearerAuth` security scheme 是生成客户端的唯一
+认证合同，不存在匿名分支。
+
 ## 文件
 
 - [`domain.schema.json`](./domain.schema.json) 定义跨传输共用的 ID、Actor、Scope、
@@ -73,6 +79,11 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 `IDEMPOTENCY_CONFLICT`。资源版本已变化时返回 `REVISION_CONFLICT`，错误详情同时
 给出 `expectedRevision` 和 `currentRevision`。
 
+成功响应按原始 `command` 或 `query` 组成判别联合。每个操作只允许自己的结果投影；例如
+`delivery.get` 只能返回 `DeliveryDetailProjection`，`runtime.projection.get` 只能返回
+`RuntimeProjectionSnapshot`。调用方或服务端不能把同一结果改写 discriminator 后当作另一项
+操作的响应。
+
 ## 查询与 cursor
 
 查询覆盖 ProductSession、Chat 消息、可重建运行投影、Delivery、设置、凭据引用、审批、
@@ -81,6 +92,12 @@ Worker 和 Publication 的列表与详情。`session.messages.list` 返回只含
 和 WebSocket reset 所需的完整有界投影。列表按稳定快照、`updatedAt`、ID 排序。cursor 是服务端生成的
 不透明字符串，并绑定当前 Scope、查询名、筛选条件和快照；换 Scope、换筛选条件、
 被篡改或已失效的 cursor 统一返回 `INVALID_REQUEST`，错误字段为 `page.cursor`。
+
+完整 Delivery 和 runtime 投影还返回传输中立的 `EventReadCursor`。Delivery 的这个位置包含在
+`StrongFlowReadCursor` 的签名字段中；product-session runtime 直接返回自己的位置。Web 完成
+HTTP 读取后把它原样放入 `transport.subscribe.v1.startAt`。订阅接受帧建立 sequence 与权限版本
+基线，后续第一条事件必须是 `baseline + 1`；保留窗口已经丢失该位置时返回 4409 并重新完整读取。
+`domain.schema.json` 只定义中立 cursor，WebSocket schema 单向引用它，不把传输对象反向塞进领域层。
 
 `input.respond` 不是 ExecutionPort 透传。Control Plane 必须先核对 Actor、Scope、当前
 revision、ProductSession、WorkerSession、ExecutionJob 和 InputRequest 的完整绑定，之后

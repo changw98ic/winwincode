@@ -764,6 +764,414 @@
           ]
         }
       ]
+    },
+    {
+      "name": "subscribe-cursor-crosses-stream",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "eventTypes": [
+              "runtime-projection.invalidated.v1"
+            ]
+          },
+          "startAt": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000999"
+            },
+            "sequence": 0,
+            "eventId": null
+          }
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "eventId": "evt_01J00000000000000000000901",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009"
+          },
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:09:01.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "runtime-projection.invalidated.v1",
+            "scopeKind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009",
+            "projectionRevision": 3,
+            "lastProjectionSequence": 12,
+            "reloadQueries": [
+              "runtime.projection.get"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "subscription-accepted-cursor-crosses-stream",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "eventTypes": [
+              "runtime-projection.invalidated.v1"
+            ]
+          },
+          "startAt": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          }
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "delivery",
+              "deliveryId": "dlv_01J00000000000000000000999"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "eventId": "evt_01J00000000000000000000901",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009"
+          },
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:09:01.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "runtime-projection.invalidated.v1",
+            "scopeKind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009",
+            "projectionRevision": 3,
+            "lastProjectionSequence": 12,
+            "reloadQueries": [
+              "runtime.projection.get"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "first-event-skips-baseline-sequence",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "eventTypes": [
+              "runtime-projection.invalidated.v1"
+            ]
+          },
+          "startAt": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          }
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "eventId": "evt_01J00000000000000000000901",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009"
+          },
+          "sequence": 2,
+          "occurredAt": "2026-08-24T12:09:01.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "runtime-projection.invalidated.v1",
+            "scopeKind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009",
+            "projectionRevision": 3,
+            "lastProjectionSequence": 12,
+            "reloadQueries": [
+              "runtime.projection.get"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "event-authorization-epoch-before-baseline",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "eventTypes": [
+              "runtime-projection.invalidated.v1"
+            ]
+          },
+          "startAt": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          }
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 2,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "eventId": "evt_01J00000000000000000000901",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009"
+          },
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:09:01.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "runtime-projection.invalidated.v1",
+            "scopeKind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009",
+            "projectionRevision": 3,
+            "lastProjectionSequence": 12,
+            "reloadQueries": [
+              "runtime.projection.get"
+            ]
+          }
+        }
+      ]
     }
   ]
 }
