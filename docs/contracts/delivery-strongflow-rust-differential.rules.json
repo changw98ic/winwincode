@@ -49,7 +49,7 @@
     ],
     "inputEnvironment": "WINWINCODE_DELIVERY_DIFFERENTIAL_INPUT",
     "outputEnvironment": "WINWINCODE_DELIVERY_DIFFERENTIAL_OUTPUT",
-    "inputSchemaVersion": "winwincode.delivery-strongflow-differential-plan.v1",
+    "inputSchemaVersion": "winwincode.delivery-strongflow-differential-plan.v2",
     "outputPolicy": "raw-un_normalized-json-file",
     "absentPolicy": "validate-oracle-plan-migration-map-and-comparator-without-running-cargo",
     "activePolicy": "run-real-cargo-target-require-canonical-expected-and-compare-entire-result"
@@ -63,7 +63,8 @@
     ],
     "exactScenarioKeys": [
       "commands",
-      "id"
+      "id",
+      "terminalOutcomeStatusBySourceCommandIndex"
     ],
     "strongFlowCommandKeys": [
       "kind",
@@ -78,7 +79,7 @@
       "observation",
       "response"
     ],
-    "expectedStateInputPolicy": "Only fixture.store.seed-snapshot.input.snapshot may carry seeded Delivery state. No final observation, expected response, journal record, manifest, receipt, outbox, or final snapshot enters the runner plan."
+    "expectedStateInputPolicy": "Only fixture.store.seed-snapshot.input.snapshot may carry seeded Delivery state. terminalOutcomeStatusBySourceCommandIndex is the sole additional closed migration provenance derived from a legacy completed response; it is not expected product state. No raw command response, assertion, final observation, journal record, manifest, receipt, outbox, or final snapshot enters the runner plan."
   },
   "canonicalMigration": {
     "mappingVersion": "winwincode.delivery-strongflow-legacy-to-canonical.v1",
@@ -361,7 +362,7 @@
       "requestType": "JobOutcomeMessage",
       "requestAuthority": "schema/winwincode/v1/execution-port.schema.json#/$defs/JobOutcomeMessage",
       "sourceOperation": "submitVerdict",
-      "sourceFactSelection": "For each distinct current final verifier SessionBinding and ExecutionJob, select exactly one successful terminal turn.completed Worker fact from the legacy submitVerdict runtimeEvents; repeated submissions carrying that exact fact reuse its accepted durable outcome.",
+      "sourceFactSelection": "For each distinct current final verifier SessionBinding and ExecutionJob, select exactly one terminal turn.completed Worker provenance fact from the legacy submitVerdict runtimeEvents; derive the generated outcome status from the completed legacy submit response carrying that exact fact; repeated submissions carrying that exact fact reuse its accepted durable outcome.",
       "deduplicationPolicy": "The exact tuple of verifier legacy sessionId, terminal event cursor.sequence, and occurredAtMillis is emitted once before its first delivery.submit_verdict; a later request carrying the same tuple adds no second job.outcome message.",
       "sourceCommandIndexesByScenario": {
         "success-closed-loop": [
@@ -387,13 +388,25 @@
           25
         ]
       },
+      "outcomeStatusByScenario": {
+        "success-closed-loop": "succeeded",
+        "request-id-replay": null,
+        "revision-conflict": null,
+        "corruption-recovery": null,
+        "task-dag": null,
+        "candidate-invalidation": "succeeded",
+        "attention": null,
+        "inconclusive": "succeeded",
+        "infra-error": "infrastructure_error",
+        "rework": "succeeded"
+      },
       "requestValueSources": {
         "lease": "exact current verifier ExecutionJob active lease",
         "workerSessionId": "exact current verifier SessionBinding.workerSessionId",
         "codexThreadId": "exact current verifier SessionBinding.codexThreadId",
         "finishedAt": "selected terminal turn.completed occurredAtMillis encoded as an exact UTC Instant",
         "lastEventSequence": "selected terminal turn.completed cursor.sequence",
-        "status": "succeeded",
+        "status": "exact status derived from the completed legacy submit response current verifier StageRun and Verdict",
         "summary": "selected terminal turn.completed data.last_agent_message",
         "artifacts": "empty array because the legacy terminal fact has no ExecutionPort ArtifactReference",
         "sentAt": "same exact Instant as outcome.finishedAt",
@@ -673,8 +686,11 @@
             "summary"
           ]
         },
-        "outcomeStatusByTarget": {
-          "job.outcome": "succeeded"
+        "outcomeStatusesByTarget": {
+          "job.outcome": [
+            "infrastructure_error",
+            "succeeded"
+          ]
         },
         "artifactExactKeys": [
           "artifactId",

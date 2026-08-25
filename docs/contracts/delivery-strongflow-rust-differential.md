@@ -186,15 +186,24 @@ invented.
 Each distinct final verifier terminal Worker fact is also migrated through the
 generated `JobOutcomeMessage` branch. The message uses the exact current
 ExecutionJob lease, WorkerSession, and CodexThread. Its finish time, last event
-sequence, and summary come from the matching successful verifier
-`turn.completed` fact; its artifact list is empty because the legacy fact has
-no ExecutionPort `ArtifactReference`. The real terminal-outcome seam applies
+sequence, and summary come from the matching terminal verifier
+`turn.completed` provenance fact; its artifact list is empty because the
+legacy fact has no ExecutionPort `ArtifactReference`. Its status comes from
+the completed legacy submit response carrying that exact fact. In the
+`infra-error` scenario, source command 17 has a failed final verifier StageRun
+and an `infra_error` Verdict, so the generated status is exactly
+`infrastructure_error`. The generated schema's underscore spelling is exact;
+it has no alias and is not normalized. Terminal facts in
+`success-closed-loop`, `candidate-invalidation`, `inconclusive`, and `rework`
+all use `succeeded`; a `fail` or `inconclusive` Verdict does not itself mean
+the Worker job failed. The real terminal-outcome seam applies
 `apply_terminal_outcome` as a separate durable commit and adds one revision.
 The candidate-invalidation stale/current submit pair carries the same second
 terminal fact, so that fact is committed once before the stale submit attempt
 and reused by the following current-candidate submit. All later revisions,
 events, receipts, outbox values, cursors, and journal digests are rebuilt from
-this sequence.
+this sequence. The status correction changes no command count or revision
+checkpoint.
 
 The canonical error envelope is always the closed generated shape. A duplicate
 create with a different request ID and the same Delivery ID maps to
@@ -226,12 +235,25 @@ Node supplies two environment variables:
 | `WINWINCODE_DELIVERY_DIFFERENTIAL_INPUT` | Path to a mode-0600 execution-plan JSON file. |
 | `WINWINCODE_DELIVERY_DIFFERENTIAL_OUTPUT` | Path where the Rust test must write its raw, unnormalized result JSON. |
 
-The plan contains only `schemaVersion`, `oracleSchemaVersion`, runtime
-bindings, and `scenarios[].{id,commands}`. A public request carries only its
-legacy request input. A fixture command carries only its fixture input. The
-plan contains no command response, assertion, final observation, final
-journal, receipt, outbox, or final snapshot. The only state-seeding exception
-is the declared `fixture.store.seed-snapshot.input.snapshot` command.
+The sole plan schema is
+`winwincode.delivery-strongflow-differential-plan.v2`. It contains only
+`schemaVersion`, `oracleSchemaVersion`, runtime bindings, and the closed
+scenario shape
+`{id,commands,terminalOutcomeStatusBySourceCommandIndex}`. The status map's
+keys are exactly the distinct `job.outcome` source command indexes for that
+scenario; no-outcome scenarios use `{}`. Its values are limited to the exact
+generated literals `succeeded` and `infrastructure_error`, and Node proves each
+value from the unique completed legacy submit response carrying the same
+terminal verifier fact. Rust consumes this map directly rather than branching
+on a scenario ID or deriving another status. This map is the sole additional
+closed migration provenance derived from a legacy response; it is not expected
+product state.
+
+A public request carries only its legacy request input. A fixture command
+carries only its fixture input. The plan contains no command response,
+assertion, final observation, final journal, receipt, outbox, or final
+snapshot. The only state-seeding exception is the declared
+`fixture.store.seed-snapshot.input.snapshot` command.
 
 The canonical expected file becomes mandatory only after the Rust trigger:
 

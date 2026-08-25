@@ -1571,8 +1571,7 @@ pub(crate) mod test_support {
         let reviewer = state(VerificationRole::Reviewer);
         let verifier = state(VerificationRole::Verifier);
         assert!(
-            [reviewer, verifier]
-                .contains(&VerificationFixtureState::InfrastructureFailed),
+            [reviewer, verifier].contains(&VerificationFixtureState::InfrastructureFailed),
             "infrastructure fixture requires at least one current Failed role StageRun"
         );
         resolved_independent_verification(delivery, candidate, reviewer, verifier)
