@@ -292,6 +292,38 @@ function commandTool(body) {
   return tool.function.name
 }
 
+function writeStdinTool(body) {
+  const tool = body.tools?.find(entry => (
+    entry.type === 'function'
+    && isRecord(entry.function?.parameters?.properties)
+    && Object.hasOwn(entry.function.parameters.properties, 'session_id')
+    && entry.function.name === 'write_stdin'
+  ))
+  assert.notEqual(tool, undefined, 'Codex request must expose write_stdin for yielded commands')
+  return tool.function.name
+}
+
+function runningExecSessions(messages) {
+  return messages.flatMap(message => {
+    const match = /Process running with session ID (\d+)/u.exec(textOfContent(message.content))
+    return match === null ? [] : [Number.parseInt(match[1], 10)]
+  })
+}
+
+function assertBackgroundPollResults(assistant, messages) {
+  const pollCallIds = new Set(assistant.tool_calls
+    .filter(call => call.function.name === 'write_stdin')
+    .map(call => call.id))
+  for (const message of messages) {
+    if (!pollCallIds.has(message.tool_call_id)) continue
+    assert.match(
+      textOfContent(message.content),
+      /Process (?:running with session ID \d+|exited with code \d+)/u,
+      'write_stdin must report the same process as running or terminal',
+    )
+  }
+}
+
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -328,6 +360,7 @@ function verificationJson(prompt, role) {
 
 async function fakeOpenAiServer(options = {}) {
   const requests = []
+  let backgroundPolls = 0
   let parallelToolResultFollowUps = 0
   const verificationResultAttempts = { reviewer: 0, verifier: 0 }
   const server = createServer(async (request, response) => {
@@ -351,7 +384,25 @@ async function fakeOpenAiServer(options = {}) {
         results.map(message => message.tool_call_id).sort(),
         assistant.tool_calls.map(call => call.id).sort(),
       )
+      assertBackgroundPollResults(assistant, results)
       if (assistant.tool_calls.length === 2) parallelToolResultFollowUps += 1
+      const runningSessions = runningExecSessions(results)
+      if (runningSessions.length > 0) {
+        backgroundPolls += runningSessions.length
+        writeStream(response, body.model, {
+          type: 'tool',
+          calls: runningSessions.map((sessionId, index) => ({
+            id: `call-background-poll-${String(requests.length)}-${String(index + 1)}`,
+            name: writeStdinTool(body),
+            arguments: {
+              session_id: sessionId,
+              chars: '',
+              yield_time_ms: 30_000,
+            },
+          })),
+        })
+        return
+      }
     }
     const prompt = textOfContent(latestUserText(body))
     const system = textOfContent(body.messages.find(message => message.role === 'system')?.content)
@@ -414,7 +465,9 @@ async function fakeOpenAiServer(options = {}) {
           id: 'call-executor-apply',
           name: commandTool(body),
           arguments: {
+            yield_time_ms: 250,
             cmd: [
+              'sleep 2',
               'test -z "${WINWINCODE_EVALUATION_TEST_API_KEY+x}"',
               'printf "executor artifact\\n" > executor-only.tmp',
               `printf "export const value = 'after'\\n" > src/value.mjs`,
@@ -448,6 +501,7 @@ async function fakeOpenAiServer(options = {}) {
   return Object.freeze({
     server,
     requests,
+    backgroundPolls: () => backgroundPolls,
     parallelToolResultFollowUps: () => parallelToolResultFollowUps,
     verificationResultAttempts: role => verificationResultAttempts[role],
     baseURL: `http://127.0.0.1:${String(address.port)}/v1`,
@@ -790,6 +844,7 @@ test('runs one isolated canonical Delivery through the real DSH provider route',
   )
   assert.equal(await readFile(result.path, 'utf8'), stored)
   assert.equal(provider.requests.length, result.result.budget.modelCalls)
+  assert.equal(provider.backgroundPolls() >= 1, true)
   assert.equal(provider.parallelToolResultFollowUps() >= 1, true)
   assert.equal(provider.verificationResultAttempts('reviewer'), 2)
   assert.equal(provider.verificationResultAttempts('verifier'), 2)
