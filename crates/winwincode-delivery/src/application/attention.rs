@@ -7,13 +7,17 @@ use std::ops::Deref;
 use winwincode_domain::{AttentionItemId, StageRunId};
 
 use crate::domain::{
-    AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot, DeliveryStage,
-    DeliveryStatus, StageRunActorType, StageRunStatus,
+    AttentionItem, AttentionItemStatus, AttentionItemType, Delivery, DeliverySnapshot,
+    DeliveryStage, DeliveryStatus, StageRun, StageRunActorType, StageRunStatus,
     rework::{resolved_verdict_attention_action, safest_attention_transition},
 };
 
 use super::{
     CoordinationError, CoordinationErrorCode, require_mutation_time,
+    solution_review::{
+        SolutionReviewErrorCode, ValidatedSolutionReviewSettlement,
+        validate_solution_review_settlement,
+    },
     verdict::current_verdict_attention_actions,
 };
 
@@ -152,6 +156,7 @@ pub fn resolve_attention(
             "human review StageRun is no longer waiting for this Attention decision",
         ));
     }
+    let solution_review_settlement = typed_solution_review_settlement(delivery, item, run, &input)?;
     let verdict_actions = current_verdict_attention_actions(delivery, item)?;
     if verdict_actions.is_some() && input.decision != AttentionDecision::Resolved {
         return Err(CoordinationError::new(
@@ -165,11 +170,53 @@ pub fn resolve_attention(
         item_index,
         run_index,
         verdict_actions,
+        solution_review_settlement,
     )?;
     Ok(ResolvedAttentionTransition {
         source_delivery: delivery.clone(),
         delivery: resolved,
     })
+}
+
+fn typed_solution_review_settlement(
+    delivery: &Delivery,
+    item: &AttentionItem,
+    run: &StageRun,
+    input: &ResolveAttentionInput,
+) -> Result<Option<ValidatedSolutionReviewSettlement>, CoordinationError> {
+    if item.item_type != AttentionItemType::DecisionRequired
+        || run.stage != DeliveryStage::PlanReview
+    {
+        return Ok(None);
+    }
+    let settlement = validate_solution_review_settlement(
+        delivery,
+        &input.attention_item_id,
+        &input.stage_run_id,
+        &input.actor,
+        &input.resolution,
+        input.now_millis,
+    )
+    .map_err(|error| {
+        let code = match error.code() {
+            SolutionReviewErrorCode::InvalidEncoding | SolutionReviewErrorCode::InvalidContent => {
+                CoordinationErrorCode::InvalidRequest
+            }
+            SolutionReviewErrorCode::StaleAuthority
+            | SolutionReviewErrorCode::AmbiguousCurrentReview => {
+                CoordinationErrorCode::StaleAttention
+            }
+        };
+        CoordinationError::new(code, error.message())
+    })?;
+    let input_resolves = input.decision == AttentionDecision::Resolved;
+    if settlement.resolve_attention() != input_resolves {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "plan-review Attention decision does not match its typed solution-review action",
+        ));
+    }
+    Ok(Some(settlement))
 }
 
 fn apply_resolution(
@@ -178,15 +225,19 @@ fn apply_resolution(
     item_index: usize,
     run_index: usize,
     verdict_actions: Option<Vec<crate::domain::rework::VerdictAttentionAction>>,
+    solution_review_settlement: Option<ValidatedSolutionReviewSettlement>,
 ) -> Result<Delivery, CoordinationError> {
     let item_type = snapshot.attention_items[item_index].item_type;
     let run_stage = snapshot.stage_runs[run_index].stage;
     let run_actor_type = snapshot.stage_runs[run_index].actor_type;
     let stored_item = &mut snapshot.attention_items[item_index];
-    stored_item.status = match input.decision {
-        AttentionDecision::Resolved => AttentionItemStatus::Resolved,
-        AttentionDecision::Dismissed => AttentionItemStatus::Dismissed,
-    };
+    stored_item.status = solution_review_settlement.map_or_else(
+        || match input.decision {
+            AttentionDecision::Resolved => AttentionItemStatus::Resolved,
+            AttentionDecision::Dismissed => AttentionItemStatus::Dismissed,
+        },
+        ValidatedSolutionReviewSettlement::attention_status,
+    );
     stored_item.resolution = Some(input.resolution);
     stored_item.resolved_by = Some(input.actor);
     stored_item.resolved_at_millis = Some(input.now_millis);
@@ -196,8 +247,12 @@ fn apply_resolution(
             && item.blocking
             && item.status == AttentionItemStatus::Open
     });
-    let review_decision = if run_actor_type == StageRunActorType::Human && !linked_review_still_open
-    {
+    let review_decision = if let Some(settlement) = solution_review_settlement {
+        let stored_run = &mut snapshot.stage_runs[run_index];
+        stored_run.status = settlement.stage_status();
+        stored_run.finished_at_millis = Some(input.now_millis);
+        input.decision
+    } else if run_actor_type == StageRunActorType::Human && !linked_review_still_open {
         let decision = if snapshot.attention_items.iter().any(|item| {
             item.stage_run_id.as_ref() == Some(&input.stage_run_id)
                 && item.status == AttentionItemStatus::Dismissed
@@ -222,6 +277,8 @@ fn apply_resolution(
         .any(|item| item.blocking && item.status == AttentionItemStatus::Open)
     {
         DeliveryStatus::NeedsAttention
+    } else if let Some(settlement) = solution_review_settlement {
+        settlement.delivery_status()
     } else {
         let actions = verdict_actions.unwrap_or_else(|| {
             snapshot
@@ -254,16 +311,6 @@ fn next_delivery_status(
     decision: AttentionDecision,
 ) -> Result<DeliveryStatus, CoordinationError> {
     let status = match (item_type, stage, decision) {
-        (
-            AttentionItemType::DecisionRequired,
-            DeliveryStage::PlanReview,
-            AttentionDecision::Resolved,
-        ) => DeliveryStatus::Executing,
-        (
-            AttentionItemType::DecisionRequired,
-            DeliveryStage::PlanReview,
-            AttentionDecision::Dismissed,
-        ) => DeliveryStatus::Planning,
         (
             AttentionItemType::DeliveryApproval,
             DeliveryStage::DeliveryReview,
