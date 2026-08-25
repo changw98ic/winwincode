@@ -995,6 +995,147 @@ mod tests {
     };
     use crate::domain::CriterionVerdict;
 
+    fn freeze_non_default_candidate(delivery: &Delivery) -> FrozenDeliveryCandidate {
+        use crate::domain::candidate::CandidateHunkFact;
+        use crate::domain::candidate::test_support::{
+            CandidateFixtureInput, freeze_candidate_fixture,
+        };
+        use crate::domain::{CandidatePathFact, CandidatePathState};
+
+        freeze_candidate_fixture(
+            delivery,
+            &StageRunId("stage-executor-1".into()),
+            &SessionBindingId("binding-executor-1".into()),
+            CandidateFixtureInput {
+                base_commit_id: "4".repeat(40),
+                base_tree_id: "5".repeat(40),
+                candidate_commit_id: "6".repeat(40),
+                candidate_tree_id: "7".repeat(40),
+                diff_sha256: "8".repeat(64),
+                // Distinct identities and opposing orders make reconstruction
+                // observably different from copying the sealed candidate.
+                changed_paths: vec![
+                    CandidatePathFact {
+                        path: "src/zeta.rs".into(),
+                        state: CandidatePathState::Present,
+                        object_id: Some("9".repeat(40)),
+                    },
+                    CandidatePathFact {
+                        path: "src/alpha.rs".into(),
+                        state: CandidatePathState::Deleted,
+                        object_id: None,
+                    },
+                ],
+                changed_hunks: vec![
+                    CandidateHunkFact {
+                        file_path: "src/zeta.rs".into(),
+                        hunk_sha256: "a".repeat(64),
+                        source_hunk_sha256: Some("c".repeat(64)),
+                    },
+                    CandidateHunkFact {
+                        file_path: "src/alpha.rs".into(),
+                        hunk_sha256: "d".repeat(64),
+                        source_hunk_sha256: None,
+                    },
+                    CandidateHunkFact {
+                        file_path: "src/zeta.rs".into(),
+                        hunk_sha256: "e".repeat(64),
+                        source_hunk_sha256: Some("f".repeat(64)),
+                    },
+                ],
+                artifact_ref: "artifact:oracle:executor".into(),
+                artifact_digest: winwincode_domain::Sha256Digest(format!(
+                    "sha256:{}",
+                    "b".repeat(64)
+                )),
+                terminal_event_sequence: 12,
+            },
+        )
+    }
+
+    #[test]
+    fn verdict_facts_fixture_uses_the_exact_sealed_candidate_checkout_for_every_outcome() {
+        for (index, (outcome, expected_verdict, expected_job_outcome)) in [
+            (
+                test_support::VerdictFixtureOutcome::Pass,
+                CriterionVerdict::Pass,
+                VerificationJobOutcomeStatus::Succeeded,
+            ),
+            (
+                test_support::VerdictFixtureOutcome::Fail,
+                CriterionVerdict::Fail,
+                VerificationJobOutcomeStatus::Succeeded,
+            ),
+            (
+                test_support::VerdictFixtureOutcome::Inconclusive,
+                CriterionVerdict::Inconclusive,
+                VerificationJobOutcomeStatus::Succeeded,
+            ),
+            (
+                test_support::VerdictFixtureOutcome::InfraError,
+                CriterionVerdict::InfraError,
+                VerificationJobOutcomeStatus::InfrastructureError,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fixture = test_support::verdict_fixture(
+                &winwincode_domain::DeliveryId(format!("dlv_01J0000000000000000000001{index}")),
+                outcome,
+            );
+            let mut snapshot = fixture.delivery.into_snapshot();
+            snapshot.spec.base_revision = "refs/heads/oracle-candidate".into();
+            let delivery = Delivery::try_from_snapshot(snapshot)
+                .expect("verdict fixture with a symbolic base revision");
+            let candidate = freeze_non_default_candidate(&delivery);
+
+            let facts = test_support::verdict_facts_fixture(&delivery, &candidate, outcome);
+
+            assert_eq!(
+                facts.verification().candidate_ref(),
+                candidate.candidate_ref()
+            );
+            assert_eq!(facts.verification().settlements().len(), 2);
+            assert_eq!(
+                facts.verification().settlements()[0].role(),
+                VerificationRole::Reviewer
+            );
+            assert_eq!(
+                facts.verification().settlements()[1].role(),
+                VerificationRole::Verifier
+            );
+            for settlement in facts.verification().settlements() {
+                let assignment = settlement
+                    .assignment()
+                    .expect("settled role keeps its exact candidate assignment");
+                assert_eq!(assignment.repository(), candidate.repository());
+                assert_eq!(
+                    assignment.checkout_revision(),
+                    candidate.candidate_commit_id()
+                );
+                let terminal = settlement
+                    .terminal_job_outcome()
+                    .expect("settled role keeps its accepted terminal outcome");
+                assert_eq!(terminal.status(), expected_job_outcome);
+                assert_eq!(
+                    terminal.terminal_candidate_tree_id(),
+                    candidate.candidate_tree_id()
+                );
+            }
+
+            let computed = crate::domain::compute_delivery_verdict(
+                &delivery,
+                &candidate,
+                facts.verification(),
+                facts.evidence(),
+                delivery.snapshot().updated_at_millis + 10,
+            )
+            .expect("exact sealed candidate facts must pass production verdict computation");
+            assert_eq!(computed.verdict().status, expected_verdict);
+        }
+    }
+
     #[test]
     fn verdict_facts_fixture_maps_all_computed_outcomes() {
         for (index, (outcome, expected)) in [

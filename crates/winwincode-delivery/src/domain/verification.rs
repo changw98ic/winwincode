@@ -1020,6 +1020,7 @@ fn snapshot_matches_candidate(
         && snapshot.candidate_tree_id() == candidate.candidate_tree_id()
         && snapshot.diff_sha256() == candidate.diff_sha256()
         && snapshot.changed_paths() == candidate.changed_paths()
+        && snapshot.changed_hunks() == candidate.changed_hunks()
 }
 
 fn validate_terminal_job_outcome(
@@ -1465,7 +1466,7 @@ pub(crate) mod test_support {
             verify_terminal_outcome,
         },
     };
-    use crate::domain::candidate::test_support::validated_git_snapshot;
+    use crate::domain::candidate::test_support::validated_candidate_checkout;
     use winwincode_domain::ArtifactId;
 
     #[allow(dead_code)]
@@ -1560,15 +1561,7 @@ pub(crate) mod test_support {
             .expect("verification fixture current role StageRun");
         let binding = current_role_binding(delivery, run, "verification.fixture")
             .expect("verification fixture current role SessionBinding");
-        let snapshot = validated_git_snapshot(
-            delivery,
-            &run.id,
-            &binding.id,
-            candidate.candidate_commit_id(),
-            candidate.candidate_tree_id(),
-            candidate.diff_sha256(),
-            candidate.changed_paths().to_vec(),
-        );
+        let snapshot = validated_candidate_checkout(delivery, &run.id, &binding.id, candidate);
         let terminal_status = match state {
             VerificationFixtureState::InfrastructureFailed => {
                 TerminalOutcomeStatus::InfrastructureError
@@ -1864,7 +1857,10 @@ mod tests {
             verify_terminal_outcome,
         },
     };
-    use crate::domain::candidate::test_support::{frozen_candidate, validated_git_snapshot};
+    use crate::domain::candidate::{
+        CandidateHunkFact,
+        test_support::{frozen_candidate, validated_git_snapshot, with_changed_hunks},
+    };
     use crate::domain::{
         Delivery, DeliveryStage, DeliveryStatus, FrozenDeliveryCandidate, SessionBinding,
         SessionBindingId, StageRun, StageRunActorType, StageRunStatus, test_fixture,
@@ -2526,6 +2522,37 @@ mod tests {
         );
         adversarial.sessions[2].mutation_records.push(record);
         assert!(validate_independent_verification(&delivery, &candidate, &adversarial).is_err());
+    }
+
+    #[test]
+    fn rejects_a_sealed_checkout_with_hunks_from_another_candidate() {
+        let (delivery, candidate, mut facts) = fixture(false);
+        let reviewer = &mut facts.sessions[0];
+        let foreign_checkout = with_changed_hunks(
+            reviewer
+                .pre_candidate_snapshot
+                .clone()
+                .expect("reviewer pre-candidate snapshot"),
+            vec![CandidateHunkFact {
+                file_path: "src/invitation.rs".into(),
+                hunk_sha256: "c".repeat(64),
+                source_hunk_sha256: None,
+            }],
+        );
+        reviewer.accepted_job_outcome = Some(terminal_outcome(
+            &delivery,
+            &foreign_checkout,
+            TerminalOutcomeStatus::Succeeded,
+        ));
+        reviewer.pre_candidate_snapshot = Some(foreign_checkout.clone());
+        reviewer.post_candidate_snapshot = Some(foreign_checkout);
+
+        let error = validate_independent_verification(&delivery, &candidate, &facts)
+            .expect_err("verification checkout must use the frozen candidate hunks");
+        assert_eq!(
+            error.code(),
+            DeliveryValidationErrorCode::RelationshipMismatch
+        );
     }
 
     #[test]
