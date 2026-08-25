@@ -223,7 +223,7 @@ pub(super) fn replay_delivery_read(
         || cursor.runtime_ledger_revision.0 < 0
         || cursor.runtime_accepted_sequence < 0
         || cursor.publication_revision.0 < 0
-        || !cursor.token.starts_with("sfc1_")
+        || !canonical_cursor_token(&cursor.token)
     {
         return Err(StrongFlowProjectionError::PermissionDenied(
             "the read cursor does not authorize this repository and aggregate".to_owned(),
@@ -798,4 +798,13 @@ fn portable(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
         })
+}
+
+fn canonical_cursor_token(value: &str) -> bool {
+    value.strip_prefix("sfc1_").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }

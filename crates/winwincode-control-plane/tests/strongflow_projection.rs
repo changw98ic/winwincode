@@ -89,6 +89,7 @@ impl EventPublisher for NoopPublisher {
 struct RuntimeAdapter {
     read: TrustedRuntimeProjectionRead,
     race: Arc<Mutex<bool>>,
+    expired: Arc<Mutex<bool>>,
     unavailable: bool,
 }
 impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
@@ -98,6 +99,9 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
         if self.unavailable {
             return Err(TrustedProjectionReadError::Unavailable);
+        }
+        if request.expected().is_some() && *self.expired.lock().expect("expired") {
+            return Err(TrustedProjectionReadError::Stale);
         }
         if request.delivery_id() != &self.read.snapshot().delivery_id
             || request.delivery_revision() != self.read.delivery_revision()
@@ -172,6 +176,7 @@ struct Fixture {
     scope: RepositoryScope,
     journal: Arc<Mutex<LoadedAggregateJournal>>,
     domain_journal: Arc<InMemoryDeliveryJournal>,
+    runtime_expired: Arc<Mutex<bool>>,
 }
 
 fn fixture(runtime_unavailable: bool, publication_unavailable: bool, race: bool) -> Fixture {
@@ -264,6 +269,7 @@ fn fixture_with_delivery(
         repository_id: RepositoryId(if race { "rep_race" } else { "rep_fixture" }.into()),
     };
     let journal = Arc::new(Mutex::new(aggregate));
+    let runtime_expired = Arc::new(Mutex::new(false));
     let mut control_plane = ControlPlane::start(
         Box::new(JournalStorage {
             journal: Arc::clone(&journal),
@@ -276,6 +282,7 @@ fn fixture_with_delivery(
             Box::new(RuntimeAdapter {
                 read: runtime,
                 race: Arc::new(Mutex::new(false)),
+                expired: Arc::clone(&runtime_expired),
                 unavailable: runtime_unavailable,
             }),
             Box::new(PublicationAdapter {
@@ -290,6 +297,7 @@ fn fixture_with_delivery(
         scope,
         journal,
         domain_journal: memory,
+        runtime_expired,
     }
 }
 
@@ -538,8 +546,23 @@ fn stale_foreign_or_raced_projection_read_fails_closed() {
     .unwrap_err();
     assert!(matches!(
         error,
+        StrongFlowProjectionError::RevisionConflict(_)
+    ));
+}
+
+#[test]
+fn retained_cut_loss_returns_read_cursor_expired() {
+    let f = fixture(false, false, false);
+    let (_, cursor) = detail_and_cursor(&f);
+    *f.runtime_expired.lock().expect("expired") = true;
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("an exact source cut outside retention must expire");
+    assert!(matches!(
+        error,
         StrongFlowProjectionError::ReadCursorExpired(_)
-            | StrongFlowProjectionError::RevisionConflict(_)
     ));
 }
 #[test]
