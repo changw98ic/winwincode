@@ -1,15 +1,16 @@
-# Control Plane Web Client 预检合同
+# Control Plane Web Client 实现合同
 
 机器规则位于
-[`control-plane-web-client.rules.json`](./control-plane-web-client.rules.json)。当前状态是 planned/gated：
-本文件固定阶段 2.5.4 要生成什么，以及实现出现后立即检查什么；不会把这份计划当成客户端已经完成。
+[`control-plane-web-client.rules.json`](./control-plane-web-client.rules.json)。当前状态是
+implemented/enforced：生成文件和可执行行为证明已经存在，门禁会拒绝手改产物、类型漂移和
+浏览器绕过。
 
 ## 当前接入面
 
 | 范围 | 当前事实 | 阶段 2.5.4 的处理 |
 | --- | --- | --- |
-| Schema 生成器 | `scripts/generate-contracts.mjs` 从 canonical schema 同时生成 Rust、TypeScript、OpenAPI 和 schema collection | 在同一个生成器增加 Web client 输出，不另建手写生成脚本 |
-| Web 生成目录 | 目前只有 `apps/web/src/generated/contracts.ts`，只有 DTO 和枚举 | 新增生成文件 `control-plane-client.ts` |
+| Schema 生成器 | `scripts/generate-contracts.mjs` 从 canonical schema 同时生成 Rust、TypeScript、OpenAPI、schema collection 和 Web client | Web client 已进入同一个生成器，没有第二个手写生成脚本 |
+| Web 生成目录 | `contracts.ts` 保存 DTO，`control-plane-client.ts` 保存唯一浏览器网络实现 | 两个文件都由同一份 canonical schema 生成并检查漂移 |
 | StrongFlow | `packages/strongflow/src/client.ts` 通过 DSH Typert 的 `strongflow.invoke` / `strongflow.advance` 调用，并每两秒读取一次完整投影 | 新 Web 页面只调用生成的 HTTP/WebSocket client；旧调用不会成为第二条长期路径 |
 | StrongFlow 浏览器状态 | 只把选中的 Delivery ID 放进 `localStorage`；Delivery 和运行投影仍由远端重新读取 | cursor 只能保存为恢复位置，不能成为 Delivery 事实 |
 | StrongFlow 重启恢复 | `delivery-recovery.ts` 从 DeliveryStore 和 RuntimeSessionLedger 重放，再决定下一项动作 | 这是服务端恢复事实，不是浏览器 cursor 的替代品 |
@@ -44,11 +45,15 @@
 值后暗中重试。分页 cursor 是不透明值；页面不能拆解、拼接或跨 Scope、Query、筛选条件、
 快照复用。
 
+请求会在发出前用生成器内嵌的 canonical schema 检查 command/query 判别分支。成功响应也
+不会按 TypeScript 类型直接断言，而是完整检查 DTO、必需字段、额外字段和结果分支；请求名
+与结果分支对不上时按 `INVALID_RESPONSE` 处理。
+
 非成功响应只按 canonical `ErrorEnvelope` 处理。`ControlPlaneClientError` 只暴露
 `code`、`message`、`requestId`、`retryable` 和已经清理过的 `details`。也就是只暴露 canonical `ErrorEnvelope` 中已经清理过的错误字段，
 不复制响应 body、header、URL、stack、
-Authorization、Credential、Token、Provider 请求或响应。格式错误的服务端响应只产生有界
-通用错误。
+Authorization、Credential、Token、Provider 请求或响应。`details` 的每一层都会检查敏感
+键，并忽略大小写和分隔符写法的差异。格式错误的服务端响应只产生有界通用错误。
 
 ## WebSocket 规则
 
@@ -58,7 +63,19 @@ HTTP。
 
 事件处理成功后才推进最后已确认 cursor 并发送累计 ack。普通断线和 `4408` 背压断线从
 最后已确认 cursor 续传；不能从最后收到但尚未应用的事件续传。`4403` 表示权限已经撤销，
-客户端清除订阅并停止自动重试。事件用 `eventId` 加同一 Scope/Stream cursor 去重。
+客户端清除订阅并停止自动重试。事件用完整 `eventId + sequence + payload` 去重；同一个 ID
+或序号对应不同内容会关闭连接。
+
+页面从 HTTP 快照取得 `EventReadCursor` 后，把它原样放进第一次 subscribe 的 `startAt`。
+subscription accepted 必须返回同一个 cursor，第一条事件只能是 baseline sequence 加一。
+后续事件必须连续，payload 中的 Delivery、ProductSession 或 Worker 身份也必须与顶层
+Scope/Stream 完全一致。accepted 的 `authorizationEpoch` 是权限下限，旧权限版本不会进入页面。
+
+通用 `transport.reset-required.v1` 不携带固定 query 清单。生成 client 保存最初的
+`subscription.stream.kind`：Delivery stream 走完整 StrongFlow 双查询，ProductSession stream
+只重读它自己的运行投影。服务端运行投影失效事件则保留严格的两分支 `reloadQueries`，客户端
+会核对分支和本地订阅一致，不能凭空补一个 Delivery。切换订阅、关闭、`4403` 或 `4409`
+都会推进本地 generation；旧异步 handler 后来完成时不能恢复 cursor 或向新 socket 发 ack。
 
 ## StrongFlow reset
 
@@ -66,12 +83,18 @@ HTTP。
 Delivery 身份发出两次 HTTP query。只有 `delivery.get` 和 `runtime.projection.get` 都成功，
 并返回一个可用于同一事件流的 cursor 后，才能一次性替换页面快照并开始订阅。
 
-任一 query 失败时丢弃这次成对读取的部分结果，不显示一半新、一半旧的页面，也不提前
-订阅。重试仍然重新读取这一对 query。客户端从返回 cursor 续传或建立新订阅，不使用 reset
-前的旧内存 cursor 猜测缺失事件。
+reset 开始时先清空旧页面快照和 cursor。任一 query 失败时丢弃这次成对读取的部分结果，
+保持页面为空且不重新订阅；不会显示一半新、一半旧的页面。重试仍然重新读取这一对 query。
+客户端从返回 cursor 续传或建立新订阅，不使用 reset 前的旧内存 cursor 猜测缺失事件；较早
+开始、较晚返回的 HTTP 请求也不能覆盖新 revision。
 
-Chat 的完整恢复仍按 Chat 合同读取消息历史和运行投影；本任务只盘点这个边界，不把 stock
-DSH Chat 迁移算进阶段 2.5.4。
+如果第二次查询返回 `READ_CURSOR_EXPIRED`，client 丢弃第一次查询结果，从不带 `atCursor`
+的 `delivery.get` 重新建立整组读取；不会只重试 runtime。格式错误或属于其他范围的 cursor
+仍按原错误结束，不进入这个恢复分支。
+
+ProductSession 的生成订阅能力在首次打开、运行失效和 `4409` 时都只调用
+`runtime.projection.get`，请求中没有 Delivery、StageRun 或 StrongFlow cursor。Chat 消息历史
+仍按 Chat 合同读取；stock DSH Chat 页面本身没有在阶段 2.5.4 中迁移。
 
 ## 页面边界与自动门禁
 
@@ -79,8 +102,6 @@ Web 不连接 Execution Worker，不持有 Worker 地址，不导入 ExecutionPo
 或 WebSocket DTO。`apps/web/src/generated` 之外出现直接 `fetch()` 或 `new WebSocket()`
 会直接失败。
 
-在 trigger 文件还不存在时，Node 门禁验证 canonical 输入、当前 types-only 目录、真实旧
-调用面和 planned/gated 计划。trigger 一旦出现，同一个门禁自动解析 TypeScript 源码，检查
-真实 export declaration、接口成员、生成标记、generator 输出和 import 依赖，并要求存在
-可执行的 `tests/generated-control-plane-client.test.mjs` 行为证明。门禁不通过搜索测试名称来
-冒充实现完成。
+Node 门禁解析 TypeScript 源码，检查真实 export declaration、接口成员、生成标记、generator
+输出和 import 依赖，并执行 `tests/generated-control-plane-client.test.mjs` 中的 fake HTTP/WS
+行为证明。门禁不通过搜索测试名称来冒充实现完成。
