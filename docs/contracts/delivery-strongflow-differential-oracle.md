@@ -32,10 +32,14 @@ snapshot, runtime events, StrongFlow projections, DeliveryVerdict, and durable
 store facts. Failed commands preserve the public error code, message, and
 `currentRevision`.
 
-## Command interface
+## Command source interface
 
-The future Rust runner consumes `scenarios[].commands` in order and returns the
-same command entries with responses filled in.
+The Rust differential plan consumes `scenarios[].commands` in order after
+removing every response, assertion, and final observation. The versioned
+test-only migration maps each legacy command index to the current canonical
+Rust command, query, or sealed fixture action. The Rust result contains only
+current canonical DTOs and internal facts; it does not return the old
+StrongFlow response shape.
 
 `strongflow.request` sends `command.request` through the canonical Delivery
 request interface. Fixture commands establish deterministic external state:
@@ -56,10 +60,14 @@ The runner supplies three bindings when hydrating a transcript:
 | `<NODE_EXECUTABLE>` | The Node executable used by the deterministic verification fixture. |
 | `<AUTH_PROOF>` | A fixture-only authentication proof that is never written to the oracle. |
 
-After execution, the Rust runner applies the same normalizer and compares the
-entire JSON value. It must not reduce comparison to a status summary. In
-particular, error codes, revisions, snapshots, events, projections, evidence,
-Attention, and verdict differences remain exact.
+The Rust runner writes raw values. The trigger-aware Node gate applies only the
+declared host binding substitutions and compares the entire canonical result.
+It must not reduce comparison to a status summary. In particular, error codes,
+revisions, snapshots, events, projections, evidence, Attention, verdict,
+receipts, outbox entries, cursors, and the rebuilt store chain remain exact.
+
+The canonical mapping, runner protocol, and first-difference rule are frozen in
+[`delivery-strongflow-rust-differential.md`](delivery-strongflow-rust-differential.md).
 
 ## Normalization boundary
 
@@ -94,5 +102,9 @@ the exporter with `--check` once, after the Node suite, so the full current
 behavior comparison is isolated from the parallel test processes and reuses
 the TypeScript build produced at the start of `test:ts`.
 
-The Rust migration gate should run the new Rust runner against this committed
-file before the TypeScript owner is deleted.
+The trigger-aware Rust migration gate must pass before the TypeScript owner is
+deleted:
+
+```bash
+corepack pnpm oracle:delivery:rust:check
+```
