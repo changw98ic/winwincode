@@ -24,15 +24,16 @@ use winwincode_delivery::{
         DeliveryStore,
     },
 };
-use winwincode_domain::{ControlPlaneEventId, DeliveryId, RequestId, Revision, Sha256Digest};
+use winwincode_domain::{
+    ControlPlaneEventId, DeliveryId, ExecutionMessageId, RequestId, Revision, Sha256Digest,
+};
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, NewOutboxEvent, ProductStateStorage, ProjectionEventStream,
     ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit, StorageError,
 };
 
 use crate::delivery_transaction::{
-    EXECUTION_JOB_TOPIC, StagedDeliveryJournal, delivery_journal_key, delivery_stream_id,
-    strict_execution_job,
+    StagedDeliveryJournal, delivery_journal_key, delivery_stream_id, load_durable_execution_job,
 };
 use crate::{
     DeliveryChangeKind, OutboxError, delivery_changed_event_for_scope,
@@ -124,8 +125,8 @@ pub(crate) fn execute(
     authority: &SessionBindingAuthority,
 ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
     let bound_at_millis = validate_message_shape(message)?;
-    let durable = load_execution_job_event(storage, message)?;
-    let job = validate_durable_job(&durable, message)?;
+    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
+    validate_durable_job(&durable, &job, message)?;
     let context = BindingContext::from_durable(&durable, &job, bound_at_millis)?;
     let worker_phase = Phase::new(message, &durable, WORKER_SESSION_PHASE)?;
     let codex_phase = Phase::new(message, &durable, CODEX_THREAD_PHASE)?;
@@ -588,41 +589,11 @@ fn validate_authority(
     Ok(())
 }
 
-fn load_execution_job_event(
-    storage: &dyn ProductStateStorage,
-    message: &SessionBindingMessage,
-) -> Result<DurableOutboxEvent, StorageError> {
-    let event_id = format!("execution-job:{}", message.lease.job_id.0);
-    let durable = storage.load_outbox_event(&event_id)?.ok_or_else(|| {
-        StorageError::invalid_input("SessionBinding ExecutionJob event does not exist")
-    })?;
-    let event = durable.event();
-    if event.event_id != event_id
-        || event.topic != EXECUTION_JOB_TOPIC
-        || event.projection_cursor.is_some()
-    {
-        return Err(StorageError::invalid_input(
-            "SessionBinding durable event is not the exact internal ExecutionJob intent",
-        ));
-    }
-    Ok(durable)
-}
-
 fn validate_durable_job(
-    durable: &DurableOutboxEvent,
+    _durable: &DurableOutboxEvent,
+    job: &ExecutionJob,
     message: &SessionBindingMessage,
-) -> Result<ExecutionJob, StorageError> {
-    let event = durable.event();
-    if event.event_id != format!("execution-job:{}", message.lease.job_id.0)
-        || event.topic != EXECUTION_JOB_TOPIC
-        || event.projection_cursor.is_some()
-    {
-        return Err(StorageError::invalid_input(
-            "SessionBinding durable event is not the exact internal ExecutionJob intent",
-        ));
-    }
-    let job = strict_execution_job(&event.payload)
-        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+) -> Result<(), StorageError> {
     let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
         return Err(StorageError::invalid_input(
             "SessionBinding durable job has foreign scope",
@@ -636,7 +607,7 @@ fn validate_durable_job(
             "SessionBinding message does not match the durable ExecutionJob",
         ));
     }
-    Ok(job)
+    Ok(())
 }
 
 fn validate_complete_replay(
@@ -681,13 +652,31 @@ fn runtime_invalidated_event(
     context: &BindingContext,
     revision: u64,
 ) -> Result<NewOutboxEvent, StorageError> {
+    delivery_stage_runtime_invalidated_event(
+        &context.scope_key,
+        &context.delivery_id,
+        &context.identity.stage_run_id,
+        &context.identity.product_session_id,
+        revision,
+        b"winwincode.session-binding-runtime-invalidation.v1",
+    )
+}
+
+pub(crate) fn delivery_stage_runtime_invalidated_event(
+    scope_key: &ReceiptScopeKey,
+    delivery_id: &DeliveryId,
+    stage_run_id: &winwincode_domain::StageRunId,
+    product_session_id: &winwincode_domain::ProductSessionId,
+    revision: u64,
+    event_namespace: &[u8],
+) -> Result<NewOutboxEvent, StorageError> {
     let revision = i64::try_from(revision)
         .map(Revision)
         .map_err(|_| StorageError::invalid_input("Delivery revision exceeds public range"))?;
     let payload = ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
-        delivery_id: context.delivery_id.clone(),
+        delivery_id: delivery_id.clone(),
         last_projection_sequence: 0,
-        product_session_id: context.identity.product_session_id.clone(),
+        product_session_id: product_session_id.clone(),
         projection_revision: revision,
         reload_queries: (
             ControlPlaneWebSocketDeliveryGetReloadQuery::DeliveryGet,
@@ -695,23 +684,19 @@ fn runtime_invalidated_event(
         ),
         scope_kind:
             ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
-        stage_run_id: context.identity.stage_run_id.clone(),
+        stage_run_id: stage_run_id.clone(),
         type_value:
             ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
     };
     let payload = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode runtime invalidation: {error}"))
     })?;
-    let event_id = projection_event_id(
-        b"winwincode.session-binding-runtime-invalidation.v1",
-        &context.scope_key,
-        &payload,
-    );
+    let event_id = projection_event_id(event_namespace, scope_key, &payload);
     Ok(NewOutboxEvent::projection(
         event_id,
         RUNTIME_INVALIDATED_TOPIC,
         payload,
-        ProjectionEventStream::Delivery(context.delivery_id.clone()),
+        ProjectionEventStream::Delivery(delivery_id.clone()),
     ))
 }
 
@@ -739,6 +724,24 @@ fn validate_phase_receipt(
         expected_revision,
         DeliveryChangeKind::Advanced,
     )?;
+    validate_delivery_stage_runtime_invalidation(
+        receipt,
+        &context.delivery_id,
+        &context.identity.stage_run_id,
+        &context.identity.product_session_id,
+        expected_revision,
+        b"winwincode.session-binding-runtime-invalidation.v1",
+    )
+}
+
+pub(crate) fn validate_delivery_stage_runtime_invalidation(
+    receipt: &CommitReceipt,
+    delivery_id: &DeliveryId,
+    stage_run_id: &winwincode_domain::StageRunId,
+    product_session_id: &winwincode_domain::ProductSessionId,
+    expected_revision: u64,
+    event_namespace: &[u8],
+) -> Result<(), StorageError> {
     let matching = receipt
         .events
         .iter()
@@ -746,24 +749,24 @@ fn validate_phase_receipt(
         .collect::<Vec<_>>();
     let [event] = matching.as_slice() else {
         return Err(StorageError::invalid_input(
-            "SessionBinding receipt must contain one runtime invalidation",
+            "receipt must contain one runtime projection invalidation",
         ));
     };
     let payload: ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent =
         serde_json::from_slice(&event.payload).map_err(|_| {
-            StorageError::invalid_input("SessionBinding runtime invalidation is not canonical")
+            StorageError::invalid_input("runtime projection invalidation is not canonical")
         })?;
     let canonical = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode runtime invalidation: {error}"))
     })?;
     let expected_revision = i64::try_from(expected_revision).unwrap_or(-1);
     let cursor = event.projection_cursor.as_ref().ok_or_else(|| {
-        StorageError::invalid_input("SessionBinding runtime invalidation has no cursor")
+        StorageError::invalid_input("runtime projection invalidation has no cursor")
     })?;
     if canonical != event.payload
-        || payload.delivery_id != context.delivery_id
-        || payload.stage_run_id != context.identity.stage_run_id
-        || payload.product_session_id != context.identity.product_session_id
+        || payload.delivery_id != *delivery_id
+        || payload.stage_run_id != *stage_run_id
+        || payload.product_session_id != *product_session_id
         || payload.projection_revision.0 != expected_revision
         || payload.last_projection_sequence != 0
         || payload.reload_queries
@@ -778,17 +781,17 @@ fn validate_phase_receipt(
         || cursor.sequence() == 0
         || cursor.event_id().map(|id| id.0.as_str()) != Some(event.event_id.as_str())
         || cursor.key().scope_key() != receipt.receipt_identity.scope_key()
-        || cursor.key().stream() != &ProjectionEventStream::Delivery(context.delivery_id.clone())
+        || cursor.key().stream() != &ProjectionEventStream::Delivery(delivery_id.clone())
         || event.event_id
             != projection_event_id(
-                b"winwincode.session-binding-runtime-invalidation.v1",
+                event_namespace,
                 receipt.receipt_identity.scope_key(),
                 &event.payload,
             )
             .0
     {
         return Err(StorageError::invalid_input(
-            "SessionBinding runtime invalidation does not match durable phase facts",
+            "runtime projection invalidation does not match durable Delivery stage facts",
         ));
     }
     Ok(())
@@ -798,14 +801,21 @@ fn phase_request_id(
     message: &SessionBindingMessage,
     phase: &'static str,
 ) -> Result<RequestId, StorageError> {
+    execution_message_request_id(&message.message_id, phase)
+}
+
+pub(crate) fn execution_message_request_id(
+    message_id: &ExecutionMessageId,
+    phase: &'static str,
+) -> Result<RequestId, StorageError> {
     // The generated message identity owns a stable two-slot idempotency key.
     // Mutable message and durable-job facts belong in the phase digest so a
     // changed payload reaches storage as a request conflict instead of a new
     // request.
-    let mut bytes = Vec::with_capacity(message.message_id.0.len() + phase.len() + 64);
+    let mut bytes = Vec::with_capacity(message_id.0.len() + phase.len() + 64);
     bytes.extend_from_slice(b"winwincode.session-binding-phase-request.v2\0");
     append_phase_fact(&mut bytes, phase.as_bytes());
-    append_phase_fact(&mut bytes, message.message_id.0.as_bytes());
+    append_phase_fact(&mut bytes, message_id.0.as_bytes());
     let digest = Sha256::digest(bytes);
     let mut value_bytes = [0_u8; 16];
     value_bytes.copy_from_slice(&digest[..16]);
@@ -860,19 +870,25 @@ fn canonical_phase_bytes(
     Ok(bytes)
 }
 
-fn append_phase_fact(target: &mut Vec<u8>, value: &[u8]) {
+pub(crate) fn append_phase_fact(target: &mut Vec<u8>, value: &[u8]) {
     target.extend_from_slice(&(value.len() as u64).to_be_bytes());
     target.extend_from_slice(value);
 }
 
 fn phase_actor_key(message: &SessionBindingMessage) -> Result<ReceiptActorKey, StorageError> {
+    execution_message_actor_key(&message.message_id)
+}
+
+pub(crate) fn execution_message_actor_key(
+    message_id: &ExecutionMessageId,
+) -> Result<ReceiptActorKey, StorageError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"winwincode.execution-port-message-actor.v1\0");
-    append_phase_fact(&mut bytes, message.message_id.0.as_bytes());
+    append_phase_fact(&mut bytes, message_id.0.as_bytes());
     ReceiptActorKey::from_encoded(bytes)
 }
 
-fn projection_event_id(
+pub(crate) fn projection_event_id(
     namespace: &[u8],
     scope_key: &ReceiptScopeKey,
     payload: &[u8],
@@ -887,7 +903,7 @@ fn projection_event_id(
     ControlPlaneEventId(format!("evt_{:x}", digest.finalize()))
 }
 
-fn require_id(value: &str, prefix: &str, field: &str) -> Result<(), StorageError> {
+pub(crate) fn require_id(value: &str, prefix: &str, field: &str) -> Result<(), StorageError> {
     let suffix = value.strip_prefix(prefix).ok_or_else(|| {
         StorageError::invalid_input(format!("SessionBinding {field} has the wrong prefix"))
     })?;
@@ -907,7 +923,7 @@ fn require_id(value: &str, prefix: &str, field: &str) -> Result<(), StorageError
     Ok(())
 }
 
-fn instant_millis(instant: &winwincode_domain::Instant) -> Result<u64, StorageError> {
+pub(crate) fn instant_millis(instant: &winwincode_domain::Instant) -> Result<u64, StorageError> {
     let bytes = instant.0.as_bytes();
     if bytes.len() != 24
         || bytes[4] != b'-'
