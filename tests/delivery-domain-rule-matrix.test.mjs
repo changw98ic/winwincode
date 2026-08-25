@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { extname, join, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
@@ -57,16 +58,6 @@ function repositoryPath(relativePath) {
   return join(root, relativePath)
 }
 
-function rustFiles(directory) {
-  const result = []
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name)
-    if (entry.isDirectory()) result.push(...rustFiles(path))
-    else if (entry.isFile() && extname(entry.name) === '.rs') result.push(path)
-  }
-  return result
-}
-
 function assertPublicSymbol(mapping) {
   const source = readFileSync(repositoryPath(mapping.path), 'utf8')
   assert.match(
@@ -76,21 +67,29 @@ function assertPublicSymbol(mapping) {
   )
 }
 
-function assertTestCase(mapping) {
-  const source = readFileSync(repositoryPath(mapping.path), 'utf8')
-  assert.equal(
-    source.includes(`test('${mapping.name}'`) || source.includes(`test("${mapping.name}"`),
-    true,
-    `${mapping.path} does not define test ${mapping.name}`,
-  )
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-test('Delivery Domain rule matrix covers the frozen TypeScript and target Rust seams', () => {
+test('Delivery Domain rule matrix covers the transitional TypeScript and canonical Rust seams', () => {
   const matrix = json(matrixPath)
   assert.equal(matrix.schemaVersion, 'winwincode.delivery-domain-rule-matrix.v1')
   assert.equal(matrix.issueId, 'winwincode-9c4.16.2.2')
-  assert.equal(matrix.typescriptSourceOfTruth, 'packages/contracts/src/delivery.ts')
-  assert.equal(matrix.rustTarget.crate, 'crates/winwincode-delivery')
+  assert.equal(matrix.status, 'implemented-enforced')
+  assert.equal(matrix.transitionalTypescriptSeam, 'packages/contracts/src/delivery.ts')
+  assert.equal(matrix.canonicalRustAuthority.crate, 'crates/winwincode-delivery')
+  assert.equal(matrix.canonicalRustAuthority.status, 'implemented-enforced')
+  assert.equal(
+    matrix.canonicalRustAuthority.decision,
+    'docs/decisions/0023-canonical-delivery-ownership.md',
+  )
+  const decision = readFileSync(repositoryPath(matrix.canonicalRustAuthority.decision), 'utf8')
+  assert.match(decision, /规范 Rust Delivery 领域与存储/u)
+  assert.match(decision, /过渡期 TypeScript 产品路径/u)
+  assert.match(decision, /winwincode-9c4\.16\.6\.3/u)
+  assert.match(decision, /winwincode-9c4\.16\.6\.6/u)
+  assert.equal(Object.hasOwn(matrix, 'typescriptSourceOfTruth'), false)
+  assert.equal(Object.hasOwn(matrix, 'rustTarget'), false)
 
   const ruleIds = matrix.rules.map(rule => rule.id)
   assert.equal(new Set(ruleIds).size, ruleIds.length)
@@ -113,7 +112,10 @@ test('Delivery Domain rule matrix covers the frozen TypeScript and target Rust s
       assert.ok(rule.typescript.gap.length > 0, `${rule.id} must explain its missing old test`)
     } else {
       assert.ok(rule.typescript.tests.length > 0, `${rule.id} needs an existing TypeScript test`)
-      for (const mapping of rule.typescript.tests) assertTestCase(mapping)
+      for (const mapping of rule.typescript.tests) {
+        assert.equal(existsSync(repositoryPath(mapping.path)), true, mapping.path)
+        assert.ok(mapping.name.length > 0, `${rule.id} needs a TypeScript test name`)
+      }
     }
 
     assert.match(rule.rust.module, /^(?:domain\/[a-z_]+|store)\.rs$/u)
@@ -133,28 +135,81 @@ test('Delivery Domain contract differences stay explicit instead of changing pha
     assert.ok(finding.action.length > 0)
     for (const path of finding.refs) assert.equal(existsSync(repositoryPath(path)), true)
   }
+  const identifierFinding = matrix.contractFindings.find(finding => (
+    finding.id === 'contract.identifier_format'
+  ))
+  assert.equal(identifierFinding.status, 'closed')
+  assert.ok(identifierFinding.evidence.length >= 4)
+  for (const path of identifierFinding.evidence) {
+    assert.equal(existsSync(repositoryPath(path)), true, path)
+  }
 })
 
-test('merged Rust Delivery crate implements every named rule test in its assigned module', () => {
+test('transitional TypeScript seam executes every mapped behavior test', () => {
   const matrix = json(matrixPath)
-  const crateRoot = repositoryPath(matrix.rustTarget.crate)
-  if (!existsSync(crateRoot)) {
-    assert.equal(matrix.rustTarget.scanWhenPresent, true)
-    return
+  const mappings = matrix.rules.flatMap(rule => rule.typescript.tests)
+  const paths = [...new Set(mappings.map(mapping => repositoryPath(mapping.path)))]
+  const environment = { ...process.env }
+  delete environment.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, [
+    '--test',
+    '--test-reporter=spec',
+    ...paths,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: environment,
+    maxBuffer: 32 * 1_024 * 1_024,
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  assert.equal(result.error, undefined, output)
+  assert.equal(result.signal, null, output)
+  assert.equal(result.status, 0, output)
+  for (const mapping of mappings) {
+    assert.match(
+      output,
+      new RegExp(`✔ ${escapeRegExp(mapping.name)} \\(`, 'u'),
+      `${mapping.path} test ${mapping.name} did not execute successfully`,
+    )
   }
+})
 
-  const sources = rustFiles(crateRoot)
-  const allRust = sources.map(path => readFileSync(path, 'utf8')).join('\n')
+test('canonical Rust Delivery authority executes every named rule test', () => {
+  const matrix = json(matrixPath)
+  const crateRoot = repositoryPath(matrix.canonicalRustAuthority.crate)
+  assert.equal(existsSync(crateRoot), true)
+
   for (const rule of matrix.rules) {
     assert.equal(
       existsSync(join(crateRoot, 'src', rule.rust.module)),
       true,
       `${rule.id} target module ${rule.rust.module} is missing`,
     )
+  }
+
+  const result = spawnSync('cargo', [
+    'test',
+    '-p',
+    'winwincode-delivery',
+    '--lib',
+    '--locked',
+    '--',
+    '--test-threads=1',
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: process.env,
+    maxBuffer: 32 * 1_024 * 1_024,
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  assert.equal(result.error, undefined, output)
+  assert.equal(result.signal, null, output)
+  assert.equal(result.status, 0, output)
+  for (const rule of matrix.rules) {
     assert.match(
-      allRust,
-      new RegExp(`\\bfn\\s+${rule.rust.testName}\\s*\\(`, 'u'),
-      `${rule.id} target test ${rule.rust.testName} is missing`,
+      output,
+      new RegExp(`test [^\\n]*\\b${escapeRegExp(rule.rust.testName)} \\.\\.\\. ok`, 'u'),
+      `${rule.id} Rust test ${rule.rust.testName} did not execute successfully`,
     )
   }
 })

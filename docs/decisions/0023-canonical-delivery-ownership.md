@@ -4,9 +4,8 @@
 - 日期：2026-08-23
 - 演进说明：十对象 Delivery 模型和 Codex 唯一执行权威保持有效；DSH 后端职责正按 [ADR-0028](0028-control-plane-worker-migration.md) 迁入 Rust Control Plane 与 Rust Execution Worker。
 - 对应任务：`winwincode-9c4.13.1`、`winwincode-9c4.13.2`、`winwincode-9c4.13.3`、`winwincode-9c4.7.1`、`winwincode-9c4.7.2`、`winwincode-9c4.7.3`、`winwincode-9c4.7.4`、`winwincode-9c4.8.1`、`winwincode-9c4.8.2`、`winwincode-9c4.8.3`、`winwincode-9c4.8.4`、`winwincode-9c4.9.6`、`winwincode-9c4.10.1`、`winwincode-9c4.10.2`、`winwincode-9c4.10.3`、`winwincode-9c4.11.1`、`winwincode-9c4.11.2`
-- 合同实现：[`packages/contracts/src/delivery.ts`](../../packages/contracts/src/delivery.ts)
-- 调用格式：[`packages/contracts/src/strongflow-delivery-api.ts`](../../packages/contracts/src/strongflow-delivery-api.ts)
-- 服务与存储：[`packages/strongflow/src/delivery-service.ts`](../../packages/strongflow/src/delivery-service.ts)、[`packages/strongflow/src/delivery-store.ts`](../../packages/strongflow/src/delivery-store.ts)
+- 规范 Rust Delivery 领域与存储：[`crates/winwincode-delivery`](../../crates/winwincode-delivery)
+- 过渡期 TypeScript 产品路径：[`packages/contracts/src/delivery.ts`](../../packages/contracts/src/delivery.ts)、[`packages/contracts/src/strongflow-delivery-api.ts`](../../packages/contracts/src/strongflow-delivery-api.ts)、[`packages/strongflow/src/delivery-service.ts`](../../packages/strongflow/src/delivery-service.ts)、[`packages/strongflow/src/delivery-store.ts`](../../packages/strongflow/src/delivery-store.ts)；页面切换由 `winwincode-9c4.16.6.3` 承担，旧后端删除由 `winwincode-9c4.16.6.6` 承担。
 - 执行语义投影：[`packages/dsh-profile/src/runtime-events.ts`](../../packages/dsh-profile/src/runtime-events.ts)、[`packages/strongflow/src/delivery-runtime-projection.ts`](../../packages/strongflow/src/delivery-runtime-projection.ts)
 - 图上执行投影：[`packages/contracts/src/strongflow-diagram-execution.ts`](../../packages/contracts/src/strongflow-diagram-execution.ts)、[`packages/strongflow/src/diagram-execution-projection.ts`](../../packages/strongflow/src/diagram-execution-projection.ts)
 - GitHub 发布绑定：[`packages/contracts/src/strongflow-github-publication.ts`](../../packages/contracts/src/strongflow-github-publication.ts)、[`packages/strongflow/src/github-publication.ts`](../../packages/strongflow/src/github-publication.ts)

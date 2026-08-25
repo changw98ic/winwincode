@@ -74,7 +74,26 @@ pub(crate) fn validate(
 mod tests {
     use winwincode_domain::{DeliveryId, DeliveryTaskId};
 
-    use crate::domain::{Delivery, test_fixture};
+    use crate::domain::{Delivery, DeliveryValidationErrorCode, test_fixture};
+
+    #[test]
+    fn session_binding_requires_product_and_execution_job_identities() {
+        for field in ["productSessionId", "executionJobId"] {
+            let mut fixture = serde_json::to_value(test_fixture()).expect("fixture json");
+            fixture["sessionBindings"][0]
+                .as_object_mut()
+                .expect("SessionBinding object")
+                .remove(field);
+            let bytes = serde_json::to_vec(&fixture).expect("fixture bytes");
+            let error = Delivery::decode_json(&bytes)
+                .expect_err("a canonical SessionBinding requires both owner identities");
+            assert_eq!(
+                error.code(),
+                DeliveryValidationErrorCode::InvalidShape,
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn codex_thread_requires_an_accepted_worker_session() {

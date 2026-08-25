@@ -1,11 +1,13 @@
 {
   "schemaVersion": "winwincode.delivery-domain-rule-matrix.v1",
   "issueId": "winwincode-9c4.16.2.2",
-  "purpose": "Freeze Delivery domain and append-only store behavior before the Rust implementation becomes canonical.",
-  "typescriptSourceOfTruth": "packages/contracts/src/delivery.ts",
-  "rustTarget": {
+  "status": "implemented-enforced",
+  "purpose": "Record and enforce the canonical Rust Delivery domain and append-only store while the TypeScript product seam remains scheduled for removal.",
+  "transitionalTypescriptSeam": "packages/contracts/src/delivery.ts",
+  "canonicalRustAuthority": {
     "crate": "crates/winwincode-delivery",
-    "scanWhenPresent": true,
+    "status": "implemented-enforced",
+    "decision": "docs/decisions/0023-canonical-delivery-ownership.md",
     "interface": "A small command/query module owns validation and persistence; callers do not manipulate stored records directly."
   },
   "coverageSummary": {
@@ -247,7 +249,7 @@
       },
       "rust": {
         "module": "domain/session_binding.rs",
-        "testName": "session_binding_matches_exact_delivery_task_stage_job_and_session_identities"
+        "testName": "session_binding_requires_product_and_execution_job_identities"
       }
     },
     {
@@ -861,13 +863,21 @@
     {
       "id": "contract.identifier_format",
       "kind": "mapping_required",
-      "current": "The TypeScript and Rust Delivery aggregate boundaries accept only dlv_ followed by 26 uppercase Crockford Base32 characters.",
-      "target": "GitHub issue sources retain their exact sourceRef while deterministically mapping to the same canonical dlv_ identity in TypeScript and Rust; source-less creation generates a ULID-shaped dlv_ identity.",
-      "action": "Derive GitHub-sourced identities from the versioned normalized source bytes, reject caller overrides and github-issue: identities, and keep sourceRef as the external issue binding.",
+      "current": "The TypeScript transition seam, canonical Rust aggregate, and generated public schemas accept only dlv_ followed by 26 uppercase Crockford Base32 characters.",
+      "target": "GitHub issue sources retain sourceRef while both language seams deterministically map the normalized source bytes to the same canonical dlv_ identity; source-less creation generates a ULID-shaped dlv_ identity.",
+      "action": "Enforce the versioned GitHub source mapping, reject caller overrides and github-issue: identities, and keep sourceRef as the external issue binding.",
       "refs": [
         "packages/contracts/src/delivery.ts",
         "schema/winwincode/v1/domain.schema.json",
         "docs/decisions/0023-canonical-delivery-ownership.md"
+      ],
+      "status": "closed",
+      "evidence": [
+        "packages/contracts/src/delivery.ts",
+        "crates/winwincode-delivery/src/domain/spec.rs",
+        "tests/github-publication.test.mjs",
+        "crates/winwincode-delivery/tests/domain_contract.rs",
+        "schema/winwincode/v1/domain.schema.json"
       ]
     },
     {
