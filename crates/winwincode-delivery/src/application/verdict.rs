@@ -774,6 +774,7 @@ pub mod test_support {
             IndependentVerification, VerificationRole,
             test_support::{
                 VerificationFixtureState, fixture_evidence_id, resolved_independent_verification,
+                resolved_infrastructure_verification,
             },
         },
     };
@@ -824,13 +825,29 @@ pub mod test_support {
         candidate: &FrozenDeliveryCandidate,
         outcome: VerdictFixtureOutcome,
     ) -> VerdictFactsFixture {
-        let state = match outcome {
-            VerdictFixtureOutcome::Pass => VerificationFixtureState::SettledPass,
-            VerdictFixtureOutcome::Fail => VerificationFixtureState::SettledFail,
-            VerdictFixtureOutcome::Inconclusive => VerificationFixtureState::Incomplete,
-            VerdictFixtureOutcome::InfraError => VerificationFixtureState::InfrastructureFailed,
+        let verification = match outcome {
+            VerdictFixtureOutcome::Pass => resolved_independent_verification(
+                delivery,
+                candidate,
+                VerificationFixtureState::SettledPass,
+                VerificationFixtureState::SettledPass,
+            ),
+            VerdictFixtureOutcome::Fail => resolved_independent_verification(
+                delivery,
+                candidate,
+                VerificationFixtureState::SettledFail,
+                VerificationFixtureState::SettledFail,
+            ),
+            VerdictFixtureOutcome::Inconclusive => resolved_independent_verification(
+                delivery,
+                candidate,
+                VerificationFixtureState::Incomplete,
+                VerificationFixtureState::Incomplete,
+            ),
+            VerdictFixtureOutcome::InfraError => {
+                resolved_infrastructure_verification(delivery, candidate)
+            }
         };
-        let verification = resolved_independent_verification(delivery, candidate, state, state);
         let observed = match outcome {
             VerdictFixtureOutcome::Pass => Some(VerifiedEvidenceOutcome::Succeeded),
             VerdictFixtureOutcome::Fail => Some(VerifiedEvidenceOutcome::Failed),
@@ -886,7 +903,39 @@ pub mod test_support {
         outcome: VerdictFixtureOutcome,
         max_rework_attempts: u64,
     ) -> VerdictFixture {
-        let delivery = verifying_delivery(delivery_id, max_rework_attempts, outcome);
+        verdict_fixture_with_infrastructure_roles(
+            delivery_id,
+            outcome,
+            max_rework_attempts,
+            &[VerificationRole::Verifier],
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verdict_fixture_with_infrastructure_failed_roles(
+        delivery_id: &DeliveryId,
+        failed_roles: &[VerificationRole],
+    ) -> VerdictFixture {
+        verdict_fixture_with_infrastructure_roles(
+            delivery_id,
+            VerdictFixtureOutcome::InfraError,
+            3,
+            failed_roles,
+        )
+    }
+
+    fn verdict_fixture_with_infrastructure_roles(
+        delivery_id: &DeliveryId,
+        outcome: VerdictFixtureOutcome,
+        max_rework_attempts: u64,
+        infrastructure_failed_roles: &[VerificationRole],
+    ) -> VerdictFixture {
+        let delivery = verifying_delivery(
+            delivery_id,
+            max_rework_attempts,
+            outcome,
+            infrastructure_failed_roles,
+        );
         let candidate = frozen_candidate(
             &delivery,
             &StageRunId("stage-executor-1".into()),
@@ -905,6 +954,7 @@ pub mod test_support {
         delivery_id: &DeliveryId,
         max_rework_attempts: u64,
         outcome: VerdictFixtureOutcome,
+        infrastructure_failed_roles: &[VerificationRole],
     ) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.id = delivery_id.clone();
@@ -945,9 +995,13 @@ pub mod test_support {
         writer_binding.codex_thread_id = Some(CodexThreadId("thread-executor".into()));
         writer_binding.bound_at_millis = 1_800_000_000_011;
 
-        for (index, role) in ["reviewer", "verifier"].into_iter().enumerate() {
+        for (index, role) in [VerificationRole::Reviewer, VerificationRole::Verifier]
+            .into_iter()
+            .enumerate()
+        {
+            let role_id = role_id(role);
             let offset = u64::try_from(index).expect("small fixture index") * 20;
-            let stage_run_id = StageRunId(format!("stage-{role}-1"));
+            let stage_run_id = StageRunId(format!("stage-{role_id}-1"));
             snapshot.stage_runs.push(StageRun {
                 schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
                 id: stage_run_id.clone(),
@@ -955,8 +1009,10 @@ pub mod test_support {
                 delivery_task_id: task_id.clone(),
                 stage: DeliveryStage::Verifying,
                 actor_type: StageRunActorType::Codex,
-                role: role.into(),
-                status: if outcome == VerdictFixtureOutcome::InfraError {
+                role: role_id.into(),
+                status: if outcome == VerdictFixtureOutcome::InfraError
+                    && infrastructure_failed_roles.contains(&role)
+                {
                     StageRunStatus::Failed
                 } else {
                     StageRunStatus::Succeeded
@@ -967,14 +1023,14 @@ pub mod test_support {
             });
             snapshot.session_bindings.push(SessionBinding {
                 schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-                id: SessionBindingId(format!("binding-{role}-1")),
+                id: SessionBindingId(format!("binding-{role_id}-1")),
                 delivery_id: delivery_id.clone(),
                 delivery_task_id: task_id.clone(),
                 stage_run_id,
-                product_session_id: ProductSessionId(format!("product-{role}")),
-                execution_job_id: ExecutionJobId(format!("job-{role}")),
-                worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
-                codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
+                product_session_id: ProductSessionId(format!("product-{role_id}")),
+                execution_job_id: ExecutionJobId(format!("job-{role_id}")),
+                worker_session_id: Some(WorkerSessionId(format!("worker-{role_id}"))),
+                codex_thread_id: Some(CodexThreadId(format!("thread-{role_id}"))),
                 bound_at_millis: 1_800_000_000_031 + offset,
             });
         }
@@ -1117,7 +1173,15 @@ mod tests {
                 let terminal = settlement
                     .terminal_job_outcome()
                     .expect("settled role keeps its accepted terminal outcome");
-                assert_eq!(terminal.status(), expected_job_outcome);
+                let expected_role_outcome = if outcome
+                    == test_support::VerdictFixtureOutcome::InfraError
+                    && settlement.role() == VerificationRole::Reviewer
+                {
+                    VerificationJobOutcomeStatus::Succeeded
+                } else {
+                    expected_job_outcome
+                };
+                assert_eq!(terminal.status(), expected_role_outcome);
                 assert_eq!(
                     terminal.terminal_candidate_tree_id(),
                     candidate.candidate_tree_id()
@@ -1202,8 +1266,64 @@ mod tests {
             &winwincode_domain::DeliveryId("dlv_01J00000000000000000000015".into()),
             outcome,
         );
+        let reviewer_run = fixture
+            .delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .find(|run| run.role == "reviewer")
+            .expect("historical Reviewer StageRun");
+        let verifier_run = fixture
+            .delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .find(|run| run.role == "verifier")
+            .expect("final Verifier StageRun");
+        assert_eq!(reviewer_run.status, StageRunStatus::Succeeded);
+        assert_eq!(verifier_run.status, StageRunStatus::Failed);
         let facts =
             test_support::verdict_facts_fixture(&fixture.delivery, &fixture.candidate, outcome);
+
+        assert!(facts.evidence().is_empty());
+        let [reviewer, verifier] = facts.verification().settlements() else {
+            panic!("infra-error fixture must preserve both required role settlements");
+        };
+        assert_eq!(reviewer.role(), VerificationRole::Reviewer);
+        assert_eq!(reviewer.state(), VerificationSessionState::Incomplete);
+        assert_eq!(
+            reviewer.terminal_settlement(),
+            Some(VerificationTerminalSettlement::Settled)
+        );
+        assert!(reviewer.terminal_job_outcome().is_some_and(|terminal| {
+            terminal.status() == VerificationJobOutcomeStatus::Succeeded
+        }));
+        assert!(reviewer.findings().is_empty());
+
+        assert_eq!(verifier.role(), VerificationRole::Verifier);
+        assert_eq!(verifier.state(), VerificationSessionState::Failed);
+        assert_eq!(
+            verifier.terminal_settlement(),
+            Some(VerificationTerminalSettlement::InfrastructureError)
+        );
+        assert!(verifier.terminal_job_outcome().is_some_and(|terminal| {
+            terminal.status() == VerificationJobOutcomeStatus::InfrastructureError
+        }));
+        assert!(verifier.findings().is_empty());
+    }
+
+    #[test]
+    fn infra_error_verdict_fixture_preserves_two_failed_role_terminals() {
+        let fixture = test_support::verdict_fixture_with_infrastructure_failed_roles(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000016".into()),
+            &[VerificationRole::Reviewer, VerificationRole::Verifier],
+        );
+
+        let facts = test_support::verdict_facts_fixture(
+            &fixture.delivery,
+            &fixture.candidate,
+            test_support::VerdictFixtureOutcome::InfraError,
+        );
 
         assert!(facts.evidence().is_empty());
         assert!(facts.verification().settlements().iter().all(|settlement| {
@@ -1214,6 +1334,32 @@ mod tests {
                     terminal.status() == VerificationJobOutcomeStatus::InfrastructureError
                 })
         }));
+        let computed = crate::domain::compute_delivery_verdict(
+            &fixture.delivery,
+            &fixture.candidate,
+            facts.verification(),
+            facts.evidence(),
+            fixture.delivery.snapshot().updated_at_millis + 10,
+        )
+        .expect("two accepted infrastructure failures remain a valid fixture");
+        assert_eq!(computed.verdict().status, CriterionVerdict::InfraError);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "infrastructure fixture requires at least one current Failed role StageRun"
+    )]
+    fn infra_error_verdict_fixture_rejects_all_succeeded_roles() {
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000017".into()),
+            test_support::VerdictFixtureOutcome::Pass,
+        );
+
+        let _ = test_support::verdict_facts_fixture(
+            &fixture.delivery,
+            &fixture.candidate,
+            test_support::VerdictFixtureOutcome::InfraError,
+        );
     }
     use crate::domain::{
         AttentionItemStatus, Delivery, DeliveryStage, DeliveryStatus, DeliveryTaskStatus,
