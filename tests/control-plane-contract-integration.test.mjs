@@ -308,7 +308,7 @@ test('public objects stay closed and error details inherit every authority redac
   for (const path of openObjects.get('control-plane-http.schema.json')) {
     assert.equal(
       path === '#/$defs/QueryEnvelope/properties/parameters'
-      || /^#\/\$defs\/[A-Za-z][A-Za-z0-9]*(?:Command|Query)\/allOf\/1$/u.test(path),
+      || /^#\/\$defs\/[A-Za-z][A-Za-z0-9]*(?:Command|Query|CompletedResponse|ResultResponse)\/allOf\/1$/u.test(path),
       true,
       `HTTP object is open outside an envelope specialization: ${path}`,
     )
@@ -677,6 +677,78 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     leakedCredential,
     false,
     'credential projection rejects its vault locator',
+  )
+})
+
+test('HTTP response discriminators, repository scope, and actor references fail closed', () => {
+  const ajv = contractValidator()
+  const httpId = `${schemaBase}control-plane-http.schema.json`
+  const examples = json(join(schemaRoot, 'examples', 'control-plane-http.examples.json'))
+  const queryRequest = validator(ajv, httpId, 'QueryRequest')
+  const queryResponse = validator(ajv, httpId, 'QueryResultResponse')
+  const commandResponse = validator(ajv, httpId, 'CommandCompletedResponse')
+
+  const relabeledQueryResponse = structuredClone(examples.responses.runtimeProjection)
+  relabeledQueryResponse.query = 'delivery.get'
+  assertValidation(
+    queryResponse,
+    relabeledQueryResponse,
+    false,
+    'query response cannot relabel a runtime result as delivery.get',
+  )
+
+  const wrongQueryResult = structuredClone(examples.responses.runtimeProjection)
+  wrongQueryResult.result = structuredClone(examples.responses.queryPage.result)
+  assertValidation(
+    queryResponse,
+    wrongQueryResult,
+    false,
+    'runtime.projection.get cannot return a Delivery page',
+  )
+
+  const relabeledCommandResponse = structuredClone(examples.responses.commandCompleted)
+  relabeledCommandResponse.command = 'delivery.create'
+  assertValidation(
+    commandResponse,
+    relabeledCommandResponse,
+    false,
+    'command response cannot relabel a Worker projection as delivery.create',
+  )
+
+  for (const query of [examples.positive.deliveryGet, examples.positive.runtimeProjectionGet]) {
+    const wrongScope = structuredClone(query)
+    wrongScope.scope = {
+      kind: 'organization',
+      organizationId: 'org_00000000000000000000000000',
+    }
+    assertValidation(
+      queryRequest,
+      wrongScope,
+      false,
+      `${query.query} requires a complete repository scope`,
+    )
+  }
+
+  const forgedPublicationApprover = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  forgedPublicationApprover.result.approvedBy = 'Authorization: Bearer secret'
+  assertValidation(
+    queryResponse,
+    forgedPublicationApprover,
+    false,
+    'publication approver must be a canonical ActorId',
+  )
+
+  const forgedAttentionResolver = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  forgedAttentionResolver.result.attention[0].assignedTo = 'credential=secret'
+  assertValidation(
+    queryResponse,
+    forgedAttentionResolver,
+    false,
+    'Attention assignee must be a canonical ActorId',
   )
 })
 

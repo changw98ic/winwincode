@@ -13,6 +13,12 @@
 WebSocket 只推送投影、运行事件、审批请求和通知。业务变更统一提交到 command
 入口，避免 HTTP 与 WebSocket 各自形成一套写入规则。
 
+两个 HTTP 路由都必须显式认证，且只接受两种方式之一：同源 Web/本地 Host 使用
+`wwc_session` cookie，服务账号和企业客户端使用 `Authorization: Bearer <JWT>`。认证材料
+不进入 query、command body 或 URL query；包络中的 `actor` 必须等于服务端认证出的
+principal。OpenAPI 的 `sessionCookie` 与 `bearerAuth` security scheme 是生成客户端的唯一
+认证合同，不存在匿名分支。
+
 ## 文件
 
 - [`domain.schema.json`](./domain.schema.json) 定义跨传输共用的 ID、Actor、Scope、
@@ -72,6 +78,11 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 状态和响应正文，不重复执行。相同 `requestId` 对应不同输入时返回
 `IDEMPOTENCY_CONFLICT`。资源版本已变化时返回 `REVISION_CONFLICT`，错误详情同时
 给出 `expectedRevision` 和 `currentRevision`。
+
+成功响应按原始 `command` 或 `query` 组成判别联合。每个操作只允许自己的结果投影；例如
+`delivery.get` 只能返回 `DeliveryDetailProjection`，`runtime.projection.get` 只能返回
+`RuntimeProjectionSnapshot`。调用方或服务端不能把同一结果改写 discriminator 后当作另一项
+操作的响应。
 
 ## 查询与 cursor
 

@@ -127,6 +127,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/ApprovalDecidePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalDecideCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "approval.decide"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ApprovalProjection"
               }
             },
             "type": "object"
@@ -250,6 +271,27 @@
               },
               "query": {
                 "const": "approval.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "approval.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ApprovalProjection"
               }
             },
             "type": "object"
@@ -294,6 +336,27 @@
               },
               "query": {
                 "const": "approval.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "approval.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ApprovalPage"
               }
             },
             "type": "object"
@@ -763,6 +826,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/ChatSubmitPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ChatSubmitCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "chat.submit"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
               }
             },
             "type": "object"
@@ -823,8 +907,9 @@
         ],
         "type": "object"
       },
-      "CommandCompletedResponse": {
+      "CommandCompletedEnvelope": {
         "additionalProperties": false,
+        "description": "Shared completed-command envelope. Public responses use the command-discriminated CommandCompletedResponse union.",
         "properties": {
           "command": {
             "$ref": "#/components/schemas/CommandName"
@@ -841,9 +926,7 @@
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
           },
-          "result": {
-            "$ref": "#/components/schemas/CommandResult"
-          },
+          "result": {},
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
           }
@@ -858,6 +941,68 @@
           "result"
         ],
         "type": "object"
+      },
+      "CommandCompletedResponse": {
+        "description": "Exact command/result response union. Relabeling a result under another command is invalid.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionCreateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ChatSubmitCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/InputRespondCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionCancelCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionCloseCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryCreateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryUpdateSpecCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryApproveTaskBreakdownCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryAdvanceCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryResolveAttentionCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliverySubmitVerdictCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceCreateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceDeleteCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalDecideCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerDrainCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerEnableCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationPublishCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationCancelCompletedResponse"
+          }
+        ]
       },
       "CommandEnvelope": {
         "additionalProperties": false,
@@ -978,34 +1123,6 @@
           },
           {
             "$ref": "#/components/schemas/PublicationCancelCommand"
-          }
-        ]
-      },
-      "CommandResult": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/ProductSessionProjection"
-          },
-          {
-            "$ref": "#/components/schemas/DeliveryProjection"
-          },
-          {
-            "$ref": "#/components/schemas/SettingsProjection"
-          },
-          {
-            "$ref": "#/components/schemas/CredentialReferenceProjection"
-          },
-          {
-            "$ref": "#/components/schemas/ApprovalProjection"
-          },
-          {
-            "$ref": "#/components/schemas/WorkerProjection"
-          },
-          {
-            "$ref": "#/components/schemas/PublicationProjection"
-          },
-          {
-            "$ref": "#/components/schemas/MutationReceipt"
           }
         ]
       },
@@ -2198,6 +2315,24 @@
           }
         ]
       },
+      "CredentialReferenceCreateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.create"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CredentialReferenceProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
       "CredentialReferenceCreatePayload": {
         "additionalProperties": false,
         "properties": {
@@ -2247,6 +2382,24 @@
           }
         ]
       },
+      "CredentialReferenceDeleteCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.delete"
+              },
+              "result": {
+                "$ref": "#/components/schemas/MutationReceipt"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
       "CredentialReferenceDeletePayload": {
         "additionalProperties": false,
         "properties": {
@@ -2283,6 +2436,24 @@
               },
               "query": {
                 "const": "credential.reference.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "credential.reference.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CredentialReferenceProjection"
               }
             },
             "type": "object"
@@ -2326,6 +2497,24 @@
               },
               "query": {
                 "const": "credential.reference.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "credential.reference.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CredentialReferencePage"
               }
             },
             "type": "object"
@@ -2444,6 +2633,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/DeliveryAdvancePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryAdvanceCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.advance"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
               }
             },
             "type": "object"
@@ -2474,6 +2684,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/DeliveryApproveTaskBreakdownPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryApproveTaskBreakdownCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.approve_task_breakdown"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
               }
             },
             "type": "object"
@@ -2532,9 +2763,7 @@
           "assignedTo": {
             "oneOf": [
               {
-                "maxLength": 500,
-                "minLength": 1,
-                "type": "string"
+                "$ref": "#/components/schemas/ActorId"
               },
               {
                 "type": "null"
@@ -2588,9 +2817,7 @@
           "resolvedBy": {
             "oneOf": [
               {
-                "maxLength": 500,
-                "minLength": 1,
-                "type": "string"
+                "$ref": "#/components/schemas/ActorId"
               },
               {
                 "type": "null"
@@ -2660,6 +2887,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/DeliveryCreatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryCreateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.create"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
               }
             },
             "type": "object"
@@ -2950,6 +3198,27 @@
               },
               "query": {
                 "const": "delivery.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "delivery.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryDetailProjection"
               }
             },
             "type": "object"
@@ -2990,6 +3259,27 @@
               },
               "query": {
                 "const": "delivery.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "delivery.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryPage"
               }
             },
             "type": "object"
@@ -3239,6 +3529,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/DeliveryResolveAttentionPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryResolveAttentionCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.resolve_attention"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
               }
             },
             "type": "object"
@@ -3737,6 +4048,24 @@
           }
         ]
       },
+      "DeliverySubmitVerdictCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.submit_verdict"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
       "DeliverySubmitVerdictPayload": {
         "additionalProperties": false,
         "description": "Requests server-side verdict computation from sealed Control Plane facts. Caller-derived Evidence, criterion results, verdicts, Attention, status, credentials, verification conclusions, and raw runtime facts are rejected.",
@@ -4002,6 +4331,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/DeliveryUpdateSpecPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "DeliveryUpdateSpecCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "delivery.update_spec"
+              },
+              "result": {
+                "$ref": "#/components/schemas/DeliveryProjection"
               }
             },
             "type": "object"
@@ -4775,6 +5125,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/InputRespondPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "InputRespondCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "input.respond"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
               }
             },
             "type": "object"
@@ -5877,6 +6248,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/PublicationCancelPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationCancelCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "publication.cancel"
+              },
+              "result": {
+                "$ref": "#/components/schemas/PublicationProjection"
               }
             },
             "type": "object"
@@ -5925,6 +6317,27 @@
               },
               "query": {
                 "const": "publication.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "publication.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/PublicationProjection"
               }
             },
             "type": "object"
@@ -5981,6 +6394,27 @@
               },
               "query": {
                 "const": "publication.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "publication.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/PublicationPage"
               }
             },
             "type": "object"
@@ -6018,9 +6452,7 @@
             "$ref": "#/components/schemas/Instant"
           },
           "approvedBy": {
-            "maxLength": 500,
-            "minLength": 1,
-            "type": "string"
+            "$ref": "#/components/schemas/ActorId"
           },
           "candidateRef": {
             "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
@@ -6115,6 +6547,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/PublicationPublishPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "PublicationPublishCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "publication.publish"
+              },
+              "result": {
+                "$ref": "#/components/schemas/PublicationProjection"
               }
             },
             "type": "object"
@@ -6154,7 +6607,7 @@
       },
       "PublicationResourceRef": {
         "additionalProperties": false,
-        "description": "Secret-safe remote publication identity. Control Plane verifies repository equals PublicationTarget.repository and resolves any link from kind plus number.",
+        "description": "Secret-safe remote publication identity. Control Plane verifies repository equals PublicationTarget.repository and resolves links from kind plus number.",
         "properties": {
           "kind": {
             "$ref": "#/components/schemas/PublicationResourceKind"
@@ -6309,57 +6762,9 @@
           }
         ]
       },
-      "QueryResult": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/ProductSessionProjection"
-          },
-          {
-            "$ref": "#/components/schemas/DeliveryDetailProjection"
-          },
-          {
-            "$ref": "#/components/schemas/RuntimeProjectionSnapshot"
-          },
-          {
-            "$ref": "#/components/schemas/SettingsProjection"
-          },
-          {
-            "$ref": "#/components/schemas/CredentialReferenceProjection"
-          },
-          {
-            "$ref": "#/components/schemas/ApprovalProjection"
-          },
-          {
-            "$ref": "#/components/schemas/WorkerProjection"
-          },
-          {
-            "$ref": "#/components/schemas/PublicationProjection"
-          },
-          {
-            "$ref": "#/components/schemas/ProductSessionPage"
-          },
-          {
-            "$ref": "#/components/schemas/ChatMessagePage"
-          },
-          {
-            "$ref": "#/components/schemas/DeliveryPage"
-          },
-          {
-            "$ref": "#/components/schemas/CredentialReferencePage"
-          },
-          {
-            "$ref": "#/components/schemas/ApprovalPage"
-          },
-          {
-            "$ref": "#/components/schemas/WorkerPage"
-          },
-          {
-            "$ref": "#/components/schemas/PublicationPage"
-          }
-        ]
-      },
-      "QueryResultResponse": {
+      "QueryResultEnvelope": {
         "additionalProperties": false,
+        "description": "Shared query-result envelope. Public responses use the query-discriminated QueryResultResponse union.",
         "properties": {
           "page": {
             "$ref": "#/components/schemas/PageInfo"
@@ -6370,9 +6775,7 @@
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
           },
-          "result": {
-            "$ref": "#/components/schemas/QueryResult"
-          },
+          "result": {},
           "schemaVersion": {
             "$ref": "#/components/schemas/SchemaVersion"
           }
@@ -6385,6 +6788,56 @@
           "page"
         ],
         "type": "object"
+      },
+      "QueryResultResponse": {
+        "description": "Exact query/result response union. A client can narrow result by query without accepting an unrelated projection.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionMessagesListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/RuntimeProjectionGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SettingsGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/WorkerGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/PublicationGetResultResponse"
+          }
+        ]
       },
       "RemediationInput": {
         "additionalProperties": false,
@@ -6965,6 +7418,27 @@
               },
               "query": {
                 "const": "runtime.projection.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "RuntimeProjectionGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "runtime.projection.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/RuntimeProjectionSnapshot"
               }
             },
             "type": "object"
@@ -7479,6 +7953,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/SessionCancelPayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionCancelCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.cancel"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
               }
             },
             "type": "object"
@@ -7515,6 +8010,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/SessionClosePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionCloseCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.close"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
               }
             },
             "type": "object"
@@ -7545,6 +8061,27 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/SessionCreatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionCreateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "session.create"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
               }
             },
             "type": "object"
@@ -7605,6 +8142,27 @@
               },
               "query": {
                 "const": "session.get"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "session.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionProjection"
               }
             },
             "type": "object"
@@ -7648,6 +8206,27 @@
               },
               "query": {
                 "const": "session.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "session.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ProductSessionPage"
               }
             },
             "type": "object"
@@ -7678,6 +8257,27 @@
               },
               "query": {
                 "const": "session.messages.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SessionMessagesListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "session.messages.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ChatMessagePage"
               }
             },
             "type": "object"
@@ -7696,6 +8296,24 @@
               },
               "query": {
                 "const": "settings.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SettingsGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "settings.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/SettingsProjection"
               }
             },
             "type": "object"
@@ -7769,6 +8387,24 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/SettingsUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "SettingsUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "settings.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/SettingsProjection"
               }
             },
             "type": "object"
@@ -8592,6 +9228,24 @@
           }
         ]
       },
+      "WorkerDrainCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "worker.drain"
+              },
+              "result": {
+                "$ref": "#/components/schemas/WorkerProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
       "WorkerDrainPayload": {
         "additionalProperties": false,
         "properties": {
@@ -8622,6 +9276,24 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/WorkerEnablePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerEnableCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "worker.enable"
+              },
+              "result": {
+                "$ref": "#/components/schemas/WorkerProjection"
               }
             },
             "type": "object"
@@ -8664,6 +9336,24 @@
               },
               "query": {
                 "const": "worker.get"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerGetResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "worker.get"
+              },
+              "result": {
+                "$ref": "#/components/schemas/WorkerProjection"
               }
             },
             "type": "object"
@@ -8831,6 +9521,24 @@
               },
               "query": {
                 "const": "worker.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "WorkerListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "worker.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/WorkerPage"
               }
             },
             "type": "object"
@@ -9045,6 +9753,20 @@
         ],
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "JWT",
+        "description": "Service-account and enterprise access token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "sessionCookie": {
+        "description": "Same-origin Web and local Host session.",
+        "in": "cookie",
+        "name": "wwc_session",
+        "type": "apiKey"
+      }
     }
   },
   "info": {
@@ -9174,7 +9896,15 @@
             },
             "description": "SERVICE_UNAVAILABLE or TRUSTED_FACTS_UNAVAILABLE"
           }
-        }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/api/v1/queries": {
@@ -9282,7 +10012,15 @@
             },
             "description": "SERVICE_UNAVAILABLE or TRUSTED_FACTS_UNAVAILABLE"
           }
-        }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     }
   },
@@ -9292,9 +10030,24 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:4a8c71880d68ee20f4f034b87e27e81b1e667c0ed120f798bd4fbe93824ccd3e",
+  "x-source-digest": "sha256:cc72794d06d70e3b0c7909b359c7de4b89cc011e98b6948b896305c571690986",
   "x-winwincode-client-metadata": {
     "http": {
+      "authentication": {
+        "anonymousAllowed": false,
+        "bearerAuth": {
+          "format": "JWT",
+          "location": "header",
+          "name": "Authorization",
+          "scheme": "Bearer"
+        },
+        "credentialsInBodyAllowed": false,
+        "credentialsInQueryAllowed": false,
+        "sessionCookie": {
+          "location": "cookie",
+          "name": "wwc_session"
+        }
+      },
       "commandEndpoint": "/api/v1/commands",
       "queries": [
         {
@@ -9309,6 +10062,11 @@
         }
       ],
       "queryEndpoint": "/api/v1/queries",
+      "responseCorrelation": {
+        "command": "command",
+        "mismatch": "reject",
+        "query": "query"
+      },
       "strongFlowRead": {
         "bootstrapQuery": "delivery.get",
         "failureMode": "discard_partial_pair",
@@ -9319,6 +10077,21 @@
       "transport": "http"
     },
     "websocket": {
+      "authentication": {
+        "bearerAuth": {
+          "format": "JWT",
+          "location": "header",
+          "name": "Authorization",
+          "scheme": "Bearer"
+        },
+        "credentialsInFramesAllowed": false,
+        "credentialsInUrlQueryAllowed": false,
+        "sessionCookie": {
+          "location": "cookie",
+          "name": "wwc_session"
+        },
+        "upgradeOnly": true
+      },
       "endpoint": "/api/v1/events",
       "invalidationReloadQueries": {
         "delivery-stage": [

@@ -1194,7 +1194,40 @@
           "runtime.projection.get"
         ]
       },
-      "resetStrategy": "discard_then_full_reload_by_original_subscription_stream"
+      "resetStrategy": "discard_then_full_reload_by_original_subscription_stream",
+      "authentication": {
+        "upgradeOnly": true,
+        "sessionCookie": {
+          "location": "cookie",
+          "name": "wwc_session"
+        },
+        "bearerAuth": {
+          "location": "header",
+          "name": "Authorization",
+          "scheme": "Bearer",
+          "format": "JWT"
+        },
+        "credentialsInUrlQueryAllowed": false,
+        "credentialsInFramesAllowed": false
+      }
+    }
+  },
+  "x-winwincode-semantics": {
+    "authentication": {
+      "anonymousAllowed": false,
+      "upgradeOnly": true,
+      "sessionCookie": {
+        "location": "cookie",
+        "name": "wwc_session"
+      },
+      "bearerAuth": {
+        "location": "header",
+        "name": "Authorization",
+        "scheme": "Bearer",
+        "format": "JWT"
+      },
+      "credentialsInUrlQueryAllowed": false,
+      "credentialsInFramesAllowed": false
     }
   }
 }

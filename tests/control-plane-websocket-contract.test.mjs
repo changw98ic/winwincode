@@ -232,7 +232,6 @@ function validateTranscript(transcript) {
   ))
   if (!subscribe) return 'subscription is missing'
   const expectedCursor = subscribe.subscription
-
   let lastSequence = subscribe.after?.sequence ?? 0
   let revokedEpoch = null
   for (const frame of transcript.frames) {
@@ -334,6 +333,30 @@ test('client frames only subscribe, resume, acknowledge, or answer a heartbeat',
   assert.equal(JSON.stringify(schema.$defs.ControlPlaneWebSocketClientFrame).includes('command'), false)
   assert.match(contract, /主要业务写入只走 HTTP/u)
   assert.match(contract, /WebSocket[^\n]+不接受主要业务 command/u)
+})
+
+test('WebSocket authentication exists only on the HTTP upgrade', () => {
+  assert.deepEqual(schema['x-winwincode-semantics'].authentication, {
+    anonymousAllowed: false,
+    upgradeOnly: true,
+    sessionCookie: {
+      location: 'cookie',
+      name: 'wwc_session',
+    },
+    bearerAuth: {
+      location: 'header',
+      name: 'Authorization',
+      scheme: 'Bearer',
+      format: 'JWT',
+    },
+    credentialsInUrlQueryAllowed: false,
+    credentialsInFramesAllowed: false,
+  })
+  assert.match(contract, /HTTP upgrade/u)
+  assert.match(contract, /`wwc_session`/u)
+  assert.match(contract, /`Authorization: Bearer <JWT>`/u)
+  assert.match(contract, /URL query/u)
+  assert.match(contract, /frame/u)
 })
 
 test('Chat event exposes only the canonical secret-safe message projection', () => {

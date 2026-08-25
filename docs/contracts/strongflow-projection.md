@@ -152,6 +152,11 @@ Web 只使用生成的 HTTP 和 WebSocket 客户端。页面代码可以负责�
   `delivery.get` 读取截面中核对；已有 publication 事实只要任一字段过期，就拒绝整份截面。
   `resourceRef` 只公开 closed `kind + owner/repository + number`，repository 必须等于 target；
   不返回任意 URL、query、fragment、userinfo 或原始 Provider payload。
+- `solutionReview.reviewerId`、Attention 的 `assignedTo/resolvedBy` 和 Publication 的
+  `approvedBy` 都使用 canonical `ActorId`，不接受任意显示文本、Authorization 内容或凭据值。
+- HTTP 成功响应按 `query` 或 `command` 组成精确判别联合；StrongFlow 请求使用完整
+  repository scope。两个 HTTP 路由只接受 `wwc_session` cookie 或 Bearer JWT，包络 actor
+  必须与认证 principal 一致。
 - ExecutionPort 在 `runtime.event` 前接受一条完整的 `session.binding`，并要求事件携带相同
   `codexThreadId`。未绑定或不一致的事件在保存和投影之前被拒绝。
 - canonical schema 中的 HTTP 路由、查询结果、WebSocket 失效事件和 reset reload metadata

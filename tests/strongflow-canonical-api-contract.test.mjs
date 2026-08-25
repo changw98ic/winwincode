@@ -10,10 +10,6 @@ function json(name) {
   return JSON.parse(readFileSync(join(schemaRoot, name), 'utf8'))
 }
 
-function refs(schema) {
-  return schema.oneOf.map(branch => branch.$ref)
-}
-
 function branchConstants(schema, unionName, propertyName) {
   return schema.$defs[unionName].oneOf.map(branch => {
     const name = branch.$ref.split('/').at(-1)
@@ -65,9 +61,11 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'updatedAt',
   ]))
 
-  assert.ok(refs(http.$defs.QueryResult).includes('#/$defs/DeliveryDetailProjection'))
-  assert.equal(refs(http.$defs.QueryResult)
-    .includes('./domain.schema.json#/$defs/DeliveryProjection'), false)
+  assert.equal(
+    http.$defs.DeliveryGetResultResponse.allOf[1].properties.result.$ref,
+    '#/$defs/DeliveryDetailProjection',
+  )
+  assert.equal(http.$defs.QueryResult, undefined)
 
   const detail = http.$defs.DeliveryDetailProjection
   assert.equal(detail.additionalProperties, false)
@@ -273,6 +271,8 @@ test('current solution review and publication expose exact authority joins', () 
     'updatedAt',
   ]) assert.ok(publication.required.includes(field), field)
   assert.equal(publication.properties.verdictStatus.const, 'pass')
+  assert.equal(publication.properties.approvedBy.$ref,
+    './domain.schema.json#/$defs/ActorId')
   assert.equal(publication.properties.publicationSetSha256.$ref,
     './domain.schema.json#/$defs/Sha256Digest')
   assert.deepEqual(publication.properties.resourceRef.oneOf, [
@@ -311,6 +311,13 @@ test('current solution review and publication expose exact authority joins', () 
       rawProviderPayloadAllowed: false,
     },
   })
+
+  for (const field of ['assignedTo', 'resolvedBy']) {
+    assert.deepEqual(http.$defs.DeliveryAttentionProjection.properties[field].oneOf, [
+      { $ref: './domain.schema.json#/$defs/ActorId' },
+      { type: 'null' },
+    ])
+  }
 })
 
 test('delivery and runtime reads share one server-issued bounded read cursor', () => {
@@ -600,6 +607,23 @@ test('canonical schemas carry generated-client route and event metadata', () => 
         resultDefinition: 'RuntimeProjectionSnapshot',
       },
     ],
+    authentication: {
+      anonymousAllowed: false,
+      sessionCookie: { location: 'cookie', name: 'wwc_session' },
+      bearerAuth: {
+        location: 'header',
+        name: 'Authorization',
+        scheme: 'Bearer',
+        format: 'JWT',
+      },
+      credentialsInQueryAllowed: false,
+      credentialsInBodyAllowed: false,
+    },
+    responseCorrelation: {
+      command: 'command',
+      query: 'query',
+      mismatch: 'reject',
+    },
   })
   assert.deepEqual(events['x-winwincode-transports'].generatedClient, {
     transport: 'websocket',
@@ -611,6 +635,18 @@ test('canonical schemas carry generated-client route and event metadata', () => 
       'delivery-stage': ['delivery.get', 'runtime.projection.get'],
     },
     resetStrategy: 'discard_then_full_reload_by_original_subscription_stream',
+    authentication: {
+      upgradeOnly: true,
+      sessionCookie: { location: 'cookie', name: 'wwc_session' },
+      bearerAuth: {
+        location: 'header',
+        name: 'Authorization',
+        scheme: 'Bearer',
+        format: 'JWT',
+      },
+      credentialsInUrlQueryAllowed: false,
+      credentialsInFramesAllowed: false,
+    },
   })
 
   const generated = readFileSync(join(

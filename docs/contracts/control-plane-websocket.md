@@ -11,6 +11,16 @@
 Approval、Attention、Task、Publication、Credential 或 Worker 管理写入。浏览器通过 HTTP
 提交带 `requestId` 和 `expectedRevision` 的操作，再通过 WebSocket 收到结果投影。
 
+## 连接认证
+
+认证只发生在 WebSocket 的 HTTP upgrade。同源 Web 和本地 Host 使用名为
+`wwc_session` 的 session cookie；服务账号和企业客户端使用
+`Authorization: Bearer <JWT>` 请求头。匿名 upgrade 一律拒绝，服务端解析出的 principal
+必须重新授权订阅中的完整 Scope。
+
+认证材料不放入 URL query，也不放入 subscribe、resume、ack、pong 或任何其他 frame。
+这样代理日志、浏览器历史和可恢复事件台账都不会保存 session 或 bearer token。
+
 ## 一条订阅只对应一个事件流
 
 一条订阅由以下二元组唯一确定：
