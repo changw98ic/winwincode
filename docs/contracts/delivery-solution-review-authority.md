@@ -84,7 +84,7 @@ comments
 requestedChanges
 ```
 
-`action=approve` 时 `requestedChanges` 必须为空；`request_changes` 必须列出至少一项修改；`reject` 必须有说明。公开投影只显示 typed `decision`，不返回完整 resolution JSON。
+`action=approve` 时 `requestedChanges` 必须为空；`request_changes` 必须列出至少一项修改；其他决定的 `requestedChanges` 必须为空。公开投影显示 typed `decision`、有上限的 `comments` 和 typed `requestedChanges`，不返回完整 resolution JSON。
 
 ## 3. 摘要与任务提案
 
@@ -152,7 +152,7 @@ solutionReview: SolutionReviewProjection | null
 
 `projection.pending_review_is_visible`：当前 pending review 返回 safe solution、diagrams、risks、unresolvedItems、非空 ordered `taskProposals`、`reviewStatus=pending`，同时 `decision/reviewerId/reviewedAt=null`。
 
-`projection.safe_fields_only`：公开字段只包括 exact authority IDs、`reviewSetSha256`、bounded solution、diagrams、risks、unresolvedItems、task proposals、review status、typed decision、reviewerId 和 reviewedAt。
+`projection.safe_fields_only`：公开字段只包括 exact authority IDs、`reviewSetSha256`、bounded solution、diagrams、risks、unresolvedItems、task proposals、review status、typed decision、bounded comments、typed requestedChanges、reviewerId 和 reviewedAt。
 
 raw Attention `context` 和 `resolution` 永远不进入公开投影。以下数据也禁止出现：credential、authorization、provider request/response、tool payload/output、runtime log、stdout/stderr、human review SessionBinding 和 ExecutionJob identity。
 
