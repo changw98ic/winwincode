@@ -12,11 +12,12 @@ use winwincode_api::generated::{
 use winwincode_control_plane::{
     AggregateJournalKey, CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig,
     EventPublishError, EventPublisher, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent,
-    ProductStateStorage, ShutdownError, ShutdownReport, StartError, StateChange, StorageError,
-    StorageErrorKind, StoredState,
+    ProductStateStorage, ProjectionEventStream, ShutdownError, ShutdownReport, StartError,
+    StateChange, StorageError, StorageErrorKind, StoredState,
 };
 use winwincode_domain::{
-    OrganizationId, ProjectId, RepositoryId, RequestId, ServiceAccountId, UserId, WorkspaceId,
+    ControlPlaneEventId, DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId,
+    ServiceAccountId, UserId, WorkspaceId,
 };
 use winwincode_storage::{ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit};
 
@@ -467,6 +468,35 @@ fn commit_persists_state_and_outbox_before_publishing_the_event() {
         ]
     );
     control_plane.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+fn generic_commit_cannot_forge_a_public_projection_stream_event() {
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let (storage, _) = TraceStorage::new(Arc::clone(&trace), vec![vec![]], None);
+    let (publisher, _) = RecordingPublisher::successful();
+    let mut control_plane =
+        ControlPlane::start(Box::new(storage), Box::new(publisher)).expect("Control Plane start");
+    trace.lock().expect("trace lock").clear();
+    let event = NewOutboxEvent::projection(
+        ControlPlaneEventId("evt_0000000000000001".into()),
+        "delivery.changed.v1",
+        br#"{"credential":"caller-controlled"}"#.to_vec(),
+        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into())),
+    );
+
+    let error = control_plane
+        .commit(
+            &default_command("req_01J00000000000000000000011", 0),
+            StateChange::new("settings:one", b"state".to_vec(), vec![event]),
+        )
+        .expect_err("only a typed transaction may advance a public stream");
+    assert!(matches!(
+        error,
+        CommitError::Storage(ref source) if source.kind() == StorageErrorKind::InvalidInput
+    ));
+    assert!(trace.lock().expect("trace lock").is_empty());
+    control_plane.shutdown().expect("shutdown");
 }
 
 #[test]
