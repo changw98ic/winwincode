@@ -186,7 +186,9 @@ function configFor(repository, baseURL) {
 }
 
 async function rejectingOpenAiServer(secret) {
+  let requestCount = 0
   const server = createServer(async (request, response) => {
+    requestCount += 1
     for await (const _chunk of request) {
       // Drain the request before returning the provider failure.
     }
@@ -198,6 +200,7 @@ async function rejectingOpenAiServer(secret) {
   const address = server.address()
   return Object.freeze({
     server,
+    requestCount: () => requestCount,
     baseURL: `http://127.0.0.1:${String(address.port)}/v1`,
   })
 }
@@ -890,12 +893,13 @@ test('persists a sanitized inspectable result when the DSH provider route fails'
   const repository = await fixtureRepository(directory)
   const credential = 'fixture-provider-failure-secret-that-must-not-leak'
   const provider = await rejectingOpenAiServer(credential)
+  const config = configFor(repository, provider.baseURL)
   t.after(() => new Promise(resolveClose => provider.server.close(resolveClose)))
   let failure
   try {
     await runLiveEvaluation({
       optIn: true,
-      config: configFor(repository, provider.baseURL),
+      config,
       outputDirectory: join(directory, 'results'),
       environment: {
         ...process.env,
@@ -905,7 +909,8 @@ test('persists a sanitized inspectable result when the DSH provider route fails'
   } catch (error) {
     failure = error
   }
-  assert.notEqual(failure, undefined)
+  assert.equal(failure?.code, 'CODEX_TURN_FAILED')
+  assert.equal(provider.requestCount() > 0, true)
   assert.equal(typeof failure.evaluationResultPath, 'string')
   const stored = await readFile(failure.evaluationResultPath, 'utf8')
   const result = JSON.parse(stored)
@@ -913,7 +918,23 @@ test('persists a sanitized inspectable result when the DSH provider route fails'
   assert.equal(result.phase, 'failed')
   assert.equal(result.preflight.status, 'passed')
   assert.notEqual(result.sourceIdentities, null)
-  assert.equal(typeof result.error.code, 'string')
+  assert.deepEqual({
+    catalog: result.provider.catalog,
+    route: result.provider.route,
+    model: result.provider.model,
+    credentialRef: result.provider.credentialRef,
+    endpointOverride: result.provider.endpointOverride,
+    reasoningEffort: result.provider.reasoningEffort,
+  }, {
+    catalog: 'dsh-pi-ai',
+    route: config.provider.route,
+    model: config.provider.model,
+    credentialRef: config.provider.apiKeyEnv,
+    endpointOverride: config.provider.baseURL,
+    reasoningEffort: config.provider.reasoningEffort,
+  })
+  assert.notEqual(result.provider.modelInfo, null)
+  assert.equal(result.error.code, 'CODEX_TURN_FAILED')
   assert.notEqual(result.runtimeProjection, null)
   assert.notEqual(result.measures, null)
   assert.deepEqual(measureLiveEvaluationResult(result), result.measures)

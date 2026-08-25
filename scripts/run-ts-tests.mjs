@@ -6,7 +6,9 @@ import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const testsDirectory = join(root, 'tests')
-const serialProcessTests = Object.freeze([])
+const serialProcessTests = Object.freeze([
+  'tests/live-evaluation-runner.test.mjs',
+])
 const testFiles = readdirSync(testsDirectory, { withFileTypes: true })
   .filter(entry => entry.isFile() && entry.name.endsWith('.test.mjs'))
   .map(entry => `tests/${entry.name}`)
@@ -33,7 +35,8 @@ function runTests(arguments_) {
 const parallelTests = testFiles.filter(path => !serialProcessTests.includes(path))
 runTests(['--test', '--test-concurrency=4', ...parallelTests])
 
-// Any future process-boundary test can opt into this serial list.
+// Process-boundary tests run after the parallel suite so their nested gates
+// observe the repository without competing test-runner load.
 for (const path of serialProcessTests) runTests(['--test', path])
 
 // The full ten-scenario oracle runs after the parallel Node suite and reuses

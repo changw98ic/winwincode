@@ -6,6 +6,7 @@ import test from 'node:test'
 const root = resolve(import.meta.dirname, '..')
 const differentialTestPath = 'tests/delivery-strongflow-differential-oracle.test.mjs'
 const exporterPath = 'scripts/export-delivery-strongflow-oracle.mjs'
+const liveEvaluationTestPath = 'tests/live-evaluation-runner.test.mjs'
 const runnerPath = 'scripts/run-ts-tests.mjs'
 
 async function source(path) {
@@ -60,6 +61,23 @@ test('TypeScript test runner checks the full oracle after the Node test suite wi
   assert.equal(runnerSource.indexOf(oracleCheck) > runnerSource.indexOf(serialSuite), true)
   assert.doesNotMatch(runnerSource, /\b(?:pnpm|build:ts)\b/u)
   assert.doesNotMatch(runnerSource, /oracle:delivery:check/u)
+})
+
+test('TypeScript test runner isolates the process-boundary live evaluation lane', async () => {
+  const runnerSource = await source(runnerPath)
+
+  assert.match(
+    runnerSource,
+    new RegExp(`serialProcessTests = Object\\.freeze\\(\\[[^\\]]*'${liveEvaluationTestPath}'`, 'u'),
+  )
+  assert.match(
+    runnerSource,
+    /parallelTests = testFiles\.filter\(path => !serialProcessTests\.includes\(path\)\)/u,
+  )
+  assert.match(
+    runnerSource,
+    /for \(const path of serialProcessTests\) runTests\(\['--test', path\]\)/u,
+  )
 })
 
 test('the exporter remains the only source that builds the full committed oracle', async () => {
