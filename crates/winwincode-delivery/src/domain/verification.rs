@@ -1550,6 +1550,34 @@ pub(crate) mod test_support {
         .expect("verification fixture observations must pass the production resolver")
     }
 
+    /// Resolves infrastructure-error fixture observations from each role's
+    /// current terminal `StageRun` instead of assigning one synthetic outcome
+    /// to every role.
+    pub(crate) fn resolved_infrastructure_verification(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+    ) -> IndependentVerification {
+        let state = |role| {
+            let run = current_role_run(delivery, role, "verification.infrastructure-fixture")
+                .expect("infrastructure fixture current role StageRun");
+            match run.status {
+                StageRunStatus::Succeeded => VerificationFixtureState::Incomplete,
+                StageRunStatus::Failed => VerificationFixtureState::InfrastructureFailed,
+                _ => panic!(
+                    "infrastructure fixture requires each required role StageRun to be Succeeded or Failed"
+                ),
+            }
+        };
+        let reviewer = state(VerificationRole::Reviewer);
+        let verifier = state(VerificationRole::Verifier);
+        assert!(
+            [reviewer, verifier]
+                .contains(&VerificationFixtureState::InfrastructureFailed),
+            "infrastructure fixture requires at least one current Failed role StageRun"
+        );
+        resolved_independent_verification(delivery, candidate, reviewer, verifier)
+    }
+
     fn resolved_session_fact(
         delivery: &Delivery,
         candidate: &FrozenDeliveryCandidate,
