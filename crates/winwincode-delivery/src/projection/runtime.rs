@@ -26,7 +26,9 @@ use winwincode_domain::{
 };
 
 use crate::domain::{Delivery, SessionBindingId};
-use crate::projection::redaction::{RuntimeDiffSummaryProjection, is_safe_source_ref};
+use crate::projection::redaction::{
+    RuntimeDiffSummaryProjection, contains_credential_material, is_safe_source_ref,
+};
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_RUNTIME_SESSIONS: usize = 256;
@@ -909,33 +911,12 @@ fn validate_recovery(recovery: &RuntimeRecoveryProjection) -> Result<(), Runtime
 }
 
 fn safe_public_text(value: &str, maximum: usize) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    let secret_markers = [
-        "--api-key ",
-        "--password ",
-        "--secret ",
-        "--token ",
-        "api_key=",
-        "api-key:",
-        "apikey=",
-        "authorization:",
-        "authorization=",
-        "aws_secret_access_key",
-        "bearer ",
-        "credential=",
-        "password=",
-        "secret=",
-        "token=",
-        "x-api-key:",
-    ];
     !value.trim().is_empty()
         && value.encode_utf16().count() <= maximum
         && !value
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-        && !secret_markers
-            .iter()
-            .any(|marker| normalized.contains(marker))
+        && !contains_credential_material(value)
 }
 
 fn portable_value(value: &str, maximum: usize) -> bool {
@@ -1735,6 +1716,54 @@ mod tests {
         assert_eq!(activities[0].activity_type, RuntimeActivityType::Command);
         assert_eq!(activities[1].activity_type, RuntimeActivityType::Test);
         assert_eq!(activities[1].exit_code, Some(101));
+    }
+
+    #[test]
+    fn semantic_runtime_text_rejects_common_bare_credentials() {
+        let (_, binding, _) = fixture();
+        for (index, command) in [
+            "deploy ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+            "request --header value sk-proj-0123456789abcdefghijklmnopqrstuvwxyz",
+            "git fetch https://alice:hunter2@example.test/repository.git",
+            "printf '%s' '-----BEGIN PRIVATE KEY-----'",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let error = test_support::accepted_event(
+                &binding,
+                1,
+                &format!("runtime-secret-{index}"),
+                test_support::RuntimeFactFixture::Activity(RuntimeActivityProjection {
+                    call_id: format!("call-secret-{index}"),
+                    activity_type: RuntimeActivityType::Command,
+                    command: Some(command.into()),
+                    status: RuntimeActivityStatus::Completed,
+                    outcome: RuntimeActivityOutcome::Succeeded,
+                    exit_code: Some(0),
+                    source_ref: format!("runtime:call-secret-{index}"),
+                }),
+            )
+            .expect_err("credential-shaped semantic text cannot enter a public runtime fold");
+            assert_eq!(error.code(), RuntimeProjectionErrorCode::InvalidFact);
+        }
+
+        let source_error = test_support::accepted_event(
+            &binding,
+            1,
+            "runtime-secret-source",
+            test_support::RuntimeFactFixture::Activity(RuntimeActivityProjection {
+                call_id: "call-secret-source".into(),
+                activity_type: RuntimeActivityType::Command,
+                command: Some("cargo check".into()),
+                status: RuntimeActivityStatus::Completed,
+                outcome: RuntimeActivityOutcome::Succeeded,
+                exit_code: Some(0),
+                source_ref: "runtime:ghp_0123456789abcdefghijklmnopqrstuvwxyz".into(),
+            }),
+        )
+        .expect_err("a credential-shaped source reference cannot enter a public runtime fold");
+        assert_eq!(source_error.code(), RuntimeProjectionErrorCode::InvalidFact);
     }
 
     #[test]

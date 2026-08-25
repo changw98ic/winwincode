@@ -23,7 +23,7 @@ use winwincode_control_plane::{
     },
 };
 use winwincode_delivery::{
-    domain::{Delivery, DeliveryStatus},
+    domain::{AttentionItem, AttentionItemStatus, AttentionItemType, Delivery, DeliveryStatus},
     projection::runtime::{
         RuntimeProjection,
         test_support::{
@@ -36,8 +36,8 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    DeliveryId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Revision, Sha256Digest, UserId, WorkspaceId,
+    AttentionItemId, DeliveryId, Instant, OrganizationId, ProductSessionId, ProjectId,
+    RepositoryId, RequestId, Revision, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_storage::{ReceiptIdentity, StateCommit};
 
@@ -563,6 +563,42 @@ fn public_projection_excludes_logs_credentials_payloads_and_live_diff_details() 
     assert!(json.contains("changedFileCount"));
     assert!(json.contains("\"detailsVisible\":false"));
 }
+
+#[test]
+fn public_attention_projection_excludes_raw_context_and_resolution() {
+    let mut snapshot = delivery_fixture(false).into_snapshot();
+    let stage_run_id = snapshot.stage_runs[0].id.clone();
+    snapshot.attention_items.push(AttentionItem {
+        schema_version: 3,
+        id: AttentionItemId("attention-redaction".into()),
+        delivery_id: snapshot.id.clone(),
+        delivery_spec_id: snapshot.spec.id.clone(),
+        stage_run_id: Some(stage_run_id),
+        item_type: AttentionItemType::DecisionRequired,
+        title: "Decision recorded".into(),
+        context: "RAW_CONTEXT_SECRET_SENTINEL".into(),
+        options: Vec::new(),
+        assigned_to: Some("usr_reviewer".into()),
+        blocking: false,
+        status: AttentionItemStatus::Resolved,
+        resolution: Some("RAW_RESOLUTION_SECRET_SENTINEL".into()),
+        resolved_by: Some("usr_reviewer".into()),
+        created_at_millis: 1_800_000_000_010,
+        resolved_at_millis: Some(1_800_000_000_020),
+    });
+    let delivery = Delivery::try_from_snapshot(snapshot).expect("redaction fixture");
+    let f = fixture_with_delivery(delivery, false, false, false, None);
+
+    let response = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, None, 20),
+    )
+    .expect("delivery detail");
+    let json = serde_json::to_string(&response).expect("projection JSON");
+    assert!(!json.contains("RAW_CONTEXT_SECRET_SENTINEL"));
+    assert!(!json.contains("RAW_RESOLUTION_SECRET_SENTINEL"));
+    assert!(json.contains("\"resolutionSummary\":\"resolved\""));
+}
 #[test]
 fn raw_http_worker_and_websocket_facts_cannot_construct_projection() {
     let f = fixture(false, false, false);
@@ -668,6 +704,23 @@ fn mismatched_runtime_cursor_is_not_reported_as_retention_loss() {
         error,
         StrongFlowProjectionError::ReadCursorExpired(_)
     ));
+}
+
+#[test]
+fn malformed_cursor_token_fails_before_it_can_name_a_trusted_cut() {
+    let f = fixture(false, false, false);
+    let (_, mut cursor) = detail_and_cursor(&f);
+    cursor.token = "sfc1_not-a-canonical-seal".into();
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, Some(cursor), 20),
+    )
+    .expect_err("a malformed token is not an authorized read cursor");
+    assert_eq!(
+        error.code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
 }
 
 #[test]

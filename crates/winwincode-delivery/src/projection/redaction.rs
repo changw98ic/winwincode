@@ -143,6 +143,67 @@ pub(crate) fn is_safe_source_ref(value: &str) -> bool {
         && !normalized.contains("credential=")
         && !normalized.contains("secret=")
         && !normalized.contains("token=")
+        && !contains_credential_material(&normalized)
+}
+
+pub(crate) fn contains_credential_material(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    let secret_markers = [
+        "--api-key ",
+        "--password ",
+        "--secret ",
+        "--token ",
+        "api_key=",
+        "api-key:",
+        "apikey=",
+        "authorization:",
+        "authorization=",
+        "aws_secret_access_key",
+        "bearer ",
+        "credential=",
+        "gho_",
+        "ghp_",
+        "ghr_",
+        "ghs_",
+        "ghu_",
+        "github_pat_",
+        "glpat-",
+        "-----begin private key-----",
+        "-----begin rsa private key-----",
+        "-----begin openssh private key-----",
+        "password=",
+        "sk-proj-",
+        "sk-svcacct-",
+        "secret=",
+        "token=",
+        "xapp-",
+        "x-api-key:",
+        "xoxb-",
+        "xoxp-",
+    ];
+    secret_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+        || contains_url_userinfo(&normalized)
+}
+
+fn contains_url_userinfo(value: &str) -> bool {
+    let mut remainder = value;
+    while let Some(scheme_end) = remainder.find("://") {
+        let after_scheme = &remainder[scheme_end + 3..];
+        let authority_end = after_scheme
+            .find(|character: char| character.is_ascii_whitespace() || "/?#".contains(character))
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        if authority
+            .rfind('@')
+            .is_some_and(|at| authority[..at].contains(':'))
+        {
+            return true;
+        }
+        remainder = &after_scheme[authority_end..];
+    }
+    false
 }
 
 fn redaction_error(

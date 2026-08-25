@@ -10,7 +10,7 @@ use winwincode_api::generated::{
 use winwincode_delivery::{
     domain::{
         AttentionItemStatus, AttentionItemType, Delivery, DeliveryStage, DeliveryStatus,
-        DeliveryVerdictStatus, StageRunStatus,
+        DeliveryVerdictStatus, StageRunActorType, StageRunStatus,
     },
     projection::{DeliveryProjection, ProjectionInput, project_delivery_detail},
     store::{
@@ -130,6 +130,15 @@ struct ApprovalSeal<'value> {
     target_sha256: &'value str,
 }
 
+struct CurrentPublicationApproval<'delivery> {
+    run: &'delivery winwincode_delivery::domain::StageRun,
+    attention: &'delivery winwincode_delivery::domain::AttentionItem,
+    resolution: &'delivery str,
+    assigned_to: &'delivery str,
+    resolved_by: &'delivery str,
+    resolved_at: u64,
+}
+
 pub(super) fn establish_delivery_read(
     control_plane: &ControlPlane,
     actor: &Actor,
@@ -237,16 +246,19 @@ pub(super) fn replay_delivery_read(
 ) -> Result<EstablishedDeliveryRead, StrongFlowProjectionError> {
     validate_limit(limit)?;
     validate_scope(scope)?;
-    if cursor.scope != *scope
-        || cursor.delivery_id != *delivery_id
-        || cursor.delivery_revision.0 < 1
+    if cursor.scope != *scope || cursor.delivery_id != *delivery_id {
+        return Err(StrongFlowProjectionError::PermissionDenied(
+            "the read cursor does not authorize this repository and aggregate".to_owned(),
+        ));
+    }
+    if cursor.delivery_revision.0 < 1
         || cursor.runtime_ledger_revision.0 < 0
         || cursor.runtime_accepted_sequence < 0
         || cursor.publication_revision.0 < 0
-        || !cursor.token.starts_with("sfc1_")
+        || !canonical_cursor_token(&cursor.token)
     {
-        return Err(StrongFlowProjectionError::PermissionDenied(
-            "the read cursor does not authorize this repository and aggregate".to_owned(),
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "the read cursor shape is invalid".to_owned(),
         ));
     }
     let delivery_revision = u64::try_from(cursor.delivery_revision.0).map_err(|_| {
@@ -581,6 +593,47 @@ fn derive_publication_binding(
     if delivery.snapshot().status != DeliveryStatus::Delivered {
         return Ok(None);
     }
+    let Some(approval) = current_publication_approval(delivery)? else {
+        return Ok(None);
+    };
+    let run = approval.run;
+    let target_sha256 = sha256_json(target)?;
+    let approval_review_set_sha256 = sha256_json(&ApprovalSeal {
+        delivery_id: detail.delivery_id(),
+        delivery_revision: detail.delivery_revision(),
+        delivery_spec_id: candidate.delivery_spec_id(),
+        delivery_spec_revision: candidate.delivery_spec_revision(),
+        stage_run: run,
+        attention_item_id: &approval.attention.id,
+        attention_context: &approval.attention.context,
+        attention_resolution: approval.resolution,
+        assigned_to: approval.assigned_to,
+        resolved_by: approval.resolved_by,
+        resolved_at: approval.resolved_at,
+        candidate_ref: candidate.candidate_ref(),
+        diff_sha256: candidate.diff_sha256(),
+        verdict_id: verdict.id(),
+        target_sha256: &target_sha256,
+    })?;
+    PublicationFactBinding::try_new(
+        detail.delivery_id().clone(),
+        detail.delivery_revision(),
+        candidate.delivery_spec_id().clone(),
+        candidate.delivery_spec_revision(),
+        candidate.candidate_ref(),
+        candidate.diff_sha256(),
+        verdict.id().clone(),
+        approval.attention.id.clone(),
+        approval_review_set_sha256,
+        target_sha256,
+    )
+    .map(Some)
+    .map_err(current_source_error)
+}
+
+fn current_publication_approval(
+    delivery: &Delivery,
+) -> Result<Option<CurrentPublicationApproval<'_>>, StrongFlowProjectionError> {
     let snapshot = delivery.snapshot();
     let max_attempt = snapshot
         .stage_runs
@@ -601,6 +654,15 @@ fn derive_publication_binding(
             "the current delivery review attempt is ambiguous".to_owned(),
         ));
     };
+    if run.delivery_id != snapshot.id
+        || run.delivery_task_id.is_some()
+        || run.actor_type != StageRunActorType::Human
+        || run.role != "approver"
+    {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "the current delivery review is not one human approver authority".to_owned(),
+        ));
+    }
     if run.status != StageRunStatus::Succeeded || run.finished_at_millis.is_none() {
         return Ok(None);
     }
@@ -632,44 +694,24 @@ fn derive_publication_binding(
         return Ok(None);
     };
     if approval.status != AttentionItemStatus::Resolved
-        || approval.created_at_millis < run.started_at_millis
+        || !approval.blocking
+        || assigned_to != resolved_by
+        || approval.created_at_millis != run.started_at_millis
         || resolved_at < approval.created_at_millis
-        || resolved_at < run.finished_at_millis.unwrap_or(u64::MAX)
+        || run.finished_at_millis != Some(resolved_at)
     {
-        return Ok(None);
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "the current delivery approval actor or time is not exact".to_owned(),
+        ));
     }
-    let target_sha256 = sha256_json(target)?;
-    let approval_review_set_sha256 = sha256_json(&ApprovalSeal {
-        delivery_id: detail.delivery_id(),
-        delivery_revision: detail.delivery_revision(),
-        delivery_spec_id: candidate.delivery_spec_id(),
-        delivery_spec_revision: candidate.delivery_spec_revision(),
-        stage_run: run,
-        attention_item_id: &approval.id,
-        attention_context: &approval.context,
-        attention_resolution: resolution,
+    Ok(Some(CurrentPublicationApproval {
+        run,
+        attention: approval,
+        resolution,
         assigned_to,
         resolved_by,
         resolved_at,
-        candidate_ref: candidate.candidate_ref(),
-        diff_sha256: candidate.diff_sha256(),
-        verdict_id: verdict.id(),
-        target_sha256: &target_sha256,
-    })?;
-    PublicationFactBinding::try_new(
-        detail.delivery_id().clone(),
-        detail.delivery_revision(),
-        candidate.delivery_spec_id().clone(),
-        candidate.delivery_spec_revision(),
-        candidate.candidate_ref(),
-        candidate.diff_sha256(),
-        verdict.id().clone(),
-        approval.id.clone(),
-        approval_review_set_sha256,
-        target_sha256,
-    )
-    .map(Some)
-    .map_err(current_source_error)
+    }))
 }
 
 fn validate_publication_result(
@@ -879,4 +921,124 @@ fn portable(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
         })
+}
+
+fn canonical_cursor_token(value: &str) -> bool {
+    value.strip_prefix("sfc1_").is_some_and(|seal| {
+        seal.len() == 64
+            && seal
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winwincode_delivery::domain::{AttentionItem, StageRun, StageRunActorType, StageRunStatus};
+    use winwincode_domain::{AttentionItemId, StageRunId};
+
+    fn delivered_with_exact_approval() -> Delivery {
+        let parsed = Delivery::decode_json(include_bytes!(
+            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
+        ))
+        .expect("canonical fixture");
+        let mut snapshot = parsed.into_snapshot();
+        snapshot.status = DeliveryStatus::Delivered;
+        snapshot.updated_at_millis = 1_800_000_000_040;
+        let run_id = StageRunId("stage-delivery-review-1".into());
+        snapshot.stage_runs.push(StageRun {
+            schema_version: 3,
+            id: run_id.clone(),
+            delivery_id: snapshot.id.clone(),
+            delivery_task_id: None,
+            stage: DeliveryStage::DeliveryReview,
+            actor_type: StageRunActorType::Human,
+            role: "approver".into(),
+            status: StageRunStatus::Succeeded,
+            attempt: 1,
+            started_at_millis: 1_800_000_000_030,
+            finished_at_millis: Some(1_800_000_000_040),
+        });
+        snapshot.attention_items.push(AttentionItem {
+            schema_version: 3,
+            id: AttentionItemId("attention-delivery-approval-1".into()),
+            delivery_id: snapshot.id.clone(),
+            delivery_spec_id: snapshot.spec.id.clone(),
+            stage_run_id: Some(run_id),
+            item_type: AttentionItemType::DeliveryApproval,
+            title: "Approve delivery".into(),
+            context: "candidate-and-verdict-review-set".into(),
+            options: Vec::new(),
+            assigned_to: Some("usr_approver".into()),
+            blocking: true,
+            status: AttentionItemStatus::Resolved,
+            resolution: Some("approved".into()),
+            resolved_by: Some("usr_approver".into()),
+            created_at_millis: 1_800_000_000_030,
+            resolved_at_millis: Some(1_800_000_000_040),
+        });
+        Delivery::try_from_snapshot(snapshot).expect("delivered approval fixture")
+    }
+
+    #[test]
+    fn publication_approval_requires_one_exact_human_actor_and_time() {
+        let valid = delivered_with_exact_approval();
+        let approval = current_publication_approval(&valid)
+            .expect("valid authority")
+            .expect("approval");
+        assert_eq!(approval.assigned_to, "usr_approver");
+        assert_eq!(approval.resolved_at, 1_800_000_000_040);
+
+        let mut wrong_actor = valid.clone().into_snapshot();
+        let review = wrong_actor.stage_runs.last_mut().expect("delivery review");
+        review.actor_type = StageRunActorType::Codex;
+        review.role = "executor".into();
+        let wrong_actor = Delivery::try_from_snapshot(wrong_actor).expect("structurally valid");
+        assert!(matches!(
+            current_publication_approval(&wrong_actor),
+            Err(StrongFlowProjectionError::RevisionConflict(_))
+        ));
+
+        let mut wrong_reviewer = valid.clone().into_snapshot();
+        wrong_reviewer
+            .attention_items
+            .last_mut()
+            .expect("delivery approval")
+            .resolved_by = Some("usr_foreign".into());
+        let wrong_reviewer =
+            Delivery::try_from_snapshot(wrong_reviewer).expect("structurally valid");
+        assert!(matches!(
+            current_publication_approval(&wrong_reviewer),
+            Err(StrongFlowProjectionError::RevisionConflict(_))
+        ));
+
+        let mut wrong_time = valid.into_snapshot();
+        wrong_time
+            .attention_items
+            .last_mut()
+            .expect("delivery approval")
+            .resolved_at_millis = Some(1_800_000_000_041);
+        wrong_time.updated_at_millis = 1_800_000_000_041;
+        let wrong_time = Delivery::try_from_snapshot(wrong_time).expect("structurally valid");
+        assert!(matches!(
+            current_publication_approval(&wrong_time),
+            Err(StrongFlowProjectionError::RevisionConflict(_))
+        ));
+
+        let valid = delivered_with_exact_approval();
+        let mut duplicate = valid.into_snapshot();
+        let mut second = duplicate
+            .attention_items
+            .last()
+            .expect("delivery approval")
+            .clone();
+        second.id = AttentionItemId("attention-delivery-approval-duplicate".into());
+        duplicate.attention_items.push(second);
+        let duplicate = Delivery::try_from_snapshot(duplicate).expect("structurally valid");
+        assert!(matches!(
+            current_publication_approval(&duplicate),
+            Err(StrongFlowProjectionError::RevisionConflict(_))
+        ));
+    }
 }
