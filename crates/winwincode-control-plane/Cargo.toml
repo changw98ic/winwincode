@@ -31,5 +31,9 @@ winwincode-delivery = { path = "../winwincode-delivery", features = ["test-suppo
 name = "delivery_command_transaction"
 required-features = ["test-support"]
 
+[[test]]
+name = "terminal_outcome_transaction"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

@@ -13,6 +13,7 @@ mod rework_transaction;
 mod session_binding_transaction;
 pub mod strongflow_projection;
 mod task_breakdown_transaction;
+mod terminal_outcome_transaction;
 mod verdict_transaction;
 
 pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
@@ -31,6 +32,9 @@ pub use session_binding_transaction::{
     DeliverySessionBindingCommitError, DeliverySessionBindingCommitReceipt,
 };
 use sha2::{Digest, Sha256};
+pub use terminal_outcome_transaction::{
+    DeliveryTerminalOutcomeCommitError, DeliveryTerminalOutcomeCommitReceipt,
+};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
     ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType,
@@ -709,10 +713,12 @@ impl ControlPlane {
             )));
         }
         if change.events.iter().any(|event| {
-            event.projection_stream().is_some() || reserved_public_projection_topic(&event.topic)
+            event.projection_stream().is_some()
+                || reserved_public_projection_topic(&event.topic)
+                || reserved_delivery_transaction_topic(&event.topic)
         }) {
             return Err(CommitError::Storage(StorageError::invalid_input(
-                "public projection events require a typed Control Plane transaction",
+                "Delivery and public projection events require a typed Control Plane transaction",
             )));
         }
         let commit = storage_commit(command, change).map_err(CommitError::Storage)?;
@@ -814,6 +820,39 @@ impl ControlPlane {
         };
         self.flush_outbox().map_err(|source| {
             DeliverySessionBindingCommitError::PublicationPending {
+                commit: Box::new(commit.clone()),
+                source,
+            }
+        })?;
+        Ok(commit)
+    }
+
+    /// Persists one lease-fenced Worker `job.outcome` through the only typed
+    /// terminal Delivery transaction.
+    ///
+    /// Receipt replay is resolved before current Delivery, journal, durable job,
+    /// or replacement authority is read. A new message is joined to its exact
+    /// durable dispatch intent and opaque scheduler/Worker facts before the
+    /// canonical terminal transition is committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns before persistence for a stale/foreign lease, binding, thread,
+    /// sequence, Artifact, message time, or non-terminal stage transition.
+    pub fn commit_delivery_terminal_outcome(
+        &mut self,
+        scope: &RepositoryScope,
+        message: &winwincode_api::generated::JobOutcomeMessage,
+        facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+    ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
+        let commit = {
+            let storage = self
+                .storage_mut()
+                .map_err(DeliveryTerminalOutcomeCommitError::Storage)?;
+            terminal_outcome_transaction::execute(storage, scope, message, facts)?
+        };
+        self.flush_outbox().map_err(|source| {
+            DeliveryTerminalOutcomeCommitError::PublicationPending {
                 commit: Box::new(commit.clone()),
                 source,
             }
@@ -998,6 +1037,10 @@ fn reserved_public_projection_topic(topic: &str) -> bool {
         topic.to_owned(),
     ))
     .is_ok()
+}
+
+fn reserved_delivery_transaction_topic(topic: &str) -> bool {
+    topic.starts_with("delivery.")
 }
 
 pub(crate) fn storage_commit(
