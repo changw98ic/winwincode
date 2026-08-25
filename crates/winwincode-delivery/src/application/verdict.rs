@@ -766,13 +766,14 @@ pub mod test_support {
         StageRunStatus,
         candidate::test_support::frozen_candidate,
         evidence::{
-            ResolvedDeliveryEvidence, VerifiedEvidenceOutcome, test_support::resolved_role_evidence,
+            ResolvedDeliveryEvidence, VerifiedEvidenceOutcome,
+            test_support::resolved_role_evidence_from_verification,
         },
         test_fixture,
         verification::{
             IndependentVerification, VerificationRole,
             test_support::{
-                VerificationFixtureState, fixture_evidence_id, independent_verification,
+                VerificationFixtureState, fixture_evidence_id, resolved_independent_verification,
             },
         },
     };
@@ -785,10 +786,91 @@ pub mod test_support {
         pub evidence: Vec<ResolvedDeliveryEvidence>,
     }
 
+    /// Sealed inputs accepted by the production verdict computation.
+    #[derive(Debug)]
+    pub struct VerdictFactsFixture {
+        verification: IndependentVerification,
+        evidence: Vec<ResolvedDeliveryEvidence>,
+    }
+
+    impl VerdictFactsFixture {
+        pub fn verification(&self) -> &IndependentVerification {
+            &self.verification
+        }
+
+        pub fn evidence(&self) -> &[ResolvedDeliveryEvidence] {
+            &self.evidence
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum VerdictFixtureOutcome {
         Pass,
         Fail,
+        Inconclusive,
+        InfraError,
+    }
+
+    /// Resolves one high-level outcome through production verification and
+    /// Evidence resolvers without exposing their raw authority facts.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the Delivery/candidate is stale or its verification
+    /// `StageRun` values do not have the terminal statuses required by `outcome`.
+    #[must_use]
+    pub fn verdict_facts_fixture(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        outcome: VerdictFixtureOutcome,
+    ) -> VerdictFactsFixture {
+        let state = match outcome {
+            VerdictFixtureOutcome::Pass => VerificationFixtureState::SettledPass,
+            VerdictFixtureOutcome::Fail => VerificationFixtureState::SettledFail,
+            VerdictFixtureOutcome::Inconclusive => VerificationFixtureState::Incomplete,
+            VerdictFixtureOutcome::InfraError => VerificationFixtureState::InfrastructureFailed,
+        };
+        let verification = resolved_independent_verification(delivery, candidate, state, state);
+        let observed = match outcome {
+            VerdictFixtureOutcome::Pass => Some(VerifiedEvidenceOutcome::Succeeded),
+            VerdictFixtureOutcome::Fail => Some(VerifiedEvidenceOutcome::Failed),
+            VerdictFixtureOutcome::Inconclusive | VerdictFixtureOutcome::InfraError => None,
+        };
+        let evidence = observed.map_or_else(Vec::new, |observed| {
+            delivery
+                .snapshot()
+                .spec
+                .acceptance_criteria
+                .iter()
+                .filter(|criterion| criterion.required)
+                .flat_map(|criterion| {
+                    [VerificationRole::Reviewer, VerificationRole::Verifier].map(|role| {
+                        resolved_role_evidence_from_verification(
+                            delivery,
+                            candidate,
+                            &verification,
+                            role_id(role),
+                            EvidenceRefType::Test,
+                            observed,
+                            fixture_evidence_id(role, &criterion.id),
+                            1,
+                        )
+                    })
+                })
+                .collect()
+        });
+        VerdictFactsFixture {
+            verification,
+            evidence,
+        }
+    }
+
+    const fn role_id(role: VerificationRole) -> &'static str {
+        match role {
+            VerificationRole::Reviewer => "reviewer",
+            VerificationRole::Verifier => "verifier",
+            VerificationRole::AdversarialVerifier => "adversarial-verifier",
+        }
     }
 
     #[must_use]
@@ -804,47 +886,26 @@ pub mod test_support {
         outcome: VerdictFixtureOutcome,
         max_rework_attempts: u64,
     ) -> VerdictFixture {
-        let delivery = verifying_delivery(delivery_id, max_rework_attempts);
+        let delivery = verifying_delivery(delivery_id, max_rework_attempts, outcome);
         let candidate = frozen_candidate(
             &delivery,
             &StageRunId("stage-executor-1".into()),
             &SessionBindingId("binding-executor-1".into()),
         );
-        let state = match outcome {
-            VerdictFixtureOutcome::Pass => VerificationFixtureState::SettledPass,
-            VerdictFixtureOutcome::Fail => VerificationFixtureState::SettledFail,
-        };
-        let verification = independent_verification(&delivery, &candidate, state, state);
-        let criterion_id = &delivery.snapshot().spec.acceptance_criteria[0].id;
-        let evidence = [VerificationRole::Reviewer, VerificationRole::Verifier]
-            .into_iter()
-            .map(|role| {
-                resolved_role_evidence(
-                    &delivery,
-                    &candidate,
-                    match role {
-                        VerificationRole::Reviewer => "reviewer",
-                        VerificationRole::Verifier => "verifier",
-                        VerificationRole::AdversarialVerifier => unreachable!(),
-                    },
-                    EvidenceRefType::Test,
-                    match outcome {
-                        VerdictFixtureOutcome::Pass => VerifiedEvidenceOutcome::Succeeded,
-                        VerdictFixtureOutcome::Fail => VerifiedEvidenceOutcome::Failed,
-                    },
-                    fixture_evidence_id(role, criterion_id),
-                )
-            })
-            .collect();
+        let facts = verdict_facts_fixture(&delivery, &candidate, outcome);
         VerdictFixture {
             delivery,
             candidate,
-            verification,
-            evidence,
+            verification: facts.verification,
+            evidence: facts.evidence,
         }
     }
 
-    fn verifying_delivery(delivery_id: &DeliveryId, max_rework_attempts: u64) -> Delivery {
+    fn verifying_delivery(
+        delivery_id: &DeliveryId,
+        max_rework_attempts: u64,
+        outcome: VerdictFixtureOutcome,
+    ) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.id = delivery_id.clone();
         snapshot.spec.delivery_id = delivery_id.clone();
@@ -895,7 +956,11 @@ pub mod test_support {
                 stage: DeliveryStage::Verifying,
                 actor_type: StageRunActorType::Codex,
                 role: role.into(),
-                status: StageRunStatus::Succeeded,
+                status: if outcome == VerdictFixtureOutcome::InfraError {
+                    StageRunStatus::Failed
+                } else {
+                    StageRunStatus::Succeeded
+                },
                 attempt: 1,
                 started_at_millis: 1_800_000_000_030 + offset,
                 finished_at_millis: Some(1_800_000_000_040 + offset),
@@ -928,6 +993,87 @@ mod tests {
     use crate::application::attention::{
         AttentionDecision, ResolveAttentionInput, resolve_attention,
     };
+    use crate::domain::CriterionVerdict;
+
+    #[test]
+    fn verdict_facts_fixture_maps_all_computed_outcomes() {
+        for (index, (outcome, expected)) in [
+            (
+                test_support::VerdictFixtureOutcome::Pass,
+                CriterionVerdict::Pass,
+            ),
+            (
+                test_support::VerdictFixtureOutcome::Fail,
+                CriterionVerdict::Fail,
+            ),
+            (
+                test_support::VerdictFixtureOutcome::Inconclusive,
+                CriterionVerdict::Inconclusive,
+            ),
+            (
+                test_support::VerdictFixtureOutcome::InfraError,
+                CriterionVerdict::InfraError,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fixture = test_support::verdict_fixture(
+                &winwincode_domain::DeliveryId(format!("dlv_01J0000000000000000000000{index}")),
+                outcome,
+            );
+            let facts =
+                test_support::verdict_facts_fixture(&fixture.delivery, &fixture.candidate, outcome);
+            let computed = crate::domain::compute_delivery_verdict(
+                &fixture.delivery,
+                &fixture.candidate,
+                facts.verification(),
+                facts.evidence(),
+                fixture.delivery.snapshot().updated_at_millis + 10,
+            )
+            .expect("high-level verdict facts must pass the production computation");
+            assert_eq!(computed.verdict().status, expected);
+        }
+    }
+
+    #[test]
+    fn inconclusive_verdict_fixture_uses_incomplete_roles_without_findings() {
+        let outcome = test_support::VerdictFixtureOutcome::Inconclusive;
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000014".into()),
+            outcome,
+        );
+        let facts =
+            test_support::verdict_facts_fixture(&fixture.delivery, &fixture.candidate, outcome);
+
+        assert!(facts.evidence().is_empty());
+        assert!(facts.verification().settlements().iter().all(|settlement| {
+            settlement.state() == VerificationSessionState::Incomplete
+                && settlement.findings().is_empty()
+                && settlement.terminal_settlement() == Some(VerificationTerminalSettlement::Settled)
+        }));
+    }
+
+    #[test]
+    fn infra_error_verdict_fixture_uses_accepted_infrastructure_terminals() {
+        let outcome = test_support::VerdictFixtureOutcome::InfraError;
+        let fixture = test_support::verdict_fixture(
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000015".into()),
+            outcome,
+        );
+        let facts =
+            test_support::verdict_facts_fixture(&fixture.delivery, &fixture.candidate, outcome);
+
+        assert!(facts.evidence().is_empty());
+        assert!(facts.verification().settlements().iter().all(|settlement| {
+            settlement.state() == VerificationSessionState::Failed
+                && settlement.terminal_settlement()
+                    == Some(VerificationTerminalSettlement::InfrastructureError)
+                && settlement.terminal_job_outcome().is_some_and(|terminal| {
+                    terminal.status() == VerificationJobOutcomeStatus::InfrastructureError
+                })
+        }));
+    }
     use crate::domain::{
         AttentionItemStatus, Delivery, DeliveryStage, DeliveryStatus, DeliveryTaskStatus,
         EvidenceRefType, FrozenDeliveryCandidate, SessionBinding, SessionBindingId, StageRun,
@@ -936,7 +1082,8 @@ mod tests {
         evidence::{VerifiedEvidenceOutcome, test_support::resolved_role_evidence},
         test_fixture,
         verification::{
-            VerificationRole,
+            VerificationJobOutcomeStatus, VerificationRole, VerificationSessionState,
+            VerificationTerminalSettlement,
             test_support::{
                 VerificationFixtureState, fixture_evidence_id, independent_verification,
             },

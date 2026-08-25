@@ -11,6 +11,9 @@ use crate::domain::{Delivery, MAX_SAFE_INTEGER};
 
 pub mod attention;
 pub mod session_binding;
+#[cfg(any(test, feature = "test-support"))]
+pub mod solution_review;
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) mod solution_review;
 pub mod stage;
 pub mod task;

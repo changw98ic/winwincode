@@ -15,6 +15,15 @@
 //!     ..todo!()
 //! };
 //! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::candidate::FreezeCandidateFacts;
+//!
+//! let _caller_built_freeze = FreezeCandidateFacts {
+//!     git_snapshot: todo!(),
+//!     terminal_outcome: todo!(),
+//! };
+//! ```
 
 use std::collections::HashSet;
 
@@ -940,7 +949,7 @@ fn stale_candidate(message: &str) -> DeliveryValidationError {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support {
+pub mod test_support {
     #![allow(dead_code, clippy::wildcard_imports)]
 
     use super::*;
@@ -949,6 +958,124 @@ pub(crate) mod test_support {
         test_support::{active_lease_identity, terminal_outcome_metadata},
     };
     use winwincode_domain::{ArtifactId, ExecutionAckSequence, Sha256Digest};
+
+    /// Observable Git and terminal artifact values used by high-level tests.
+    ///
+    /// Execution ownership is intentionally absent. The fixture resolves the
+    /// producer's Job, lease, fence, Worker, and Session identities from the
+    /// canonical [`Delivery`] instead of accepting caller-provided authority.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CandidateFixtureInput {
+        pub base_commit_id: String,
+        pub base_tree_id: String,
+        pub candidate_commit_id: String,
+        pub candidate_tree_id: String,
+        pub diff_sha256: String,
+        pub changed_paths: Vec<CandidatePathFact>,
+        pub changed_hunks: Vec<CandidateHunkFact>,
+        pub artifact_ref: String,
+        pub artifact_digest: Sha256Digest,
+        pub terminal_event_sequence: u64,
+    }
+
+    /// Freezes one executor candidate through the production candidate seam.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the producer IDs are missing, foreign, stale, incomplete,
+    /// or the observable Git/artifact input is invalid.
+    #[must_use]
+    pub fn freeze_candidate_fixture(
+        delivery: &Delivery,
+        producer_stage_run_id: &StageRunId,
+        producer_session_binding_id: &SessionBindingId,
+        input: CandidateFixtureInput,
+    ) -> FrozenDeliveryCandidate {
+        let snapshot = sealed_snapshot_from_input(
+            delivery,
+            producer_stage_run_id,
+            producer_session_binding_id,
+            input,
+        );
+        freeze_delivery_candidate(delivery, &freeze_facts(delivery, snapshot))
+            .expect("candidate fixture must match the current executor and sealed observations")
+    }
+
+    pub(crate) fn sealed_snapshot_from_input(
+        delivery: &Delivery,
+        stage_run_id: &StageRunId,
+        session_binding_id: &SessionBindingId,
+        input: CandidateFixtureInput,
+    ) -> ValidatedGitSnapshotFact {
+        let run = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .find(|run| &run.id == stage_run_id)
+            .expect("candidate fixture StageRun");
+        let binding = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| &binding.id == session_binding_id)
+            .expect("candidate fixture SessionBinding");
+        let worker_session_id = binding
+            .worker_session_id
+            .clone()
+            .expect("candidate fixture WorkerSession");
+        let codex_thread_id = binding
+            .codex_thread_id
+            .clone()
+            .expect("candidate fixture CodexThread");
+        let mut fact = ValidatedGitSnapshotFact {
+            stage_run_id: run.id.clone(),
+            session_binding_id: binding.id.clone(),
+            product_session_id: binding.product_session_id.clone(),
+            execution_job_id: binding.execution_job_id.clone(),
+            attempt: run.attempt,
+            lease_id: LeaseId(format!("lease-fixture-{}", run.id.0)),
+            fencing_token: FencingToken("1".into()),
+            worker_id: WorkerId("worker-candidate-fixture".into()),
+            worker_instance_id: WorkerInstanceId("worker-instance-candidate-fixture".into()),
+            worker_session_id,
+            codex_thread_id,
+            repository: delivery.snapshot().spec.repository.clone(),
+            base_commit_id: input.base_commit_id,
+            base_tree_id: input.base_tree_id,
+            candidate_commit_id: input.candidate_commit_id,
+            candidate_tree_id: input.candidate_tree_id,
+            diff_sha256: input.diff_sha256,
+            changed_paths: input.changed_paths,
+            changed_hunks: input.changed_hunks,
+            artifact_ref: input.artifact_ref,
+            artifact_digest: input.artifact_digest,
+            last_event_sequence: input.terminal_event_sequence,
+            finished_at_millis: run
+                .finished_at_millis
+                .expect("candidate fixture terminal StageRun"),
+            validation_seal: [0; 32],
+        };
+        fact.validation_seal = seal_git_snapshot(&fact).expect("candidate fixture snapshot seal");
+        fact
+    }
+
+    pub(crate) fn rework_facts_and_delta_from_input(
+        delivery: &Delivery,
+        stage_run_id: &StageRunId,
+        session_binding_id: &SessionBindingId,
+        input: CandidateFixtureInput,
+    ) -> (FreezeCandidateFacts, ValidatedGitSnapshotFact) {
+        let delta = sealed_snapshot_from_input(delivery, stage_run_id, session_binding_id, input);
+        let mut candidate_snapshot = delta.clone();
+        if git_object_id(&delivery.snapshot().spec.base_revision) {
+            candidate_snapshot
+                .base_commit_id
+                .clone_from(&delivery.snapshot().spec.base_revision);
+            candidate_snapshot.validation_seal =
+                seal_git_snapshot(&candidate_snapshot).expect("rework candidate fixture seal");
+        }
+        (freeze_facts(delivery, candidate_snapshot), delta)
+    }
 
     pub(crate) fn validated_git_snapshot(
         delivery: &Delivery,
@@ -1133,7 +1260,9 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{freeze_facts, validated_git_snapshot};
+    use super::test_support::{
+        CandidateFixtureInput, freeze_candidate_fixture, freeze_facts, validated_git_snapshot,
+    };
     use super::*;
     use crate::domain::{DeliveryStatus, test_fixture};
     use winwincode_domain::{CodexThreadId, ExecutionJobId, ProductSessionId, WorkerSessionId};
@@ -1175,6 +1304,159 @@ mod tests {
                 object_id: Some("4444444444444444444444444444444444444444".into()),
             }],
         )
+    }
+
+    fn high_level_input() -> CandidateFixtureInput {
+        CandidateFixtureInput {
+            base_commit_id: "0123456789012345678901234567890123456789".into(),
+            base_tree_id: "1111111111111111111111111111111111111111".into(),
+            candidate_commit_id: "2222222222222222222222222222222222222222".into(),
+            candidate_tree_id: "3333333333333333333333333333333333333333".into(),
+            diff_sha256: "a".repeat(64),
+            changed_paths: vec![CandidatePathFact {
+                path: "src/invitation.rs".into(),
+                state: CandidatePathState::Present,
+                object_id: Some("4444444444444444444444444444444444444444".into()),
+            }],
+            changed_hunks: vec![CandidateHunkFact {
+                file_path: "src/invitation.rs".into(),
+                hunk_sha256: "b".repeat(64),
+                source_hunk_sha256: None,
+            }],
+            artifact_ref: "artifact:fixture:executor".into(),
+            artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
+            terminal_event_sequence: 12,
+        }
+    }
+
+    #[test]
+    fn freeze_candidate_fixture_binds_current_producer_and_seals_observable_input() {
+        let delivery = writer_delivery();
+        let candidate = freeze_candidate_fixture(
+            &delivery,
+            &StageRunId("stage-executor-1".into()),
+            &SessionBindingId("binding-executor-1".into()),
+            high_level_input(),
+        );
+
+        assert_eq!(candidate.producer_stage_run_id().0, "stage-executor-1");
+        assert_eq!(
+            candidate.producer_session_binding_id().0,
+            "binding-executor-1"
+        );
+        assert_eq!(
+            candidate.producer_artifact_ref(),
+            "artifact:fixture:executor"
+        );
+        assert_eq!(candidate.producer_last_event_sequence(), 12);
+        assert_eq!(candidate.candidate_commit_id(), "2".repeat(40));
+        assert_frozen_candidate_current(&delivery, &candidate).expect("current fixture candidate");
+    }
+
+    #[test]
+    fn freeze_candidate_fixture_rejects_foreign_binding() {
+        let delivery = writer_delivery();
+        let mut foreign = delivery.clone().into_snapshot();
+        foreign.session_bindings.push(SessionBinding {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: SessionBindingId("binding-foreign".into()),
+            delivery_id: foreign.id.clone(),
+            delivery_task_id: foreign.stage_runs[0].delivery_task_id.clone(),
+            stage_run_id: foreign.stage_runs[0].id.clone(),
+            product_session_id: ProductSessionId("product-foreign".into()),
+            execution_job_id: ExecutionJobId("job-foreign".into()),
+            worker_session_id: Some(WorkerSessionId("worker-foreign".into())),
+            codex_thread_id: Some(CodexThreadId("thread-foreign".into())),
+            bound_at_millis: 1_800_000_000_012,
+        });
+        let foreign = Delivery::try_from_snapshot(foreign).expect("foreign fixture binding");
+
+        let rejected = std::panic::catch_unwind(|| {
+            freeze_candidate_fixture(
+                &foreign,
+                &StageRunId("stage-executor-1".into()),
+                &SessionBindingId("binding-foreign".into()),
+                high_level_input(),
+            )
+        });
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn freeze_candidate_fixture_rejects_stale_producer() {
+        let delivery = writer_delivery();
+        let mut stale = delivery.into_snapshot();
+        stale.stage_runs.push(StageRun {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: StageRunId("stage-executor-2".into()),
+            delivery_id: stale.id.clone(),
+            delivery_task_id: stale.stage_runs[0].delivery_task_id.clone(),
+            stage: DeliveryStage::Executing,
+            actor_type: StageRunActorType::Codex,
+            role: "executor".into(),
+            status: StageRunStatus::Succeeded,
+            attempt: 2,
+            started_at_millis: 1_800_000_000_030,
+            finished_at_millis: Some(1_800_000_000_040),
+        });
+        stale.session_bindings.push(SessionBinding {
+            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+            id: SessionBindingId("binding-executor-2".into()),
+            delivery_id: stale.id.clone(),
+            delivery_task_id: stale.stage_runs[0].delivery_task_id.clone(),
+            stage_run_id: StageRunId("stage-executor-2".into()),
+            product_session_id: ProductSessionId("product-executor-2".into()),
+            execution_job_id: ExecutionJobId("job-executor-2".into()),
+            worker_session_id: Some(WorkerSessionId("worker-executor-2".into())),
+            codex_thread_id: Some(CodexThreadId("thread-executor-2".into())),
+            bound_at_millis: 1_800_000_000_031,
+        });
+        stale.updated_at_millis = 1_800_000_000_040;
+        let stale = Delivery::try_from_snapshot(stale).expect("newer writer fixture");
+
+        let rejected = std::panic::catch_unwind(|| {
+            freeze_candidate_fixture(
+                &stale,
+                &StageRunId("stage-executor-1".into()),
+                &SessionBindingId("binding-executor-1".into()),
+                high_level_input(),
+            )
+        });
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn freeze_candidate_fixture_rejects_invalid_artifact() {
+        let delivery = writer_delivery();
+        let mut input = high_level_input();
+        input.artifact_digest = Sha256Digest("sha256:not-a-digest".into());
+
+        let rejected = std::panic::catch_unwind(|| {
+            freeze_candidate_fixture(
+                &delivery,
+                &StageRunId("stage-executor-1".into()),
+                &SessionBindingId("binding-executor-1".into()),
+                input,
+            )
+        });
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn freeze_candidate_fixture_rejects_zero_terminal_sequence() {
+        let delivery = writer_delivery();
+        let mut input = high_level_input();
+        input.terminal_event_sequence = 0;
+
+        let rejected = std::panic::catch_unwind(|| {
+            freeze_candidate_fixture(
+                &delivery,
+                &StageRunId("stage-executor-1".into()),
+                &SessionBindingId("binding-executor-1".into()),
+                input,
+            )
+        });
+        assert!(rejected.is_err());
     }
 
     #[test]

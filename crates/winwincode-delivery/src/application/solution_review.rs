@@ -13,6 +13,18 @@
 //!
 //! let _caller_supplied: ValidatedSolutionReviewSet = serde_json::from_str("{}").unwrap();
 //! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::solution_review::SolutionReviewContextV1;
+//!
+//! let _caller_context: SolutionReviewContextV1 = serde_json::from_str("{}").unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::solution_review::SolutionReviewDecisionV1;
+//!
+//! let _caller_decision: SolutionReviewDecisionV1 = serde_json::from_str("{}").unwrap();
+//! ```
 
 use std::{
     collections::{HashMap, HashSet},
@@ -1299,6 +1311,644 @@ fn review_error(code: SolutionReviewErrorCode, message: &str) -> SolutionReviewE
     }
 }
 
+/// High-level semantic fixtures for exercising the real solution-review
+/// transitions from integration tests. The canonical context, decision,
+/// digest, and validated authority facts remain private to this module.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support {
+    use super::{
+        AcceptanceCriterionId, DecisionActionWire, Delivery, DeliveryStage, DeliveryTaskId,
+        DeliveryTaskProposal, Error, SOLUTION_REVIEW_CONTEXT_PROTOCOL,
+        SOLUTION_REVIEW_DECISION_PROTOCOL, SOLUTION_REVIEW_SCHEMA_VERSION, SessionBindingId,
+        SolutionReviewContextV1, SolutionReviewDecisionV1, SolutionWire, StageRunActorType,
+        StageRunId, ValidatedDiagram, ValidatedDiagramEdge, ValidatedDiagramKind,
+        ValidatedDiagramNode, ValidatedDiagramNodeKind, ValidatedReviewStatus,
+        ValidatedSolutionComponent, ValidatedSolutionComponentKind, ValidatedSolutionConnection,
+        fmt, resolve_current_solution_review, review_set_digest,
+    };
+    use crate::application::{
+        attention::{
+            AttentionDecision, ResolveAttentionInput, ResolvedAttentionTransition,
+            resolve_attention,
+        },
+        stage::{
+            AdvanceStageInput, ReviewAttentionSeed, StageAdvanceEffect, StageAdvanceResult, advance,
+        },
+    };
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum SolutionComponentKindFixture {
+        Component,
+        External,
+        DataStore,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionComponentFixture {
+        pub id: String,
+        pub label: String,
+        pub responsibility: String,
+        pub kind: SolutionComponentKindFixture,
+        pub trust_boundary: Option<String>,
+        pub unresolved: bool,
+        pub repository_path_prefixes: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionConnectionFixture {
+        pub id: String,
+        pub from: String,
+        pub to: String,
+        pub label: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionFixture {
+        pub id: String,
+        pub summary: String,
+        pub approach: Vec<String>,
+        pub components: Vec<SolutionComponentFixture>,
+        pub connections: Vec<SolutionConnectionFixture>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum SolutionDiagramKindFixture {
+        SystemArchitecture,
+        ProcessFlow,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum SolutionDiagramNodeKindFixture {
+        Interaction,
+        DeliveryControl,
+        Execution,
+        Repository,
+        Component,
+        External,
+        DataStore,
+        Stage,
+        Decision,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionDiagramNodeFixture {
+        pub id: String,
+        pub label: String,
+        pub description: String,
+        pub kind: SolutionDiagramNodeKindFixture,
+        pub trust_boundary: Option<String>,
+        pub unresolved: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionDiagramEdgeFixture {
+        pub id: String,
+        pub from: String,
+        pub to: String,
+        pub label: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionDiagramFixture {
+        pub id: String,
+        pub kind: SolutionDiagramKindFixture,
+        pub title: String,
+        pub nodes: Vec<SolutionDiagramNodeFixture>,
+        pub edges: Vec<SolutionDiagramEdgeFixture>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct SolutionReviewTaskProposalFixture {
+        pub id: DeliveryTaskId,
+        pub title: String,
+        pub goal: String,
+        pub acceptance_criterion_ids: Vec<AcceptanceCriterionId>,
+        pub blocked_by_task_ids: Vec<DeliveryTaskId>,
+    }
+
+    /// Semantic review content. It intentionally contains no Delivery,
+    /// `StageRun`, `SessionBinding`, Attention, protocol, or digest authority.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SolutionReviewFixture {
+        pub attention_title: String,
+        pub assigned_to: String,
+        pub solution: SolutionFixture,
+        pub architecture_diagram: SolutionDiagramFixture,
+        pub process_diagram: SolutionDiagramFixture,
+        pub risks: Vec<String>,
+        pub unresolved_items: Vec<String>,
+        pub task_proposals: Vec<SolutionReviewTaskProposalFixture>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum InvalidTaskProposalFixture {
+        DependencyCycle,
+        MissingDependency,
+        DuplicateTaskId,
+        DuplicateCriterionId,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SolutionReviewDecisionFixture {
+        Approve {
+            comments: Option<String>,
+        },
+        RequestChanges {
+            comments: Option<String>,
+            requested_changes: Vec<String>,
+        },
+        Reject {
+            comments: Option<String>,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SolutionReviewFixtureError {
+        message: String,
+    }
+
+    impl SolutionReviewFixtureError {
+        pub fn message(&self) -> &str {
+            &self.message
+        }
+    }
+
+    impl fmt::Display for SolutionReviewFixtureError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(&self.message)
+        }
+    }
+
+    impl Error for SolutionReviewFixtureError {}
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreparedSolutionReviewFixture {
+        transition: StageAdvanceResult,
+        review_set_sha256: String,
+    }
+
+    impl PreparedSolutionReviewFixture {
+        pub fn transition(&self) -> &StageAdvanceResult {
+            &self.transition
+        }
+
+        pub fn into_transition(self) -> StageAdvanceResult {
+            self.transition
+        }
+
+        pub fn review_set_sha256(&self) -> &str {
+            &self.review_set_sha256
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SettledSolutionReviewFixture {
+        transition: ResolvedAttentionTransition,
+        review_set_sha256: String,
+    }
+
+    impl SettledSolutionReviewFixture {
+        pub fn transition(&self) -> &ResolvedAttentionTransition {
+            &self.transition
+        }
+
+        pub fn into_transition(self) -> ResolvedAttentionTransition {
+            self.transition
+        }
+
+        pub fn review_set_sha256(&self) -> &str {
+            &self.review_set_sha256
+        }
+    }
+
+    /// Builds and validates the exact current plan-review context, then calls
+    /// the production stage coordinator. Callers never encode authority JSON
+    /// or calculate a review-set digest.
+    pub fn prepare_solution_review_fixture(
+        delivery: &Delivery,
+        mut input: AdvanceStageInput,
+        fixture: SolutionReviewFixture,
+    ) -> Result<PreparedSolutionReviewFixture, SolutionReviewFixtureError> {
+        if input.review.is_some() {
+            return Err(fixture_error(
+                "solution-review fixture owns the canonical review Attention seed",
+            ));
+        }
+        let (planning_stage_run_id, planning_session_binding_id) =
+            current_planning_authority(delivery)?;
+        let review_stage_run_id = input.identities.stage_run_id.clone();
+        let attention_item_id = input.identities.attention_item_id.clone();
+        let prepared_at = input.now_millis;
+        let task_proposals = normalized_task_proposals(delivery, fixture.task_proposals)
+            .into_iter()
+            .map(DeliveryTaskProposal::from)
+            .collect();
+        let mut context = SolutionReviewContextV1 {
+            schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
+            protocol: SOLUTION_REVIEW_CONTEXT_PROTOCOL.to_owned(),
+            delivery_id: delivery.id().clone(),
+            delivery_spec_id: delivery.snapshot().spec.id.clone(),
+            delivery_spec_revision: delivery.snapshot().spec.revision,
+            planning_stage_run_id,
+            planning_session_binding_id,
+            review_stage_run_id,
+            attention_item_id,
+            solution: fixture.solution.into(),
+            architecture_diagram: fixture.architecture_diagram.into(),
+            process_diagram: fixture.process_diagram.into(),
+            risks: fixture.risks,
+            unresolved_items: fixture.unresolved_items,
+            task_proposals,
+            prepared_at,
+            review_set_sha256: String::new(),
+        };
+        context.review_set_sha256 =
+            review_set_digest(&context).map_err(|error| fixture_error(error.to_string()))?;
+        let review_set_sha256 = context.review_set_sha256.clone();
+        let encoded = serde_json::to_string(&context).map_err(|error| {
+            fixture_error(format!(
+                "canonical solution-review context encoding failed: {error}"
+            ))
+        })?;
+        input.review = Some(ReviewAttentionSeed {
+            title: fixture.attention_title,
+            context: encoded,
+            assigned_to: fixture.assigned_to,
+        });
+        let transition =
+            advance(delivery, input).map_err(|error| fixture_error(error.to_string()))?;
+        if !matches!(transition.effect, StageAdvanceEffect::Review(_)) {
+            return Err(fixture_error(
+                "solution-review fixture did not advance to a human review",
+            ));
+        }
+        let resolved = resolve_current_solution_review(&transition.delivery)
+            .map_err(|error| fixture_error(error.to_string()))?
+            .ok_or_else(|| fixture_error("prepared Delivery has no current solution review"))?;
+        if resolved.review_status != ValidatedReviewStatus::Pending
+            || resolved.review_set_sha256 != review_set_sha256
+        {
+            return Err(fixture_error(
+                "prepared solution review did not resolve to the exact pending review set",
+            ));
+        }
+        Ok(PreparedSolutionReviewFixture {
+            transition,
+            review_set_sha256,
+        })
+    }
+
+    /// Reconstructs an exact typed decision for the current pending review and
+    /// delegates all state movement to the production Attention transition.
+    pub fn settle_solution_review_fixture(
+        delivery: &Delivery,
+        actor: &str,
+        now_millis: u64,
+        decision: SolutionReviewDecisionFixture,
+    ) -> Result<SettledSolutionReviewFixture, SolutionReviewFixtureError> {
+        let current = resolve_current_solution_review(delivery)
+            .map_err(|error| fixture_error(error.to_string()))?
+            .ok_or_else(|| fixture_error("Delivery has no current solution review"))?;
+        if current.review_status != ValidatedReviewStatus::Pending {
+            return Err(fixture_error("solution review is not pending"));
+        }
+        let (action, comments, requested_changes, attention_decision, expected_status) =
+            match decision {
+                SolutionReviewDecisionFixture::Approve { comments } => (
+                    DecisionActionWire::Approve,
+                    comments,
+                    None,
+                    AttentionDecision::Resolved,
+                    ValidatedReviewStatus::Approved,
+                ),
+                SolutionReviewDecisionFixture::RequestChanges {
+                    comments,
+                    requested_changes,
+                } => (
+                    DecisionActionWire::RequestChanges,
+                    comments,
+                    Some(requested_changes),
+                    AttentionDecision::Dismissed,
+                    ValidatedReviewStatus::ChangesRequested,
+                ),
+                SolutionReviewDecisionFixture::Reject { comments } => (
+                    DecisionActionWire::Reject,
+                    comments,
+                    None,
+                    AttentionDecision::Dismissed,
+                    ValidatedReviewStatus::Rejected,
+                ),
+            };
+        let review_set_sha256 = current.review_set_sha256.clone();
+        let attention_item_id = current.attention_item_id.clone();
+        let review_stage_run_id = current.review_stage_run_id.clone();
+        let resolution = SolutionReviewDecisionV1 {
+            schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
+            protocol: SOLUTION_REVIEW_DECISION_PROTOCOL.to_owned(),
+            delivery_id: current.delivery_id.clone(),
+            delivery_spec_id: current.delivery_spec_id.clone(),
+            delivery_spec_revision: current.delivery_spec_revision,
+            review_stage_run_id: review_stage_run_id.clone(),
+            attention_item_id: attention_item_id.clone(),
+            review_set_sha256: review_set_sha256.clone(),
+            action,
+            comments,
+            requested_changes,
+        };
+        let resolution = serde_json::to_string(&resolution).map_err(|error| {
+            fixture_error(format!(
+                "canonical solution-review decision encoding failed: {error}"
+            ))
+        })?;
+        let attention = delivery
+            .snapshot()
+            .attention_items
+            .iter()
+            .find(|item| item.id == attention_item_id)
+            .ok_or_else(|| fixture_error("current solution-review Attention disappeared"))?;
+        let transition = resolve_attention(
+            delivery,
+            ResolveAttentionInput {
+                expected_revision: delivery.revision(),
+                attention_item_id,
+                stage_run_id: review_stage_run_id,
+                expected_context: attention.context.clone(),
+                actor: actor.to_owned(),
+                decision: attention_decision,
+                resolution,
+                now_millis,
+            },
+        )
+        .map_err(|error| fixture_error(error.to_string()))?;
+        let settled = resolve_current_solution_review(transition.delivery())
+            .map_err(|error| fixture_error(error.to_string()))?
+            .ok_or_else(|| fixture_error("settled Delivery lost its solution review"))?;
+        if settled.review_status != expected_status
+            || settled.review_set_sha256 != review_set_sha256
+            || settled.reviewer_id.as_deref() != Some(actor)
+            || settled.reviewed_at != Some(now_millis)
+        {
+            return Err(fixture_error(
+                "solution-review settlement did not preserve its exact authority",
+            ));
+        }
+        Ok(SettledSolutionReviewFixture {
+            transition,
+            review_set_sha256,
+        })
+    }
+
+    /// Produces semantic invalid graphs without exposing canonical context or
+    /// digest construction. Passing one of these graphs to `prepare` must be
+    /// rejected by the production solution-review resolver.
+    pub fn invalid_task_proposals_fixture(
+        delivery: &Delivery,
+        invalid: InvalidTaskProposalFixture,
+    ) -> Vec<SolutionReviewTaskProposalFixture> {
+        let mut first = default_task_proposal(delivery);
+        match invalid {
+            InvalidTaskProposalFixture::MissingDependency => {
+                first.blocked_by_task_ids = vec![DeliveryTaskId("task:missing".to_owned())];
+                vec![first]
+            }
+            InvalidTaskProposalFixture::DuplicateTaskId => vec![first.clone(), first],
+            InvalidTaskProposalFixture::DuplicateCriterionId => {
+                if let Some(criterion) = first.acceptance_criterion_ids.first().cloned() {
+                    first.acceptance_criterion_ids.push(criterion);
+                }
+                vec![first]
+            }
+            InvalidTaskProposalFixture::DependencyCycle => {
+                let second_id = DeliveryTaskId("task:fixture:cycle".to_owned());
+                let first_id = first.id.clone();
+                first.blocked_by_task_ids = vec![second_id.clone()];
+                let second = SolutionReviewTaskProposalFixture {
+                    id: second_id,
+                    title: "Cycle dependency".to_owned(),
+                    goal: "Exercise canonical cycle rejection.".to_owned(),
+                    acceptance_criterion_ids: first.acceptance_criterion_ids.clone(),
+                    blocked_by_task_ids: vec![first_id],
+                };
+                vec![first, second]
+            }
+        }
+    }
+
+    fn current_planning_authority(
+        delivery: &Delivery,
+    ) -> Result<(StageRunId, SessionBindingId), SolutionReviewFixtureError> {
+        let highest_attempt = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .filter(|run| {
+                run.delivery_task_id.is_none()
+                    && run.stage == DeliveryStage::Planning
+                    && run.actor_type == StageRunActorType::Codex
+                    && run.role == "planner"
+            })
+            .map(|run| run.attempt)
+            .max()
+            .ok_or_else(|| fixture_error("Delivery has no planning StageRun"))?;
+        let planning_runs: Vec<_> = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .filter(|run| {
+                run.delivery_task_id.is_none()
+                    && run.stage == DeliveryStage::Planning
+                    && run.actor_type == StageRunActorType::Codex
+                    && run.role == "planner"
+                    && run.attempt == highest_attempt
+            })
+            .collect();
+        let [planning] = planning_runs.as_slice() else {
+            return Err(fixture_error(
+                "Delivery does not have one exact current planning StageRun",
+            ));
+        };
+        let bindings: Vec<_> = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .filter(|binding| binding.stage_run_id == planning.id)
+            .collect();
+        let [binding] = bindings.as_slice() else {
+            return Err(fixture_error(
+                "current planning StageRun does not have one exact SessionBinding",
+            ));
+        };
+        Ok((planning.id.clone(), binding.id.clone()))
+    }
+
+    fn normalized_task_proposals(
+        delivery: &Delivery,
+        proposals: Vec<SolutionReviewTaskProposalFixture>,
+    ) -> Vec<SolutionReviewTaskProposalFixture> {
+        if proposals.is_empty() {
+            vec![default_task_proposal(delivery)]
+        } else {
+            proposals
+        }
+    }
+
+    fn default_task_proposal(delivery: &Delivery) -> SolutionReviewTaskProposalFixture {
+        SolutionReviewTaskProposalFixture {
+            id: DeliveryTaskId("task:fixture".to_owned()),
+            title: "Implement the approved Delivery solution".to_owned(),
+            goal: "Satisfy every acceptance criterion in the current DeliverySpec.".to_owned(),
+            acceptance_criterion_ids: delivery
+                .snapshot()
+                .spec
+                .acceptance_criteria
+                .iter()
+                .map(|criterion| criterion.id.clone())
+                .collect(),
+            blocked_by_task_ids: Vec::new(),
+        }
+    }
+
+    fn fixture_error(message: impl Into<String>) -> SolutionReviewFixtureError {
+        SolutionReviewFixtureError {
+            message: message.into(),
+        }
+    }
+
+    impl From<SolutionReviewTaskProposalFixture> for DeliveryTaskProposal {
+        fn from(value: SolutionReviewTaskProposalFixture) -> Self {
+            Self {
+                id: value.id,
+                title: value.title,
+                goal: value.goal,
+                acceptance_criterion_ids: value.acceptance_criterion_ids,
+                blocked_by_task_ids: value.blocked_by_task_ids,
+            }
+        }
+    }
+
+    impl From<SolutionFixture> for SolutionWire {
+        fn from(value: SolutionFixture) -> Self {
+            Self {
+                id: value.id,
+                summary: value.summary,
+                approach: value.approach,
+                components: value.components.into_iter().map(Into::into).collect(),
+                connections: value.connections.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
+
+    impl From<SolutionComponentFixture> for ValidatedSolutionComponent {
+        fn from(value: SolutionComponentFixture) -> Self {
+            Self {
+                id: value.id,
+                label: value.label,
+                responsibility: value.responsibility,
+                kind: match value.kind {
+                    SolutionComponentKindFixture::Component => {
+                        ValidatedSolutionComponentKind::Component
+                    }
+                    SolutionComponentKindFixture::External => {
+                        ValidatedSolutionComponentKind::External
+                    }
+                    SolutionComponentKindFixture::DataStore => {
+                        ValidatedSolutionComponentKind::DataStore
+                    }
+                },
+                trust_boundary: value.trust_boundary,
+                unresolved: value.unresolved,
+                repository_path_prefixes: value.repository_path_prefixes,
+            }
+        }
+    }
+
+    impl From<SolutionConnectionFixture> for ValidatedSolutionConnection {
+        fn from(value: SolutionConnectionFixture) -> Self {
+            Self {
+                id: value.id,
+                from: value.from,
+                to: value.to,
+                label: value.label,
+            }
+        }
+    }
+
+    impl From<SolutionDiagramFixture> for ValidatedDiagram {
+        fn from(value: SolutionDiagramFixture) -> Self {
+            Self {
+                id: value.id,
+                kind: match value.kind {
+                    SolutionDiagramKindFixture::SystemArchitecture => {
+                        ValidatedDiagramKind::SystemArchitecture
+                    }
+                    SolutionDiagramKindFixture::ProcessFlow => ValidatedDiagramKind::ProcessFlow,
+                },
+                title: value.title,
+                nodes: value.nodes.into_iter().map(Into::into).collect(),
+                edges: value.edges.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
+
+    impl From<SolutionDiagramNodeFixture> for ValidatedDiagramNode {
+        fn from(value: SolutionDiagramNodeFixture) -> Self {
+            Self {
+                id: value.id,
+                label: value.label,
+                description: value.description,
+                kind: match value.kind {
+                    SolutionDiagramNodeKindFixture::Interaction => {
+                        ValidatedDiagramNodeKind::Interaction
+                    }
+                    SolutionDiagramNodeKindFixture::DeliveryControl => {
+                        ValidatedDiagramNodeKind::DeliveryControl
+                    }
+                    SolutionDiagramNodeKindFixture::Execution => {
+                        ValidatedDiagramNodeKind::Execution
+                    }
+                    SolutionDiagramNodeKindFixture::Repository => {
+                        ValidatedDiagramNodeKind::Repository
+                    }
+                    SolutionDiagramNodeKindFixture::Component => {
+                        ValidatedDiagramNodeKind::Component
+                    }
+                    SolutionDiagramNodeKindFixture::External => ValidatedDiagramNodeKind::External,
+                    SolutionDiagramNodeKindFixture::DataStore => {
+                        ValidatedDiagramNodeKind::DataStore
+                    }
+                    SolutionDiagramNodeKindFixture::Stage => ValidatedDiagramNodeKind::Stage,
+                    SolutionDiagramNodeKindFixture::Decision => ValidatedDiagramNodeKind::Decision,
+                },
+                trust_boundary: value.trust_boundary,
+                unresolved: value.unresolved,
+            }
+        }
+    }
+
+    impl From<SolutionDiagramEdgeFixture> for ValidatedDiagramEdge {
+        fn from(value: SolutionDiagramEdgeFixture) -> Self {
+            Self {
+                id: value.id,
+                from: value.from,
+                to: value.to,
+                label: value.label,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) use tests::{
     ReviewFixtureState, duplicate_task_and_criterion_fixtures, empty_task_proposals_fixture,
@@ -1312,7 +1962,8 @@ mod tests {
 
     use serde_json::{Value, json};
     use winwincode_domain::{
-        CodexThreadId, ExecutionJobId, ProductSessionId, RequestId, WorkerSessionId,
+        CodexThreadId, ExecutionAckSequence, ExecutionJobId, FencingToken, LeaseId,
+        ProductSessionId, RequestId, WorkerId, WorkerInstanceId, WorkerSessionId,
     };
 
     use super::*;
@@ -2351,5 +3002,291 @@ mod tests {
             review_set_digest(&decoded).expect("first digest"),
             review_set_digest(&reparsed).expect("restart digest")
         );
+    }
+
+    fn planning_handoff_fixture(
+        now_millis: u64,
+    ) -> (Delivery, crate::application::stage::AdvanceStageInput) {
+        use crate::application::stage::{
+            AdvanceStageInput, NewStageIdentities, TerminalOutcomeStatus,
+            test_support::{
+                active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
+                verify_terminal_outcome,
+            },
+        };
+
+        let mut snapshot = review_delivery(ReviewFixtureState::Pending).into_snapshot();
+        snapshot.status = DeliveryStatus::Planning;
+        snapshot.stage_runs.truncate(1);
+        snapshot.stage_runs[0].status = StageRunStatus::Running;
+        snapshot.stage_runs[0].finished_at_millis = None;
+        snapshot.attention_items.clear();
+        snapshot.updated_at_millis = snapshot.stage_runs[0].started_at_millis;
+        let delivery = Delivery::try_from_snapshot(snapshot).expect("active planning Delivery");
+        let run = &delivery.snapshot().stage_runs[0];
+        let binding = &delivery.snapshot().session_bindings[0];
+        let worker_session_id = binding
+            .worker_session_id
+            .clone()
+            .expect("planning WorkerSession");
+        let lease = active_lease_identity(
+            binding.execution_job_id.clone(),
+            run.attempt,
+            LeaseId("lease:planning".into()),
+            FencingToken("1".into()),
+            WorkerId("worker:planning".into()),
+            WorkerInstanceId("worker-instance:planning".into()),
+            worker_session_id.clone(),
+        );
+        let metadata = terminal_outcome_metadata(
+            binding.codex_thread_id.clone(),
+            now_millis,
+            ExecutionAckSequence(9),
+            Vec::new(),
+        );
+        let raw = terminal_worker_outcome(
+            run.id.clone(),
+            binding.execution_job_id.clone(),
+            run.attempt,
+            lease.lease_id().clone(),
+            lease.fencing_token().clone(),
+            lease.worker_id().clone(),
+            lease.worker_instance_id().clone(),
+            worker_session_id,
+            TerminalOutcomeStatus::Succeeded,
+            metadata,
+        );
+        let terminal =
+            verify_terminal_outcome(&delivery, &lease, raw).expect("verified planning outcome");
+        let input = AdvanceStageInput {
+            expected_revision: delivery.revision(),
+            product_session_id: ProductSessionId("product:review-unused".into()),
+            identities: NewStageIdentities {
+                stage_run_id: StageRunId("stage:plan-review-fixture".into()),
+                execution_job_id: ExecutionJobId("job:review-unused".into()),
+                session_binding_id: SessionBindingId("binding:review-unused".into()),
+                attention_item_id: AttentionItemId("attention:plan-review-fixture".into()),
+            },
+            review: None,
+            previous_outcome: Some(terminal),
+            current_lease: Some(lease),
+            rework_authorization: None,
+            now_millis,
+        };
+        (delivery, input)
+    }
+
+    fn semantic_review_fixture(
+        task_proposals: Vec<test_support::SolutionReviewTaskProposalFixture>,
+    ) -> test_support::SolutionReviewFixture {
+        use test_support::{
+            SolutionComponentFixture, SolutionComponentKindFixture, SolutionConnectionFixture,
+            SolutionDiagramEdgeFixture, SolutionDiagramFixture, SolutionDiagramKindFixture,
+            SolutionDiagramNodeFixture, SolutionDiagramNodeKindFixture, SolutionFixture,
+            SolutionReviewFixture,
+        };
+
+        let diagram = |id: &str, kind| SolutionDiagramFixture {
+            id: id.to_owned(),
+            kind,
+            title: format!("{id} fixture"),
+            nodes: vec![
+                SolutionDiagramNodeFixture {
+                    id: format!("{id}:input"),
+                    label: "Input".into(),
+                    description: "Starts the fixture flow.".into(),
+                    kind: SolutionDiagramNodeKindFixture::Stage,
+                    trust_boundary: None,
+                    unresolved: false,
+                },
+                SolutionDiagramNodeFixture {
+                    id: format!("{id}:output"),
+                    label: "Output".into(),
+                    description: "Completes the fixture flow.".into(),
+                    kind: SolutionDiagramNodeKindFixture::Decision,
+                    trust_boundary: Some("fixture-review".into()),
+                    unresolved: false,
+                },
+            ],
+            edges: vec![SolutionDiagramEdgeFixture {
+                id: format!("{id}:edge"),
+                from: format!("{id}:input"),
+                to: format!("{id}:output"),
+                label: "reviews".into(),
+            }],
+        };
+        SolutionReviewFixture {
+            attention_title: "Review the fixture solution".into(),
+            assigned_to: "alice".into(),
+            solution: SolutionFixture {
+                id: "solution:fixture".into(),
+                summary: "Exercise the canonical solution-review transition.".into(),
+                approach: vec!["Preserve the exact current review set.".into()],
+                components: vec![SolutionComponentFixture {
+                    id: "component:fixture".into(),
+                    label: "Fixture".into(),
+                    responsibility: "Produces the expected Delivery result.".into(),
+                    kind: SolutionComponentKindFixture::Component,
+                    trust_boundary: Some("repository".into()),
+                    unresolved: false,
+                    repository_path_prefixes: vec!["src".into()],
+                }],
+                connections: vec![SolutionConnectionFixture {
+                    id: "connection:fixture".into(),
+                    from: "platform:codex-core".into(),
+                    to: "component:fixture".into(),
+                    label: "implements".into(),
+                }],
+            },
+            architecture_diagram: diagram(
+                "diagram:architecture-fixture",
+                SolutionDiagramKindFixture::SystemArchitecture,
+            ),
+            process_diagram: diagram(
+                "diagram:process-fixture",
+                SolutionDiagramKindFixture::ProcessFlow,
+            ),
+            risks: vec!["A stale review must be rejected.".into()],
+            unresolved_items: Vec::new(),
+            task_proposals,
+        }
+    }
+
+    #[test]
+    fn high_level_solution_review_fixture_prepares_real_sealed_stage_transition() {
+        let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
+        let prepared = test_support::prepare_solution_review_fixture(
+            &delivery,
+            input,
+            semantic_review_fixture(Vec::new()),
+        )
+        .expect("prepared solution review");
+
+        prepared
+            .transition()
+            .validate_projection()
+            .expect("sealed StageAdvanceResult");
+        assert_eq!(prepared.review_set_sha256().len(), 64);
+        let pending = resolve_current_solution_review(&prepared.transition().delivery)
+            .expect("current review")
+            .expect("pending review");
+        assert_eq!(pending.review_status, ValidatedReviewStatus::Pending);
+        assert_eq!(pending.review_set_sha256(), prepared.review_set_sha256());
+        assert_eq!(pending.task_proposals.len(), 1);
+        assert_eq!(
+            pending.task_proposals[0].acceptance_criterion_ids,
+            delivery
+                .snapshot()
+                .spec
+                .acceptance_criteria
+                .iter()
+                .map(|criterion| criterion.id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn high_level_solution_review_fixture_settles_and_promotes_exact_tasks() {
+        let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
+        let prepared = test_support::prepare_solution_review_fixture(
+            &delivery,
+            input,
+            semantic_review_fixture(Vec::new()),
+        )
+        .expect("prepared solution review");
+        let pending = prepared.transition().delivery.clone();
+        let digest = prepared.review_set_sha256().to_owned();
+        let settled = test_support::settle_solution_review_fixture(
+            &pending,
+            "alice",
+            1_800_000_000_021,
+            test_support::SolutionReviewDecisionFixture::Approve {
+                comments: Some("Approved exact fixture set.".into()),
+            },
+        )
+        .expect("settled solution review");
+
+        assert_eq!(settled.review_set_sha256(), digest);
+        let approved = resolve_current_solution_review(settled.transition().delivery())
+            .expect("current review")
+            .expect("approved review");
+        assert_eq!(approved.review_status, ValidatedReviewStatus::Approved);
+        let authority = approved
+            .approved_task_promotion()
+            .expect("approved promotion authority");
+        let promotion = crate::application::task_breakdown::prepare_task_breakdown_promotion(
+            settled.transition().delivery(),
+            &authority,
+        )
+        .expect("real task promotion");
+        assert_eq!(promotion.delivery().snapshot().tasks.len(), 1);
+        assert_eq!(promotion.review_set_sha256(), digest);
+    }
+
+    #[test]
+    fn high_level_solution_review_fixture_maps_non_approval_decisions() {
+        let cases = [
+            (
+                test_support::SolutionReviewDecisionFixture::RequestChanges {
+                    comments: Some("Add the missing boundary.".into()),
+                    requested_changes: vec!["Add the exact stale-review test.".into()],
+                },
+                ValidatedReviewStatus::ChangesRequested,
+                DeliveryStatus::Planning,
+            ),
+            (
+                test_support::SolutionReviewDecisionFixture::Reject { comments: None },
+                ValidatedReviewStatus::Rejected,
+                DeliveryStatus::Clarifying,
+            ),
+        ];
+        for (decision, expected_review, expected_delivery) in cases {
+            let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
+            let prepared = test_support::prepare_solution_review_fixture(
+                &delivery,
+                input,
+                semantic_review_fixture(Vec::new()),
+            )
+            .expect("prepared solution review");
+            let settled = test_support::settle_solution_review_fixture(
+                &prepared.transition().delivery,
+                "alice",
+                1_800_000_000_021,
+                decision,
+            )
+            .expect("settled solution review");
+            let current = resolve_current_solution_review(settled.transition().delivery())
+                .expect("current review")
+                .expect("settled review");
+            assert_eq!(current.review_status, expected_review);
+            assert_eq!(
+                settled.transition().delivery().snapshot().status,
+                expected_delivery
+            );
+        }
+    }
+
+    #[test]
+    fn high_level_solution_review_fixture_rejects_invalid_proposal_graphs() {
+        use test_support::InvalidTaskProposalFixture::{
+            DependencyCycle, DuplicateCriterionId, DuplicateTaskId, MissingDependency,
+        };
+
+        for invalid in [
+            DependencyCycle,
+            MissingDependency,
+            DuplicateTaskId,
+            DuplicateCriterionId,
+        ] {
+            let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
+            let proposals = test_support::invalid_task_proposals_fixture(&delivery, invalid);
+            let rejected = test_support::prepare_solution_review_fixture(
+                &delivery,
+                input,
+                semantic_review_fixture(proposals),
+            )
+            .expect_err("invalid proposal graph must not produce sealed review authority");
+            assert!(!rejected.message().is_empty());
+        }
     }
 }

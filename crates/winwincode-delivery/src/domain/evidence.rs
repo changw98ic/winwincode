@@ -948,8 +948,9 @@ pub(crate) mod test_support {
     #![allow(dead_code, clippy::needless_pass_by_value, clippy::wildcard_imports)]
 
     use super::*;
-    use crate::domain::verification::test_support::{
-        VerificationFixtureState, independent_verification,
+    use crate::domain::verification::{
+        IndependentVerification,
+        test_support::{VerificationFixtureState, independent_verification},
     };
 
     /// Resolves one current role-scoped runtime Evidence through the production
@@ -986,18 +987,6 @@ pub(crate) mod test_support {
         evidence_id: EvidenceId,
         source_sequence: u64,
     ) -> ResolvedDeliveryEvidence {
-        let stage_run = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .find(|run| run.role == role_id && run.actor_type == StageRunActorType::Codex)
-            .expect("fixture role StageRun");
-        let binding = delivery
-            .snapshot()
-            .session_bindings
-            .iter()
-            .find(|binding| binding.stage_run_id == stage_run.id)
-            .expect("fixture role SessionBinding");
         let (reviewer, verifier) = match role_id {
             "reviewer" => (
                 VerificationFixtureState::SettledPass,
@@ -1010,12 +999,41 @@ pub(crate) mod test_support {
             _ => panic!("Evidence fixture supports reviewer or verifier"),
         };
         let verification = independent_verification(delivery, candidate, reviewer, verifier);
+        resolved_role_evidence_from_verification(
+            delivery,
+            candidate,
+            &verification,
+            role_id,
+            evidence_type,
+            outcome,
+            evidence_id,
+            source_sequence,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolved_role_evidence_from_verification(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        verification: &IndependentVerification,
+        role_id: &str,
+        evidence_type: EvidenceRefType,
+        outcome: VerifiedEvidenceOutcome,
+        evidence_id: EvidenceId,
+        source_sequence: u64,
+    ) -> ResolvedDeliveryEvidence {
         let terminal = verification
             .settlements()
             .iter()
-            .find_map(|settlement| settlement.terminal_job_outcome())
-            .filter(|terminal| terminal.role_id() == role_id)
+            .filter_map(|settlement| settlement.terminal_job_outcome())
+            .find(|terminal| terminal.role_id() == role_id)
             .expect("fixture accepted terminal outcome");
+        let binding = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .find(|binding| binding.stage_run_id == *terminal.stage_run_id())
+            .expect("fixture role SessionBinding");
         let finished_at_millis = terminal.finished_at_millis();
         let source_event_id = ExecutionEventId(format!("event-evidence-{}", evidence_id.0));
         let source = AcceptedRuntimeSourceFact {
@@ -1060,7 +1078,7 @@ pub(crate) mod test_support {
             delivery,
             candidate,
             ResolveDeliveryEvidenceInput {
-                stage_run_id: stage_run.id.clone(),
+                stage_run_id: terminal.stage_run_id().clone(),
                 session_binding_id: binding.id.clone(),
                 source: EvidenceSource::Runtime {
                     evidence_type,

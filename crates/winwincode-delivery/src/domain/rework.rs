@@ -1051,9 +1051,10 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 pub mod test_support {
     use super::{
         CriterionVerdict, CurrentReworkScope, Delivery, DeliveryStatus, EvidenceId,
-        FrozenDeliveryCandidate, PreciseReworkAnnotation, ReworkClarificationReason,
-        ReworkDecision, ReworkTargetFact, decide_precise_rework, derive_rework_clarification,
-        derive_validated_rework_history,
+        FrozenDeliveryCandidate, PreciseReworkAnnotation, ReworkAuthorization,
+        ReworkClarificationReason, ReworkDecision, ReworkTargetFact, decide_precise_rework,
+        derive_rework_clarification, derive_validated_rework_history,
+        freeze_rework_replacement_candidate,
     };
     use crate::application::attention::ResolvedAttentionTransition;
     use crate::application::{
@@ -1064,7 +1065,10 @@ pub mod test_support {
             test_support::{VerdictFixtureOutcome, verdict_fixture_with_rework_limit},
         },
     };
-    use crate::domain::SessionBindingId;
+    use crate::domain::{
+        SessionBindingId,
+        candidate::test_support::{CandidateFixtureInput, rework_facts_and_delta_from_input},
+    };
     use winwincode_domain::{
         AttentionItemId, DeliveryId, ExecutionJobId, ProductSessionId, StageRunId,
     };
@@ -1092,6 +1096,32 @@ pub mod test_support {
         pub source_delivery: Delivery,
         pub transition: StageAdvanceResult,
         pub reason: ReworkClarificationReason,
+    }
+
+    /// Freezes one authorization-bound remediator replacement through the
+    /// production candidate and rework seams.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the producer is not the current authorized remediator, its
+    /// binding is foreign, or the observable old-to-new Git/artifact values
+    /// exceed the exact authorized scope.
+    #[must_use]
+    pub fn freeze_rework_replacement_candidate_fixture(
+        delivery: &Delivery,
+        authorization: &ReworkAuthorization,
+        producer_stage_run_id: &StageRunId,
+        producer_session_binding_id: &SessionBindingId,
+        input: CandidateFixtureInput,
+    ) -> FrozenDeliveryCandidate {
+        let (replacement_facts, delta) = rework_facts_and_delta_from_input(
+            delivery,
+            producer_stage_run_id,
+            producer_session_binding_id,
+            input,
+        );
+        freeze_rework_replacement_candidate(delivery, authorization, &replacement_facts, &delta)
+            .expect("rework fixture must match the current authorization and sealed observations")
     }
 
     /// Builds one production-derived, sealed rework dispatch fixture.
@@ -1282,6 +1312,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::freeze_rework_replacement_candidate_fixture;
     use super::*;
     use crate::application::{
         CoordinationErrorCode,
@@ -1292,8 +1323,8 @@ mod tests {
     };
     use crate::domain::candidate::CandidateHunkFact;
     use crate::domain::candidate::test_support::{
-        freeze_facts, validated_git_snapshot, validated_git_snapshot_between, with_changed_hunks,
-        with_foreign_terminal_workspace,
+        CandidateFixtureInput, freeze_facts, validated_git_snapshot,
+        validated_git_snapshot_between, with_changed_hunks, with_foreign_terminal_workspace,
     };
     use crate::domain::{
         CandidatePathState, CriterionResult, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
@@ -1564,6 +1595,56 @@ mod tests {
         snapshot.updated_at_millis = finished_at_millis.unwrap_or(started_at_millis + 1);
         snapshot.revision += 1;
         Delivery::try_from_snapshot(snapshot).expect("remediator Delivery")
+    }
+
+    #[test]
+    fn freeze_rework_replacement_fixture_uses_authorized_old_to_new_delta() {
+        let (delivery, previous, scope, annotation) = current_failure();
+        let authorization = authorization(&delivery, &previous, &scope, annotation);
+        let mut snapshot = delivery.into_snapshot();
+        invalidate_candidate_authorization_for_writer_start(&mut snapshot);
+        let cleared = Delivery::try_from_snapshot(snapshot).expect("cleared prior authority");
+        let remediated = append_remediator(
+            cleared,
+            authorization.delivery_task_id().clone(),
+            "remediator-fixture",
+            "remediator-fixture-binding",
+            authorization.next_attempt(),
+            StageRunStatus::Succeeded,
+        );
+        let replacement = freeze_rework_replacement_candidate_fixture(
+            &remediated,
+            &authorization,
+            &StageRunId("remediator-fixture".into()),
+            &SessionBindingId("remediator-fixture-binding".into()),
+            CandidateFixtureInput {
+                base_commit_id: previous.candidate_commit_id().into(),
+                base_tree_id: previous.candidate_tree_id().into(),
+                candidate_commit_id: "5".repeat(40),
+                candidate_tree_id: "6".repeat(40),
+                diff_sha256: "c".repeat(64),
+                changed_paths: vec![super::super::CandidatePathFact {
+                    path: "src/invitation.rs".into(),
+                    state: CandidatePathState::Present,
+                    object_id: Some("7".repeat(40)),
+                }],
+                changed_hunks: vec![CandidateHunkFact {
+                    file_path: "src/invitation.rs".into(),
+                    hunk_sha256: "f".repeat(64),
+                    source_hunk_sha256: Some("b".repeat(64)),
+                }],
+                artifact_ref: "artifact:fixture:remediator".into(),
+                artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
+                terminal_event_sequence: 12,
+            },
+        );
+
+        assert_eq!(replacement.producer_role(), "remediator");
+        assert_eq!(
+            replacement.base_commit_id(),
+            remediated.snapshot().spec.base_revision
+        );
+        assert_eq!(replacement.candidate_commit_id(), "5".repeat(40));
     }
 
     #[test]

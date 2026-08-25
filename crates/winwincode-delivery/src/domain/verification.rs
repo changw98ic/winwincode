@@ -16,6 +16,15 @@
 //! fn require_deserialize<T: DeserializeOwned>() {}
 //! require_deserialize::<AcceptedVerificationJobOutcomeFact>();
 //! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::verification::VerificationFacts;
+//!
+//! let _caller_built_facts = VerificationFacts {
+//!     required_roles: vec![],
+//!     sessions: vec![],
+//! };
+//! ```
 
 use std::collections::HashSet;
 
@@ -372,7 +381,7 @@ impl AcceptedVerificationJobOutcomeFact {
     /// Joins the stage coordinator's sealed outcome to one adapter-sealed Job
     /// snapshot. No caller-supplied identity or terminal timestamp is copied.
     #[cfg_attr(
-        not(test),
+        all(not(test), not(feature = "test-support")),
         expect(
             dead_code,
             reason = "Phase 4 Worker and Git adapters are the production constructors"
@@ -1449,6 +1458,15 @@ pub(crate) mod test_support {
     #![allow(dead_code, clippy::wildcard_imports)]
 
     use super::*;
+    use crate::application::stage::{
+        TerminalArtifactReference, TerminalOutcomeStatus,
+        test_support::{
+            active_lease_identity, terminal_outcome_metadata, terminal_worker_outcome,
+            verify_terminal_outcome,
+        },
+    };
+    use crate::domain::candidate::test_support::validated_git_snapshot;
+    use winwincode_domain::ArtifactId;
 
     #[allow(dead_code)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1503,6 +1521,173 @@ pub(crate) mod test_support {
             source_delivery_seal: seal_source_delivery(delivery)
                 .expect("verification fixture source Delivery seal"),
         }
+    }
+
+    /// Resolves fixture observations through the production verification seam.
+    pub(crate) fn resolved_independent_verification(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        reviewer: VerificationFixtureState,
+        verifier: VerificationFixtureState,
+    ) -> IndependentVerification {
+        let sessions = [
+            (VerificationRole::Reviewer, reviewer),
+            (VerificationRole::Verifier, verifier),
+        ]
+        .into_iter()
+        .filter(|(_, state)| *state != VerificationFixtureState::Missing)
+        .map(|(role, state)| resolved_session_fact(delivery, candidate, role, state))
+        .collect();
+        validate_independent_verification(
+            delivery,
+            candidate,
+            &VerificationFacts {
+                required_roles: vec![VerificationRole::Reviewer, VerificationRole::Verifier],
+                sessions,
+            },
+        )
+        .expect("verification fixture observations must pass the production resolver")
+    }
+
+    fn resolved_session_fact(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+        role: VerificationRole,
+        state: VerificationFixtureState,
+    ) -> VerificationSessionFacts {
+        let role_id = role.as_str();
+        let run = current_role_run(delivery, role, "verification.fixture")
+            .expect("verification fixture current role StageRun");
+        let binding = current_role_binding(delivery, run, "verification.fixture")
+            .expect("verification fixture current role SessionBinding");
+        let snapshot = validated_git_snapshot(
+            delivery,
+            &run.id,
+            &binding.id,
+            candidate.candidate_commit_id(),
+            candidate.candidate_tree_id(),
+            candidate.diff_sha256(),
+            candidate.changed_paths().to_vec(),
+        );
+        let terminal_status = match state {
+            VerificationFixtureState::InfrastructureFailed => {
+                TerminalOutcomeStatus::InfrastructureError
+            }
+            VerificationFixtureState::Failed => TerminalOutcomeStatus::Failed,
+            VerificationFixtureState::Cancelled => TerminalOutcomeStatus::Cancelled,
+            VerificationFixtureState::Running => {
+                return VerificationSessionFacts {
+                    role,
+                    stage_run_id: run.id.clone(),
+                    session_binding_id: binding.id.clone(),
+                    workspace_mode: VerificationWorkspaceMode::CandidateReadOnly,
+                    permission_profile: VerificationPermissionProfile::CandidateReadOnlyRestricted,
+                    pre_candidate_snapshot: Some(snapshot.clone()),
+                    post_candidate_snapshot: Some(snapshot),
+                    accepted_job_outcome: None,
+                    codex_turn_completed: false,
+                    mutation_records: vec![],
+                    findings: vec![],
+                };
+            }
+            VerificationFixtureState::Incomplete
+            | VerificationFixtureState::SettledPass
+            | VerificationFixtureState::SettledFail => TerminalOutcomeStatus::Succeeded,
+            VerificationFixtureState::Missing => unreachable!("filtered before construction"),
+        };
+        let terminal = accepted_terminal_outcome(delivery, &snapshot, terminal_status, role_id);
+        let findings = match state {
+            VerificationFixtureState::SettledPass | VerificationFixtureState::SettledFail => {
+                let conclusion = if state == VerificationFixtureState::SettledPass {
+                    VerificationFindingConclusion::Pass
+                } else {
+                    VerificationFindingConclusion::Fail
+                };
+                delivery
+                    .snapshot()
+                    .spec
+                    .acceptance_criteria
+                    .iter()
+                    .map(|criterion| VerificationFindingFact {
+                        finding_ref: format!("finding-fixture-{role_id}-{}", criterion.id.0),
+                        criterion_id: criterion.id.clone(),
+                        conclusion,
+                        result_sequence: ExecutionSequence(2),
+                        source_refs: vec![fixture_source_ref(role, &criterion.id)],
+                        source_sequences: vec![ExecutionSequence(1)],
+                        explanation: format!("{role_id} fixture finding for {}", criterion.id.0),
+                    })
+                    .collect()
+            }
+            _ => vec![],
+        };
+        VerificationSessionFacts {
+            role,
+            stage_run_id: run.id.clone(),
+            session_binding_id: binding.id.clone(),
+            workspace_mode: VerificationWorkspaceMode::CandidateReadOnly,
+            permission_profile: VerificationPermissionProfile::CandidateReadOnlyRestricted,
+            pre_candidate_snapshot: Some(snapshot.clone()),
+            post_candidate_snapshot: Some(snapshot),
+            accepted_job_outcome: Some(terminal),
+            codex_turn_completed: true,
+            mutation_records: vec![],
+            findings,
+        }
+    }
+
+    fn accepted_terminal_outcome(
+        delivery: &Delivery,
+        snapshot: &ValidatedGitSnapshotFact,
+        status: TerminalOutcomeStatus,
+        role_id: &str,
+    ) -> AcceptedVerificationJobOutcomeFact {
+        let mut active_snapshot = delivery.clone().into_snapshot();
+        let active_run = active_snapshot
+            .stage_runs
+            .iter_mut()
+            .find(|run| run.id == *snapshot.stage_run_id())
+            .expect("verification fixture active StageRun");
+        active_run.status = StageRunStatus::Running;
+        active_run.finished_at_millis = None;
+        let active = Delivery::try_from_snapshot(active_snapshot)
+            .expect("verification fixture active Delivery");
+        let lease = active_lease_identity(
+            snapshot.execution_job_id().clone(),
+            snapshot.attempt(),
+            snapshot.lease_id().clone(),
+            snapshot.fencing_token().clone(),
+            snapshot.worker_id().clone(),
+            snapshot.worker_instance_id().clone(),
+            snapshot.worker_session_id().clone(),
+        );
+        let outcome = terminal_worker_outcome(
+            snapshot.stage_run_id().clone(),
+            lease.execution_job_id().clone(),
+            lease.attempt(),
+            lease.lease_id().clone(),
+            lease.fencing_token().clone(),
+            lease.worker_id().clone(),
+            lease.worker_instance_id().clone(),
+            lease.worker_session_id().clone(),
+            status,
+            terminal_outcome_metadata(
+                Some(snapshot.codex_thread_id().clone()),
+                snapshot.finished_at_millis(),
+                ExecutionAckSequence(
+                    i64::try_from(snapshot.last_event_sequence())
+                        .expect("verification fixture terminal sequence"),
+                ),
+                vec![TerminalArtifactReference {
+                    artifact_id: ArtifactId(snapshot.artifact_ref().into()),
+                    digest: snapshot.artifact_digest().clone(),
+                }],
+            ),
+        );
+        let verified = verify_terminal_outcome(&active, &lease, outcome)
+            .expect("verification fixture accepted terminal outcome");
+        AcceptedVerificationJobOutcomeFact::from_verified_outcome(&verified, snapshot, role_id)
+            .expect("verification fixture terminal snapshot join")
     }
 
     #[allow(clippy::too_many_lines)]
