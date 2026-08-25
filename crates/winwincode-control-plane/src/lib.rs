@@ -472,6 +472,15 @@ impl ControlPlane {
                 "Delivery commands require the atomic Delivery command path",
             )));
         }
+        if change
+            .events
+            .iter()
+            .any(|event| event.projection_stream().is_some())
+        {
+            return Err(CommitError::Storage(StorageError::invalid_input(
+                "public projection events require a typed Control Plane transaction",
+            )));
+        }
         let commit = storage_commit(command, change).map_err(CommitError::Storage)?;
         let receipt = self
             .storage_mut()
