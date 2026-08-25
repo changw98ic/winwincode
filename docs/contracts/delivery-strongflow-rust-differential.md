@@ -60,13 +60,15 @@ the current closed types.
 | Legacy input | Canonical disposition |
 | --- | --- |
 | `createDelivery` | `delivery.create`; `tasks` is always empty. |
+| `task-dag` source 2 `createDelivery` | `fixture.solution-review.validate`; the second Spec drives the real high-level invalid-proposal resolver and the main store is unchanged. |
 | `updateDeliverySpec` | `delivery.update_spec`. |
 | Codex `startStage` | one `delivery.advance` that creates the pending ProductSession/ExecutionJob binding authority. |
 | accepted Codex `bindSession` | one strict generated `SessionBindingMessage`, recorded as `execution-port.message`; its worker and Codex facts commit in two ordered revisions. |
 | successful Human-review `bindSession` | provenance on its one `delivery.advance`; Human review has no execution binding and adds no revision. |
 | rejected foreign `bindSession` | one strict `SessionBindingMessage` sent to the real typed seam; its canonical rejection writes nothing. |
 | `resolveAttention` | `delivery.resolve_attention`. |
-| `submitVerdict` | `delivery.submit_verdict` with only the current candidate digest; sealed facts build Evidence and Verdict server-side. |
+| terminal Worker fact before `submitVerdict` | one strict generated `JobOutcomeMessage`, recorded as `execution-port.message`; `apply_terminal_outcome` commits it as one independent revision before Verdict submission. |
+| `submitVerdict` | `delivery.submit_verdict` with only the current candidate digest; sealed facts build Evidence and Verdict server-side. A repeated request carrying the same already-accepted terminal fact does not emit a second outcome. |
 | `getDeliveryProjection` | Always `delivery.get`. Append `runtime.projection.get` only when the returned Delivery projection contains an eligible complete Codex binding. |
 | `fixture.*` | a closed test-only fixture command; never a `CommandRequest`. |
 
@@ -130,12 +132,29 @@ computes the new digest. Task identity does not use the old review digest.
 Missing review authority, deterministic time, a current `reviewSetSha256`, any
 Spec criterion, or the deterministic proposal rejects migration.
 
-The legacy task-DAG cycle is migrated to an invalid sealed task-promotion graph.
-It is not copied into `delivery.create.tasks`. The earlier canonical
-`delivery.advance` selects the unblocked prerequisite task rather than
-reproducing the legacy blocked-task error. The later cyclic promotion returns
-`INVALID_REQUEST` and writes no revision, event, receipt, outbox item, or
-journal record.
+The seeded `task-dag` snapshot uses a separate one-time task-ID migration. A
+task ID already in canonical `dtk_` form is kept exactly. Every other ID hashes
+the UTF-8 bytes of
+`winwincode.oracle-task-id-migration.v1\0<deliveryId>\0<legacyTaskId>` with
+SHA-256, converts the first 16 digest bytes as a big-endian `u128` to exactly
+26 Crockford Base32 characters, and prefixes `dtk_`. The migration uses two
+passes: first map every task ID, then map every dependency through that closed
+table. Task order, title, goal, and criterion order stay exact; owner becomes
+`null`. Thus `oracle-task-prerequisite` becomes
+`dtk_59X1F156B8YGG0P7G1K9KR5KB1`, and `oracle-task-dependent` becomes
+`dtk_7HT0EYAWGG4MD098E2F2Z5XNTW` with its dependency updated to the first ID.
+
+The earlier canonical `delivery.advance` automatically selects that migrated
+prerequisite task rather than reproducing the legacy blocked-task error. Source
+command 2 does not create or promote another Delivery. It becomes the explicit
+test-only command `fixture.solution-review.validate`, whose input is exactly the
+second legacy DeliverySpec plus `invalidProposalKind:"dependency-cycle"`. The
+fixture calls `.6.8` `invalid_task_proposals_fixture` and the production
+`prepare_solution_review_fixture` resolver against an isolated canonical
+planning handoff built from that source Spec. The resolver returns
+`INVALID_REQUEST` before any Approved review seal exists, and the main scenario
+store remains byte-for-byte unchanged: no revision, event, receipt, outbox
+item, or journal record is written.
 
 The inserted promotion changes revisions, events, task states, snapshots,
 projections, receipts, outbox entries, cursors, and every later journal digest.
@@ -163,6 +182,19 @@ message identities. The real typed Control Plane seam performs
 event, and outbox fact. Human review creates no message. The task-DAG transcript
 has no bind source, so its advance leaves one pending binding and no message is
 invented.
+
+Each distinct final verifier terminal Worker fact is also migrated through the
+generated `JobOutcomeMessage` branch. The message uses the exact current
+ExecutionJob lease, WorkerSession, and CodexThread. Its finish time, last event
+sequence, and summary come from the matching successful verifier
+`turn.completed` fact; its artifact list is empty because the legacy fact has
+no ExecutionPort `ArtifactReference`. The real terminal-outcome seam applies
+`apply_terminal_outcome` as a separate durable commit and adds one revision.
+The candidate-invalidation stale/current submit pair carries the same second
+terminal fact, so that fact is committed once before the stale submit attempt
+and reused by the following current-candidate submit. All later revisions,
+events, receipts, outbox values, cursors, and journal digests are rebuilt from
+this sequence.
 
 The canonical error envelope is always the closed generated shape. A duplicate
 create with a different request ID and the same Delivery ID maps to
@@ -251,18 +283,22 @@ listed in the machine rules. `delivery.create.tasks` must be exactly empty. The
 runtime projection query uses the closed `delivery-stage` parameter branch and
 the read cursor returned by `delivery.get`.
 
-The test-only response around one `SessionBindingMessage` is closed. Success
-contains exactly two ordered commit results, first `accept_worker_session`, then
-`report_codex_thread`, with consecutive revisions and closed receipts. Failure
+The test-only response around an execution-port message is closed. A successful
+`SessionBindingMessage` contains exactly two ordered commit results, first
+`accept_worker_session`, then `report_codex_thread`. A successful
+`JobOutcomeMessage` contains exactly one `apply_terminal_outcome` commit. Every
+commit has a consecutive revision and a closed receipt. Session-binding failure
 contains the exact canonical error and unchanged current revision. This wrapper
 records the typed seam result for comparison; it is not a product DTO.
 
 The test-only fixture union is closed as well. A fixture request is exactly
 `{kind,input}`. Successful responses are exactly `{outcome:"completed",result}`;
 fixture results cover only runtime-source installation, service restart,
-snapshot seeding, record corruption, and record restoration. Each fixture
-result has the exact key set in the machine rules, so fixture output cannot
-carry legacy response data.
+snapshot seeding, record corruption, and record restoration. The one
+`fixture.solution-review.validate` branch has exact input keys
+`{spec,invalidProposalKind}` and an exact rejected response carrying the
+canonical `INVALID_REQUEST` error. Each fixture branch has the exact key set in
+the machine rules, so fixture output cannot carry legacy response data.
 
 ## Ten exact scenarios
 
@@ -288,12 +324,12 @@ The migrated checkpoints are also frozen as ordinary facts, not normalization:
 
 | Scenario | Revision | Stage runs | Session bindings | Tasks |
 | --- | ---: | ---: | ---: | ---: |
-| `success-closed-loop` | 20 | 6 | 4 | 1 |
+| `success-closed-loop` | 21 | 6 | 4 | 1 |
 | `attention` | 8 | 2 | 1 | 1 |
-| `inconclusive` | 18 | 5 | 4 | 1 |
-| `infra-error` | 18 | 5 | 4 | 1 |
-| `candidate-invalidation` | 29 | 8 | 7 | 1 |
-| `rework` | 29 | 8 | 7 | 1 |
+| `inconclusive` | 19 | 5 | 4 | 1 |
+| `infra-error` | 19 | 5 | 4 | 1 |
+| `candidate-invalidation` | 31 | 8 | 7 | 1 |
+| `rework` | 31 | 8 | 7 | 1 |
 | `task-dag` | 2 | 1 | 1 | 2 |
 
 The remaining exact final revisions are `request-id-replay` 1,
