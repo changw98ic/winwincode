@@ -11,6 +11,7 @@ const schemaPath = join(
   'v1',
   'control-plane-events.schema.json',
 )
+const domainSchemaPath = join(root, 'schema', 'winwincode', 'v1', 'domain.schema.json')
 const contractPath = join(root, 'docs', 'contracts', 'control-plane-websocket.md')
 const validFixturePath = join(
   root,
@@ -26,6 +27,7 @@ const invalidFixturePath = join(
 )
 
 const schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
+const domainSchema = JSON.parse(readFileSync(domainSchemaPath, 'utf8'))
 const contract = readFileSync(contractPath, 'utf8')
 const validFixture = JSON.parse(readFileSync(validFixturePath, 'utf8'))
 const invalidFixture = JSON.parse(readFileSync(invalidFixturePath, 'utf8'))
@@ -79,26 +81,29 @@ function resolveInternalRef(ref) {
   return schema.$defs[name]
 }
 
-function validateSchemaNode(value, node, path = '$') {
+function validateSchemaNode(value, node, path = '$', document = schema) {
   if (node.$ref) {
     if (node.$ref.startsWith('./domain.schema.json')) {
-      return value === null ? [`${path}: canonical domain value cannot be null`] : []
+      const name = node.$ref.split('/').at(-1)
+      assert.ok(domainSchema.$defs[name], `missing domain schema definition: ${name}`)
+      return validateSchemaNode(value, domainSchema.$defs[name], path, domainSchema)
     }
-    return validateSchemaNode(value, resolveInternalRef(node.$ref), path)
+    assert.match(node.$ref, /^#\/\$defs\/[A-Za-z][A-Za-z0-9]+$/u)
+    const name = node.$ref.split('/').at(-1)
+    assert.ok(document.$defs[name], `missing local schema definition: ${name}`)
+    return validateSchemaNode(value, document.$defs[name], path, document)
   }
+  const errors = []
   if (node.oneOf) {
-    const results = node.oneOf.map(branch => validateSchemaNode(value, branch, path))
+    const results = node.oneOf.map(branch => validateSchemaNode(value, branch, path, document))
     const matches = results.filter(errors => errors.length === 0)
-    return matches.length === 1
-      ? []
-      : [`${path}: expected exactly one matching union branch`]
+    if (matches.length !== 1) errors.push(`${path}: expected exactly one matching union branch`)
   }
   if ('const' in node && value !== node.const) {
     return [`${path}: expected ${JSON.stringify(node.const)}`]
   }
   if (node.enum && !node.enum.includes(value)) return [`${path}: value is not in enum`]
 
-  const errors = []
   if (node.type === 'null') {
     if (value !== null) errors.push(`${path}: expected null`)
     return errors
@@ -140,19 +145,24 @@ function validateSchemaNode(value, node, path = '$') {
     }
     const prefixLength = node.prefixItems?.length ?? 0
     for (let index = 0; index < Math.min(prefixLength, value.length); index += 1) {
-      errors.push(...validateSchemaNode(value[index], node.prefixItems[index], `${path}[${index}]`))
+      errors.push(...validateSchemaNode(
+        value[index],
+        node.prefixItems[index],
+        `${path}[${index}]`,
+        document,
+      ))
     }
     if (node.items === false && value.length > prefixLength) {
       errors.push(`${path}: array has items after the closed tuple prefix`)
     } else if (node.items && node.items !== true) {
       value.slice(prefixLength).forEach((item, offset) => {
         const index = prefixLength + offset
-        errors.push(...validateSchemaNode(item, node.items, `${path}[${index}]`))
+        errors.push(...validateSchemaNode(item, node.items, `${path}[${index}]`, document))
       })
     }
     return errors
   }
-  if (node.type === 'object') {
+  if (node.type === 'object' || node.properties !== undefined) {
     if (value === null || Array.isArray(value) || typeof value !== 'object') {
       return [`${path}: expected object`]
     }
@@ -166,7 +176,7 @@ function validateSchemaNode(value, node, path = '$') {
     }
     for (const [field, child] of Object.entries(node.properties ?? {})) {
       if (field in value) {
-        errors.push(...validateSchemaNode(value[field], child, `${path}.${field}`))
+        errors.push(...validateSchemaNode(value[field], child, `${path}.${field}`, document))
       }
     }
   }
@@ -194,6 +204,48 @@ function streamKey(stream) {
 
 function cursorKey(cursor) {
   return `${scopeKey(cursor.scope)}:${streamKey(cursor.stream)}`
+}
+
+function subscriptionBaseline(transcript, subscribe) {
+  if (subscribe.type === 'transport.resume.v1') {
+    const accepted = transcript.frames.find(frame => (
+      frame.type === 'transport.resume-accepted.v1'
+      && frame.subscriptionId === subscribe.subscriptionId
+    ))
+    if (accepted === undefined) return { error: 'resume acceptance is missing' }
+    if (cursorKey(accepted.after) !== cursorKey(subscribe.after)) {
+      return { error: 'resume acceptance crosses the requested stream' }
+    }
+    if (
+      accepted.after.sequence !== subscribe.after.sequence
+      || accepted.after.eventId !== subscribe.after.eventId
+    ) return { error: 'resume acceptance changes the acknowledged cursor' }
+    return {
+      cursor: accepted.after,
+      authorizationEpoch: accepted.authorizationEpoch,
+    }
+  }
+
+  const accepted = transcript.frames.find(frame => (
+    frame.type === 'transport.subscription-accepted.v1'
+    && frame.subscriptionId === subscribe.subscriptionId
+  ))
+  if (accepted === undefined) return { error: 'subscription acceptance is missing' }
+  if (cursorKey(accepted.cursor) !== cursorKey(subscribe.subscription)) {
+    return { error: 'subscription acceptance crosses the requested stream' }
+  }
+  if (
+    typeof subscribe.startAt === 'object'
+    && (
+      cursorKey(subscribe.startAt) !== cursorKey(subscribe.subscription)
+      || accepted.cursor.sequence !== subscribe.startAt.sequence
+      || accepted.cursor.eventId !== subscribe.startAt.eventId
+    )
+  ) return { error: 'subscription acceptance changes the HTTP snapshot cursor' }
+  return {
+    cursor: accepted.cursor,
+    authorizationEpoch: accepted.authorizationEpoch,
+  }
 }
 
 function validateFrameShape(frame) {
@@ -232,8 +284,16 @@ function validateTranscript(transcript) {
   ))
   if (!subscribe) return 'subscription is missing'
   const expectedCursor = subscribe.subscription
+  if (
+    subscribe.type === 'transport.subscribe.v1'
+    && typeof subscribe.startAt === 'object'
+    && cursorKey(subscribe.startAt) !== cursorKey(expectedCursor)
+  ) return 'snapshot cursor crosses the subscribed stream'
+  const baseline = subscriptionBaseline(transcript, subscribe)
+  if (baseline.error !== undefined) return baseline.error
 
-  let lastSequence = subscribe.after?.sequence ?? 0
+  let lastSequence = baseline.cursor.sequence
+  const authorizationEpochBaseline = baseline.authorizationEpoch
   let revokedEpoch = null
   for (const frame of transcript.frames) {
     if (frame.type === 'transport.authorization-revoked.v1') {
@@ -253,7 +313,10 @@ function validateTranscript(transcript) {
     if (streamKey(frame.stream) !== streamKey(expectedCursor.stream)) {
       return 'event crosses the subscribed resource stream'
     }
-    if (frame.sequence <= lastSequence) return 'event sequence is not monotonic'
+    if (frame.sequence !== lastSequence + 1) return 'event sequence is not continuous'
+    if (frame.authorizationEpoch < authorizationEpochBaseline) {
+      return 'event authorization epoch predates the accepted baseline'
+    }
     if (revokedEpoch !== null && frame.authorizationEpoch <= revokedEpoch) {
       return 'event was sent after authorization was revoked'
     }
@@ -318,11 +381,72 @@ test('event envelope carries ordered scope, time, source, and authorization fact
   assert.equal(eventFrame.properties.scope.$ref, './domain.schema.json#/$defs/Scope')
   assert.equal(eventFrame.properties.occurredAt.$ref, './domain.schema.json#/$defs/Instant')
   assert.equal(schema.$defs.ControlPlaneWebSocketEventSequence.minimum, 1)
-  assert.equal(schema.$defs.ControlPlaneWebSocketStreamPosition.minimum, 0)
+  assert.equal(domainSchema.$defs.EventReadPosition.minimum, 0)
+  assert.equal(
+    schema.$defs.ControlPlaneWebSocketAcknowledgedCursor.properties.sequence.$ref,
+    '#/$defs/ControlPlaneWebSocketEventSequence',
+  )
   assert.deepEqual(
     schema.$defs.ControlPlaneWebSocketEventPayload.oneOf.map(branch => branchConst(branch, 'type')).sort(),
     [...eventTypes].sort(),
   )
+})
+
+test('HTTP snapshots hand one exact event cursor to the first WebSocket subscription', () => {
+  for (const name of [
+    'ControlPlaneEventId',
+    'EventReadPosition',
+    'EventReadStream',
+    'EventReadCursor',
+  ]) {
+    assert.ok(domainSchema.$defs[name], `${name} must have one shared domain definition`)
+    assert.equal(schema.$defs[name], undefined, `${name} cannot be copied into the event schema`)
+  }
+
+  for (const name of [
+    'ScopeEventReadCursor',
+    'DeliveryEventReadCursor',
+    'ProductSessionEventReadCursor',
+    'LeaseEventReadCursor',
+  ]) {
+    assert.deepEqual(domainSchema.$defs[name].oneOf, [
+      {
+        properties: {
+          sequence: { const: 0 },
+          eventId: { type: 'null' },
+        },
+      },
+      {
+        properties: {
+          sequence: { type: 'integer', minimum: 1, maximum: 9007199254740991 },
+          eventId: { $ref: '#/$defs/ControlPlaneEventId' },
+        },
+      },
+    ], name)
+  }
+
+  assert.deepEqual(schema.$defs.ControlPlaneWebSocketSubscribeFrame.properties.startAt, {
+    $ref: '#/$defs/ControlPlaneWebSocketSubscribeStartAt',
+  })
+  assert.deepEqual(schema.$defs.ControlPlaneWebSocketSubscribeStartAt.oneOf, [
+    { $ref: '#/$defs/ControlPlaneWebSocketSubscribeOrigin' },
+    { $ref: './domain.schema.json#/$defs/EventReadCursor' },
+  ])
+  assert.deepEqual(schema.$defs.ControlPlaneWebSocketSubscribeOrigin.enum, [
+    'latest',
+    'earliest-available',
+  ])
+
+  assert.deepEqual(schema['x-winwincode-semantics'].snapshotHandoff, {
+    httpCursorField: 'eventCursor',
+    subscribeCursorField: 'startAt',
+    cursorMustMatchSubscription: ['scope', 'stream'],
+    acceptedBaselineFrame: 'transport.subscription-accepted.v1',
+    firstEventSequence: 'accepted.cursor.sequence + 1',
+    authorizationEpochBaseline: 'accepted.authorizationEpoch',
+    retentionLossFrame: 'transport.reset-required.v1',
+    retentionLossCloseCode: 4409,
+  })
 })
 
 test('client frames only subscribe, resume, acknowledge, or answer a heartbeat', () => {
@@ -334,6 +458,30 @@ test('client frames only subscribe, resume, acknowledge, or answer a heartbeat',
   assert.equal(JSON.stringify(schema.$defs.ControlPlaneWebSocketClientFrame).includes('command'), false)
   assert.match(contract, /主要业务写入只走 HTTP/u)
   assert.match(contract, /WebSocket[^\n]+不接受主要业务 command/u)
+})
+
+test('WebSocket authentication exists only on the HTTP upgrade', () => {
+  assert.deepEqual(schema['x-winwincode-semantics'].authentication, {
+    anonymousAllowed: false,
+    upgradeOnly: true,
+    sessionCookie: {
+      location: 'cookie',
+      name: 'wwc_session',
+    },
+    bearerAuth: {
+      location: 'header',
+      name: 'Authorization',
+      scheme: 'Bearer',
+      format: 'JWT',
+    },
+    credentialsInUrlQueryAllowed: false,
+    credentialsInFramesAllowed: false,
+  })
+  assert.match(contract, /HTTP upgrade/u)
+  assert.match(contract, /`wwc_session`/u)
+  assert.match(contract, /`Authorization: Bearer <JWT>`/u)
+  assert.match(contract, /URL query/u)
+  assert.match(contract, /frame/u)
 })
 
 test('Chat event exposes only the canonical secret-safe message projection', () => {
@@ -429,6 +577,10 @@ test('negative transcripts reject commands, missing metadata, and crossed stream
     'product-runtime-invalidation-smuggles-delivery',
     'product-runtime-invalidation-uses-strongflow-pair',
     'reset-cannot-hard-code-delivery-reload-queries',
+    'subscribe-cursor-crosses-stream',
+    'subscription-accepted-cursor-crosses-stream',
+    'first-event-skips-baseline-sequence',
+    'event-authorization-epoch-before-baseline',
   ])
   assert.deepEqual(
     new Set(invalidFixture.transcripts.map(transcript => transcript.name)),

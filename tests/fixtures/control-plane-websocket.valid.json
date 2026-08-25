@@ -694,7 +694,47 @@
               "runtime-projection.invalidated.v1"
             ]
           },
-          "startAt": "latest"
+          "startAt": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          }
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
         },
         {
           "type": "event.v1",

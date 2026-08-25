@@ -828,7 +828,7 @@
     },
     {
       "id": "recovery.websocket_reset_reloads_snapshot",
-      "statement": "After a delivery-stage invalidation or unusable StrongFlow cursor, the Web client establishes a server-issued bounded cut with delivery.get, passes that exact readCursor as runtime.projection.get atCursor, discards a partial or mismatched pair, and subscribes only after both results carry the same cursor. READ_CURSOR_EXPIRED discards the complete partial StrongFlow snapshot and restarts delivery.get without atCursor. A product-session invalidation reloads runtime.projection.get alone and keeps readCursor null. A generic reset first discards old partial state, then selects the complete reload from the saved original subscription stream and publishes nothing until that reload succeeds.",
+      "statement": "After a delivery-stage invalidation or unusable StrongFlow cursor, the Web client establishes a server-issued bounded cut with delivery.get, passes that exact readCursor as runtime.projection.get atCursor, discards a partial or mismatched pair, and subscribes from the signed readCursor.eventCursor only after both results agree. READ_CURSOR_EXPIRED discards the complete partial StrongFlow snapshot and restarts delivery.get without atCursor. A product-session invalidation reloads runtime.projection.get alone, keeps readCursor null, and subscribes from its returned eventCursor. subscription-accepted establishes the sequence and authorizationEpoch baseline; the first event is baseline + 1, while retention loss uses reset-required/4409.",
       "refs": [
         "docs/contracts/control-plane-websocket.md",
         "schema/winwincode/v1/control-plane-http.schema.json"
@@ -1036,14 +1036,14 @@
     {
       "id": "websocket.structured_runtime_delta_missing",
       "status": "closed",
-      "current": "runtime-projection.invalidated.v1 is notification-only and strictly discriminates delivery-stage from product-session. Delivery stages require the paired delivery.get then runtime.projection.get reload at one returned StrongFlowReadCursor; product sessions reload runtime only and never invent a Delivery. The prose appended event was removed.",
+      "current": "runtime-projection.invalidated.v1 is notification-only and strictly discriminates delivery-stage from product-session. Delivery stages require the paired delivery.get then runtime.projection.get reload at one returned StrongFlowReadCursor whose signed eventCursor becomes subscribe.startAt; product sessions reload runtime only and subscribe from their own runtime eventCursor.",
       "target": "The event either carries the same typed safe runtime detail branch as the snapshot or is explicitly an invalidation that makes the client reload the snapshot; it never makes the browser infer a second runtime model from prose.",
-      "action": "Keep WebSocket as invalidation. Rebuild a Delivery-stage page only after both canonical HTTP reads return one compatible StrongFlowReadCursor; rebuild an ordinary product-session runtime from its single canonical query.",
+      "action": "Keep WebSocket as invalidation. Rebuild a Delivery-stage page only after both canonical HTTP reads return one compatible StrongFlowReadCursor, then subscribe from its eventCursor; rebuild an ordinary product-session runtime from its single canonical query and subscribe from that eventCursor.",
       "refs": [
         "schema/winwincode/v1/control-plane-events.schema.json",
         "schema/winwincode/v1/domain.schema.json"
       ],
-      "resolution": "runtime-projection.invalidated.v1 is notification-only; delivery-stage uses delivery.get to establish the read cut before runtime replay, while product-session carries no Delivery identity and reloads runtime.projection.get alone."
+      "resolution": "Both HTTP reload paths now return an exact EventReadCursor. subscription-accepted establishes the continuous sequence and authorization baseline, and 4409 forces a full reset when retention cannot serve that position."
     },
     {
       "id": "http.publication_join_missing",

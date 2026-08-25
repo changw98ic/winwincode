@@ -10,10 +10,6 @@ function json(name) {
   return JSON.parse(readFileSync(join(schemaRoot, name), 'utf8'))
 }
 
-function refs(schema) {
-  return schema.oneOf.map(branch => branch.$ref)
-}
-
 function branchConstants(schema, unionName, propertyName) {
   return schema.$defs[unionName].oneOf.map(branch => {
     const name = branch.$ref.split('/').at(-1)
@@ -65,9 +61,11 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'updatedAt',
   ]))
 
-  assert.ok(refs(http.$defs.QueryResult).includes('#/$defs/DeliveryDetailProjection'))
-  assert.equal(refs(http.$defs.QueryResult)
-    .includes('./domain.schema.json#/$defs/DeliveryProjection'), false)
+  assert.equal(
+    http.$defs.DeliveryGetResultResponse.allOf[1].properties.result.$ref,
+    '#/$defs/DeliveryDetailProjection',
+  )
+  assert.equal(http.$defs.QueryResult, undefined)
 
   const detail = http.$defs.DeliveryDetailProjection
   assert.equal(detail.additionalProperties, false)
@@ -273,6 +271,8 @@ test('current solution review and publication expose exact authority joins', () 
     'updatedAt',
   ]) assert.ok(publication.required.includes(field), field)
   assert.equal(publication.properties.verdictStatus.const, 'pass')
+  assert.equal(publication.properties.approvedBy.$ref,
+    './domain.schema.json#/$defs/ActorId')
   assert.equal(publication.properties.publicationSetSha256.$ref,
     './domain.schema.json#/$defs/Sha256Digest')
   assert.deepEqual(publication.properties.resourceRef.oneOf, [
@@ -311,6 +311,13 @@ test('current solution review and publication expose exact authority joins', () 
       rawProviderPayloadAllowed: false,
     },
   })
+
+  for (const field of ['assignedTo', 'resolvedBy']) {
+    assert.deepEqual(http.$defs.DeliveryAttentionProjection.properties[field].oneOf, [
+      { $ref: './domain.schema.json#/$defs/ActorId' },
+      { type: 'null' },
+    ])
+  }
 })
 
 test('delivery and runtime reads share one server-issued bounded read cursor', () => {
@@ -328,6 +335,7 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
     'runtimeLedgerRevision',
     'runtimeAcceptedSequence',
     'publicationRevision',
+    'eventCursor',
   ])
   assert.equal(cursor.properties.scope.$ref, '#/$defs/RepositoryScope')
   assert.equal(cursor.properties.deliveryId.$ref, '#/$defs/DeliveryId')
@@ -335,6 +343,10 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
   assert.equal(cursor.properties.runtimeLedgerRevision.$ref, '#/$defs/Revision')
   assert.equal(cursor.properties.runtimeAcceptedSequence.minimum, 0)
   assert.equal(cursor.properties.publicationRevision.$ref, '#/$defs/Revision')
+  assert.equal(
+    cursor.properties.eventCursor.$ref,
+    '#/$defs/DeliveryEventReadCursor',
+  )
   assert.equal(cursor.properties.generatedAt, undefined)
 
   const deliveryDetail = http.$defs.DeliveryDetailProjection
@@ -357,9 +369,15 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
 
   const runtime = domain.$defs.RuntimeProjectionSnapshot
   assert.ok(runtime.required.includes('readCursor'))
+  assert.ok(runtime.required.includes('eventCursor'))
   assert.deepEqual(runtime.properties.readCursor.oneOf, [
     { $ref: '#/$defs/StrongFlowReadCursor' },
     { type: 'null' },
+  ])
+  assert.equal(runtime.properties.eventCursor.$ref, '#/$defs/RuntimeProjectionEventCursor')
+  assert.deepEqual(domain.$defs.RuntimeProjectionEventCursor.oneOf, [
+    { $ref: '#/$defs/ProductSessionEventReadCursor' },
+    { $ref: '#/$defs/DeliveryEventReadCursor' },
   ])
   assert.deepEqual(http['x-winwincode-semantics'].strongFlowReadCut, {
     bootstrapQuery: 'delivery.get',
@@ -373,6 +391,7 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
       'runtimeLedgerRevision',
       'runtimeAcceptedSequence',
       'publicationRevision',
+      'eventCursor',
     ],
     deliveryStageRuntimeRequiresReturnedCursor: true,
     cursorAuthority: 'server_issued_and_authenticated',
@@ -389,6 +408,16 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
     foreignScopeCursorError: 'PERMISSION_DENIED',
     factAdapterUnavailableError: 'TRUSTED_FACTS_UNAVAILABLE',
     generatedTimeIsCursor: false,
+    eventCursorResultPaths: {
+      'delivery.get': 'result.readCursor.eventCursor',
+      'runtime.projection.get': 'result.eventCursor',
+    },
+    webSocketHandoff: 'subscribe.startAt_must_equal_result_event_cursor',
+    deliveryRuntimeEventCursorMustEqualReadCursor: true,
+    productSessionEventCursorMustMatch: [
+      'envelope.scope',
+      'parameters.productSessionId',
+    ],
   })
 
   const mismatch = examples.strongFlowReadCutMismatch
@@ -600,6 +629,28 @@ test('canonical schemas carry generated-client route and event metadata', () => 
         resultDefinition: 'RuntimeProjectionSnapshot',
       },
     ],
+    authentication: {
+      anonymousAllowed: false,
+      sessionCookie: { location: 'cookie', name: 'wwc_session' },
+      bearerAuth: {
+        location: 'header',
+        name: 'Authorization',
+        scheme: 'Bearer',
+        format: 'JWT',
+      },
+      credentialsInQueryAllowed: false,
+      credentialsInBodyAllowed: false,
+    },
+    responseCorrelation: {
+      command: 'command',
+      query: 'query',
+      mismatch: 'reject',
+    },
+    snapshotHandoff: {
+      deliveryGetCursorPath: 'result.readCursor.eventCursor',
+      runtimeProjectionGetCursorPath: 'result.eventCursor',
+      subscribeStartAtField: 'startAt',
+    },
   })
   assert.deepEqual(events['x-winwincode-transports'].generatedClient, {
     transport: 'websocket',
@@ -611,6 +662,28 @@ test('canonical schemas carry generated-client route and event metadata', () => 
       'delivery-stage': ['delivery.get', 'runtime.projection.get'],
     },
     resetStrategy: 'discard_then_full_reload_by_original_subscription_stream',
+    authentication: {
+      upgradeOnly: true,
+      sessionCookie: { location: 'cookie', name: 'wwc_session' },
+      bearerAuth: {
+        location: 'header',
+        name: 'Authorization',
+        scheme: 'Bearer',
+        format: 'JWT',
+      },
+      credentialsInUrlQueryAllowed: false,
+      credentialsInFramesAllowed: false,
+    },
+    snapshotHandoff: {
+      httpCursorField: 'eventCursor',
+      subscribeCursorField: 'startAt',
+      cursorMustMatchSubscription: ['scope', 'stream'],
+      acceptedBaselineFrame: 'transport.subscription-accepted.v1',
+      firstEventSequence: 'accepted.cursor.sequence + 1',
+      authorizationEpochBaseline: 'accepted.authorizationEpoch',
+      retentionLossFrame: 'transport.reset-required.v1',
+      retentionLossCloseCode: 4409,
+    },
   })
 
   const generated = readFileSync(join(
@@ -626,6 +699,11 @@ test('canonical schemas carry generated-client route and event metadata', () => 
   assert.match(generated, /"DeliveryDetailProjection"/u)
   assert.match(generated, /export type SolutionReviewProjection =/u)
   assert.match(generated, /export type StrongFlowReadCursor =/u)
+  assert.match(generated, /export type EventReadCursor =/u)
+  assert.match(
+    generated,
+    /readonly "eventId": null\n\s+readonly "sequence": 0\n\} \| \{\n\s+readonly "eventId": ControlPlaneEventId\n\s+readonly "sequence": number/u,
+  )
   assert.doesNotMatch(generated, /export type ApprovedSolutionProjection =/u)
   assert.match(generated, /"failureMode":\s*"discard_partial_pair"/u)
 })

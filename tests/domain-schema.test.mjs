@@ -465,6 +465,21 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     kind: 'runtime_projection',
     revision: 1,
     readCursor: null,
+    eventCursor: {
+      scope: {
+        kind: 'repository',
+        organizationId: 'org_01J00000000000000000000000',
+        workspaceId: 'wsp_01J00000000000000000000000',
+        projectId: 'prj_01J00000000000000000000000',
+        repositoryId: 'rep_01J00000000000000000000000',
+      },
+      stream: {
+        kind: 'product-session',
+        productSessionId: session.productSessionId,
+      },
+      sequence: 1,
+      eventId: 'evt_01J00000000000000000000001',
+    },
     productSessionId: session.productSessionId,
     deliveryId: null,
     stageRunId: null,
@@ -500,10 +515,20 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     runtimeLedgerRevision: 1,
     runtimeAcceptedSequence: 1,
     publicationRevision: 0,
+    eventCursor: {
+      scope: snapshot.eventCursor.scope,
+      stream: {
+        kind: 'delivery',
+        deliveryId: 'dlv_01J00000000000000000000000',
+      },
+      sequence: 2,
+      eventId: 'evt_01J00000000000000000000002',
+    },
   }
   assert.equal(validateSnapshot({
     ...snapshot,
     readCursor,
+    eventCursor: readCursor.eventCursor,
     deliveryId: readCursor.deliveryId,
     stageRunId: 'run_01J00000000000000000000000',
     sessions: [{
@@ -512,6 +537,45 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     }],
   }), true, JSON.stringify(validateSnapshot.errors))
   assert.equal(validateSnapshot({ ...snapshot, readCursor }), false)
+  assert.equal(validateSnapshot({
+    ...snapshot,
+    readCursor,
+    deliveryId: readCursor.deliveryId,
+    stageRunId: 'run_01J00000000000000000000000',
+    eventCursor: snapshot.eventCursor,
+  }), false)
+})
+
+test('event read cursors bind empty and positive positions to exact event identity', async () => {
+  const schema = await loadSchema()
+  const validate = ajvDefinitionValidator(schema, 'DeliveryEventReadCursor')
+  const cursor = {
+    scope: {
+      kind: 'repository',
+      organizationId: 'org_01J00000000000000000000000',
+      workspaceId: 'wsp_01J00000000000000000000000',
+      projectId: 'prj_01J00000000000000000000000',
+      repositoryId: 'rep_01J00000000000000000000000',
+    },
+    stream: {
+      kind: 'delivery',
+      deliveryId: 'dlv_01J00000000000000000000000',
+    },
+    sequence: 0,
+    eventId: null,
+  }
+
+  assert.equal(validate(cursor), true, JSON.stringify(validate.errors))
+  assert.equal(validate({
+    ...cursor,
+    eventId: 'evt_01J00000000000000000000000',
+  }), false)
+  assert.equal(validate({ ...cursor, sequence: 1 }), false)
+  assert.equal(validate({
+    ...cursor,
+    sequence: 1,
+    eventId: 'evt_01J00000000000000000000000',
+  }), true, JSON.stringify(validate.errors))
 })
 
 test('ErrorEnvelope keeps machine codes and retry behavior stable', async () => {
