@@ -76,6 +76,12 @@ function schemaPropertyConst(documents, document, node, property, seen = new Set
     const value = schemaPropertyConst(documents, document, branch, property, seen)
     if (value !== undefined) return value
   }
+  if (Array.isArray(node.oneOf)) {
+    const values = node.oneOf.map(branch => (
+      schemaPropertyConst(documents, document, branch, property, new Set(seen))
+    ))
+    if (values.length > 0 && values.every(value => value === values[0])) return values[0]
+  }
   return undefined
 }
 
@@ -88,9 +94,14 @@ function schemaRequiresProperty(documents, document, node, property, seen = new 
     const resolved = resolveSchemaRef(documents, document, node.$ref)
     return schemaRequiresProperty(documents, resolved.document, resolved.node, property, seen)
   }
-  return (node.allOf ?? []).some(branch => (
+  if ((node.allOf ?? []).some(branch => (
     schemaRequiresProperty(documents, document, branch, property, seen)
-  ))
+  ))) return true
+  return Array.isArray(node.oneOf)
+    && node.oneOf.length > 0
+    && node.oneOf.every(branch => (
+      schemaRequiresProperty(documents, document, branch, property, new Set(seen))
+    ))
 }
 
 function contractValidator() {
@@ -145,6 +156,44 @@ function streamKey(stream) {
   }`
 }
 
+function cursorKey(cursor) {
+  return `${scopeKey(cursor.scope)}:${streamKey(cursor.stream)}`
+}
+
+function transcriptBaseline(transcript, subscribe) {
+  if (subscribe.type === 'transport.resume.v1') {
+    const accepted = transcript.frames.find(frame => (
+      frame.type === 'transport.resume-accepted.v1'
+      && frame.subscriptionId === subscribe.subscriptionId
+    ))
+    if (accepted === undefined) return { error: 'resume acceptance is missing' }
+    if (
+      cursorKey(accepted.after) !== cursorKey(subscribe.after)
+      || accepted.after.sequence !== subscribe.after.sequence
+      || accepted.after.eventId !== subscribe.after.eventId
+    ) return { error: 'resume acceptance changes the requested cursor' }
+    return { cursor: accepted.after, authorizationEpoch: accepted.authorizationEpoch }
+  }
+
+  const accepted = transcript.frames.find(frame => (
+    frame.type === 'transport.subscription-accepted.v1'
+    && frame.subscriptionId === subscribe.subscriptionId
+  ))
+  if (accepted === undefined) return { error: 'subscription acceptance is missing' }
+  if (cursorKey(accepted.cursor) !== cursorKey(subscribe.subscription)) {
+    return { error: 'subscription acceptance crosses the requested stream' }
+  }
+  if (
+    typeof subscribe.startAt === 'object'
+    && (
+      cursorKey(subscribe.startAt) !== cursorKey(subscribe.subscription)
+      || accepted.cursor.sequence !== subscribe.startAt.sequence
+      || accepted.cursor.eventId !== subscribe.startAt.eventId
+    )
+  ) return { error: 'subscription acceptance changes the HTTP snapshot cursor' }
+  return { cursor: accepted.cursor, authorizationEpoch: accepted.authorizationEpoch }
+}
+
 function transcriptError(transcript) {
   const subscribe = transcript.frames.find(frame => (
     frame.type === 'transport.subscribe.v1'
@@ -153,7 +202,15 @@ function transcriptError(transcript) {
   if (subscribe === undefined) return 'subscription is missing'
 
   const expectedCursor = subscribe.subscription
-  let lastSequence = subscribe.after?.sequence ?? 0
+  if (
+    subscribe.type === 'transport.subscribe.v1'
+    && typeof subscribe.startAt === 'object'
+    && cursorKey(subscribe.startAt) !== cursorKey(expectedCursor)
+  ) return 'snapshot cursor crosses the subscribed stream'
+  const baseline = transcriptBaseline(transcript, subscribe)
+  if (baseline.error !== undefined) return baseline.error
+  let lastSequence = baseline.cursor.sequence
+  const authorizationEpochBaseline = baseline.authorizationEpoch
   let revokedEpoch = null
   for (const frame of transcript.frames) {
     if (frame.type === 'transport.authorization-revoked.v1') {
@@ -174,7 +231,10 @@ function transcriptError(transcript) {
     if (streamKey(frame.stream) !== streamKey(expectedCursor.stream)) {
       return 'event crosses the subscribed resource stream'
     }
-    if (frame.sequence <= lastSequence) return 'event sequence is not monotonic'
+    if (frame.sequence !== lastSequence + 1) return 'event sequence is not continuous'
+    if (frame.authorizationEpoch < authorizationEpochBaseline) {
+      return 'event authorization epoch predates the accepted baseline'
+    }
     if (revokedEpoch !== null && frame.authorizationEpoch <= revokedEpoch) {
       return 'event was sent after authorization was revoked'
     }
@@ -226,6 +286,43 @@ test('every raw reference resolves, including references inside generated OpenAP
       }
     })
   }
+})
+
+test('schema dependency direction keeps neutral event cursors out of transport cycles', () => {
+  const documents = schemaDocuments()
+  const dependencies = new Map(schemaFiles.map(name => [name, new Set()]))
+
+  for (const [fileName, document] of schemaFiles.map(name => [name, schema(name)])) {
+    visitSchema(document, node => {
+      if (typeof node.$ref !== 'string') return
+      const target = resolveSchemaRef(documents, document, node.$ref).document
+      const targetName = new URL(target.$id).pathname.split('/').at(-1)
+      if (targetName !== fileName) dependencies.get(fileName).add(targetName)
+    })
+  }
+
+  assert.deepEqual([...dependencies.get('domain.schema.json')], [])
+  assert.deepEqual([...dependencies.get('control-plane-events.schema.json')], [
+    'domain.schema.json',
+  ])
+  assert.deepEqual([...dependencies.get('control-plane-http.schema.json')], [
+    'domain.schema.json',
+  ])
+  assert.deepEqual([...dependencies.get('execution-port.schema.json')], [
+    'domain.schema.json',
+  ])
+
+  const domain = documents.get(`${schemaBase}domain.schema.json`)
+  assert.ok(domain.$defs.EventReadCursor)
+  assert.equal(
+    Object.keys(domain.$defs).some(name => name.startsWith('ControlPlaneWebSocket')),
+    false,
+  )
+  const events = documents.get(`${schemaBase}control-plane-events.schema.json`)
+  assert.deepEqual(events.$defs.ControlPlaneWebSocketSubscribeStartAt.oneOf, [
+    { $ref: '#/$defs/ControlPlaneWebSocketSubscribeOrigin' },
+    { $ref: './domain.schema.json#/$defs/EventReadCursor' },
+  ])
 })
 
 test('public unions have one required discriminator and no schema copies', () => {
@@ -297,7 +394,7 @@ test('public objects stay closed and error details inherit every authority redac
   for (const path of openObjects.get('control-plane-http.schema.json')) {
     assert.equal(
       path === '#/$defs/QueryEnvelope/properties/parameters'
-      || /^#\/\$defs\/[A-Za-z][A-Za-z0-9]*(?:Command|Query)\/allOf\/1$/u.test(path),
+      || /^#\/\$defs\/[A-Za-z][A-Za-z0-9]*(?:Command|Query|CompletedResponse|ResultResponse)\/allOf\/1$/u.test(path),
       true,
       `HTTP object is open outside an envelope specialization: ${path}`,
     )
@@ -384,7 +481,7 @@ test('strict validation covers every canonical domain sample and keeps IDs disti
     [domainId, 'WorkerId', 'wrk_01J00000000000000000000000'],
     [domainId, 'WorkerSessionId', 'wsn_01J00000000000000000000000'],
     [domainId, 'WorkspaceId', 'wsp_01J00000000000000000000000'],
-    [`${schemaBase}control-plane-events.schema.json`, 'ControlPlaneWebSocketEventId', 'evt_01J00000000000000000000000'],
+    [domainId, 'ControlPlaneEventId', 'evt_01J00000000000000000000000'],
     [`${schemaBase}control-plane-events.schema.json`, 'ControlPlaneWebSocketSubscriptionId', 'sub_01J00000000000000000000000'],
     [`${schemaBase}execution-port.schema.json`, 'ArtifactId', 'art_01J00000000000000000000000'],
     [`${schemaBase}execution-port.schema.json`, 'ExecutionEventId', 'xevt_01J00000000000000000000000'],
@@ -440,6 +537,7 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   for (const [name, value] of Object.entries({
     revisionConflict: examples.revisionConflict,
     invalidCursor: examples.invalidCursor,
+    readCursorExpired: examples.readCursorExpired,
   })) {
     assertValidation(
       validator(ajv, domainId, 'ErrorEnvelope'),
@@ -470,11 +568,154 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     true,
     'queryPage',
   )
-  for (const name of ['chatMessagesPage', 'runtimeProjection']) {
+  for (const name of [
+    'chatMessagesPage',
+    'deliveryDetailPendingReview',
+    'runtimeProjection',
+    'publicationProjection',
+  ]) {
     assertValidation(
       validator(ajv, httpId, 'QueryResultResponse'),
       examples.responses[name],
       true,
+      name,
+    )
+  }
+  const settledReviewExamples = {
+    approvedReview: {
+      reviewStatus: 'approved',
+      decision: 'approve',
+      comments: null,
+      requestedChanges: null,
+    },
+    changesRequestedReview: {
+      reviewStatus: 'changes_requested',
+      decision: 'request_changes',
+      comments: 'Please keep the retry boundary explicit.',
+      requestedChanges: ['Add the bounded retry check.'],
+    },
+    rejectedReview: {
+      reviewStatus: 'rejected',
+      decision: 'reject',
+      comments: null,
+      requestedChanges: null,
+    },
+  }
+  for (const [name, reviewFields] of Object.entries(settledReviewExamples)) {
+    const response = structuredClone(examples.responses.deliveryDetailPendingReview)
+    Object.assign(response.result.solutionReview, reviewFields, {
+      reviewerId: 'usr_00000000000000000000000000',
+      reviewedAt: '2026-08-24T09:02:00.000Z',
+    })
+    assertValidation(
+      validator(ajv, httpId, 'QueryResultResponse'),
+      response,
+      true,
+      name,
+    )
+  }
+  const pendingReviewWithReviewer = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  pendingReviewWithReviewer.result.solutionReview.reviewerId = 'usr_00000000000000000000000000'
+  pendingReviewWithReviewer.result.solutionReview.reviewedAt = '2026-08-24T09:02:00.000Z'
+  const changesWithoutRequests = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  Object.assign(changesWithoutRequests.result.solutionReview, {
+    reviewStatus: 'changes_requested',
+    decision: 'request_changes',
+    reviewerId: 'usr_00000000000000000000000000',
+    reviewedAt: '2026-08-24T09:02:00.000Z',
+    requestedChanges: null,
+  })
+  const pendingReviewWithComments = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  pendingReviewWithComments.result.solutionReview.comments = 'Caller-authored pending comment'
+  const approvedReviewWithRequests = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  Object.assign(approvedReviewWithRequests.result.solutionReview, {
+    reviewStatus: 'approved',
+    decision: 'approve',
+    reviewerId: 'usr_00000000000000000000000000',
+    reviewedAt: '2026-08-24T09:02:00.000Z',
+    requestedChanges: ['This cannot coexist with approval.'],
+  })
+  const plannerAssignedTaskOwner = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  plannerAssignedTaskOwner.result.solutionReview.taskProposals[0].ownerActorId =
+    'usr_00000000000000000000000000'
+  const legacyApprovedSolution = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  legacyApprovedSolution.result.solution = legacyApprovedSolution.result.solutionReview
+  delete legacyApprovedSolution.result.solutionReview
+  const rawAttentionReview = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  rawAttentionReview.result.solutionReview.context = { raw: true }
+  const codexStageWithoutBinding = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  codexStageWithoutBinding.result.stages
+    .find(stage => stage.actorType === 'codex').sessionBinding = null
+  const humanStageWithExecutionBinding = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  const humanStage = humanStageWithExecutionBinding.result.stages
+    .find(stage => stage.actorType === 'human')
+  humanStage.sessionBinding = structuredClone(
+    examples.responses.deliveryDetailPendingReview.result.stages
+      .find(stage => stage.actorType === 'codex').sessionBinding,
+  )
+  const partialBindingWithThreadOnly = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  const partialBinding = partialBindingWithThreadOnly.result.stages
+    .find(stage => stage.actorType === 'codex').sessionBinding
+  partialBinding.workerSessionId = null
+  const publicationWithArbitraryUrl = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithArbitraryUrl.result.resourceRef =
+    'https://token@example.com/repository/pull/42?access_token=secret#fragment'
+  const publicationWithSecretBearingRepository = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithSecretBearingRepository.result.resourceRef.repository =
+    'openai/winwincode?access_token=secret'
+  const publicationWithWebUrl = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithWebUrl.result.resourceRef.webUrl =
+    'https://github.com/openai/winwincode/pull/42'
+  const publicationWithInvalidNumber = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  publicationWithInvalidNumber.result.resourceRef.number = 0
+  for (const [name, value] of Object.entries({
+    pendingReviewWithReviewer,
+    pendingReviewWithComments,
+    changesWithoutRequests,
+    approvedReviewWithRequests,
+    plannerAssignedTaskOwner,
+    legacyApprovedSolution,
+    rawAttentionReview,
+    codexStageWithoutBinding,
+    humanStageWithExecutionBinding,
+    partialBindingWithThreadOnly,
+    publicationWithArbitraryUrl,
+    publicationWithSecretBearingRepository,
+    publicationWithWebUrl,
+    publicationWithInvalidNumber,
+  })) {
+    assertValidation(
+      validator(ajv, httpId, 'QueryResultResponse'),
+      value,
+      false,
       name,
     )
   }
@@ -495,12 +736,24 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
   swappedId.payload.productSessionId = swappedId.payload.repositoryId
   const extraField = structuredClone(examples.positive.sessionCreate)
   extraField.secret = 'must-not-cross-the-boundary'
+  const callerAuthoredTaskBreakdown = structuredClone(
+    examples.positive.deliveryApproveTaskBreakdown,
+  )
+  callerAuthoredTaskBreakdown.payload.tasks = [{
+    id: 'dtk_01J00000000000000000000000',
+    title: 'Caller replacement',
+    goal: 'Bypass the reviewed task proposals.',
+    acceptanceCriterionIds: ['criterion:1'],
+    blockedByTaskIds: [],
+    ownerActorId: null,
+  }]
   for (const [name, value] of Object.entries({
     wrongVersion,
     missingRevision,
     nullPayload,
     swappedId,
     extraField,
+    callerAuthoredTaskBreakdown,
   })) assertValidation(command, value, false, name)
 
   const leakedCredential = structuredClone(examples.responses.credentialReference)
@@ -510,6 +763,78 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     leakedCredential,
     false,
     'credential projection rejects its vault locator',
+  )
+})
+
+test('HTTP response discriminators, repository scope, and actor references fail closed', () => {
+  const ajv = contractValidator()
+  const httpId = `${schemaBase}control-plane-http.schema.json`
+  const examples = json(join(schemaRoot, 'examples', 'control-plane-http.examples.json'))
+  const queryRequest = validator(ajv, httpId, 'QueryRequest')
+  const queryResponse = validator(ajv, httpId, 'QueryResultResponse')
+  const commandResponse = validator(ajv, httpId, 'CommandCompletedResponse')
+
+  const relabeledQueryResponse = structuredClone(examples.responses.runtimeProjection)
+  relabeledQueryResponse.query = 'delivery.get'
+  assertValidation(
+    queryResponse,
+    relabeledQueryResponse,
+    false,
+    'query response cannot relabel a runtime result as delivery.get',
+  )
+
+  const wrongQueryResult = structuredClone(examples.responses.runtimeProjection)
+  wrongQueryResult.result = structuredClone(examples.responses.queryPage.result)
+  assertValidation(
+    queryResponse,
+    wrongQueryResult,
+    false,
+    'runtime.projection.get cannot return a Delivery page',
+  )
+
+  const relabeledCommandResponse = structuredClone(examples.responses.commandCompleted)
+  relabeledCommandResponse.command = 'delivery.create'
+  assertValidation(
+    commandResponse,
+    relabeledCommandResponse,
+    false,
+    'command response cannot relabel a Worker projection as delivery.create',
+  )
+
+  for (const query of [examples.positive.deliveryGet, examples.positive.runtimeProjectionGet]) {
+    const wrongScope = structuredClone(query)
+    wrongScope.scope = {
+      kind: 'organization',
+      organizationId: 'org_00000000000000000000000000',
+    }
+    assertValidation(
+      queryRequest,
+      wrongScope,
+      false,
+      `${query.query} requires a complete repository scope`,
+    )
+  }
+
+  const forgedPublicationApprover = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  forgedPublicationApprover.result.approvedBy = 'Authorization: Bearer secret'
+  assertValidation(
+    queryResponse,
+    forgedPublicationApprover,
+    false,
+    'publication approver must be a canonical ActorId',
+  )
+
+  const forgedAttentionResolver = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  forgedAttentionResolver.result.attention[0].assignedTo = 'credential=secret'
+  assertValidation(
+    queryResponse,
+    forgedAttentionResolver,
+    false,
+    'Attention assignee must be a canonical ActorId',
   )
 })
 

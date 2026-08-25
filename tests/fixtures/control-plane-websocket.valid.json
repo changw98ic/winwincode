@@ -291,7 +291,7 @@
               "presence.changed.v1",
               "product-session.changed.v1",
               "product-session.message.appended.v1",
-              "runtime-projection.appended.v1"
+              "runtime-projection.invalidated.v1"
             ]
           },
           "after": {
@@ -444,16 +444,17 @@
           },
           "authorizationEpoch": 7,
           "event": {
-            "type": "runtime-projection.appended.v1",
+            "type": "runtime-projection.invalidated.v1",
             "productSessionId": "psn_01J00000000000000000000000",
-            "workerSessionId": "wsn_01J00000000000000000000000",
-            "codexThreadId": "cdx_01J00000000000000000000000",
-            "leaseId": "lse_01J00000000000000000000000",
             "deliveryId": "dlv_01J00000000000000000000000",
-            "projectionSequence": 42,
-            "projectionKind": "test",
-            "summary": "The focused contract tests passed.",
-            "sourceRef": "runtime-event:42"
+            "stageRunId": "run_01J00000000000000000000000",
+            "projectionRevision": 11,
+            "lastProjectionSequence": 42,
+            "reloadQueries": [
+              "delivery.get",
+              "runtime.projection.get"
+            ],
+            "scopeKind": "delivery-stage"
           }
         },
         {
@@ -668,6 +669,108 @@
           "subscriptionId": "sub_01J00000000000000000000003",
           "authorizationEpoch": 4,
           "closeCode": 4403
+        }
+      ]
+    },
+    {
+      "name": "product-session-runtime-invalidation-reloads-runtime-only",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "subscription": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "eventTypes": [
+              "runtime-projection.invalidated.v1"
+            ]
+          },
+          "startAt": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          }
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "cursor": {
+            "scope": {
+              "kind": "repository",
+              "organizationId": "org_01J00000000000000000000000",
+              "workspaceId": "wsp_01J00000000000000000000000",
+              "projectId": "prj_01J00000000000000000000000",
+              "repositoryId": "rep_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "product-session",
+              "productSessionId": "psn_01J00000000000000000000009"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000901",
+          "eventId": "evt_01J00000000000000000000901",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009"
+          },
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:09:01.000Z",
+          "source": {
+            "kind": "execution-worker",
+            "workerId": "wrk_01J00000000000000000000000",
+            "workerSessionId": "wsn_01J00000000000000000000000",
+            "leaseId": "lse_01J00000000000000000000000",
+            "codexThreadId": "cdx_01J00000000000000000000000"
+          },
+          "authorizationEpoch": 1,
+          "event": {
+            "type": "runtime-projection.invalidated.v1",
+            "scopeKind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000009",
+            "projectionRevision": 3,
+            "lastProjectionSequence": 12,
+            "reloadQueries": [
+              "runtime.projection.get"
+            ]
+          }
         }
       ]
     }

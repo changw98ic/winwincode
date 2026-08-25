@@ -62,6 +62,10 @@
         "httpStatus": 409,
         "retryable": false
       },
+      "READ_CURSOR_EXPIRED": {
+        "httpStatus": 409,
+        "retryable": true
+      },
       "CANDIDATE_STALE": {
         "httpStatus": 409,
         "retryable": false
@@ -119,7 +123,124 @@
     "projectionRecovery": {
       "chatMessages": "session.messages.list",
       "runtimeProjection": "runtime.projection.get",
-      "webSocketReset": "reload_queries_before_new_subscription"
+      "webSocketUpdate": "runtime-projection.invalidated.v1",
+      "webSocketReset": "discard_partial_state_then_full_reload_by_original_subscription_stream"
+    },
+    "strongFlowPublicationJoin": {
+      "snapshot": "delivery.get",
+      "requiresExactMatch": [
+        "deliveryId",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "candidateRef",
+        "deliveryVerdictId",
+        "verdictStatus=pass",
+        "approvalAttentionItemId",
+        "target",
+        "resourceRef.repository=target.repository",
+        "publicationSetSha256"
+      ],
+      "mismatch": "fail_entire_read_cut",
+      "resourceRef": {
+        "allowedKinds": [
+          "github_issue",
+          "github_pull_request"
+        ],
+        "arbitraryUrlAllowed": false,
+        "rawProviderPayloadAllowed": false
+      }
+    },
+    "strongFlowReadCut": {
+      "bootstrapQuery": "delivery.get",
+      "followupQuery": "runtime.projection.get",
+      "requestCursorField": "atCursor",
+      "resultCursorField": "readCursor",
+      "exactCoordinates": [
+        "scope",
+        "deliveryId",
+        "deliveryRevision",
+        "runtimeLedgerRevision",
+        "runtimeAcceptedSequence",
+        "publicationRevision",
+        "eventCursor"
+      ],
+      "deliveryStageRuntimeRequiresReturnedCursor": true,
+      "cursorAuthority": "server_issued_and_authenticated",
+      "requestMustMatchCursor": [
+        "envelope.scope",
+        "parameters.deliveryId"
+      ],
+      "pairedResultsMustReturnIdenticalCursor": true,
+      "mismatch": "reject_entire_pair_and_reload",
+      "expiredCursorError": "READ_CURSOR_EXPIRED",
+      "expiredCursorAction": "discard_all_partial_state_and_restart_delivery_get_without_at_cursor",
+      "malformedCursorError": "INVALID_REQUEST",
+      "foreignScopeCursorError": "PERMISSION_DENIED",
+      "factAdapterUnavailableError": "TRUSTED_FACTS_UNAVAILABLE",
+      "generatedTimeIsCursor": false,
+      "eventCursorResultPaths": {
+        "delivery.get": "result.readCursor.eventCursor",
+        "runtime.projection.get": "result.eventCursor"
+      },
+      "webSocketHandoff": "subscribe.startAt_must_equal_result_event_cursor",
+      "deliveryRuntimeEventCursorMustEqualReadCursor": true,
+      "productSessionEventCursorMustMatch": [
+        "envelope.scope",
+        "parameters.productSessionId"
+      ]
+    },
+    "deliveryStageSessionBinding": {
+      "partialBindingFields": [
+        "bindingId",
+        "productSessionId",
+        "executionJobId",
+        "boundAt"
+      ],
+      "codexThreadRequiresWorkerSession": true,
+      "humanStageBinding": "must_be_null",
+      "runtimeSessionBinding": "worker_and_codex_required"
+    },
+    "solutionReview": {
+      "digestIncludesOrderedTaskProposals": true,
+      "pendingProjectionAllowed": true,
+      "settledReviewerRequired": true,
+      "pendingReviewerMustBeNull": true,
+      "pendingDecisionFieldsMustBeNull": true,
+      "changesRequestedRequiresNonEmptyRequestedChanges": true,
+      "commentsAreBoundedNullableTypedDecisionField": true,
+      "reviewSetDigestExcludesDecision": true,
+      "plannerSuppliedTaskOwnerAllowed": false,
+      "promotedTaskOwner": null,
+      "promotedTaskInitialStatus": "pending",
+      "taskPromotionStatus": "approved",
+      "rawAttentionContextReturned": false,
+      "rawAttentionResolutionReturned": false
+    },
+    "taskBreakdownApproval": {
+      "payload": [
+        "deliveryId",
+        "reviewSetSha256"
+      ],
+      "authority": "current_sealed_approved_solution_review",
+      "callerTaskFieldsAllowed": false,
+      "promotion": "copy_ordered_task_proposals_field_by_field",
+      "staleDigestError": "REVISION_CONFLICT"
+    },
+    "authentication": {
+      "anonymousAllowed": false,
+      "acceptedMethods": [
+        "sessionCookie",
+        "bearerAuth"
+      ],
+      "principalBinding": "authenticated_principal_must_equal_envelope_actor",
+      "credentialsInQueryAllowed": false,
+      "credentialsInBodyAllowed": false
+    },
+    "responseCorrelation": {
+      "authority": "request_operation_discriminator",
+      "queryResult": "exact_query_to_result_projection",
+      "commandResult": "exact_command_to_result_projection",
+      "relabeling": "reject"
     }
   },
   "$defs": {
@@ -347,40 +468,66 @@
       "description": "Side-effect-free query. Authenticated identity must equal actor and authorize scope."
     },
     "CommandCompletedResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "requestId",
-        "command",
-        "outcome",
-        "previousRevision",
-        "currentRevision",
-        "result"
-      ],
-      "properties": {
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionCreateCompletedResponse"
         },
-        "requestId": {
-          "$ref": "./domain.schema.json#/$defs/RequestId"
+        {
+          "$ref": "#/$defs/ChatSubmitCompletedResponse"
         },
-        "command": {
-          "$ref": "./domain.schema.json#/$defs/CommandName"
+        {
+          "$ref": "#/$defs/InputRespondCompletedResponse"
         },
-        "outcome": {
-          "const": "completed"
+        {
+          "$ref": "#/$defs/SessionCancelCompletedResponse"
         },
-        "previousRevision": {
-          "$ref": "./domain.schema.json#/$defs/Revision"
+        {
+          "$ref": "#/$defs/SessionCloseCompletedResponse"
         },
-        "currentRevision": {
-          "$ref": "./domain.schema.json#/$defs/Revision"
+        {
+          "$ref": "#/$defs/DeliveryCreateCompletedResponse"
         },
-        "result": {
-          "$ref": "#/$defs/CommandResult"
+        {
+          "$ref": "#/$defs/DeliveryUpdateSpecCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryResolveAttentionCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliverySubmitVerdictCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/SettingsUpdateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceCreateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceDeleteCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalDecideCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerDrainCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerEnableCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationPublishCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationCancelCompletedResponse"
         }
-      }
+      ],
+      "description": "Exact command/result response union. Relabeling a result under another command is invalid."
     },
     "CommandAcceptedResponse": {
       "type": "object",
@@ -415,32 +562,54 @@
       }
     },
     "QueryResultResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "requestId",
-        "query",
-        "result",
-        "page"
-      ],
-      "properties": {
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionListResultResponse"
         },
-        "requestId": {
-          "$ref": "./domain.schema.json#/$defs/RequestId"
+        {
+          "$ref": "#/$defs/SessionGetResultResponse"
         },
-        "query": {
-          "$ref": "#/$defs/QueryName"
+        {
+          "$ref": "#/$defs/SessionMessagesListResultResponse"
         },
-        "result": {
-          "$ref": "#/$defs/QueryResult"
+        {
+          "$ref": "#/$defs/RuntimeProjectionGetResultResponse"
         },
-        "page": {
-          "$ref": "#/$defs/PageInfo"
+        {
+          "$ref": "#/$defs/DeliveryListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/SettingsGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationGetResultResponse"
         }
-      }
+      ],
+      "description": "Exact query/result response union. A client can narrow result by query without accepting an unrelated projection."
     },
     "ScopedResourceLocator": {
       "type": "object",
@@ -504,9 +673,7 @@
           "const": "github"
         },
         "repository": {
-          "type": "string",
-          "pattern": "^[^/\\s]+/[^/\\s]+$",
-          "maxLength": 256
+          "$ref": "#/$defs/GitHubRepositorySlug"
         },
         "baseBranch": {
           "type": "string",
@@ -939,21 +1106,18 @@
       "additionalProperties": false,
       "required": [
         "deliveryId",
-        "tasks"
+        "reviewSetSha256"
       ],
       "properties": {
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
         },
-        "tasks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DeliveryTaskInput"
-          },
-          "minItems": 1,
-          "maxItems": 1000
+        "reviewSetSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest",
+          "description": "Stale-check assertion for the current sealed approved SolutionReviewProjection; it is not caller-authored task content."
         }
-      }
+      },
+      "description": "Promotes the ordered task proposals from the exact sealed approved review set. The caller cannot submit or replace task fields."
     },
     "DeliveryAdvancePayload": {
       "type": "object",
@@ -1257,7 +1421,8 @@
         "kind",
         "productSessionId",
         "deliveryId",
-        "stageRunId"
+        "stageRunId",
+        "atCursor"
       ],
       "properties": {
         "kind": {
@@ -1271,6 +1436,9 @@
         },
         "stageRunId": {
           "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
         }
       }
     },
@@ -1311,6 +1479,10 @@
       "properties": {
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor",
+          "description": "Optional server-issued cursor for an exact replay. Omit it to establish a new bounded StrongFlow read cut."
         }
       }
     },
@@ -1473,6 +1645,9 @@
             },
             "payload": {
               "$ref": "#/$defs/SessionCreatePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1491,6 +1666,9 @@
             },
             "payload": {
               "$ref": "#/$defs/ChatSubmitPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1509,6 +1687,9 @@
             },
             "payload": {
               "$ref": "#/$defs/InputRespondPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1527,6 +1708,9 @@
             },
             "payload": {
               "$ref": "#/$defs/SessionCancelPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1545,6 +1729,9 @@
             },
             "payload": {
               "$ref": "#/$defs/SessionClosePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1563,6 +1750,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryCreatePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1581,6 +1771,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryUpdateSpecPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1599,6 +1792,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryApproveTaskBreakdownPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1617,6 +1813,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryAdvancePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1635,6 +1834,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryResolveAttentionPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1729,6 +1931,9 @@
             },
             "payload": {
               "$ref": "#/$defs/ApprovalDecidePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1783,6 +1988,9 @@
             },
             "payload": {
               "$ref": "#/$defs/PublicationPublishPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1801,6 +2009,9 @@
             },
             "payload": {
               "$ref": "#/$defs/PublicationCancelPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1819,6 +2030,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1837,6 +2051,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1855,6 +2072,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionMessagesListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1873,6 +2093,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/RuntimeProjectionGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1891,6 +2114,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/DeliveryListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1909,6 +2135,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/DeliveryGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1981,6 +2210,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/ApprovalListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1999,6 +2231,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/ApprovalGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2053,6 +2288,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/PublicationListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2071,6 +2309,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/PublicationGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2231,7 +2472,18 @@
         "id",
         "revision",
         "deliveryId",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "candidateRef",
+        "deliveryVerdictId",
+        "verdictStatus",
+        "approvalAttentionItemId",
+        "approvedBy",
+        "approvedAt",
+        "publicationSetSha256",
+        "target",
         "state",
+        "resourceRef",
         "updatedAt"
       ],
       "properties": {
@@ -2244,6 +2496,43 @@
         "deliveryId": {
           "$ref": "./domain.schema.json#/$defs/DeliveryId"
         },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "deliveryVerdictId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "verdictStatus": {
+          "const": "pass"
+        },
+        "approvalAttentionItemId": {
+          "$ref": "./domain.schema.json#/$defs/AttentionItemId"
+        },
+        "approvedBy": {
+          "$ref": "./domain.schema.json#/$defs/ActorId"
+        },
+        "approvedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "publicationSetSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "target": {
+          "$ref": "#/$defs/PublicationTarget"
+        },
         "state": {
           "type": "string",
           "enum": [
@@ -2254,10 +2543,58 @@
             "failed"
           ]
         },
+        "resourceRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicationResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "updatedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
         }
-      }
+      },
+      "description": "Bounded publication summary joined to one current Delivery, Spec, candidate, passing verdict, approval, and target. Remote resources use a closed GitHub identity, never an arbitrary URL or provider payload."
+    },
+    "GitHubRepositorySlug": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 140,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9._-])?$",
+      "description": "GitHub owner/repository without URL syntax, userinfo, query, fragment, or credentials."
+    },
+    "PublicationResourceKind": {
+      "type": "string",
+      "enum": [
+        "github_issue",
+        "github_pull_request"
+      ]
+    },
+    "PublicationResourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repository",
+        "number"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PublicationResourceKind"
+        },
+        "repository": {
+          "$ref": "#/$defs/GitHubRepositorySlug"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "description": "Secret-safe remote publication identity. Control Plane verifies repository equals PublicationTarget.repository and resolves links from kind plus number."
     },
     "ProductSessionPage": {
       "type": "object",
@@ -2400,55 +2737,6 @@
         }
       }
     },
-    "QueryResult": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ProductSessionProjection"
-        },
-        {
-          "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
-        },
-        {
-          "$ref": "./domain.schema.json#/$defs/RuntimeProjectionSnapshot"
-        },
-        {
-          "$ref": "#/$defs/SettingsProjection"
-        },
-        {
-          "$ref": "#/$defs/CredentialReferenceProjection"
-        },
-        {
-          "$ref": "#/$defs/ApprovalProjection"
-        },
-        {
-          "$ref": "#/$defs/WorkerProjection"
-        },
-        {
-          "$ref": "#/$defs/PublicationProjection"
-        },
-        {
-          "$ref": "#/$defs/ProductSessionPage"
-        },
-        {
-          "$ref": "#/$defs/ChatMessagePage"
-        },
-        {
-          "$ref": "#/$defs/DeliveryPage"
-        },
-        {
-          "$ref": "#/$defs/CredentialReferencePage"
-        },
-        {
-          "$ref": "#/$defs/ApprovalPage"
-        },
-        {
-          "$ref": "#/$defs/WorkerPage"
-        },
-        {
-          "$ref": "#/$defs/PublicationPage"
-        }
-      ]
-    },
     "MutationReceipt": {
       "type": "object",
       "additionalProperties": false,
@@ -2474,36 +2762,2238 @@
         }
       }
     },
-    "CommandResult": {
+    "DeliveryRepositoryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "locator"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "local-git",
+            "github"
+          ]
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "DeliverySourceIssueProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "kind",
+        "repository",
+        "number"
+      ],
+      "properties": {
+        "provider": {
+          "const": "github"
+        },
+        "kind": {
+          "const": "issue"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "DeliveryAcceptanceCriterionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "verificationMethod",
+        "required"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "verificationMethod": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "DeliveryRequirementsProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "title",
+        "goal",
+        "scope",
+        "outOfScope",
+        "constraints",
+        "acceptanceCriteria",
+        "sourceRef",
+        "publicationTarget",
+        "repository",
+        "baseRevision",
+        "maxReworkAttempts"
+      ],
+      "properties": {
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 1000
+        },
+        "outOfScope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 1000
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 1000
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryAcceptanceCriterionProjection"
+          },
+          "maxItems": 1000,
+          "minItems": 1
+        },
+        "sourceRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeliverySourceIssueProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publicationTarget": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicationTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository": {
+          "$ref": "#/$defs/DeliveryRepositoryProjection"
+        },
+        "baseRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "maxReworkAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "SolutionReviewComponentProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "responsibility",
+        "kind",
+        "trustBoundary",
+        "unresolved",
+        "repositoryPathPrefixes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "responsibility": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "component",
+            "external",
+            "data-store"
+          ]
+        },
+        "trustBoundary": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved": {
+          "type": "boolean"
+        },
+        "repositoryPathPrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "maxItems": 200,
+          "uniqueItems": true
+        }
+      }
+    },
+    "SolutionReviewConnectionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "from",
+        "to",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      }
+    },
+    "SolutionReviewDiagramNodeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "description",
+        "kind",
+        "trustBoundary",
+        "unresolved"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "interaction",
+            "delivery-control",
+            "execution",
+            "repository",
+            "component",
+            "external",
+            "data-store",
+            "stage",
+            "decision"
+          ]
+        },
+        "trustBoundary": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unresolved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "SolutionReviewDiagramEdgeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "from",
+        "to",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      }
+    },
+    "SolutionReviewDiagramProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "nodes",
+        "edges"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "system-architecture",
+            "process-flow"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SolutionReviewDiagramNodeProjection"
+          },
+          "maxItems": 200,
+          "minItems": 1
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SolutionReviewDiagramEdgeProjection"
+          },
+          "maxItems": 400
+        }
+      }
+    },
+    "SolutionReviewStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approved",
+        "changes_requested",
+        "rejected"
+      ]
+    },
+    "SolutionReviewDecision": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "request_changes",
+        "reject"
+      ]
+    },
+    "DeliveryTaskProposalProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "goal",
+        "acceptanceCriterionIds",
+        "blockedByTaskIds"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "acceptanceCriterionIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+          },
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true
+        },
+        "blockedByTaskIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+          },
+          "maxItems": 200,
+          "uniqueItems": true
+        }
+      },
+      "description": "One ordered planner task proposal sealed into reviewSetSha256. Approval promotes these exact fields with owner null and status pending; planner-supplied ownership and HTTP replacement task content are rejected."
+    },
+    "SolutionReviewProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "planningStageRunId",
+        "planningSessionBindingId",
+        "reviewStageRunId",
+        "attentionItemId",
+        "reviewSetSha256",
+        "reviewStatus",
+        "decision",
+        "comments",
+        "requestedChanges",
+        "reviewerId",
+        "reviewedAt",
+        "solutionId",
+        "summary",
+        "approach",
+        "components",
+        "connections",
+        "architectureDiagram",
+        "processDiagram",
+        "risks",
+        "unresolvedItems",
+        "taskProposals"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "planningStageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "planningSessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "reviewStageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "attentionItemId": {
+          "$ref": "./domain.schema.json#/$defs/AttentionItemId"
+        },
+        "reviewSetSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "reviewStatus": {
+          "$ref": "#/$defs/SolutionReviewStatus"
+        },
+        "decision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SolutionReviewDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comments": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestedChanges": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 65536
+              },
+              "minItems": 1,
+              "maxItems": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewerId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "solutionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "approach": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 200,
+          "minItems": 1
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SolutionReviewComponentProjection"
+          },
+          "maxItems": 200
+        },
+        "connections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SolutionReviewConnectionProjection"
+          },
+          "maxItems": 400
+        },
+        "architectureDiagram": {
+          "$ref": "#/$defs/SolutionReviewDiagramProjection"
+        },
+        "processDiagram": {
+          "$ref": "#/$defs/SolutionReviewDiagramProjection"
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 200
+        },
+        "unresolvedItems": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 200
+        },
+        "taskProposals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryTaskProposalProjection"
+          },
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true,
+          "description": "Canonical order is part of reviewSetSha256 and is preserved during task promotion."
+        }
+      },
       "oneOf": [
         {
-          "$ref": "#/$defs/ProductSessionProjection"
+          "properties": {
+            "reviewStatus": {
+              "const": "pending"
+            },
+            "decision": {
+              "type": "null"
+            },
+            "comments": {
+              "type": "null"
+            },
+            "requestedChanges": {
+              "type": "null"
+            },
+            "reviewerId": {
+              "type": "null"
+            },
+            "reviewedAt": {
+              "type": "null"
+            }
+          }
         },
         {
-          "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+          "properties": {
+            "reviewStatus": {
+              "const": "approved"
+            },
+            "decision": {
+              "const": "approve"
+            },
+            "requestedChanges": {
+              "type": "null"
+            },
+            "reviewerId": {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            "reviewedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
         },
         {
-          "$ref": "#/$defs/SettingsProjection"
+          "properties": {
+            "reviewStatus": {
+              "const": "changes_requested"
+            },
+            "decision": {
+              "const": "request_changes"
+            },
+            "requestedChanges": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 65536
+              },
+              "minItems": 1,
+              "maxItems": 200
+            },
+            "reviewerId": {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            "reviewedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
         },
         {
-          "$ref": "#/$defs/CredentialReferenceProjection"
+          "properties": {
+            "reviewStatus": {
+              "const": "rejected"
+            },
+            "decision": {
+              "const": "reject"
+            },
+            "requestedChanges": {
+              "type": "null"
+            },
+            "reviewerId": {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            "reviewedAt": {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            }
+          }
+        }
+      ],
+      "description": "Current validated solution review, including pending review content and the ordered task proposals sealed into reviewSetSha256. Human review has no ExecutionJob SessionBinding."
+    },
+    "DeliveryStageSessionBindingProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bindingId",
+        "productSessionId",
+        "executionJobId",
+        "workerSessionId",
+        "codexThreadId",
+        "boundAt"
+      ],
+      "properties": {
+        "bindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "executionJobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "workerSessionId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "codexThreadId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "boundAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "codexThreadId": {
+              "type": "null"
+            }
+          }
         },
         {
-          "$ref": "#/$defs/ApprovalProjection"
+          "properties": {
+            "workerSessionId": {
+              "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+            },
+            "codexThreadId": {
+              "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+            }
+          }
+        }
+      ],
+      "description": "A ProductSession/ExecutionJob binding remains visible before Worker/Codex attachment; a CodexThread is never present without its WorkerSession."
+    },
+    "DeliveryStageProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "deliveryTaskId",
+        "stage",
+        "actorType",
+        "role",
+        "status",
+        "attempt",
+        "startedAt",
+        "finishedAt",
+        "sessionBinding"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "deliveryTaskId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "type": "string",
+          "enum": [
+            "clarifying",
+            "planning",
+            "plan-review",
+            "executing",
+            "verifying",
+            "reworking",
+            "delivery-review"
+          ]
+        },
+        "actorType": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "human"
+          ]
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "waiting",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "startedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "finishedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sessionBinding": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeliveryStageSessionBindingProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "actorType": {
+              "const": "human"
+            },
+            "sessionBinding": {
+              "type": "null"
+            }
+          }
         },
         {
-          "$ref": "#/$defs/WorkerProjection"
+          "properties": {
+            "actorType": {
+              "const": "codex"
+            },
+            "sessionBinding": {
+              "$ref": "#/$defs/DeliveryStageSessionBindingProjection"
+            }
+          }
+        }
+      ],
+      "description": "Human review stages never receive an ExecutionJob SessionBinding. Every Codex StageRun has its ProductSession/ExecutionJob binding; only WorkerSession/CodexThread attachment may remain pending."
+    },
+    "DeliveryTaskDetailProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "goal",
+        "acceptanceCriterionIds",
+        "blockedByTaskIds",
+        "owner",
+        "status",
+        "stageRunIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "acceptanceCriterionIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "blockedByTaskIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "owner": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskStatus"
+        },
+        "stageRunIds": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/StageRunId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/EvidenceId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      }
+    },
+    "DeliveryAttentionOptionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "description"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "DeliveryAttentionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "deliverySpecId",
+        "stageRunId",
+        "type",
+        "title",
+        "options",
+        "assignedTo",
+        "blocking",
+        "status",
+        "resolutionSummary",
+        "resolvedBy",
+        "createdAt",
+        "resolvedAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/AttentionItemId"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "stageRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/StageRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "requirement_question",
+            "decision_required",
+            "verification_blocked",
+            "scope_change",
+            "delivery_approval"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryAttentionOptionProjection"
+          },
+          "maxItems": 100
+        },
+        "assignedTo": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "resolved",
+            "dismissed"
+          ]
+        },
+        "resolutionSummary": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolvedBy": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "resolvedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Safe Attention projection. Canonical protocol context is never returned."
+    },
+    "DeliveryEvidenceProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "stageRunId",
+        "sessionBindingId",
+        "candidateRef",
+        "type",
+        "sourceRef",
+        "createdAt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/EvidenceId"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "sessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "test",
+            "command",
+            "diff",
+            "file",
+            "commit",
+            "pull_request",
+            "runtime_event",
+            "review_finding"
+          ]
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "description": "Evidence stores a bounded source reference, never copied runtime logs or command output."
+    },
+    "FrozenCandidateSummaryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateRef",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "producerStageRunId",
+        "producerSessionBindingId",
+        "candidateCommitId",
+        "candidateTreeId",
+        "diffSha256",
+        "frozenAt"
+      ],
+      "properties": {
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "producerStageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "producerSessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "candidateCommitId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "frozenAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "description": "Bounded current candidate identity. Changed paths, hunks, and diff bytes require a separate authorized detail endpoint."
+    },
+    "DeliveryCriterionResultProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resultId",
+        "criterionId",
+        "verdict",
+        "evidenceRefs",
+        "explanation",
+        "evaluatedAt"
+      ],
+      "properties": {
+        "resultId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "criterionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ]
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/EvidenceId"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "evaluatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "DeliveryVerdictProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "candidateRef",
+        "status",
+        "criteria",
+        "unresolvedFindings",
+        "producedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "deliverySpecRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive",
+            "infra_error"
+          ]
+        },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryCriterionResultProjection"
+          },
+          "maxItems": 1000,
+          "minItems": 1
+        },
+        "unresolvedFindings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 1000
+        },
+        "producedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      }
+    },
+    "DeliveryDetailProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schemaVersion",
+        "readCursor",
+        "deliveryId",
+        "deliveryRevision",
+        "ownership",
+        "status",
+        "requirements",
+        "solutionReview",
+        "stages",
+        "tasks",
+        "attention",
+        "evidence",
+        "currentCandidate",
+        "verdict",
+        "publication"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery_detail"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "ownership": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryOwnershipProjection"
+        },
+        "status": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryStatus"
+        },
+        "requirements": {
+          "$ref": "#/$defs/DeliveryRequirementsProjection"
+        },
+        "solutionReview": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SolutionReviewProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryStageProjection"
+          },
+          "maxItems": 1000
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryTaskDetailProjection"
+          },
+          "maxItems": 1000
+        },
+        "attention": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryAttentionProjection"
+          },
+          "maxItems": 1000
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryEvidenceProjection"
+          },
+          "maxItems": 1000
+        },
+        "currentCandidate": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/FrozenCandidateSummaryProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verdict": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeliveryVerdictProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicationProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "StrongFlow detail read model. It is a closed projection, not a mutable Delivery entity."
+    },
+    "CommandCompletedEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "command",
+        "outcome",
+        "previousRevision",
+        "currentRevision",
+        "result"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "command": {
+          "$ref": "./domain.schema.json#/$defs/CommandName"
+        },
+        "outcome": {
+          "const": "completed"
+        },
+        "previousRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "currentRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "result": {}
+      },
+      "description": "Shared completed-command envelope. Public responses use the command-discriminated CommandCompletedResponse union."
+    },
+    "SessionCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
         },
         {
-          "$ref": "#/$defs/PublicationProjection"
+          "properties": {
+            "command": {
+              "const": "session.create"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ChatSubmitCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
         },
         {
-          "$ref": "#/$defs/MutationReceipt"
+          "properties": {
+            "command": {
+              "const": "chat.submit"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "InputRespondCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "input.respond"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionCancelCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "session.cancel"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionCloseCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "session.close"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.create"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryUpdateSpecCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.update_spec"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryApproveTaskBreakdownCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.approve_task_breakdown"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryAdvanceCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.advance"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryResolveAttentionCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.resolve_attention"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliverySubmitVerdictCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.submit_verdict"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SettingsUpdateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "settings.update"
+            },
+            "result": {
+              "$ref": "#/$defs/SettingsProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "credential.reference.create"
+            },
+            "result": {
+              "$ref": "#/$defs/CredentialReferenceProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceDeleteCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "credential.reference.delete"
+            },
+            "result": {
+              "$ref": "#/$defs/MutationReceipt"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalDecideCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "approval.decide"
+            },
+            "result": {
+              "$ref": "#/$defs/ApprovalProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerDrainCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "worker.drain"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerEnableCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "worker.enable"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationPublishCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "publication.publish"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationCancelCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "publication.cancel"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "QueryResultEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "query",
+        "result",
+        "page"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "query": {
+          "$ref": "#/$defs/QueryName"
+        },
+        "result": {},
+        "page": {
+          "$ref": "#/$defs/PageInfo"
+        }
+      },
+      "description": "Shared query-result envelope. Public responses use the query-discriminated QueryResultResponse union."
+    },
+    "SessionListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.get"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionMessagesListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.messages.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ChatMessagePage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeProjectionGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "runtime.projection.get"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/RuntimeProjectionSnapshot"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "delivery.list"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "delivery.get"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryDetailProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SettingsGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "settings.get"
+            },
+            "result": {
+              "$ref": "#/$defs/SettingsProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "credential.reference.list"
+            },
+            "result": {
+              "$ref": "#/$defs/CredentialReferencePage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "credential.reference.get"
+            },
+            "result": {
+              "$ref": "#/$defs/CredentialReferenceProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "approval.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ApprovalPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "approval.get"
+            },
+            "result": {
+              "$ref": "#/$defs/ApprovalProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "worker.list"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "worker.get"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "publication.list"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "publication.get"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationProjection"
+            }
+          },
+          "type": "object"
         }
       ]
     }
   },
   "x-winwincode-openapi": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "wwc_session",
+        "description": "Same-origin Web and local Host session."
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Service-account and enterprise access token."
+      }
+    },
     "paths": {
       "/api/v1/commands": {
         "post": {
@@ -2620,7 +5110,15 @@
                 }
               }
             }
-          }
+          },
+          "security": [
+            {
+              "sessionCookie": []
+            },
+            {
+              "bearerAuth": []
+            }
+          ]
         }
       },
       "/api/v1/queries": {
@@ -2688,6 +5186,16 @@
                 }
               }
             },
+            "409": {
+              "description": "READ_CURSOR_EXPIRED; discard the complete partial StrongFlow snapshot and restart with delivery.get without atCursor",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "./domain.schema.json#/$defs/ErrorEnvelope"
+                  }
+                }
+              }
+            },
             "429": {
               "description": "RATE_LIMITED",
               "content": {
@@ -2709,7 +5217,7 @@
               }
             },
             "503": {
-              "description": "SERVICE_UNAVAILABLE",
+              "description": "SERVICE_UNAVAILABLE or TRUSTED_FACTS_UNAVAILABLE",
               "content": {
                 "application/json": {
                   "schema": {
@@ -2718,8 +5226,67 @@
                 }
               }
             }
-          }
+          },
+          "security": [
+            {
+              "sessionCookie": []
+            },
+            {
+              "bearerAuth": []
+            }
+          ]
         }
+      }
+    }
+  },
+  "x-winwincode-transports": {
+    "generatedClient": {
+      "transport": "http",
+      "commandEndpoint": "/api/v1/commands",
+      "queryEndpoint": "/api/v1/queries",
+      "strongFlowRead": {
+        "bootstrapQuery": "delivery.get",
+        "followupQuery": "runtime.projection.get",
+        "requestCursorField": "atCursor",
+        "resultCursorField": "readCursor",
+        "failureMode": "discard_partial_pair"
+      },
+      "queries": [
+        {
+          "query": "delivery.get",
+          "requestDefinition": "DeliveryGetQuery",
+          "resultDefinition": "DeliveryDetailProjection"
+        },
+        {
+          "query": "runtime.projection.get",
+          "requestDefinition": "RuntimeProjectionGetQuery",
+          "resultDefinition": "RuntimeProjectionSnapshot"
+        }
+      ],
+      "authentication": {
+        "anonymousAllowed": false,
+        "sessionCookie": {
+          "location": "cookie",
+          "name": "wwc_session"
+        },
+        "bearerAuth": {
+          "location": "header",
+          "name": "Authorization",
+          "scheme": "Bearer",
+          "format": "JWT"
+        },
+        "credentialsInQueryAllowed": false,
+        "credentialsInBodyAllowed": false
+      },
+      "responseCorrelation": {
+        "command": "command",
+        "query": "query",
+        "mismatch": "reject"
+      },
+      "snapshotHandoff": {
+        "deliveryGetCursorPath": "result.readCursor.eventCursor",
+        "runtimeProjectionGetCursorPath": "result.eventCursor",
+        "subscribeStartAtField": "startAt"
       }
     }
   }

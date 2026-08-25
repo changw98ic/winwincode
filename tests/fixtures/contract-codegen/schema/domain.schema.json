@@ -61,6 +61,56 @@
         }
       ]
     },
+    "ReviewProjection": {
+      "description": "A closed object-level oneOf with a required nullable field.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewerId"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved"
+          ]
+        },
+        "reviewerId": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "pending"
+            },
+            "reviewerId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "approved"
+            },
+            "reviewerId": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
     "Revision": {
       "description": "Expected canonical state revision.",
       "type": "integer",

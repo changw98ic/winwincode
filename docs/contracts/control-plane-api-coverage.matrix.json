@@ -59,7 +59,7 @@
       "presence.changed.v1",
       "product-session.changed.v1",
       "product-session.message.appended.v1",
-      "runtime-projection.appended.v1",
+      "runtime-projection.invalidated.v1",
       "worker-health.changed.v1"
     ],
     "executionPortMessages": [
@@ -70,6 +70,7 @@
       "worker.heartbeat_ack",
       "job.dispatch",
       "job.dispatch_result",
+      "session.binding",
       "lease.renew",
       "runtime.event",
       "runtime.ack",
@@ -448,12 +449,13 @@
       "websocketEvents": [
         "product-session.changed.v1",
         "product-session.message.appended.v1",
-        "runtime-projection.appended.v1",
+        "runtime-projection.invalidated.v1",
         "activity.recorded.v1"
       ],
       "executionPortMessages": [
         "job.dispatch",
         "job.dispatch_result",
+        "session.binding",
         "runtime.event",
         "runtime.ack",
         "runtime.replay_request",
@@ -478,7 +480,7 @@
         "runtime.projection.get"
       ],
       "websocketEvents": [
-        "runtime-projection.appended.v1",
+        "runtime-projection.invalidated.v1",
         "activity.recorded.v1"
       ],
       "executionPortMessages": [
@@ -512,7 +514,9 @@
       "id": "delivery-strongflow",
       "currentObservableOperations": [
         "create and update a DeliverySpec with revision and request identity",
-        "approve the task breakdown and advance the one legal next stage",
+        "display the current pending or settled solution review without raw Attention protocol data",
+        "approve the exact sealed review digest and promote its ordered task proposals without caller-authored tasks",
+        "read Delivery and runtime at one server-issued StrongFlow cursor and advance the one legal next stage",
         "resolve business Attention with bounded remediation",
         "request server-computed verdicts for one candidate stale-check digest and rebuild the Delivery view"
       ],
@@ -533,12 +537,13 @@
         "delivery.changed.v1",
         "delivery-task.changed.v1",
         "attention.changed.v1",
-        "runtime-projection.appended.v1",
+        "runtime-projection.invalidated.v1",
         "activity.recorded.v1"
       ],
       "executionPortMessages": [
         "job.dispatch",
         "job.dispatch_result",
+        "session.binding",
         "runtime.event",
         "runtime.ack",
         "runtime.replay_request",
@@ -584,7 +589,7 @@
         "runtime.projection.get"
       ],
       "websocketEvents": [
-        "runtime-projection.appended.v1",
+        "runtime-projection.invalidated.v1",
         "activity.recorded.v1"
       ],
       "executionPortMessages": [

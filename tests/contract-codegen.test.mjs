@@ -79,6 +79,18 @@ test('one canonical schema generation is deterministic and compiles for Rust and
   assert.match(typescript, /export type SchemaVersion = "winwincode\/v1"/u)
   assert.match(firstContents[0], /pub enum SchemaVersion \{/u)
   assert.match(firstContents[0], /    WinwincodeV1,/u)
+  assert.match(firstContents[0], /pub enum CreatedEventTypeValue \{/u)
+  assert.match(firstContents[0], /    Created,/u)
+  assert.match(firstContents[0], /pub type_value: CreatedEventTypeValue,/u)
+  assert.match(firstContents[0], /struct ReviewProjectionWire/u)
+  assert.match(
+    firstContents[0],
+    /deserialize_with = "deserialize_required_nullable"[\s\S]+reviewer_id: Option<String>/u,
+  )
+  assert.match(
+    typescript,
+    /export type ReviewProjection = \{[\s\S]+\} & \(\{[\s\S]+"reviewerId": null[\s\S]+"status": "pending"[\s\S]+\} \| \{[\s\S]+"reviewerId": string[\s\S]+"status": "approved"/u,
+  )
   assert.match(
     typescript,
     /\/\*\*\n \* Read-only data shown by the fixture client\.\n \* It exercises multiline generated documentation\.\n \*\//u,
@@ -155,6 +167,19 @@ test('one canonical schema generation is deterministic and compiles for Rust and
   })
   assert.equal(rustfmt.status, 0, commandFailure(rustfmt))
 
+  const typescriptConsumer = join(temporaryRoot, 'typescript', 'consumer.ts')
+  writeFileSync(typescriptConsumer, [
+    "import type { ReviewProjection } from './generated.js'",
+    '',
+    "const pending: ReviewProjection = { status: 'pending', reviewerId: null }",
+    "const approved: ReviewProjection = { status: 'approved', reviewerId: 'usr_1' }",
+    '// @ts-expect-error pending reviews have no reviewer',
+    "const crossed: ReviewProjection = { status: 'pending', reviewerId: 'usr_1' }",
+    '// @ts-expect-error required nullable means present, not optional',
+    "const missing: ReviewProjection = { status: 'pending' }",
+    'void [pending, approved, crossed, missing]',
+    '',
+  ].join('\n'))
   const tsc = spawnSync('corepack', [
     'pnpm',
     'exec',
@@ -171,6 +196,7 @@ test('one canonical schema generation is deterministic and compiles for Rust and
     '--moduleResolution',
     'Bundler',
     paths[1],
+    typescriptConsumer,
   ], {
     cwd: root,
     encoding: 'utf8',

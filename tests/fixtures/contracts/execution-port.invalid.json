@@ -327,6 +327,79 @@
         },
         "respondedAt": "2026-08-24T12:00:00.000Z"
       }
+    },
+    {
+      "name": "runtime-event-without-accepted-codex-thread-binding",
+      "message": {
+        "kind": "runtime.event",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000009",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "event": {
+          "eventId": "xevt_0000000000000000000000000B",
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:00:00.000Z",
+          "category": "lifecycle",
+          "summary": "Worker session started."
+        }
+      }
+    },
+    {
+      "name": "session-binding-without-codex-thread",
+      "message": {
+        "kind": "session.binding",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000T",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "boundAt": "2026-08-24T12:00:00.000Z"
+      }
+    },
+    {
+      "name": "session-binding-with-undeclared-runtime-log",
+      "message": {
+        "kind": "session.binding",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000T",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "boundAt": "2026-08-24T12:00:00.000Z",
+        "rawRuntimeLog": "secret output"
+      }
     }
   ]
 }

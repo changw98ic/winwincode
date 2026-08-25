@@ -85,6 +85,7 @@ const ERROR_CODES = Object.freeze([
   'RESOURCE_NOT_FOUND',
   'IDEMPOTENCY_CONFLICT',
   'REVISION_CONFLICT',
+  'READ_CURSOR_EXPIRED',
   'CANDIDATE_STALE',
   'WRONG_STATE',
   'RATE_LIMITED',
@@ -426,35 +427,71 @@ test('DeliveryProjection exposes a minimal page view with complete repository ow
 
 test('runtime projection scope is either Chat or one complete Delivery stage', async () => {
   const schema = await loadSchema()
-  const validateItem = ajvDefinitionValidator(schema, 'RuntimeProjectionItem')
+  const validateSession = ajvDefinitionValidator(schema, 'RuntimeSessionProjection')
   const validateSnapshot = ajvDefinitionValidator(schema, 'RuntimeProjectionSnapshot')
-  const item = {
+  const session = {
+    sessionBindingId: 'binding:runtime:1',
+    stageRunId: null,
+    deliveryTaskId: null,
     productSessionId: 'psn_01J00000000000000000000000',
     workerSessionId: 'wsn_01J00000000000000000000000',
     codexThreadId: 'cdx_01J00000000000000000000000',
+    executionJobId: 'job_01J00000000000000000000000',
     leaseId: 'lse_01J00000000000000000000000',
-    projectionSequence: 1,
-    projectionKind: 'activity',
-    summary: 'Started.',
-    occurredAt: '2026-08-24T09:10:11.123Z',
+    attempt: 1,
+    fencingToken: '42',
+    asOfSequence: 1,
+    plan: null,
+    agents: [],
+    agentEdges: [],
+    activities: [],
+    usage: null,
+    recovery: {
+      state: 'none',
+      failureCount: 0,
+      recoveryCount: 0,
+      lastFailureSourceRef: null,
+      latestRecoverySourceRef: null,
+    },
+    diffSummary: {
+      changedFileCount: 1,
+      additions: 2,
+      deletions: 0,
+      detailsVisible: false,
+      sourceRef: 'runtime-event:1',
+    },
   }
   const snapshot = {
     kind: 'runtime_projection',
     revision: 1,
-    productSessionId: item.productSessionId,
+    readCursor: null,
+    eventCursor: {
+      scope: {
+        kind: 'repository',
+        organizationId: 'org_01J00000000000000000000000',
+        workspaceId: 'wsp_01J00000000000000000000000',
+        projectId: 'prj_01J00000000000000000000000',
+        repositoryId: 'rep_01J00000000000000000000000',
+      },
+      stream: {
+        kind: 'product-session',
+        productSessionId: session.productSessionId,
+      },
+      sequence: 1,
+      eventId: 'evt_01J00000000000000000000001',
+    },
+    productSessionId: session.productSessionId,
     deliveryId: null,
     stageRunId: null,
     lastProjectionSequence: 1,
-    items: [item],
+    sessions: [session],
     rebuiltAt: '2026-08-24T09:10:12.123Z',
   }
 
-  assert.equal(validateItem(item), true, JSON.stringify(validateItem.errors))
+  assert.equal(validateSession(session), true, JSON.stringify(validateSession.errors))
   assert.equal(validateSnapshot(snapshot), true, JSON.stringify(validateSnapshot.errors))
-  assert.equal(validateItem({
-    ...item,
-    deliveryId: 'dlv_01J00000000000000000000000',
-  }), false)
+  assert.equal(validateSession({ ...session, unifiedDiff: 'secret diff' }), false)
+  assert.equal(validateSession({ ...session, rawRuntimeLog: 'secret output' }), false)
   assert.equal(validateSnapshot({
     ...snapshot,
     deliveryId: 'dlv_01J00000000000000000000000',
@@ -463,6 +500,82 @@ test('runtime projection scope is either Chat or one complete Delivery stage', a
     ...snapshot,
     stageRunId: 'run_01J00000000000000000000000',
   }), false)
+
+  const readCursor = {
+    token: 'sfread_01J0000000000000000000000000000',
+    scope: {
+      kind: 'repository',
+      organizationId: 'org_01J00000000000000000000000',
+      workspaceId: 'wsp_01J00000000000000000000000',
+      projectId: 'prj_01J00000000000000000000000',
+      repositoryId: 'rep_01J00000000000000000000000',
+    },
+    deliveryId: 'dlv_01J00000000000000000000000',
+    deliveryRevision: 1,
+    runtimeLedgerRevision: 1,
+    runtimeAcceptedSequence: 1,
+    publicationRevision: 0,
+    eventCursor: {
+      scope: snapshot.eventCursor.scope,
+      stream: {
+        kind: 'delivery',
+        deliveryId: 'dlv_01J00000000000000000000000',
+      },
+      sequence: 2,
+      eventId: 'evt_01J00000000000000000000002',
+    },
+  }
+  assert.equal(validateSnapshot({
+    ...snapshot,
+    readCursor,
+    eventCursor: readCursor.eventCursor,
+    deliveryId: readCursor.deliveryId,
+    stageRunId: 'run_01J00000000000000000000000',
+    sessions: [{
+      ...session,
+      stageRunId: 'run_01J00000000000000000000000',
+    }],
+  }), true, JSON.stringify(validateSnapshot.errors))
+  assert.equal(validateSnapshot({ ...snapshot, readCursor }), false)
+  assert.equal(validateSnapshot({
+    ...snapshot,
+    readCursor,
+    deliveryId: readCursor.deliveryId,
+    stageRunId: 'run_01J00000000000000000000000',
+    eventCursor: snapshot.eventCursor,
+  }), false)
+})
+
+test('event read cursors bind empty and positive positions to exact event identity', async () => {
+  const schema = await loadSchema()
+  const validate = ajvDefinitionValidator(schema, 'DeliveryEventReadCursor')
+  const cursor = {
+    scope: {
+      kind: 'repository',
+      organizationId: 'org_01J00000000000000000000000',
+      workspaceId: 'wsp_01J00000000000000000000000',
+      projectId: 'prj_01J00000000000000000000000',
+      repositoryId: 'rep_01J00000000000000000000000',
+    },
+    stream: {
+      kind: 'delivery',
+      deliveryId: 'dlv_01J00000000000000000000000',
+    },
+    sequence: 0,
+    eventId: null,
+  }
+
+  assert.equal(validate(cursor), true, JSON.stringify(validate.errors))
+  assert.equal(validate({
+    ...cursor,
+    eventId: 'evt_01J00000000000000000000000',
+  }), false)
+  assert.equal(validate({ ...cursor, sequence: 1 }), false)
+  assert.equal(validate({
+    ...cursor,
+    sequence: 1,
+    eventId: 'evt_01J00000000000000000000000',
+  }), true, JSON.stringify(validate.errors))
 })
 
 test('ErrorEnvelope keeps machine codes and retry behavior stable', async () => {

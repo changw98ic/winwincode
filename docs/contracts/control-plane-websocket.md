@@ -11,18 +11,28 @@
 Approval、Attention、Task、Publication、Credential 或 Worker 管理写入。浏览器通过 HTTP
 提交带 `requestId` 和 `expectedRevision` 的操作，再通过 WebSocket 收到结果投影。
 
+## 连接认证
+
+认证只发生在 WebSocket 的 HTTP upgrade。同源 Web 和本地 Host 使用名为
+`wwc_session` 的 session cookie；服务账号和企业客户端使用
+`Authorization: Bearer <JWT>` 请求头。匿名 upgrade 一律拒绝，服务端解析出的 principal
+必须重新授权订阅中的完整 Scope。
+
+认证材料不放入 URL query，也不放入 subscribe、resume、ack、pong 或任何其他 frame。
+这样代理日志、浏览器历史和可恢复事件台账都不会保存 session 或 bearer token。
+
 ## 一条订阅只对应一个事件流
 
 一条订阅由以下二元组唯一确定：
 
 ```text
-canonical Scope + EventStream
+canonical Scope + EventReadStream
 ```
 
-`Scope` 来自 `domain.schema.json`，保存完整的 Organization、Workspace、Project、
-Repository 连续层级。`EventStream` 只增加一个资源选择器：
+`Scope` 和传输中立的 `EventReadStream` 都来自 `domain.schema.json`。Scope 保存完整的
+Organization、Workspace、Project、Repository 连续层级，EventReadStream 只增加一个资源选择器：
 
-| `EventStream.kind` | 资源选择器 | 用途 |
+| `EventReadStream.kind` | 资源选择器 | 用途 |
 | --- | --- | --- |
 | `scope` | 无 | 组织、工作区、项目或仓库级活动 |
 | `delivery` | `deliveryId` | Delivery、DeliveryTask、Attention 与交付活动 |
@@ -52,20 +62,31 @@ Lease 的事件不能进入同一条订阅。
 
 ### 新订阅
 
-浏览器发送 `transport.subscribe.v1`，明确 Scope、EventStream、需要的事件类型和起点。
+浏览器发送 `transport.subscribe.v1`，明确 Scope、EventReadStream、需要的事件类型和起点。
 Control Plane 检查权限后返回 `transport.subscription-accepted.v1`，其中的 cursor 是该流
 本次发送的起点。
+
+`startAt` 只有三种合法值：`latest`、`earliest-available`，或 HTTP 完整快照返回的
+`EventReadCursor`。页面已经读取 HTTP 快照时必须使用第三种，不能改成 `latest`；否则 HTTP
+响应返回后、WebSocket 订阅建立前发生的事件会永久漏掉。Delivery 快照从
+`readCursor.eventCursor` 取这个值，product-session runtime 快照从自己的 `eventCursor` 取值。
+
+cursor 的 `scope + stream` 必须与 subscription 完全相同。服务端接受后返回的
+`subscription-accepted.cursor` 必须保留提交 cursor 的 sequence 和 eventId，作为连续读取
+基线。第一条业务事件必须是 `accepted.cursor.sequence + 1`，后续每条也只能加一；跳号、
+倒退或跨流都按协议错误处理。`subscription-accepted.authorizationEpoch` 同时建立权限基线，
+后续事件不能带更早的权限版本。
 
 ### 确认
 
 浏览器在成功写入本地投影后发送累计 `transport.ack.v1`。确认 cursor 必须与订阅的
-Scope 和 EventStream 完全相同。服务端只保留每条订阅最后一个已确认 cursor；比它更旧
+Scope 和 EventReadStream 完全相同。服务端只保留每条订阅最后一个已确认 cursor；比它更旧
 的确认不改变状态，跨流确认直接返回协议错误。
 
 ### 断线续传
 
 浏览器持久保存最后一个已确认 cursor。重新连接后发送 `transport.resume.v1`，并再次
-提交原 Scope、EventStream 和事件类型。Control Plane 在每次续传前重新检查权限，返回
+提交原 Scope、EventReadStream 和事件类型。Control Plane 在每次续传前重新检查权限，返回
 `transport.resume-accepted.v1` 后，从 `after.sequence + 1` 开始按序重放。
 
 已被服务端确认的事件不会重放。如果最后一次确认在网络中丢失，客户端可能再次收到
@@ -74,14 +95,25 @@ Scope 和 EventStream 完全相同。服务端只保留每条订阅最后一个�
 `authorizationEpoch`。
 
 如果 cursor 已被保留策略清理、事件流已重建或权限边界已经改变，Control Plane 返回
-`transport.reset-required.v1` 并以 `4409` 关闭连接。客户端随后通过
-`session.messages.list` 和 `runtime.projection.get` 获取完整的最新 Projection，再建立一条
-新订阅；不能猜测或跳过缺失序号。
+`transport.reset-required.v1` 并以 `4409` 关闭连接。它是通用传输帧，不携带固定
+`reloadQueries`。客户端先丢弃该订阅对应的旧局部状态，再根据自己保存的原始
+`subscription.stream.kind` 执行完整重载；只有重载全部成功后才发布新快照和建立新订阅。
+Delivery 页面先让 `delivery.get` 签发 `StrongFlowReadCursor`，再把它作为
+`runtime.projection.get` 的 `atCursor`，两个结果必须返回完全相同的 cursor。该 cursor 的签名
+也覆盖 `eventCursor`；paired read 成功后，页面立即用这个 eventCursor 建立新订阅。
+product-session 页面只读取自己的 runtime snapshot，并用快照自己的 eventCursor 建立订阅。
+任一必要请求失败或 cursor 错位时，客户端继续保持旧局部状态已丢弃，不猜测、跳过缺失序号
+或拼接两个独立的 latest 快照。
 
 `product-session.message.appended.v1` 只携带已经保存的 `ChatMessageProjection`：消息角色
 只允许用户或助手，正文有大小上限，不包含原始 Provider 请求/响应、工具负载、Credential
-或 Codex 内部对象。Chat 消息与 `runtime-projection.appended.v1` 是两类事实；运行摘要不能
-代替用户可见的会话历史。
+或 Codex 内部对象。`runtime-projection.invalidated.v1` 不携带运行摘要或详情，并用
+`scopeKind` 严格区分两条路径：`delivery-stage` 必须带非空 `deliveryId + stageRunId`，按上述
+同一读取截面依次读取 `delivery.get` 和 `runtime.projection.get`；`product-session` 不带这两个
+Delivery 字段，只重新读取 `runtime.projection.get`，也不要求 `StrongFlowReadCursor`，但该
+完整 runtime 快照仍必须带 product-session 流的 `eventCursor`。浏览器
+因此不会从文字消息拼出第二份运行模型，不会把不同 revision 的 Delivery 与 runtime 拼在
+一起，也不会为了普通 Chat 暗中创建一个 Delivery。
 
 ## 权限变化
 
@@ -111,7 +143,7 @@ Control Plane 来源包含明确的业务 Actor。Execution Worker 来源必须�
 事件只能进入相同 `workerId + leaseId` 的流；过期 Lease 和过期 fencing token 在进入
 本合同之前已被 ExecutionPort 拒绝。
 
-事件 payload 中的 `deliveryId`、`productSessionId` 或 `leaseId` 必须与顶层 EventStream
+事件 payload 中的 `deliveryId`、`productSessionId` 或 `leaseId` 必须与顶层 EventReadStream
 一致。Control Plane 在广播前执行这项检查，浏览器也把不一致视为协议错误并关闭连接。
 
 ## 关闭码
@@ -128,5 +160,6 @@ Control Plane 来源包含明确的业务 Actor。Execution Worker 来源必须�
 ## 版本和生成
 
 所有公开分支都使用必需的 `type` 单值作为判别字段。通用 ID、Scope、Actor、Instant、
-Revision 和 ErrorEnvelope 只从相邻的 `domain.schema.json` 引用。Rust 和 TypeScript 类型
-从这两个 schema 生成，不在语言实现中再维护第二份事件枚举。
+Revision、ErrorEnvelope 和传输中立的 `EventReadCursor` 只从相邻的 `domain.schema.json`
+引用。WebSocket schema 只依赖 domain schema，domain schema 不反向依赖任何传输 schema，
+因此生成器不会靠循环引用或复制第二份 cursor 来完成 HTTP 到 WebSocket 的衔接。

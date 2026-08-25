@@ -53,6 +53,7 @@ const ERROR_STATUS = Object.freeze({
   RESOURCE_NOT_FOUND: 404,
   IDEMPOTENCY_CONFLICT: 409,
   REVISION_CONFLICT: 409,
+  READ_CURSOR_EXPIRED: 409,
   CANDIDATE_STALE: 409,
   WRONG_STATE: 409,
   RATE_LIMITED: 429,
@@ -157,30 +158,35 @@ test('HTTP query contract covers every current read surface with an opaque stabl
   assert.equal(schema.$defs.OpaqueCursor.type, 'string')
   assert.equal(schema.$defs.PageRequest.properties.limit.maximum, 200)
   assert.equal(schema.$defs.PageInfo.properties.nextCursor.oneOf[1].type, 'null')
-  assert.equal(
-    schema.$defs.QueryResultResponse.properties.result.$ref,
-    '#/$defs/QueryResult',
-  )
   assert.deepEqual(
-    schema.$defs.QueryResult.oneOf.map(entry => entry.$ref),
-    [
-      '#/$defs/ProductSessionProjection',
-      './domain.schema.json#/$defs/DeliveryProjection',
-      './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
-      '#/$defs/SettingsProjection',
-      '#/$defs/CredentialReferenceProjection',
-      '#/$defs/ApprovalProjection',
-      '#/$defs/WorkerProjection',
-      '#/$defs/PublicationProjection',
-      '#/$defs/ProductSessionPage',
-      '#/$defs/ChatMessagePage',
-      '#/$defs/DeliveryPage',
-      '#/$defs/CredentialReferencePage',
-      '#/$defs/ApprovalPage',
-      '#/$defs/WorkerPage',
-      '#/$defs/PublicationPage',
-    ],
+    specializationNames(schema, 'QueryResultResponse', 'query'),
+    QUERIES,
   )
+  assert.equal(schema.$defs.QueryResult, undefined)
+  const queryResultRefs = Object.fromEntries(
+    schema.$defs.QueryResultResponse.oneOf.map(({ $ref }) => {
+      const specialization = localDefinition(schema, $ref)
+      const constraint = specialization.allOf.at(1)
+      return [constraint.properties.query.const, constraint.properties.result.$ref]
+    }),
+  )
+  assert.deepEqual(queryResultRefs, {
+    'session.list': '#/$defs/ProductSessionPage',
+    'session.get': '#/$defs/ProductSessionProjection',
+    'session.messages.list': '#/$defs/ChatMessagePage',
+    'runtime.projection.get': './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
+    'delivery.list': '#/$defs/DeliveryPage',
+    'delivery.get': '#/$defs/DeliveryDetailProjection',
+    'settings.get': '#/$defs/SettingsProjection',
+    'credential.reference.list': '#/$defs/CredentialReferencePage',
+    'credential.reference.get': '#/$defs/CredentialReferenceProjection',
+    'approval.list': '#/$defs/ApprovalPage',
+    'approval.get': '#/$defs/ApprovalProjection',
+    'worker.list': '#/$defs/WorkerPage',
+    'worker.get': '#/$defs/WorkerProjection',
+    'publication.list': '#/$defs/PublicationPage',
+    'publication.get': '#/$defs/PublicationProjection',
+  })
   assert.deepEqual(
     [
       'ProductSessionPage',
@@ -274,10 +280,17 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
     conflict: 'REVISION_CONFLICT',
     reports: ['expectedRevision', 'currentRevision'],
   })
-  assert.equal(
-    schema.$defs.CommandCompletedResponse.properties.result.$ref,
-    '#/$defs/CommandResult',
+  assert.deepEqual(
+    specializationNames(schema, 'CommandCompletedResponse', 'command'),
+    COMMANDS,
   )
+  assert.equal(schema.$defs.CommandResult, undefined)
+  assert.deepEqual(semantics.responseCorrelation, {
+    authority: 'request_operation_discriminator',
+    queryResult: 'exact_query_to_result_projection',
+    commandResult: 'exact_command_to_result_projection',
+    relabeling: 'reject',
+  })
 
   assert.deepEqual(
     Object.fromEntries(Object.entries(semantics.errors).map(([code, value]) => [
@@ -287,10 +300,12 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
     ERROR_STATUS,
   )
   assert.equal(semantics.errors.RATE_LIMITED.retryable, true)
+  assert.equal(semantics.errors.READ_CURSOR_EXPIRED.retryable, true)
   assert.equal(semantics.errors.SERVICE_UNAVAILABLE.retryable, true)
   assert.equal(semantics.errors.TRUSTED_FACTS_UNAVAILABLE.retryable, true)
   for (const code of Object.keys(ERROR_STATUS).filter(code => (
     code !== 'RATE_LIMITED'
+    && code !== 'READ_CURSOR_EXPIRED'
     && code !== 'SERVICE_UNAVAILABLE'
     && code !== 'TRUSTED_FACTS_UNAVAILABLE'
   ))) assert.equal(semantics.errors[code].retryable, false)
@@ -298,9 +313,25 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
 
 test('OpenAPI 3.1 fragment exposes one command route and one query route with no legacy aliases', async () => {
   const schema = await json('control-plane-http.schema.json')
+  const generatedOpenApi = await json('openapi.generated.json')
   const openapi = schema['x-winwincode-openapi']
 
-  assert.deepEqual(Object.keys(openapi), ['paths'])
+  assert.deepEqual(Object.keys(openapi), ['securitySchemes', 'paths'])
+  assert.deepEqual(openapi.securitySchemes, {
+    sessionCookie: {
+      type: 'apiKey',
+      in: 'cookie',
+      name: 'wwc_session',
+      description: 'Same-origin Web and local Host session.',
+    },
+    bearerAuth: {
+      type: 'http',
+      scheme: 'bearer',
+      bearerFormat: 'JWT',
+      description: 'Service-account and enterprise access token.',
+    },
+  })
+  assert.deepEqual(generatedOpenApi.components.securitySchemes, openapi.securitySchemes)
   assert.deepEqual(Object.keys(openapi.paths), ['/api/v1/commands', '/api/v1/queries'])
   assert.equal(
     openapi.paths['/api/v1/commands'].post.requestBody.content['application/json'].schema.$ref,
@@ -331,18 +362,47 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
     '401',
     '403',
     '404',
+    '409',
     '429',
     '500',
     '503',
   ])
   for (const route of Object.values(openapi.paths)) {
-    assert.equal(route.post.security, undefined)
+    assert.deepEqual(route.post.security, [
+      { sessionCookie: [] },
+      { bearerAuth: [] },
+    ])
     for (const response of Object.values(route.post.responses)) {
       if (response.content === undefined) continue
       assert.ok(response.content['application/json'])
       assert.equal(response.content['application/problem+json'], undefined)
     }
   }
+  for (const route of Object.values(generatedOpenApi.paths)) {
+    assert.deepEqual(route.post.security, [
+      { sessionCookie: [] },
+      { bearerAuth: [] },
+    ])
+  }
+
+  assert.deepEqual(schema['x-winwincode-semantics'].authentication, {
+    anonymousAllowed: false,
+    acceptedMethods: ['sessionCookie', 'bearerAuth'],
+    principalBinding: 'authenticated_principal_must_equal_envelope_actor',
+    credentialsInQueryAllowed: false,
+    credentialsInBodyAllowed: false,
+  })
+
+  const taskApproval = schema.$defs.DeliveryApproveTaskBreakdownPayload
+  assert.deepEqual(taskApproval.required, ['deliveryId', 'reviewSetSha256'])
+  assert.equal(taskApproval.properties.tasks, undefined)
+  assert.deepEqual(schema['x-winwincode-semantics'].taskBreakdownApproval, {
+    payload: ['deliveryId', 'reviewSetSha256'],
+    authority: 'current_sealed_approved_solution_review',
+    callerTaskFieldsAllowed: false,
+    promotion: 'copy_ordered_task_proposals_field_by_field',
+    staleDigestError: 'REVISION_CONFLICT',
+  })
 })
 
 test('positive and negative samples pin retries, conflicts, cursors, and secret-safe output', async () => {
@@ -363,6 +423,12 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   })
   assert.equal(examples.invalidCursor.error.code, 'INVALID_REQUEST')
   assert.equal(examples.invalidCursor.error.details.field, 'page.cursor')
+  assert.equal(examples.readCursorExpired.error.code, 'READ_CURSOR_EXPIRED')
+  assert.equal(examples.readCursorExpired.error.retryable, true)
+  assert.deepEqual(examples.readCursorExpired.error.details, {
+    field: 'atCursor',
+    action: 'restart_strongflow_read_without_cursor',
+  })
   assert.equal(examples.responses.queryPage.result.kind, 'delivery_page')
   assert.deepEqual(examples.responses.commandCompleted.result, {
     id: 'wrk_00000000000000000000000000',
@@ -381,7 +447,32 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
   assert.equal(examples.positive.inputRespond.payload.status, 'provided')
   assert.equal(examples.positive.sessionMessagesList.query, 'session.messages.list')
   assert.equal(examples.positive.runtimeProjectionGet.query, 'runtime.projection.get')
+  assert.deepEqual(examples.positive.deliveryApproveTaskBreakdown.payload, {
+    deliveryId: 'dlv_00000000000000000000000000',
+    reviewSetSha256:
+      'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+  })
   assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
+  assert.equal(
+    examples.responses.deliveryDetailPendingReview.result.solutionReview.reviewStatus,
+    'pending',
+  )
+  assert.equal(
+    examples.responses.deliveryDetailPendingReview.result.solutionReview.taskProposals.length,
+    1,
+  )
   assert.equal(examples.responses.runtimeProjection.result.kind, 'runtime_projection')
-  assert.equal(examples.responses.runtimeProjection.result.items[0].projectionSequence, 42)
+  assert.equal(examples.responses.runtimeProjection.result.sessions[0].asOfSequence, 42)
+  assert.deepEqual(
+    examples.positive.runtimeProjectionGet.parameters.atCursor,
+    examples.responses.runtimeProjection.result.readCursor,
+  )
+  assert.notDeepEqual(
+    examples.strongFlowReadCutMismatch.deliveryCursor,
+    examples.strongFlowReadCutMismatch.runtimeCursor,
+  )
+  assert.equal(
+    examples.strongFlowReadCutMismatch.expected.error.code,
+    'REVISION_CONFLICT',
+  )
 })

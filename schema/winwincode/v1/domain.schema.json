@@ -200,85 +200,53 @@
       },
       "description": "Secret-safe product message projection. It excludes provider requests, provider responses, tool payloads, credentials, and Codex internals."
     },
-    "RuntimeProjectionKind": {
-      "type": "string",
-      "enum": [
-        "plan",
-        "agent-graph",
-        "activity",
-        "command",
-        "test",
-        "recovery",
-        "failure",
-        "diff",
-        "usage",
-        "evidence",
-        "input-request",
-        "execution-approval"
-      ]
-    },
-    "RuntimeProjectionItem": {
+    "StrongFlowReadCursor": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "productSessionId",
-        "workerSessionId",
-        "codexThreadId",
-        "leaseId",
-        "projectionSequence",
-        "projectionKind",
-        "summary",
-        "occurredAt"
+        "token",
+        "scope",
+        "deliveryId",
+        "deliveryRevision",
+        "runtimeLedgerRevision",
+        "runtimeAcceptedSequence",
+        "publicationRevision",
+        "eventCursor"
       ],
       "properties": {
-        "productSessionId": {
-          "$ref": "#/$defs/ProductSessionId"
+        "token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 2048,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "Opaque authenticated token issued by the Control Plane for these exact read coordinates."
         },
-        "workerSessionId": {
-          "$ref": "#/$defs/WorkerSessionId"
-        },
-        "codexThreadId": {
-          "$ref": "#/$defs/CodexThreadId"
-        },
-        "leaseId": {
-          "$ref": "#/$defs/LeaseId"
+        "scope": {
+          "$ref": "#/$defs/RepositoryScope"
         },
         "deliveryId": {
           "$ref": "#/$defs/DeliveryId"
         },
-        "stageRunId": {
-          "$ref": "#/$defs/StageRunId"
+        "deliveryRevision": {
+          "$ref": "#/$defs/Revision"
         },
-        "projectionSequence": {
+        "runtimeLedgerRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "runtimeAcceptedSequence": {
           "type": "integer",
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 9007199254740991
         },
-        "projectionKind": {
-          "$ref": "#/$defs/RuntimeProjectionKind"
+        "publicationRevision": {
+          "$ref": "#/$defs/Revision"
         },
-        "summary": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096
-        },
-        "sourceRef": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1024
-        },
-        "occurredAt": {
-          "$ref": "#/$defs/Instant"
+        "eventCursor": {
+          "$ref": "#/$defs/DeliveryEventReadCursor",
+          "description": "Exact Delivery event stream position included in the authenticated read-cut token."
         }
       },
-      "dependentRequired": {
-        "deliveryId": [
-          "stageRunId"
-        ],
-        "stageRunId": [
-          "deliveryId"
-        ]
-      }
+      "description": "Server-issued, fully comparable StrongFlow read cut. Its authenticated token seals every field including eventCursor. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate."
     },
     "RuntimeProjectionSnapshot": {
       "type": "object",
@@ -286,11 +254,13 @@
       "required": [
         "kind",
         "revision",
+        "readCursor",
+        "eventCursor",
         "productSessionId",
         "deliveryId",
         "stageRunId",
         "lastProjectionSequence",
-        "items",
+        "sessions",
         "rebuiltAt"
       ],
       "properties": {
@@ -299,6 +269,16 @@
         },
         "revision": {
           "$ref": "#/$defs/Revision"
+        },
+        "readCursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/StrongFlowReadCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "productSessionId": {
           "$ref": "#/$defs/ProductSessionId"
@@ -328,18 +308,22 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "items": {
+        "sessions": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/RuntimeProjectionItem"
+            "$ref": "#/$defs/RuntimeSessionProjection"
           },
-          "maxItems": 10000
+          "maxItems": 256
         },
         "rebuiltAt": {
           "$ref": "#/$defs/Instant"
+        },
+        "eventCursor": {
+          "$ref": "#/$defs/RuntimeProjectionEventCursor",
+          "description": "Exact WebSocket stream position represented by this complete snapshot."
         }
       },
-      "description": "Complete bounded projection used after restart or WebSocket reset.",
+      "description": "Complete bounded typed projection used after restart, invalidation, or WebSocket reset. eventCursor is the only lossless handoff to the first subscription.",
       "oneOf": [
         {
           "properties": {
@@ -348,6 +332,12 @@
             },
             "stageRunId": {
               "type": "null"
+            },
+            "readCursor": {
+              "type": "null"
+            },
+            "eventCursor": {
+              "$ref": "#/$defs/ProductSessionEventReadCursor"
             }
           }
         },
@@ -358,6 +348,12 @@
             },
             "stageRunId": {
               "$ref": "#/$defs/StageRunId"
+            },
+            "readCursor": {
+              "$ref": "#/$defs/StrongFlowReadCursor"
+            },
+            "eventCursor": {
+              "$ref": "#/$defs/DeliveryEventReadCursor"
             }
           }
         }
@@ -786,6 +782,7 @@
         "RESOURCE_NOT_FOUND",
         "IDEMPOTENCY_CONFLICT",
         "REVISION_CONFLICT",
+        "READ_CURSOR_EXPIRED",
         "CANDIDATE_STALE",
         "WRONG_STATE",
         "RATE_LIMITED",
@@ -812,6 +809,7 @@
       "type": "string",
       "enum": [
         "RATE_LIMITED",
+        "READ_CURSOR_EXPIRED",
         "SERVICE_UNAVAILABLE",
         "TRUSTED_FACTS_UNAVAILABLE"
       ]
@@ -956,6 +954,896 @@
           "$ref": "#/$defs/Error"
         }
       }
+    },
+    "RuntimePlanItemStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed"
+      ]
+    },
+    "RuntimePlanItemProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "status"
+      ],
+      "properties": {
+        "step": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "status": {
+          "$ref": "#/$defs/RuntimePlanItemStatus"
+        }
+      }
+    },
+    "RuntimePlanProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "explanation",
+        "items",
+        "text",
+        "complete",
+        "sourceRef"
+      ],
+      "properties": {
+        "itemId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "explanation": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimePlanItemProjection"
+          },
+          "maxItems": 200
+        },
+        "text": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "RuntimeAgentStatus": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "waiting",
+        "running",
+        "completed",
+        "interrupted",
+        "failed",
+        "closed"
+      ]
+    },
+    "RuntimeAgentProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "threadId",
+        "parentThreadId",
+        "path",
+        "nickname",
+        "role",
+        "status",
+        "sourceRef"
+      ],
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/CodexThreadId"
+        },
+        "parentThreadId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CodexThreadId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nickname": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/RuntimeAgentStatus"
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "RuntimeAgentEdgeProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parentThreadId",
+        "childThreadId"
+      ],
+      "properties": {
+        "parentThreadId": {
+          "$ref": "#/$defs/CodexThreadId"
+        },
+        "childThreadId": {
+          "$ref": "#/$defs/CodexThreadId"
+        }
+      }
+    },
+    "RuntimeActivityType": {
+      "type": "string",
+      "enum": [
+        "command",
+        "test"
+      ]
+    },
+    "RuntimeActivityStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "declined",
+        "cancelled",
+        "unknown"
+      ]
+    },
+    "RuntimeActivityOutcome": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "succeeded",
+        "task-failed",
+        "timed-out",
+        "policy-denied",
+        "infrastructure-failed",
+        "cancelled"
+      ]
+    },
+    "RuntimeActivityProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "activityType",
+        "command",
+        "status",
+        "outcome",
+        "exitCode",
+        "sourceRef"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "activityType": {
+          "$ref": "#/$defs/RuntimeActivityType"
+        },
+        "command": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/RuntimeActivityStatus"
+        },
+        "outcome": {
+          "$ref": "#/$defs/RuntimeActivityOutcome"
+        },
+        "exitCode": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "RuntimeUsageMetricProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,99}$"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "RuntimeUsageProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totals",
+        "sourceRef"
+      ],
+      "properties": {
+        "totals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeUsageMetricProjection"
+          },
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "description": "Usage totals are sorted by metric name before publication."
+    },
+    "RuntimeRecoveryState": {
+      "type": "string",
+      "enum": [
+        "none",
+        "required",
+        "in-progress",
+        "recovered"
+      ]
+    },
+    "RuntimeRecoveryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "failureCount",
+        "recoveryCount",
+        "lastFailureSourceRef",
+        "latestRecoverySourceRef"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/RuntimeRecoveryState"
+        },
+        "failureCount": {
+          "$ref": "#/$defs/Count"
+        },
+        "recoveryCount": {
+          "$ref": "#/$defs/Count"
+        },
+        "lastFailureSourceRef": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latestRecoverySourceRef": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RuntimeDiffSummaryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changedFileCount",
+        "additions",
+        "deletions",
+        "detailsVisible",
+        "sourceRef"
+      ],
+      "properties": {
+        "changedFileCount": {
+          "$ref": "#/$defs/Count"
+        },
+        "additions": {
+          "$ref": "#/$defs/Count"
+        },
+        "deletions": {
+          "$ref": "#/$defs/Count"
+        },
+        "detailsVisible": {
+          "const": false
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "description": "Live execution exposes counts and a source reference only; paths, hunks, and unified diff bytes are excluded."
+    },
+    "RuntimeSessionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionBindingId",
+        "stageRunId",
+        "deliveryTaskId",
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "executionJobId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "asOfSequence",
+        "plan",
+        "agents",
+        "agentEdges",
+        "activities",
+        "usage",
+        "recovery",
+        "diffSummary"
+      ],
+      "properties": {
+        "sessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "stageRunId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/StageRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deliveryTaskId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeliveryTaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "productSessionId": {
+          "$ref": "#/$defs/ProductSessionId"
+        },
+        "workerSessionId": {
+          "$ref": "#/$defs/WorkerSessionId"
+        },
+        "codexThreadId": {
+          "$ref": "#/$defs/CodexThreadId"
+        },
+        "executionJobId": {
+          "$ref": "#/$defs/ExecutionJobId"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "fencingToken": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$"
+        },
+        "asOfSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "plan": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RuntimePlanProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeAgentProjection"
+          },
+          "maxItems": 256
+        },
+        "agentEdges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeAgentEdgeProjection"
+          },
+          "maxItems": 512
+        },
+        "activities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeActivityProjection"
+          },
+          "maxItems": 100
+        },
+        "usage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RuntimeUsageProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "$ref": "#/$defs/RuntimeRecoveryProjection"
+        },
+        "diffSummary": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RuntimeDiffSummaryProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "One deterministic StrongFlow session projection built only from an exact accepted runtime binding."
+    },
+    "RuntimeProjectionEventCursor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/DeliveryEventReadCursor"
+        }
+      ],
+      "description": "Exact event baseline for a ProductSession runtime snapshot or Delivery-stage runtime snapshot."
+    },
+    "ControlPlaneEventId": {
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9_-]{16,128}$",
+      "description": "Stable identity of one persisted Control Plane event, independent of transport."
+    },
+    "EventReadPosition": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Last persisted sequence included in a snapshot or event-stream baseline; zero represents an empty stream."
+    },
+    "ScopeEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "scope"
+        }
+      }
+    },
+    "DeliveryEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "deliveryId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery"
+        },
+        "deliveryId": {
+          "$ref": "#/$defs/DeliveryId"
+        }
+      }
+    },
+    "ProductSessionEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "productSessionId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "product-session"
+        },
+        "productSessionId": {
+          "$ref": "#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "LeaseEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workerId",
+        "leaseId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "lease"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        }
+      }
+    },
+    "EventReadStream": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ScopeEventReadStream"
+        },
+        {
+          "$ref": "#/$defs/DeliveryEventReadStream"
+        },
+        {
+          "$ref": "#/$defs/ProductSessionEventReadStream"
+        },
+        {
+          "$ref": "#/$defs/LeaseEventReadStream"
+        }
+      ],
+      "description": "One exact ordered Control Plane event stream shared by snapshot and push transports."
+    },
+    "ScopeEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ScopeEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one scope-wide event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/RepositoryScope"
+        },
+        "stream": {
+          "$ref": "#/$defs/DeliveryEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one repository-scoped Delivery event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "ProductSessionEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/RepositoryScope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ProductSessionEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one repository-scoped ProductSession event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "LeaseEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/LeaseEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one worker lease event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "EventReadCursor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ScopeEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/DeliveryEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/ProductSessionEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/LeaseEventReadCursor"
+        }
+      ],
+      "description": "Transport-neutral exact stream position carried from a complete snapshot into event subscription."
     }
   }
 }
