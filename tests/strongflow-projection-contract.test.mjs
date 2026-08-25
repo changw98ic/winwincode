@@ -185,6 +185,7 @@ test('StrongFlow projection rules freeze binding, replay, redaction, and Web aut
     'runtimeLedgerRevision',
     'runtimeAcceptedSequence',
     'publicationRevision',
+    'eventCursor',
   ])
   assert.equal(matrix.readCut.authority, 'server-issued-authenticated-cursor')
   assert.equal(matrix.readCut.partialPairPolicy, 'discard-and-reload')

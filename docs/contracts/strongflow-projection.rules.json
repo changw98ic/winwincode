@@ -25,7 +25,8 @@
       "deliveryRevision",
       "runtimeLedgerRevision",
       "runtimeAcceptedSequence",
-      "publicationRevision"
+      "publicationRevision",
+      "eventCursor"
     ],
     "authority": "server-issued-authenticated-cursor",
     "reloadOrder": "delivery.get-then-runtime.projection.get-at-returned-cursor",

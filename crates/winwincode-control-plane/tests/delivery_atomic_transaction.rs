@@ -119,7 +119,7 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
             workspace: ExecutionWorkspace {
                 checkout_revision: checkout_revision.into(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode: "candidate".into(),
+                write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
                 deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
@@ -135,7 +135,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
     CommandEnvelope {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: "user".into(),
+            kind: winwincode_api::generated::UserActorKind::User,
         }),
         command: CommandName::DeliveryAdvance,
         expected_revision: Revision(1),
@@ -143,7 +143,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::RepositoryScope(RepositoryScope {
-            kind: "repository".into(),
+            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
             organization_id: OrganizationId(canonical_id("org", seed)),
             workspace_id: WorkspaceId(canonical_id("wsp", seed)),
             project_id: ProjectId(canonical_id("prj", seed)),
@@ -174,7 +174,7 @@ fn pending_rework(
             workspace: ExecutionWorkspace {
                 checkout_revision: fixture.source_candidate_commit_id.clone(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode: "candidate".into(),
+                write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
                 deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),

@@ -61,7 +61,7 @@ fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {
     CommandEnvelope {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: "user".into(),
+            kind: winwincode_api::generated::UserActorKind::User,
         }),
         command: CommandName::DeliverySubmitVerdict,
         expected_revision: Revision(
@@ -76,7 +76,7 @@ fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::RepositoryScope(RepositoryScope {
-            kind: "repository".into(),
+            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
             organization_id: OrganizationId(canonical_id("org", seed)),
             workspace_id: WorkspaceId(canonical_id("wsp", seed)),
             project_id: ProjectId(canonical_id("prj", seed)),
