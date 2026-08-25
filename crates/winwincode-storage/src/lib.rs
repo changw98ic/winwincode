@@ -468,6 +468,19 @@ impl StorageError {
         }
     }
 
+    /// Builds the revision-token conflict for the one reviewed solution-set
+    /// digest accepted at the task-promotion boundary.
+    #[must_use]
+    pub fn revision_token_conflict(field: &str) -> Self {
+        if field != "reviewSetSha256" {
+            return Self::invalid_input("revision token conflict field is unsupported");
+        }
+        Self {
+            kind: StorageErrorKind::RevisionConflict,
+            message: "reviewSetSha256 no longer identifies the current solution review".to_owned(),
+        }
+    }
+
     fn request_conflict(request_id: &RequestId) -> Self {
         Self {
             kind: StorageErrorKind::RequestConflict,

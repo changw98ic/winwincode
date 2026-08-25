@@ -336,11 +336,49 @@ fn task_breakdown_same_scoped_request_with_changed_digest_is_a_conflict() {
 }
 
 #[test]
+fn task_breakdown_same_revision_stale_review_digest_maps_to_revision_conflict() {
+    let root = temporary_directory("review-digest-stale");
+    seed_delivery(&root);
+    let mut command = task_breakdown_command(6);
+    command.payload = serde_json::json!({
+        "deliveryId": "delivery-main",
+        "reviewSetSha256": format!("sha256:{}", "f".repeat(64)),
+    });
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }),
+    )
+    .expect("Control Plane start");
+
+    let rejected = control_plane
+        .commit_delivery_task_breakdown(&command)
+        .expect_err("stale reviewSetSha256 is a revision-token conflict");
+    let CommitError::Storage(error) = rejected else {
+        panic!("stale review digest must fail before publication")
+    };
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert_eq!(
+        error.to_string(),
+        "reviewSetSha256 no longer identifies the current solution review"
+    );
+    let state = control_plane
+        .load_state("delivery:delivery-main")
+        .expect("state read")
+        .expect("seed state");
+    assert_eq!(state.revision, 1);
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
 fn task_breakdown_revision_race_commits_no_partial_loser_facts() {
     let root = temporary_directory("revision-race");
     seed_delivery(&root);
     let winner_command = task_breakdown_command(4);
-    let loser_command = task_breakdown_command(5);
+    let mut loser_command = task_breakdown_command(5);
+    loser_command.expected_revision = Revision(0);
     let mut control_plane = ControlPlane::start_local(
         ControlPlaneConfig::local(&root),
         Box::new(CapturingPublisher {
@@ -355,10 +393,14 @@ fn task_breakdown_revision_race_commits_no_partial_loser_facts() {
     let rejected = control_plane
         .commit_delivery_task_breakdown(&loser_command)
         .expect_err("stale competing revision is rejected");
-    assert!(matches!(
-        rejected,
-        CommitError::Storage(ref error) if error.kind() == StorageErrorKind::RevisionConflict
-    ));
+    let CommitError::Storage(error) = rejected else {
+        panic!("old expectedRevision must fail before publication")
+    };
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert_eq!(
+        error.to_string(),
+        "expected revision 0, but current revision is 2"
+    );
     control_plane.shutdown().expect("shutdown");
 
     let storage = SqliteStorage::open(&root).expect("inspection storage");

@@ -941,3 +941,20 @@ fn revision_conflict_constructor_preserves_expected_and_actual_revisions() {
         "expected revision 7, but current revision is 9"
     );
 }
+
+#[test]
+fn revision_token_conflict_accepts_only_the_review_set_stale_token() {
+    let stale = StorageError::revision_token_conflict("reviewSetSha256");
+    assert_eq!(stale.kind(), StorageErrorKind::RevisionConflict);
+    assert_eq!(
+        stale.to_string(),
+        "reviewSetSha256 no longer identifies the current solution review"
+    );
+
+    let unsupported = StorageError::revision_token_conflict("candidateDigest");
+    assert_eq!(unsupported.kind(), StorageErrorKind::InvalidInput);
+    assert_eq!(
+        unsupported.to_string(),
+        "revision token conflict field is unsupported"
+    );
+}

@@ -65,10 +65,7 @@ pub(crate) fn execute(
     let loaded = storage.load_journal(&journal_key)?;
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
     let source = DeliveryStore::borrowed(&journal)
-        .query(DeliveryQuery::GetRevision {
-            delivery_id: delivery_id.clone(),
-            revision: expected_revision,
-        })
+        .query(DeliveryQuery::Get(delivery_id.clone()))
         .map_err(|error| delivery_store_error(&error))?;
     let request_digest = command_digest
         .0
@@ -356,11 +353,24 @@ fn task_breakdown_event_id(event: &DeliveryTaskBreakdownApprovedEvent) -> String
 }
 
 fn delivery_store_error(error: &DeliveryStoreError) -> StorageError {
-    if error.code() == DeliveryStoreErrorCode::RevisionConflict
-        && let (Some(expected), Some(current)) =
-            (error.expected_revision(), error.current_revision())
-    {
-        return StorageError::revision_conflict(expected, current);
+    match error.code() {
+        DeliveryStoreErrorCode::RevisionConflict => {
+            if let (Some(expected), Some(current)) =
+                (error.expected_revision(), error.current_revision())
+            {
+                return StorageError::revision_conflict(expected, current);
+            }
+        }
+        DeliveryStoreErrorCode::ReviewSetStale => {
+            return StorageError::revision_token_conflict("reviewSetSha256");
+        }
+        DeliveryStoreErrorCode::InvalidStoreOptions
+        | DeliveryStoreErrorCode::DeliveryAlreadyExists
+        | DeliveryStoreErrorCode::DeliveryNotFound
+        | DeliveryStoreErrorCode::StoreCorrupt
+        | DeliveryStoreErrorCode::DeliveryIdMismatch
+        | DeliveryStoreErrorCode::RequestConflict
+        | DeliveryStoreErrorCode::StoreIoError => {}
     }
     StorageError::invalid_input(error.to_string())
 }

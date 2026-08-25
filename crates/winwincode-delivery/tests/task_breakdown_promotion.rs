@@ -141,7 +141,10 @@ fn task_breakdown_store_rejects_stale_foreign_revised_or_changed_review() {
         unreachable!();
     };
     stale_command.review_set_sha256 = "0".repeat(64);
-    assert!(stale_store.execute(stale).is_err());
+    let stale = stale_store
+        .execute(stale)
+        .expect_err("same revision with another review digest is stale");
+    assert_eq!(stale.code(), DeliveryStoreErrorCode::ReviewSetStale);
 
     let foreign_store = seeded_store();
     let mut foreign = approval("foreign-task-breakdown", 1);

@@ -399,6 +399,10 @@ impl ApprovedTaskPromotion<'_> {
 }
 
 impl ValidatedSolutionReviewSet {
+    pub(crate) fn review_set_sha256(&self) -> &str {
+        &self.review_set_sha256
+    }
+
     pub(crate) fn projection_view(&self) -> SolutionReviewView<'_> {
         SolutionReviewView {
             delivery_id: &self.delivery_id,

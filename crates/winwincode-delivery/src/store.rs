@@ -90,6 +90,7 @@ pub enum DeliveryStoreErrorCode {
     StoreCorrupt,
     DeliveryIdMismatch,
     RevisionConflict,
+    ReviewSetStale,
     RequestConflict,
     StoreIoError,
 }
@@ -785,18 +786,18 @@ impl<'journal> DeliveryStore<'journal> {
                     "task-breakdown promotion requires a current solution review",
                 )
             })?;
+        if review.review_set_sha256() != command.review_set_sha256 {
+            return Err(store_error(
+                DeliveryStoreErrorCode::ReviewSetStale,
+                "reviewSetSha256 no longer identifies the current solution review",
+            ));
+        }
         let approved = review.approved_task_promotion().ok_or_else(|| {
             store_error(
                 DeliveryStoreErrorCode::InvalidStoreOptions,
                 "task-breakdown promotion requires the current approved solution review",
             )
         })?;
-        if approved.review_set_sha256() != command.review_set_sha256 {
-            return Err(store_error(
-                DeliveryStoreErrorCode::InvalidStoreOptions,
-                "reviewSetSha256 does not match the current approved solution review",
-            ));
-        }
         let transition = prepare_task_breakdown_promotion(&stored.snapshot, &approved)
             .map_err(|error| map_task_breakdown_error(&error))?;
         let append = AppendDelivery {
