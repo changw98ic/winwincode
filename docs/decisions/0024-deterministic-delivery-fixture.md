@@ -122,7 +122,7 @@ node --test tests/delivery-full-keyless.test.mjs
 corepack pnpm verify:fixture-cleanup
 ```
 
-`verify:fixture-cleanup` 会在独立子进程中同时运行 Delivery testkit 和原生 Kernel 清理，并强制垃圾回收。它检查 Delivery 目录不会重新出现、Kernel 关闭了自己持有的 SQLite 连接与临时目录，而且原生层不会在 Node runtime 结束后再尝试启动 Tokio 任务。macOS 压力检查可设置 `WINWINCODE_CLEANUP_STRESS_ITERATIONS=32` 重复这两条路径。
+`verify:fixture-cleanup` 会在独立子进程中运行旧行为样本的 Delivery testkit、Rust Control Plane differential 和原生 Kernel 清理，并强制垃圾回收。它检查旧 Delivery 目录不会重新出现，Rust Control Plane 在真实重启、损坏与恢复场景后清空每轮独立临时目录，Kernel 关闭自己持有的 SQLite 连接与临时目录，而且原生层不会在 Node runtime 结束后再尝试启动 Tokio 任务。macOS 压力检查可设置 `WINWINCODE_CLEANUP_STRESS_ITERATIONS=32` 重复这三条路径。
 
 完整仓库门禁继续使用：
 

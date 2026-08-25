@@ -1,0 +1,167 @@
+{
+  "schemaVersion": "winwincode.delivery-rust-cutover-gate.v1",
+  "issueId": "winwincode-9c4.16.2.7",
+  "status": "implemented-enforced",
+  "documentation": "docs/contracts/delivery-rust-cutover.md",
+  "coverage": {
+    "mode": "git-file-inventory+rg-direct-read-fallback",
+    "symbolGraphComplete": false,
+    "reason": "The repository-local index script is absent; this gate claims file-level coverage only."
+  },
+  "canonicalBackend": {
+    "owner": "winwincode-control-plane",
+    "runnerEntry": "crates/winwincode-control-plane/tests/delivery_strongflow_differential_runner.rs",
+    "runnerSupport": "crates/winwincode-control-plane/tests/support/differential_runner.rs",
+    "scenarioCount": 10,
+    "typedMutationEntries": [
+      "ControlPlane::commit_delivery_command",
+      "ControlPlane::commit_delivery_execution",
+      "ControlPlane::commit_delivery_session_binding",
+      "ControlPlane::commit_delivery_terminal_outcome",
+      "ControlPlane::commit_delivery_task_breakdown",
+      "ControlPlane::commit_delivery_verdict"
+    ],
+    "typedQueryEntry": "StrongFlowProjectionQueryPort",
+    "storage": "SqliteStorage",
+    "atomicPersistenceMembers": [
+      "product_state",
+      "aggregate_journal_records",
+      "command_receipts",
+      "outbox_events"
+    ],
+    "directSeedPolicy": "one-test-only-strict-snapshot-seed-for-the-task-dag-migration-scenario",
+    "genericDeliveryMutationAllowed": false
+  },
+  "migration": {
+    "inputSchemaVersion": "winwincode.delivery-strongflow-differential-plan.v2",
+    "mappingVersion": "winwincode.delivery-strongflow-legacy-to-canonical.v1",
+    "planAuthority": "node-authored-closed-plan-only",
+    "oldDtoPolicy": "one-time-test-migration-only",
+    "runtimeFallbackAllowed": false,
+    "expected": {
+      "path": "tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json",
+      "sha256": "4aaab65259218df5df814b9d9743d71e779aad81a552c0540df63ad8490f1c71"
+    },
+    "checkpoints": [
+      {
+        "id": "success-closed-loop",
+        "revision": 21
+      },
+      {
+        "id": "request-id-replay",
+        "revision": 1
+      },
+      {
+        "id": "revision-conflict",
+        "revision": 2
+      },
+      {
+        "id": "corruption-recovery",
+        "revision": 1
+      },
+      {
+        "id": "task-dag",
+        "revision": 2
+      },
+      {
+        "id": "candidate-invalidation",
+        "revision": 31
+      },
+      {
+        "id": "attention",
+        "revision": 8
+      },
+      {
+        "id": "inconclusive",
+        "revision": 19
+      },
+      {
+        "id": "infra-error",
+        "revision": 19
+      },
+      {
+        "id": "rework",
+        "revision": 31
+      }
+    ]
+  },
+  "dependencyBoundaries": {
+    "controlPlane": {
+      "manifest": "crates/winwincode-control-plane/Cargo.toml",
+      "deniedDependencies": [
+        "codex-core",
+        "winwincode-worker",
+        "winwincode-native"
+      ]
+    },
+    "delivery": {
+      "manifest": "crates/winwincode-delivery/Cargo.toml",
+      "deniedDependencies": [
+        "winwincode-api",
+        "winwincode-control-plane",
+        "winwincode-storage",
+        "winwincode-worker",
+        "winwincode-native"
+      ]
+    }
+  },
+  "legacyBoundary": {
+    "phase2CutoverClaim": "canonical-rust-backend-only",
+    "browserHostCutoverComplete": false,
+    "newBackendCallersAllowed": false,
+    "allowedPurpose": "bounded-presentation-host-and-behavior-oracle-until-phase-6",
+    "uiCutoverTask": "winwincode-9c4.16.6.3",
+    "removalTask": "winwincode-9c4.16.6.6",
+    "strongFlowServiceConstructorPaths": [
+      "apps/host/src/cli.ts",
+      "packages/strongflow/src/index.ts",
+      "scripts/live-evaluation.mjs"
+    ],
+    "deliveryStoreWritePaths": [
+      "packages/dsh-profile/src/delivery-recovery.ts",
+      "packages/strongflow/src/delivery-service.ts"
+    ],
+    "deliveryStorePublicExportPaths": [
+      "packages/strongflow/src/index.ts"
+    ],
+    "deliveryStoreSymbolPaths": [
+      "packages/dsh-profile/src/delivery-recovery.ts",
+      "packages/strongflow/src/delivery-service.ts",
+      "packages/strongflow/src/delivery-store.ts"
+    ],
+    "deliveryStoreModuleReferencePaths": [
+      "packages/strongflow/src/delivery-service.ts",
+      "packages/strongflow/src/index.ts",
+      "scripts/verify-packages.mjs"
+    ],
+    "strongFlowServiceSymbolPaths": [
+      "apps/host/src/cli.ts",
+      "packages/strongflow/src/delivery-invoker.ts",
+      "packages/strongflow/src/delivery-service.ts",
+      "packages/strongflow/src/delivery-stage-coordinator.ts",
+      "packages/strongflow/src/index.ts",
+      "scripts/live-evaluation.mjs"
+    ]
+  },
+  "cleanup": {
+    "script": "scripts/verify-rust-delivery-cleanup.mjs",
+    "aggregateScript": "scripts/verify-runtime-cleanup.mjs",
+    "iterationsEnvironment": "WINWINCODE_CLEANUP_STRESS_ITERATIONS",
+    "defaultIterations": 4,
+    "maximumIterations": 32,
+    "command": "node scripts/run-delivery-strongflow-rust-differential.mjs --check",
+    "expectedOutput": "Rust differential runner matched all 10 canonical scenarios",
+    "isolation": "fresh-process-and-empty-TMPDIR-after-each-iteration",
+    "exercisedRecoveryScenarios": [
+      "corruption-recovery",
+      "request-id-replay"
+    ]
+  },
+  "verification": {
+    "cutoverCommand": "corepack pnpm verify:delivery-rust-cutover",
+    "cleanupCommand": "corepack pnpm verify:fixture-cleanup",
+    "fullCommand": "corepack pnpm verify",
+    "gateTest": "tests/delivery-rust-cutover-gate.test.mjs",
+    "differentialTest": "tests/delivery-strongflow-rust-differential-gate.test.mjs"
+  }
+}

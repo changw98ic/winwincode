@@ -64,6 +64,15 @@ runCleanupFixture({
   timeout: 60_000,
 })
 
+runCleanupFixture({
+  arguments_: [
+    'scripts/verify-rust-delivery-cleanup.mjs',
+  ],
+  expectedReport: { iterations, status: 'clean' },
+  label: 'Rust Control Plane Delivery cleanup stress process',
+  timeout: 300_000,
+})
+
 const require = createRequire(resolve(root, 'packages/native/dist/index.js'))
 const target = resolveReleaseTarget()
 const prebuildRoot = dirname(require.resolve(`${nativePackageName(target)}/build-info.json`))
@@ -81,5 +90,5 @@ runCleanupFixture({
 })
 
 process.stdout.write(
-  `Runtime cleanup passed ${String(iterations)} iterations for Delivery testkit and native kernel\n`,
+  `Runtime cleanup passed ${String(iterations)} iterations for Delivery testkit, Rust Control Plane, and native kernel\n`,
 )
