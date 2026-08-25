@@ -1366,6 +1366,7 @@ export function createControlPlaneWebSocketClient(
   let subscribeStartCursor: EventReadCursor | null = null
   let authorizationEpoch: number | null = null
   let nextExpectedSequence: number | null = null
+  let nextReceivedSequence: number | null = null
   let phase: ConnectionPhase = 'idle'
   let manuallyClosed = false
   let blocked = false
@@ -1461,6 +1462,12 @@ export function createControlPlaneWebSocketClient(
 
   function failEventProcessing(error: unknown): void {
     blocked = true
+    subscriptionGeneration += 1
+    nextReceivedSequence = nextExpectedSequence
+    pendingEvents = new Map()
+    pendingEventIds = new Map()
+    pendingSequences = new Map()
+    eventQueue = Promise.resolve()
     const failure = error instanceof ControlPlaneClientError
       ? error
       : clientFailure('EVENT_HANDLER_FAILED', 'The page did not apply a Control Plane event.')
@@ -1524,14 +1531,14 @@ export function createControlPlaneWebSocketClient(
       || pendingIdentity === identity
       || pendingSequence === identity
     ) return
-    if (nextExpectedSequence === null || frame.sequence !== nextExpectedSequence) {
+    if (nextReceivedSequence === null || frame.sequence !== nextReceivedSequence) {
       queueProtocolFailure(clientFailure(
         'INVALID_WEBSOCKET_FRAME',
         'The event sequence is not contiguous with the active subscription.',
       ))
       return
     }
-    nextExpectedSequence += 1
+    nextReceivedSequence += 1
     const ownSubscriptionGeneration = subscriptionGeneration
     const ownPendingEvents = pendingEvents
     const ownPendingEventIds = pendingEventIds
@@ -1552,8 +1559,15 @@ export function createControlPlaneWebSocketClient(
           || blocked
           || manuallyClosed
         ) return
+        if (nextExpectedSequence === null || frame.sequence !== nextExpectedSequence) {
+          throw clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The applied event sequence is not contiguous with the acknowledged cursor.',
+          )
+        }
         const cursor = eventCursor(frame)
         acknowledgedCursor = cursor
+        nextExpectedSequence = frame.sequence + 1
         rememberEvent(frame.eventId, frame.sequence, identity)
         sendAcknowledgement()
       } catch (error) {
@@ -1575,6 +1589,7 @@ export function createControlPlaneWebSocketClient(
     subscribeStartCursor = null
     authorizationEpoch = null
     nextExpectedSequence = null
+    nextReceivedSequence = null
     phase = 'idle'
     pendingEvents = new Map()
     pendingEventIds = new Map()
@@ -1723,6 +1738,7 @@ export function createControlPlaneWebSocketClient(
         }
         authorizationEpoch = frame.authorizationEpoch
         nextExpectedSequence = frame.cursor.sequence + 1
+        nextReceivedSequence = frame.cursor.sequence + 1
         subscribeStartCursor = null
         phase = 'active'
         if (frame.cursor.eventId !== null) {
@@ -1752,6 +1768,10 @@ export function createControlPlaneWebSocketClient(
         authorizationEpoch = frame.authorizationEpoch
         nextExpectedSequence = Math.max(
           nextExpectedSequence ?? frame.after.sequence + 1,
+          frame.after.sequence + 1,
+        )
+        nextReceivedSequence = Math.max(
+          nextReceivedSequence ?? frame.after.sequence + 1,
           frame.after.sequence + 1,
         )
         resumeAfterCursor = null

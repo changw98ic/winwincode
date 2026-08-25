@@ -558,16 +558,20 @@ fn publication_resource_ref(
     resource: &super::PublicationResourceFact,
     target: &api::PublicationTarget,
 ) -> Result<api::PublicationResourceRef, StrongFlowProjectionError> {
-    if resource.repository() != target.repository.0
-        || resource.kind() != super::PublicationResourceKind::GitHubPullRequest
-    {
+    if resource.repository() != target.repository.0 {
         return Err(StrongFlowProjectionError::RevisionConflict(
-            "published resource identity differs from the authorized pull-request target"
-                .to_owned(),
+            "published resource identity differs from the authorized GitHub target".to_owned(),
         ));
     }
     Ok(api::PublicationResourceRef {
-        kind: api::PublicationResourceKind::GithubPullRequest,
+        kind: match resource.kind() {
+            super::PublicationResourceKind::GitHubIssue => {
+                api::PublicationResourceKind::GithubIssue
+            }
+            super::PublicationResourceKind::GitHubPullRequest => {
+                api::PublicationResourceKind::GithubPullRequest
+            }
+        },
         repository: GitHubRepositorySlug(resource.repository().to_owned()),
         number: integer(resource.number(), "publication resource number")?,
     })
@@ -576,10 +580,7 @@ fn publication_resource_ref(
 fn publication_target(
     source: &winwincode_delivery::domain::DeliveryPublicationTarget,
 ) -> Result<api::PublicationTarget, StrongFlowProjectionError> {
-    if source.provider != "github"
-        || source.kind != "pull_request"
-        || source.repository != source.head_repository
-    {
+    if source.provider != "github" || source.kind != "pull-request" {
         return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
             "publication target cannot be represented by the canonical contract".to_owned(),
         ));
@@ -588,6 +589,7 @@ fn publication_target(
         provider: api::PublicationTargetProvider::Github,
         repository: GitHubRepositorySlug(source.repository.clone()),
         base_branch: source.base_branch.clone(),
+        head_repository: GitHubRepositorySlug(source.head_repository.clone()),
         head_branch: source.head_branch.clone(),
     })
 }
@@ -980,34 +982,44 @@ mod tests {
             provider: api::PublicationTargetProvider::Github,
             repository: GitHubRepositorySlug("owner/repository".to_owned()),
             base_branch: "main".to_owned(),
+            head_repository: GitHubRepositorySlug("contributor/repository".to_owned()),
             head_branch: "delivery".to_owned(),
         }
     }
 
     #[test]
-    fn publication_resource_kind_must_match_the_pull_request_target() {
-        let issue = PublicationResourceFact::try_new(
-            PublicationResourceKind::GitHubIssue,
-            "owner/repository",
+    fn publication_resource_preserves_each_closed_github_kind() {
+        for (source, expected) in [
+            (
+                PublicationResourceKind::GitHubIssue,
+                api::PublicationResourceKind::GithubIssue,
+            ),
+            (
+                PublicationResourceKind::GitHubPullRequest,
+                api::PublicationResourceKind::GithubPullRequest,
+            ),
+        ] {
+            let resource = PublicationResourceFact::try_new(source, "owner/repository", 7)
+                .expect("valid closed GitHub identity");
+            let projected = publication_resource_ref(&resource, &pull_request_target())
+                .expect("matching closed GitHub resource");
+            assert_eq!(projected.kind, expected);
+            assert_eq!(projected.repository.0, "owner/repository");
+            assert_eq!(projected.number, 7);
+        }
+    }
+
+    #[test]
+    fn publication_resource_rejects_a_foreign_repository() {
+        let resource = PublicationResourceFact::try_new(
+            PublicationResourceKind::GitHubPullRequest,
+            "other/repository",
             7,
         )
-        .expect("valid closed issue identity");
+        .expect("valid closed GitHub identity");
         assert!(matches!(
-            publication_resource_ref(&issue, &pull_request_target()),
+            publication_resource_ref(&resource, &pull_request_target()),
             Err(StrongFlowProjectionError::RevisionConflict(_))
         ));
-
-        let pull_request = PublicationResourceFact::try_new(
-            PublicationResourceKind::GitHubPullRequest,
-            "owner/repository",
-            7,
-        )
-        .expect("valid closed pull-request identity");
-        let projected = publication_resource_ref(&pull_request, &pull_request_target())
-            .expect("matching pull-request resource");
-        assert_eq!(
-            projected.kind,
-            api::PublicationResourceKind::GithubPullRequest
-        );
     }
 }

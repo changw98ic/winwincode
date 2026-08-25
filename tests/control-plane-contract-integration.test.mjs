@@ -581,6 +581,27 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
       name,
     )
   }
+  const crossRepositoryPublication = structuredClone(
+    examples.responses.publicationProjection,
+  )
+  crossRepositoryPublication.result.target.repository = 'openai/winwincode'
+  crossRepositoryPublication.result.target.headRepository = 'contributor/winwincode'
+  assertValidation(
+    validator(ajv, httpId, 'QueryResultResponse'),
+    crossRepositoryPublication,
+    true,
+    'publication target preserves an exact fork identity',
+  )
+  const publicationWithoutHeadRepository = structuredClone(
+    crossRepositoryPublication,
+  )
+  delete publicationWithoutHeadRepository.result.target.headRepository
+  assertValidation(
+    validator(ajv, httpId, 'QueryResultResponse'),
+    publicationWithoutHeadRepository,
+    false,
+    'publication target requires its exact head repository',
+  )
   const settledReviewExamples = {
     approvedReview: {
       reviewStatus: 'approved',

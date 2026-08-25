@@ -6801,6 +6801,9 @@
             "minLength": 1,
             "type": "string"
           },
+          "headRepository": {
+            "$ref": "#/components/schemas/GitHubRepositorySlug"
+          },
           "provider": {
             "const": "github"
           },
@@ -6812,6 +6815,7 @@
           "provider",
           "repository",
           "baseBranch",
+          "headRepository",
           "headBranch"
         ],
         "type": "object"
@@ -10285,7 +10289,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:29842ea31dd1d969de68878c8a50cd3a9f868c301abb76c77bec2c66c4203e51",
+  "x-source-digest": "sha256:2a64a4a5139b9335fc7a666cd4d81c837ba2d033e7895afa4a09de49d23c661c",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
