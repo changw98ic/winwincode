@@ -974,6 +974,25 @@ test('workspace test lane always invokes the trigger-aware Rust differential gat
   assert.equal(runner.indexOf(rustCheck) > runner.indexOf(legacyCheck), true)
 })
 
+test('Rust runner consumes only the Node-authored execution plan', async () => {
+  const sources = await Promise.all([
+    'crates/winwincode-control-plane/tests/delivery_strongflow_differential_runner.rs',
+    'crates/winwincode-control-plane/tests/support/differential_runner.rs',
+  ].map(path => readFile(join(root, path), 'utf8')))
+
+  assert.match(
+    sources[0],
+    /fn machine_entry_executes_node_authored_plan_when_supplied\(\)/u,
+  )
+
+  for (const source of sources) {
+    assert.equal(source.includes('delivery-strongflow-typescript.v1.json'), false)
+    assert.equal(source.includes('local_plan_paths'), false)
+    assert.equal(source.includes('local_fixture_terminal_outcome_statuses'), false)
+    assert.equal(source.includes('fixture_terminal_outcome_status'), false)
+  }
+})
+
 // Synchronous helpers keep the injected spawn seam identical to spawnSync.
 function requireRead(path) {
   return readFileSync(path, 'utf8')
