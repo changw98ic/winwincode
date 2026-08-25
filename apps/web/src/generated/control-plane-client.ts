@@ -5,8 +5,8 @@
 const CONTROL_PLANE_COMMAND_PATH = "/api/v1/commands"
 const CONTROL_PLANE_QUERY_PATH = "/api/v1/queries"
 const CONTROL_PLANE_EVENTS_PATH = "/api/v1/events"
-const CANONICAL_ERROR_CODES = new Set<string>(["INVALID_REQUEST","AUTHENTICATION_REQUIRED","PERMISSION_DENIED","RESOURCE_NOT_FOUND","IDEMPOTENCY_CONFLICT","REVISION_CONFLICT","READ_CURSOR_EXPIRED","CANDIDATE_STALE","WRONG_STATE","RATE_LIMITED","SERVICE_UNAVAILABLE","TRUSTED_FACTS_UNAVAILABLE","INTERNAL_ERROR"])
-const RETRYABLE_ERROR_CODES = new Set<string>(["RATE_LIMITED","READ_CURSOR_EXPIRED","SERVICE_UNAVAILABLE","TRUSTED_FACTS_UNAVAILABLE"])
+const CANONICAL_FORBIDDEN_ERROR_KEYS = new Set<string>(["accessToken","agentGraph","apiKey","codexPlan","database","databaseRow","deliveryPatch","deliveryVerdict","password","providerCredential","rawProviderRequest","rawProviderResponse","secret","secretMaterial","socketPath","sql","table","toolPayload","turn","vaultLocator"])
+const CONTROL_PLANE_RUNTIME_SCHEMAS: Readonly<Record<string, unknown>> = {"Actor":{"oneOf":[{"$ref":"#/$defs/UserActor"},{"$ref":"#/$defs/ServiceAccountActor"},{"$ref":"#/$defs/SystemActor"}]},"ActorId":{"oneOf":[{"$ref":"#/$defs/UserId"},{"$ref":"#/$defs/ServiceAccountId"},{"$ref":"#/$defs/SystemActorId"}]},"ApprovalId":{"pattern":"^apr_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ApprovalPage":{"additionalProperties":false,"properties":{"items":{"items":{"$ref":"#/$defs/ApprovalProjection"},"maxItems":200,"type":"array"},"kind":{"const":"approval_page"}},"required":["kind","items"],"type":"object"},"ApprovalProjection":{"additionalProperties":false,"properties":{"id":{"$ref":"#/$defs/ApprovalId"},"requestedAt":{"$ref":"#/$defs/Instant"},"revision":{"$ref":"#/$defs/Revision"},"state":{"enum":["pending","approved","rejected","expired"],"type":"string"}},"required":["id","revision","state","requestedAt"],"type":"object"},"AttentionItemId":{"pattern":"^att_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ChatMessageId":{"pattern":"^msg_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ChatMessagePage":{"additionalProperties":false,"description":"Secret-safe ProductSession message history page.","properties":{"items":{"items":{"$ref":"#/$defs/ChatMessageProjection"},"maxItems":200,"type":"array"},"kind":{"const":"chat_message_page"}},"required":["kind","items"],"type":"object"},"ChatMessageProjection":{"additionalProperties":false,"description":"Secret-safe product message projection. It excludes provider requests, provider responses, tool payloads, credentials, and Codex internals.","properties":{"content":{"maxLength":1048576,"type":"string"},"createdAt":{"$ref":"#/$defs/Instant"},"id":{"$ref":"#/$defs/ChatMessageId"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"role":{"enum":["user","assistant"],"type":"string"},"sequence":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"state":{"enum":["streaming","completed","cancelled","failed"],"type":"string"},"updatedAt":{"$ref":"#/$defs/Instant"}},"required":["id","productSessionId","sequence","role","state","content","createdAt","updatedAt"],"type":"object"},"CodexThreadId":{"pattern":"^cdx_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"CommandAcceptedResponse":{"additionalProperties":false,"properties":{"acceptedAt":{"$ref":"#/$defs/Instant"},"command":{"$ref":"#/$defs/CommandName"},"currentRevision":{"$ref":"#/$defs/Revision"},"outcome":{"const":"accepted"},"requestId":{"$ref":"#/$defs/RequestId"},"schemaVersion":{"$ref":"#/$defs/SchemaVersion"}},"required":["schemaVersion","requestId","command","outcome","currentRevision","acceptedAt"],"type":"object"},"CommandCompletedResponse":{"additionalProperties":false,"properties":{"command":{"$ref":"#/$defs/CommandName"},"currentRevision":{"$ref":"#/$defs/Revision"},"outcome":{"const":"completed"},"previousRevision":{"$ref":"#/$defs/Revision"},"requestId":{"$ref":"#/$defs/RequestId"},"result":{"$ref":"#/$defs/CommandResult"},"schemaVersion":{"$ref":"#/$defs/SchemaVersion"}},"required":["schemaVersion","requestId","command","outcome","previousRevision","currentRevision","result"],"type":"object"},"CommandName":{"enum":["session.create","chat.submit","input.respond","session.cancel","session.close","delivery.create","delivery.update_spec","delivery.approve_task_breakdown","delivery.advance","delivery.resolve_attention","delivery.submit_verdict","settings.update","credential.reference.create","credential.reference.delete","approval.decide","worker.drain","worker.enable","publication.publish","publication.cancel"],"type":"string"},"CommandResult":{"oneOf":[{"$ref":"#/$defs/ProductSessionProjection"},{"$ref":"#/$defs/DeliveryProjection"},{"$ref":"#/$defs/SettingsProjection"},{"$ref":"#/$defs/CredentialReferenceProjection"},{"$ref":"#/$defs/ApprovalProjection"},{"$ref":"#/$defs/WorkerProjection"},{"$ref":"#/$defs/PublicationProjection"},{"$ref":"#/$defs/MutationReceipt"}]},"ControlPlaneWebSocketAcknowledgedCursor":{"additionalProperties":false,"properties":{"eventId":{"$ref":"#/$defs/ControlPlaneWebSocketEventId"},"scope":{"$ref":"#/$defs/Scope"},"sequence":{"$ref":"#/$defs/ControlPlaneWebSocketStreamPosition"},"stream":{"$ref":"#/$defs/ControlPlaneWebSocketEventStream"}},"required":["scope","stream","sequence","eventId"],"type":"object"},"ControlPlaneWebSocketActivityRecordedEvent":{"additionalProperties":false,"properties":{"actor":{"$ref":"#/$defs/Actor"},"category":{"enum":["product","runtime","approval","publication","collaboration","security"],"type":"string"},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"summary":{"maxLength":4096,"minLength":1,"type":"string"},"type":{"const":"activity.recorded.v1"}},"required":["type","actor","category","summary"],"type":"object"},"ControlPlaneWebSocketApprovalChangedEvent":{"additionalProperties":false,"properties":{"approvalId":{"$ref":"#/$defs/ApprovalId"},"decidedBy":{"oneOf":[{"$ref":"#/$defs/Actor"},{"type":"null"}]},"decisionReason":{"maxLength":4096,"minLength":1,"type":"string"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"requestedBy":{"$ref":"#/$defs/Actor"},"state":{"enum":["pending","approved","denied","expired","cancelled"],"type":"string"},"subject":{"maxLength":2048,"minLength":1,"type":"string"},"type":{"const":"approval.changed.v1"}},"required":["type","approvalId","productSessionId","state","subject","requestedBy","decidedBy"],"type":"object"},"ControlPlaneWebSocketAttentionChangedEvent":{"additionalProperties":false,"properties":{"assignedTo":{"oneOf":[{"$ref":"#/$defs/ActorId"},{"type":"null"}]},"attentionItemId":{"$ref":"#/$defs/AttentionItemId"},"category":{"enum":["credential","execution-approval","user-input","provider","verification","business"],"type":"string"},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"revision":{"$ref":"#/$defs/Revision"},"stageRunId":{"$ref":"#/$defs/StageRunId"},"status":{"enum":["blocking","resolved","obsolete"],"type":"string"},"summary":{"maxLength":4096,"minLength":1,"type":"string"},"type":{"const":"attention.changed.v1"}},"required":["type","attentionItemId","deliveryId","revision","status","category","summary","assignedTo"],"type":"object"},"ControlPlaneWebSocketAuthorizationEpoch":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"ControlPlaneWebSocketAuthorizationRevokedFrame":{"additionalProperties":false,"properties":{"authorizationEpoch":{"$ref":"#/$defs/ControlPlaneWebSocketAuthorizationEpoch"},"closeCode":{"const":4403},"subscriptionId":{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionId"},"type":{"const":"transport.authorization-revoked.v1"}},"required":["type","subscriptionId","authorizationEpoch","closeCode"],"type":"object"},"ControlPlaneWebSocketBackpressureFrame":{"additionalProperties":false,"properties":{"ackRequiredThrough":{"$ref":"#/$defs/ControlPlaneWebSocketAcknowledgedCursor"},"closeCode":{"const":4408},"disconnectAt":{"$ref":"#/$defs/Instant"},"pendingEventCount":{"minimum":256,"type":"integer"},"subscriptionId":{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionId"},"type":{"const":"transport.backpressure.v1"}},"required":["type","subscriptionId","pendingEventCount","ackRequiredThrough","disconnectAt","closeCode"],"type":"object"},"ControlPlaneWebSocketControlPlaneSource":{"additionalProperties":false,"properties":{"actor":{"$ref":"#/$defs/Actor"},"component":{"maxLength":128,"minLength":1,"type":"string"},"kind":{"const":"control-plane"}},"required":["kind","component","actor"],"type":"object"},"ControlPlaneWebSocketCursor":{"additionalProperties":false,"properties":{"eventId":{"oneOf":[{"$ref":"#/$defs/ControlPlaneWebSocketEventId"},{"type":"null"}]},"scope":{"$ref":"#/$defs/Scope"},"sequence":{"$ref":"#/$defs/ControlPlaneWebSocketStreamPosition"},"stream":{"$ref":"#/$defs/ControlPlaneWebSocketEventStream"}},"required":["scope","stream","sequence","eventId"],"type":"object"},"ControlPlaneWebSocketDeliveryChangedEvent":{"additionalProperties":false,"properties":{"changeKind":{"enum":["created","advanced","reworked","cancelled","published"],"type":"string"},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"revision":{"$ref":"#/$defs/Revision"},"type":{"const":"delivery.changed.v1"}},"required":["type","deliveryId","revision","changeKind"],"type":"object"},"ControlPlaneWebSocketDeliveryGetReloadQuery":{"const":"delivery.get"},"ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent":{"additionalProperties":false,"description":"Delivery-stage invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor.","properties":{"deliveryId":{"$ref":"#/$defs/DeliveryId"},"lastProjectionSequence":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"projectionRevision":{"$ref":"#/$defs/Revision"},"reloadQueries":{"items":false,"maxItems":2,"minItems":2,"prefixItems":[{"$ref":"#/$defs/ControlPlaneWebSocketDeliveryGetReloadQuery"},{"$ref":"#/$defs/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery"}],"type":"array"},"scopeKind":{"const":"delivery-stage"},"stageRunId":{"$ref":"#/$defs/StageRunId"},"type":{"const":"runtime-projection.invalidated.v1"}},"required":["type","scopeKind","productSessionId","deliveryId","stageRunId","projectionRevision","lastProjectionSequence","reloadQueries"],"type":"object"},"ControlPlaneWebSocketDeliveryStream":{"additionalProperties":false,"properties":{"deliveryId":{"$ref":"#/$defs/DeliveryId"},"kind":{"const":"delivery"}},"required":["kind","deliveryId"],"type":"object"},"ControlPlaneWebSocketDeliveryTaskChangedEvent":{"additionalProperties":false,"properties":{"changeKind":{"enum":["created","assigned","blocked","started","completed","cancelled"],"type":"string"},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"deliveryTaskId":{"$ref":"#/$defs/DeliveryTaskId"},"revision":{"$ref":"#/$defs/Revision"},"type":{"const":"delivery-task.changed.v1"}},"required":["type","deliveryId","deliveryTaskId","revision","changeKind"],"type":"object"},"ControlPlaneWebSocketEventFrame":{"additionalProperties":false,"properties":{"authorizationEpoch":{"$ref":"#/$defs/ControlPlaneWebSocketAuthorizationEpoch"},"event":{"$ref":"#/$defs/ControlPlaneWebSocketEventPayload"},"eventId":{"$ref":"#/$defs/ControlPlaneWebSocketEventId"},"occurredAt":{"$ref":"#/$defs/Instant"},"scope":{"$ref":"#/$defs/Scope"},"sequence":{"$ref":"#/$defs/ControlPlaneWebSocketEventSequence"},"source":{"$ref":"#/$defs/ControlPlaneWebSocketEventSource"},"stream":{"$ref":"#/$defs/ControlPlaneWebSocketEventStream"},"subscriptionId":{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionId"},"type":{"const":"event.v1"}},"required":["type","subscriptionId","eventId","scope","stream","sequence","occurredAt","source","authorizationEpoch","event"],"type":"object"},"ControlPlaneWebSocketEventId":{"pattern":"^evt_[A-Za-z0-9_-]{16,128}$","type":"string"},"ControlPlaneWebSocketEventPayload":{"oneOf":[{"$ref":"#/$defs/ControlPlaneWebSocketProductSessionChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketProductSessionMessageAppendedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketRuntimeProjectionInvalidatedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketApprovalChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketAttentionChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketDeliveryChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketDeliveryTaskChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketPresenceChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketWorkerHealthChangedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketActivityRecordedEvent"}]},"ControlPlaneWebSocketEventSequence":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"ControlPlaneWebSocketEventSource":{"oneOf":[{"$ref":"#/$defs/ControlPlaneWebSocketControlPlaneSource"},{"$ref":"#/$defs/ControlPlaneWebSocketExecutionWorkerSource"}]},"ControlPlaneWebSocketEventStream":{"oneOf":[{"$ref":"#/$defs/ControlPlaneWebSocketScopeStream"},{"$ref":"#/$defs/ControlPlaneWebSocketDeliveryStream"},{"$ref":"#/$defs/ControlPlaneWebSocketProductSessionStream"},{"$ref":"#/$defs/ControlPlaneWebSocketLeaseStream"}]},"ControlPlaneWebSocketEventType":{"enum":["activity.recorded.v1","approval.changed.v1","attention.changed.v1","delivery.changed.v1","delivery-task.changed.v1","presence.changed.v1","product-session.changed.v1","product-session.message.appended.v1","runtime-projection.invalidated.v1","worker-health.changed.v1"],"type":"string"},"ControlPlaneWebSocketExecutionWorkerSource":{"additionalProperties":false,"properties":{"codexThreadId":{"$ref":"#/$defs/CodexThreadId"},"kind":{"const":"execution-worker"},"leaseId":{"$ref":"#/$defs/LeaseId"},"workerId":{"$ref":"#/$defs/WorkerId"},"workerSessionId":{"$ref":"#/$defs/WorkerSessionId"}},"required":["kind","workerId","workerSessionId","leaseId","codexThreadId"],"type":"object"},"ControlPlaneWebSocketLeaseStream":{"additionalProperties":false,"properties":{"kind":{"const":"lease"},"leaseId":{"$ref":"#/$defs/LeaseId"},"workerId":{"$ref":"#/$defs/WorkerId"}},"required":["kind","workerId","leaseId"],"type":"object"},"ControlPlaneWebSocketPingFrame":{"additionalProperties":false,"properties":{"nonce":{"maxLength":128,"minLength":16,"type":"string"},"sentAt":{"$ref":"#/$defs/Instant"},"type":{"const":"transport.ping.v1"}},"required":["type","nonce","sentAt"],"type":"object"},"ControlPlaneWebSocketPresenceChangedEvent":{"additionalProperties":false,"properties":{"observedAt":{"$ref":"#/$defs/Instant"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"state":{"enum":["online","away","offline"],"type":"string"},"type":{"const":"presence.changed.v1"},"userId":{"$ref":"#/$defs/UserId"}},"required":["type","userId","state","observedAt"],"type":"object"},"ControlPlaneWebSocketProductSessionChangedEvent":{"additionalProperties":false,"properties":{"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"revision":{"$ref":"#/$defs/Revision"},"status":{"enum":["active","waiting-input","waiting-approval","completed","failed","cancelled"],"type":"string"},"title":{"maxLength":512,"minLength":1,"type":"string"},"type":{"const":"product-session.changed.v1"}},"required":["type","productSessionId","revision","status"],"type":"object"},"ControlPlaneWebSocketProductSessionMessageAppendedEvent":{"additionalProperties":false,"description":"Secret-safe Chat projection only; excludes raw provider, tool, credential, and Codex payloads.","properties":{"message":{"$ref":"#/$defs/ChatMessageProjection"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"type":{"const":"product-session.message.appended.v1"}},"required":["type","productSessionId","message"],"type":"object"},"ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent":{"additionalProperties":false,"description":"Chat/product-session invalidation. It has no Delivery identity or StrongFlow read cursor and reloads only its product-session runtime projection.","properties":{"lastProjectionSequence":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"projectionRevision":{"$ref":"#/$defs/Revision"},"reloadQueries":{"items":false,"maxItems":1,"minItems":1,"prefixItems":[{"$ref":"#/$defs/ControlPlaneWebSocketRuntimeProjectionGetReloadQuery"}],"type":"array"},"scopeKind":{"const":"product-session"},"type":{"const":"runtime-projection.invalidated.v1"}},"required":["type","scopeKind","productSessionId","projectionRevision","lastProjectionSequence","reloadQueries"],"type":"object"},"ControlPlaneWebSocketProductSessionStream":{"additionalProperties":false,"properties":{"kind":{"const":"product-session"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"}},"required":["kind","productSessionId"],"type":"object"},"ControlPlaneWebSocketProtocolErrorFrame":{"additionalProperties":false,"properties":{"error":{"$ref":"#/$defs/ErrorEnvelope"},"type":{"const":"transport.error.v1"}},"required":["type","error"],"type":"object"},"ControlPlaneWebSocketResetRequiredFrame":{"additionalProperties":false,"description":"Generic transport reset. The client discards partial state and selects a complete reload from its saved original subscription stream; the frame does not pretend every stream is a Delivery.","properties":{"closeCode":{"const":4409},"earliestAvailable":{"$ref":"#/$defs/ControlPlaneWebSocketCursor"},"reason":{"enum":["cursor-expired","stream-rebuilt","authorization-boundary"],"type":"string"},"subscriptionId":{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionId"},"type":{"const":"transport.reset-required.v1"}},"required":["type","subscriptionId","reason","earliestAvailable","closeCode"],"type":"object"},"ControlPlaneWebSocketResumeAcceptedFrame":{"additionalProperties":false,"properties":{"after":{"$ref":"#/$defs/ControlPlaneWebSocketAcknowledgedCursor"},"authorizationEpoch":{"$ref":"#/$defs/ControlPlaneWebSocketAuthorizationEpoch"},"replayThrough":{"$ref":"#/$defs/ControlPlaneWebSocketCursor"},"subscriptionId":{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionId"},"type":{"const":"transport.resume-accepted.v1"}},"required":["type","subscriptionId","after","replayThrough","authorizationEpoch"],"type":"object"},"ControlPlaneWebSocketRuntimeProjectionGetReloadQuery":{"const":"runtime.projection.get"},"ControlPlaneWebSocketRuntimeProjectionInvalidatedEvent":{"description":"Strictly discriminated runtime invalidation. Product-session Chat reloads runtime alone; a Delivery stage establishes one bounded StrongFlow read cut before runtime replay.","oneOf":[{"$ref":"#/$defs/ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent"},{"$ref":"#/$defs/ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent"}]},"ControlPlaneWebSocketScopeStream":{"additionalProperties":false,"properties":{"kind":{"const":"scope"}},"required":["kind"],"type":"object"},"ControlPlaneWebSocketServerFrame":{"oneOf":[{"$ref":"#/$defs/ControlPlaneWebSocketEventFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionAcceptedFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketResumeAcceptedFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketBackpressureFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketAuthorizationRevokedFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketResetRequiredFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketPingFrame"},{"$ref":"#/$defs/ControlPlaneWebSocketProtocolErrorFrame"}]},"ControlPlaneWebSocketStreamPosition":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"ControlPlaneWebSocketSubscription":{"additionalProperties":false,"properties":{"eventTypes":{"items":{"$ref":"#/$defs/ControlPlaneWebSocketEventType"},"minItems":1,"type":"array","uniqueItems":true},"scope":{"$ref":"#/$defs/Scope"},"stream":{"$ref":"#/$defs/ControlPlaneWebSocketEventStream"}},"required":["scope","stream","eventTypes"],"type":"object"},"ControlPlaneWebSocketSubscriptionAcceptedFrame":{"additionalProperties":false,"properties":{"authorizationEpoch":{"$ref":"#/$defs/ControlPlaneWebSocketAuthorizationEpoch"},"cursor":{"$ref":"#/$defs/ControlPlaneWebSocketCursor"},"limits":{"$ref":"#/$defs/ControlPlaneWebSocketTransportLimits"},"subscriptionId":{"$ref":"#/$defs/ControlPlaneWebSocketSubscriptionId"},"type":{"const":"transport.subscription-accepted.v1"}},"required":["type","subscriptionId","cursor","authorizationEpoch","limits"],"type":"object"},"ControlPlaneWebSocketSubscriptionId":{"pattern":"^sub_[A-Za-z0-9_-]{16,128}$","type":"string"},"ControlPlaneWebSocketTransportLimits":{"additionalProperties":false,"properties":{"ackDeadlineMillis":{"const":30000},"backpressureCloseCode":{"const":4408},"hardUnackedEvents":{"const":1024},"maxUnackedEvents":{"const":256}},"required":["maxUnackedEvents","hardUnackedEvents","ackDeadlineMillis","backpressureCloseCode"],"type":"object"},"ControlPlaneWebSocketWorkerHealthChangedEvent":{"additionalProperties":false,"properties":{"activeLeaseCount":{"minimum":0,"type":"integer"},"availableCapacity":{"minimum":0,"type":"integer"},"capabilityLabels":{"items":{"maxLength":128,"minLength":1,"type":"string"},"type":"array","uniqueItems":true},"observedAt":{"$ref":"#/$defs/Instant"},"status":{"enum":["registering","healthy","degraded","draining","offline"],"type":"string"},"type":{"const":"worker-health.changed.v1"},"workerId":{"$ref":"#/$defs/WorkerId"}},"required":["type","workerId","status","observedAt","activeLeaseCount","availableCapacity"],"type":"object"},"Count":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"CredentialReferenceId":{"pattern":"^crd_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"CredentialReferencePage":{"additionalProperties":false,"properties":{"items":{"items":{"$ref":"#/$defs/CredentialReferenceProjection"},"maxItems":200,"type":"array"},"kind":{"const":"credential_reference_page"}},"required":["kind","items"],"type":"object"},"CredentialReferenceProjection":{"additionalProperties":false,"description":"Secret-safe: responses never include secret material or vault locator.","properties":{"displayName":{"maxLength":500,"minLength":1,"type":"string"},"id":{"$ref":"#/$defs/CredentialReferenceId"},"providerId":{"maxLength":128,"minLength":1,"type":"string"},"revision":{"$ref":"#/$defs/Revision"},"secretState":{"enum":["available","missing","revoked"],"type":"string"},"updatedAt":{"$ref":"#/$defs/Instant"}},"required":["id","providerId","displayName","secretState","revision","updatedAt"],"type":"object"},"DeliveryAcceptanceCriterionProjection":{"additionalProperties":false,"properties":{"description":{"maxLength":65536,"minLength":1,"type":"string"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"required":{"type":"boolean"},"verificationMethod":{"oneOf":[{"maxLength":65536,"minLength":1,"type":"string"},{"type":"null"}]}},"required":["id","description","verificationMethod","required"],"type":"object"},"DeliveryAttentionOptionProjection":{"additionalProperties":false,"properties":{"description":{"maxLength":4096,"minLength":1,"type":"string"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"label":{"maxLength":500,"minLength":1,"type":"string"}},"required":["id","label","description"],"type":"object"},"DeliveryAttentionProjection":{"additionalProperties":false,"description":"Safe Attention projection. Canonical protocol context is never returned.","properties":{"assignedTo":{"oneOf":[{"maxLength":500,"minLength":1,"type":"string"},{"type":"null"}]},"blocking":{"type":"boolean"},"createdAt":{"$ref":"#/$defs/Instant"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"id":{"$ref":"#/$defs/AttentionItemId"},"options":{"items":{"$ref":"#/$defs/DeliveryAttentionOptionProjection"},"maxItems":100,"type":"array"},"resolutionSummary":{"oneOf":[{"maxLength":4096,"minLength":1,"type":"string"},{"type":"null"}]},"resolvedAt":{"oneOf":[{"$ref":"#/$defs/Instant"},{"type":"null"}]},"resolvedBy":{"oneOf":[{"maxLength":500,"minLength":1,"type":"string"},{"type":"null"}]},"stageRunId":{"oneOf":[{"$ref":"#/$defs/StageRunId"},{"type":"null"}]},"status":{"enum":["open","resolved","dismissed"],"type":"string"},"title":{"maxLength":8192,"minLength":1,"type":"string"},"type":{"enum":["requirement_question","decision_required","verification_blocked","scope_change","delivery_approval"],"type":"string"}},"required":["id","deliverySpecId","stageRunId","type","title","options","assignedTo","blocking","status","resolutionSummary","resolvedBy","createdAt","resolvedAt"],"type":"object"},"DeliveryCriterionResultProjection":{"additionalProperties":false,"properties":{"criterionId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"evaluatedAt":{"$ref":"#/$defs/Instant"},"evidenceRefs":{"items":{"$ref":"#/$defs/EvidenceId"},"maxItems":1000,"type":"array","uniqueItems":true},"explanation":{"maxLength":65536,"minLength":1,"type":"string"},"resultId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"verdict":{"enum":["pass","fail","inconclusive","infra_error"],"type":"string"}},"required":["resultId","criterionId","verdict","evidenceRefs","explanation","evaluatedAt"],"type":"object"},"DeliveryDetailProjection":{"additionalProperties":false,"description":"StrongFlow detail read model. It is a closed projection, not a mutable Delivery entity.","properties":{"attention":{"items":{"$ref":"#/$defs/DeliveryAttentionProjection"},"maxItems":1000,"type":"array"},"currentCandidate":{"oneOf":[{"$ref":"#/$defs/FrozenCandidateSummaryProjection"},{"type":"null"}]},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"deliveryRevision":{"$ref":"#/$defs/Revision"},"evidence":{"items":{"$ref":"#/$defs/DeliveryEvidenceProjection"},"maxItems":1000,"type":"array"},"kind":{"const":"delivery_detail"},"ownership":{"$ref":"#/$defs/DeliveryOwnershipProjection"},"publication":{"oneOf":[{"$ref":"#/$defs/PublicationProjection"},{"type":"null"}]},"readCursor":{"$ref":"#/$defs/StrongFlowReadCursor"},"requirements":{"$ref":"#/$defs/DeliveryRequirementsProjection"},"schemaVersion":{"$ref":"#/$defs/SchemaVersion"},"solutionReview":{"oneOf":[{"$ref":"#/$defs/SolutionReviewProjection"},{"type":"null"}]},"stages":{"items":{"$ref":"#/$defs/DeliveryStageProjection"},"maxItems":1000,"type":"array"},"status":{"$ref":"#/$defs/DeliveryStatus"},"tasks":{"items":{"$ref":"#/$defs/DeliveryTaskDetailProjection"},"maxItems":1000,"type":"array"},"verdict":{"oneOf":[{"$ref":"#/$defs/DeliveryVerdictProjection"},{"type":"null"}]}},"required":["kind","schemaVersion","readCursor","deliveryId","deliveryRevision","ownership","status","requirements","solutionReview","stages","tasks","attention","evidence","currentCandidate","verdict","publication"],"type":"object"},"DeliveryEvidenceProjection":{"additionalProperties":false,"description":"Evidence stores a bounded source reference, never copied runtime logs or command output.","properties":{"candidateRef":{"pattern":"^git-candidate:sha256:[0-9a-f]{64}$","type":"string"},"createdAt":{"$ref":"#/$defs/Instant"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"deliverySpecRevision":{"$ref":"#/$defs/Revision"},"id":{"$ref":"#/$defs/EvidenceId"},"sessionBindingId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"sourceRef":{"maxLength":1024,"minLength":1,"type":"string"},"stageRunId":{"$ref":"#/$defs/StageRunId"},"type":{"enum":["test","command","diff","file","commit","pull_request","runtime_event","review_finding"],"type":"string"}},"required":["id","deliverySpecId","deliverySpecRevision","stageRunId","sessionBindingId","candidateRef","type","sourceRef","createdAt"],"type":"object"},"DeliveryId":{"pattern":"^dlv_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"DeliveryOwnershipProjection":{"additionalProperties":false,"properties":{"organizationId":{"$ref":"#/$defs/OrganizationId"},"projectId":{"$ref":"#/$defs/ProjectId"},"repositoryId":{"$ref":"#/$defs/RepositoryId"},"workspaceId":{"$ref":"#/$defs/WorkspaceId"}},"required":["organizationId","workspaceId","projectId","repositoryId"],"type":"object"},"DeliveryPage":{"additionalProperties":false,"properties":{"items":{"items":{"$ref":"#/$defs/DeliveryProjection"},"maxItems":200,"type":"array"},"kind":{"const":"delivery_page"}},"required":["kind","items"],"type":"object"},"DeliveryProjection":{"additionalProperties":false,"properties":{"activeStageRunId":{"anyOf":[{"$ref":"#/$defs/StageRunId"},{"type":"null"}]},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"openAttentionCount":{"$ref":"#/$defs/Count"},"ownership":{"$ref":"#/$defs/DeliveryOwnershipProjection"},"revision":{"$ref":"#/$defs/Revision"},"schemaVersion":{"$ref":"#/$defs/SchemaVersion"},"status":{"$ref":"#/$defs/DeliveryStatus"},"taskCounts":{"$ref":"#/$defs/DeliveryTaskCountsProjection"},"title":{"maxLength":500,"minLength":1,"type":"string"},"updatedAt":{"$ref":"#/$defs/Instant"}},"required":["schemaVersion","deliveryId","revision","ownership","title","status","taskCounts","activeStageRunId","openAttentionCount","updatedAt"],"type":"object"},"DeliveryRepositoryProjection":{"additionalProperties":false,"properties":{"kind":{"enum":["local-git","github"],"type":"string"},"locator":{"maxLength":4096,"minLength":1,"type":"string"}},"required":["kind","locator"],"type":"object"},"DeliveryRequirementsProjection":{"additionalProperties":false,"properties":{"acceptanceCriteria":{"items":{"$ref":"#/$defs/DeliveryAcceptanceCriterionProjection"},"maxItems":1000,"minItems":1,"type":"array"},"baseRevision":{"maxLength":4096,"minLength":1,"type":"string"},"constraints":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":1000,"type":"array"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"deliverySpecRevision":{"$ref":"#/$defs/Revision"},"goal":{"maxLength":65536,"minLength":1,"type":"string"},"maxReworkAttempts":{"maximum":100,"minimum":0,"type":"integer"},"outOfScope":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":1000,"type":"array"},"publicationTarget":{"oneOf":[{"$ref":"#/$defs/PublicationTarget"},{"type":"null"}]},"repository":{"$ref":"#/$defs/DeliveryRepositoryProjection"},"scope":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":1000,"type":"array"},"sourceRef":{"oneOf":[{"$ref":"#/$defs/DeliverySourceIssueProjection"},{"type":"null"}]},"title":{"maxLength":500,"minLength":1,"type":"string"}},"required":["deliverySpecId","deliverySpecRevision","title","goal","scope","outOfScope","constraints","acceptanceCriteria","sourceRef","publicationTarget","repository","baseRevision","maxReworkAttempts"],"type":"object"},"DeliverySourceIssueProjection":{"additionalProperties":false,"properties":{"kind":{"const":"issue"},"number":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"provider":{"const":"github"},"repository":{"pattern":"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$","type":"string"}},"required":["provider","kind","repository","number"],"type":"object"},"DeliveryStageProjection":{"additionalProperties":false,"description":"Human review stages never receive an ExecutionJob SessionBinding. Every Codex StageRun has its ProductSession/ExecutionJob binding; only WorkerSession/CodexThread attachment may remain pending.","oneOf":[{"properties":{"actorType":{"const":"human"},"sessionBinding":{"type":"null"}}},{"properties":{"actorType":{"const":"codex"},"sessionBinding":{"$ref":"#/$defs/DeliveryStageSessionBindingProjection"}}}],"properties":{"actorType":{"enum":["codex","human"],"type":"string"},"attempt":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"deliveryTaskId":{"oneOf":[{"$ref":"#/$defs/DeliveryTaskId"},{"type":"null"}]},"finishedAt":{"oneOf":[{"$ref":"#/$defs/Instant"},{"type":"null"}]},"id":{"$ref":"#/$defs/StageRunId"},"role":{"maxLength":500,"minLength":1,"type":"string"},"sessionBinding":{"oneOf":[{"$ref":"#/$defs/DeliveryStageSessionBindingProjection"},{"type":"null"}]},"stage":{"enum":["clarifying","planning","plan-review","executing","verifying","reworking","delivery-review"],"type":"string"},"startedAt":{"$ref":"#/$defs/Instant"},"status":{"enum":["running","waiting","succeeded","failed","cancelled"],"type":"string"}},"required":["id","deliveryTaskId","stage","actorType","role","status","attempt","startedAt","finishedAt","sessionBinding"],"type":"object"},"DeliveryStageSessionBindingProjection":{"additionalProperties":false,"description":"A ProductSession/ExecutionJob binding remains visible before Worker/Codex attachment; a CodexThread is never present without its WorkerSession.","oneOf":[{"properties":{"codexThreadId":{"type":"null"}}},{"properties":{"codexThreadId":{"$ref":"#/$defs/CodexThreadId"},"workerSessionId":{"$ref":"#/$defs/WorkerSessionId"}}}],"properties":{"bindingId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"boundAt":{"$ref":"#/$defs/Instant"},"codexThreadId":{"oneOf":[{"$ref":"#/$defs/CodexThreadId"},{"type":"null"}]},"executionJobId":{"$ref":"#/$defs/ExecutionJobId"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"workerSessionId":{"oneOf":[{"$ref":"#/$defs/WorkerSessionId"},{"type":"null"}]}},"required":["bindingId","productSessionId","executionJobId","workerSessionId","codexThreadId","boundAt"],"type":"object"},"DeliveryStatus":{"enum":["draft","clarifying","ready","planning","plan-review","executing","verifying","reworking","needs-attention","ready-to-deliver","delivered"],"type":"string"},"DeliveryTaskCountsProjection":{"additionalProperties":false,"properties":{"active":{"$ref":"#/$defs/Count"},"blocked":{"$ref":"#/$defs/Count"},"completed":{"$ref":"#/$defs/Count"},"failed":{"$ref":"#/$defs/Count"},"pending":{"$ref":"#/$defs/Count"},"total":{"$ref":"#/$defs/Count"},"verifying":{"$ref":"#/$defs/Count"}},"required":["total","pending","active","blocked","verifying","completed","failed"],"type":"object"},"DeliveryTaskDetailProjection":{"additionalProperties":false,"properties":{"acceptanceCriterionIds":{"items":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"maxItems":1000,"minItems":1,"type":"array","uniqueItems":true},"blockedByTaskIds":{"items":{"$ref":"#/$defs/DeliveryTaskId"},"maxItems":1000,"type":"array","uniqueItems":true},"evidenceRefs":{"items":{"$ref":"#/$defs/EvidenceId"},"maxItems":1000,"type":"array","uniqueItems":true},"goal":{"maxLength":65536,"minLength":1,"type":"string"},"id":{"$ref":"#/$defs/DeliveryTaskId"},"owner":{"oneOf":[{"maxLength":500,"minLength":1,"type":"string"},{"type":"null"}]},"stageRunIds":{"items":{"$ref":"#/$defs/StageRunId"},"maxItems":1000,"type":"array","uniqueItems":true},"status":{"$ref":"#/$defs/DeliveryTaskStatus"},"title":{"maxLength":500,"minLength":1,"type":"string"}},"required":["id","title","goal","acceptanceCriterionIds","blockedByTaskIds","owner","status","stageRunIds","evidenceRefs"],"type":"object"},"DeliveryTaskId":{"pattern":"^dtk_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"DeliveryTaskProposalProjection":{"additionalProperties":false,"description":"One ordered planner task proposal sealed into reviewSetSha256. Approval promotes these exact fields with owner null and status pending; planner-supplied ownership and HTTP replacement task content are rejected.","properties":{"acceptanceCriterionIds":{"items":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"maxItems":200,"minItems":1,"type":"array","uniqueItems":true},"blockedByTaskIds":{"items":{"$ref":"#/$defs/DeliveryTaskId"},"maxItems":200,"type":"array","uniqueItems":true},"goal":{"maxLength":65536,"minLength":1,"type":"string"},"id":{"$ref":"#/$defs/DeliveryTaskId"},"title":{"maxLength":256,"minLength":1,"type":"string"}},"required":["id","title","goal","acceptanceCriterionIds","blockedByTaskIds"],"type":"object"},"DeliveryTaskStatus":{"enum":["pending","active","blocked","verifying","completed","failed"],"type":"string"},"DeliveryVerdictProjection":{"additionalProperties":false,"properties":{"candidateRef":{"pattern":"^git-candidate:sha256:[0-9a-f]{64}$","type":"string"},"criteria":{"items":{"$ref":"#/$defs/DeliveryCriterionResultProjection"},"maxItems":1000,"minItems":1,"type":"array"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"deliverySpecRevision":{"$ref":"#/$defs/Revision"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"producedAt":{"$ref":"#/$defs/Instant"},"status":{"enum":["pass","fail","inconclusive","infra_error"],"type":"string"},"unresolvedFindings":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":1000,"type":"array"}},"required":["id","deliverySpecId","deliverySpecRevision","candidateRef","status","criteria","unresolvedFindings","producedAt"],"type":"object"},"Error":{"oneOf":[{"$ref":"#/$defs/TerminalError"},{"$ref":"#/$defs/RetryableError"}]},"ErrorDetails":{"additionalProperties":{"$ref":"#/$defs/ErrorDetailValue"},"description":"Machine-readable error facts. Authority-sensitive property names are rejected recursively at the public boundary.","propertyNames":{"not":{"enum":["accessToken","agentGraph","apiKey","codexPlan","database","databaseRow","deliveryPatch","deliveryVerdict","password","providerCredential","rawProviderRequest","rawProviderResponse","secret","secretMaterial","socketPath","sql","table","toolPayload","turn","vaultLocator"]}},"type":"object"},"ErrorDetailValue":{"description":"A recursive JSON value whose object branches apply the public error redaction rules.","oneOf":[{"type":"null"},{"type":"boolean"},{"type":"number"},{"type":"string"},{"items":{"$ref":"#/$defs/ErrorDetailValue"},"type":"array"},{"$ref":"#/$defs/ErrorDetails"}]},"ErrorEnvelope":{"additionalProperties":false,"properties":{"error":{"$ref":"#/$defs/Error"},"requestId":{"$ref":"#/$defs/RequestId"},"schemaVersion":{"$ref":"#/$defs/SchemaVersion"}},"required":["schemaVersion","requestId","error"],"type":"object"},"EvidenceId":{"pattern":"^evd_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ExecutionJobId":{"description":"Identity of one scheduler-owned execution job.","pattern":"^job_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"FrozenCandidateSummaryProjection":{"additionalProperties":false,"description":"Bounded current candidate identity. Changed paths, hunks, and diff bytes require a separate authorized detail endpoint.","properties":{"candidateCommitId":{"pattern":"^[0-9a-f]{40,64}$","type":"string"},"candidateRef":{"pattern":"^git-candidate:sha256:[0-9a-f]{64}$","type":"string"},"candidateTreeId":{"pattern":"^[0-9a-f]{40,64}$","type":"string"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"deliverySpecRevision":{"$ref":"#/$defs/Revision"},"diffSha256":{"$ref":"#/$defs/Sha256Digest"},"frozenAt":{"$ref":"#/$defs/Instant"},"producerSessionBindingId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"producerStageRunId":{"$ref":"#/$defs/StageRunId"}},"required":["candidateRef","deliverySpecId","deliverySpecRevision","producerStageRunId","producerSessionBindingId","candidateCommitId","candidateTreeId","diffSha256","frozenAt"],"type":"object"},"GitHubRepositorySlug":{"description":"GitHub owner/repository without URL syntax, userinfo, query, fragment, or credentials.","maxLength":140,"minLength":3,"pattern":"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9._-])?$","type":"string"},"Instant":{"format":"date-time","pattern":"^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$","type":"string"},"LeaseId":{"pattern":"^lse_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ModelRoute":{"additionalProperties":false,"properties":{"credentialReferenceId":{"$ref":"#/$defs/CredentialReferenceId"},"modelId":{"maxLength":256,"minLength":1,"type":"string"},"providerId":{"maxLength":128,"minLength":1,"type":"string"}},"required":["providerId","modelId","credentialReferenceId"],"type":"object"},"MutationReceipt":{"additionalProperties":false,"properties":{"resourceKind":{"enum":["product_session","delivery","settings","credential_reference","approval","worker","publication"],"type":"string"},"revision":{"$ref":"#/$defs/Revision"}},"required":["resourceKind","revision"],"type":"object"},"OpaqueCursor":{"description":"Opaque cursor bound to scope, query, filters, and one stable snapshot.","maxLength":2048,"minLength":16,"pattern":"^[A-Za-z0-9_-]+$","type":"string"},"OrganizationId":{"pattern":"^org_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"OrganizationScope":{"additionalProperties":false,"properties":{"kind":{"const":"organization"},"organizationId":{"$ref":"#/$defs/OrganizationId"}},"required":["kind","organizationId"],"type":"object"},"PageInfo":{"additionalProperties":false,"properties":{"hasMore":{"type":"boolean"},"nextCursor":{"oneOf":[{"$ref":"#/$defs/OpaqueCursor"},{"type":"null"}]}},"required":["nextCursor","hasMore"],"type":"object"},"ProductSessionId":{"pattern":"^psn_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ProductSessionPage":{"additionalProperties":false,"properties":{"items":{"items":{"$ref":"#/$defs/ProductSessionProjection"},"maxItems":200,"type":"array"},"kind":{"const":"product_session_page"}},"required":["kind","items"],"type":"object"},"ProductSessionProjection":{"additionalProperties":false,"properties":{"id":{"$ref":"#/$defs/ProductSessionId"},"projectId":{"$ref":"#/$defs/ProjectId"},"repositoryId":{"$ref":"#/$defs/RepositoryId"},"revision":{"$ref":"#/$defs/Revision"},"state":{"enum":["idle","running","waiting_for_input","waiting_for_approval","cancelled","closed","failed"],"type":"string"},"title":{"maxLength":500,"minLength":1,"type":"string"},"updatedAt":{"$ref":"#/$defs/Instant"}},"required":["id","revision","projectId","repositoryId","title","state","updatedAt"],"type":"object"},"ProjectId":{"pattern":"^prj_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"ProjectScope":{"additionalProperties":false,"properties":{"kind":{"const":"project"},"organizationId":{"$ref":"#/$defs/OrganizationId"},"projectId":{"$ref":"#/$defs/ProjectId"},"workspaceId":{"$ref":"#/$defs/WorkspaceId"}},"required":["kind","organizationId","workspaceId","projectId"],"type":"object"},"PublicationId":{"pattern":"^pub_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"PublicationPage":{"additionalProperties":false,"properties":{"items":{"items":{"$ref":"#/$defs/PublicationProjection"},"maxItems":200,"type":"array"},"kind":{"const":"publication_page"}},"required":["kind","items"],"type":"object"},"PublicationProjection":{"additionalProperties":false,"description":"Bounded publication summary joined to one current Delivery, Spec, candidate, passing verdict, approval, and target. Remote resources use a closed GitHub identity, never an arbitrary URL or provider payload.","properties":{"approvalAttentionItemId":{"$ref":"#/$defs/AttentionItemId"},"approvedAt":{"$ref":"#/$defs/Instant"},"approvedBy":{"maxLength":500,"minLength":1,"type":"string"},"candidateRef":{"pattern":"^git-candidate:sha256:[0-9a-f]{64}$","type":"string"},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"deliverySpecRevision":{"$ref":"#/$defs/Revision"},"deliveryVerdictId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"id":{"$ref":"#/$defs/PublicationId"},"publicationSetSha256":{"$ref":"#/$defs/Sha256Digest"},"resourceRef":{"oneOf":[{"$ref":"#/$defs/PublicationResourceRef"},{"type":"null"}]},"revision":{"$ref":"#/$defs/Revision"},"state":{"enum":["pending","publishing","published","cancelled","failed"],"type":"string"},"target":{"$ref":"#/$defs/PublicationTarget"},"updatedAt":{"$ref":"#/$defs/Instant"},"verdictStatus":{"const":"pass"}},"required":["id","revision","deliveryId","deliverySpecId","deliverySpecRevision","candidateRef","deliveryVerdictId","verdictStatus","approvalAttentionItemId","approvedBy","approvedAt","publicationSetSha256","target","state","resourceRef","updatedAt"],"type":"object"},"PublicationResourceKind":{"enum":["github_issue","github_pull_request"],"type":"string"},"PublicationResourceRef":{"additionalProperties":false,"description":"Secret-safe remote publication identity. Control Plane verifies repository equals PublicationTarget.repository and resolves the link from kind plus number.","properties":{"kind":{"$ref":"#/$defs/PublicationResourceKind"},"number":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"repository":{"$ref":"#/$defs/GitHubRepositorySlug"}},"required":["kind","repository","number"],"type":"object"},"PublicationTarget":{"additionalProperties":false,"properties":{"baseBranch":{"maxLength":255,"minLength":1,"type":"string"},"headBranch":{"maxLength":255,"minLength":1,"type":"string"},"provider":{"const":"github"},"repository":{"$ref":"#/$defs/GitHubRepositorySlug"}},"required":["provider","repository","baseBranch","headBranch"],"type":"object"},"QueryName":{"enum":["session.list","session.get","session.messages.list","runtime.projection.get","delivery.list","delivery.get","settings.get","credential.reference.list","credential.reference.get","approval.list","approval.get","worker.list","worker.get","publication.list","publication.get"],"type":"string"},"QueryResult":{"oneOf":[{"$ref":"#/$defs/ProductSessionProjection"},{"$ref":"#/$defs/DeliveryDetailProjection"},{"$ref":"#/$defs/RuntimeProjectionSnapshot"},{"$ref":"#/$defs/SettingsProjection"},{"$ref":"#/$defs/CredentialReferenceProjection"},{"$ref":"#/$defs/ApprovalProjection"},{"$ref":"#/$defs/WorkerProjection"},{"$ref":"#/$defs/PublicationProjection"},{"$ref":"#/$defs/ProductSessionPage"},{"$ref":"#/$defs/ChatMessagePage"},{"$ref":"#/$defs/DeliveryPage"},{"$ref":"#/$defs/CredentialReferencePage"},{"$ref":"#/$defs/ApprovalPage"},{"$ref":"#/$defs/WorkerPage"},{"$ref":"#/$defs/PublicationPage"}]},"QueryResultResponse":{"additionalProperties":false,"properties":{"page":{"$ref":"#/$defs/PageInfo"},"query":{"$ref":"#/$defs/QueryName"},"requestId":{"$ref":"#/$defs/RequestId"},"result":{"$ref":"#/$defs/QueryResult"},"schemaVersion":{"$ref":"#/$defs/SchemaVersion"}},"required":["schemaVersion","requestId","query","result","page"],"type":"object"},"RepositoryId":{"pattern":"^rep_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"RepositoryScope":{"additionalProperties":false,"properties":{"kind":{"const":"repository"},"organizationId":{"$ref":"#/$defs/OrganizationId"},"projectId":{"$ref":"#/$defs/ProjectId"},"repositoryId":{"$ref":"#/$defs/RepositoryId"},"workspaceId":{"$ref":"#/$defs/WorkspaceId"}},"required":["kind","organizationId","workspaceId","projectId","repositoryId"],"type":"object"},"RequestId":{"pattern":"^req_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"RetryableError":{"additionalProperties":false,"properties":{"code":{"$ref":"#/$defs/RetryableErrorCode"},"details":{"$ref":"#/$defs/ErrorDetails"},"message":{"maxLength":4096,"minLength":1,"type":"string"},"retryable":{"const":true}},"required":["code","message","retryable","details"],"type":"object"},"RetryableErrorCode":{"enum":["RATE_LIMITED","READ_CURSOR_EXPIRED","SERVICE_UNAVAILABLE","TRUSTED_FACTS_UNAVAILABLE"],"type":"string"},"Revision":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"RuntimeActivityOutcome":{"enum":["observed","succeeded","task-failed","timed-out","policy-denied","infrastructure-failed","cancelled"],"type":"string"},"RuntimeActivityProjection":{"additionalProperties":false,"properties":{"activityType":{"$ref":"#/$defs/RuntimeActivityType"},"callId":{"maxLength":500,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"command":{"oneOf":[{"maxLength":4096,"minLength":1,"type":"string"},{"type":"null"}]},"exitCode":{"oneOf":[{"maximum":2147483647,"minimum":-2147483648,"type":"integer"},{"type":"null"}]},"outcome":{"$ref":"#/$defs/RuntimeActivityOutcome"},"sourceRef":{"maxLength":1024,"minLength":1,"type":"string"},"status":{"$ref":"#/$defs/RuntimeActivityStatus"}},"required":["callId","activityType","command","status","outcome","exitCode","sourceRef"],"type":"object"},"RuntimeActivityStatus":{"enum":["running","completed","failed","declined","cancelled","unknown"],"type":"string"},"RuntimeActivityType":{"enum":["command","test"],"type":"string"},"RuntimeAgentEdgeProjection":{"additionalProperties":false,"properties":{"childThreadId":{"$ref":"#/$defs/CodexThreadId"},"parentThreadId":{"$ref":"#/$defs/CodexThreadId"}},"required":["parentThreadId","childThreadId"],"type":"object"},"RuntimeAgentProjection":{"additionalProperties":false,"properties":{"nickname":{"oneOf":[{"maxLength":500,"minLength":1,"type":"string"},{"type":"null"}]},"parentThreadId":{"oneOf":[{"$ref":"#/$defs/CodexThreadId"},{"type":"null"}]},"path":{"oneOf":[{"maxLength":4096,"minLength":1,"type":"string"},{"type":"null"}]},"role":{"oneOf":[{"maxLength":500,"minLength":1,"type":"string"},{"type":"null"}]},"sourceRef":{"maxLength":1024,"minLength":1,"type":"string"},"status":{"$ref":"#/$defs/RuntimeAgentStatus"},"threadId":{"$ref":"#/$defs/CodexThreadId"}},"required":["threadId","parentThreadId","path","nickname","role","status","sourceRef"],"type":"object"},"RuntimeAgentStatus":{"enum":["unknown","waiting","running","completed","interrupted","failed","closed"],"type":"string"},"RuntimeDiffSummaryProjection":{"additionalProperties":false,"description":"Live execution exposes counts and a source reference only; paths, hunks, and unified diff bytes are excluded.","properties":{"additions":{"$ref":"#/$defs/Count"},"changedFileCount":{"$ref":"#/$defs/Count"},"deletions":{"$ref":"#/$defs/Count"},"detailsVisible":{"const":false},"sourceRef":{"maxLength":1024,"minLength":1,"type":"string"}},"required":["changedFileCount","additions","deletions","detailsVisible","sourceRef"],"type":"object"},"RuntimePlanItemProjection":{"additionalProperties":false,"properties":{"status":{"$ref":"#/$defs/RuntimePlanItemStatus"},"step":{"maxLength":8192,"minLength":1,"type":"string"}},"required":["step","status"],"type":"object"},"RuntimePlanItemStatus":{"enum":["pending","in_progress","completed"],"type":"string"},"RuntimePlanProjection":{"additionalProperties":false,"properties":{"complete":{"type":"boolean"},"explanation":{"oneOf":[{"maxLength":8192,"minLength":1,"type":"string"},{"type":"null"}]},"itemId":{"oneOf":[{"maxLength":500,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},{"type":"null"}]},"items":{"items":{"$ref":"#/$defs/RuntimePlanItemProjection"},"maxItems":200,"type":"array"},"sourceRef":{"maxLength":1024,"minLength":1,"type":"string"},"text":{"oneOf":[{"maxLength":65536,"minLength":1,"type":"string"},{"type":"null"}]}},"required":["itemId","explanation","items","text","complete","sourceRef"],"type":"object"},"RuntimeProjectionSnapshot":{"additionalProperties":false,"description":"Complete bounded typed projection used after restart, invalidation, or WebSocket reset.","oneOf":[{"properties":{"deliveryId":{"type":"null"},"readCursor":{"type":"null"},"stageRunId":{"type":"null"}}},{"properties":{"deliveryId":{"$ref":"#/$defs/DeliveryId"},"readCursor":{"$ref":"#/$defs/StrongFlowReadCursor"},"stageRunId":{"$ref":"#/$defs/StageRunId"}}}],"properties":{"deliveryId":{"oneOf":[{"$ref":"#/$defs/DeliveryId"},{"type":"null"}]},"kind":{"const":"runtime_projection"},"lastProjectionSequence":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"readCursor":{"oneOf":[{"$ref":"#/$defs/StrongFlowReadCursor"},{"type":"null"}]},"rebuiltAt":{"$ref":"#/$defs/Instant"},"revision":{"$ref":"#/$defs/Revision"},"sessions":{"items":{"$ref":"#/$defs/RuntimeSessionProjection"},"maxItems":256,"type":"array"},"stageRunId":{"oneOf":[{"$ref":"#/$defs/StageRunId"},{"type":"null"}]}},"required":["kind","revision","readCursor","productSessionId","deliveryId","stageRunId","lastProjectionSequence","sessions","rebuiltAt"],"type":"object"},"RuntimeRecoveryProjection":{"additionalProperties":false,"properties":{"failureCount":{"$ref":"#/$defs/Count"},"lastFailureSourceRef":{"oneOf":[{"maxLength":1024,"minLength":1,"type":"string"},{"type":"null"}]},"latestRecoverySourceRef":{"oneOf":[{"maxLength":1024,"minLength":1,"type":"string"},{"type":"null"}]},"recoveryCount":{"$ref":"#/$defs/Count"},"state":{"$ref":"#/$defs/RuntimeRecoveryState"}},"required":["state","failureCount","recoveryCount","lastFailureSourceRef","latestRecoverySourceRef"],"type":"object"},"RuntimeRecoveryState":{"enum":["none","required","in-progress","recovered"],"type":"string"},"RuntimeSessionProjection":{"additionalProperties":false,"description":"One deterministic StrongFlow session projection built only from an exact accepted runtime binding.","properties":{"activities":{"items":{"$ref":"#/$defs/RuntimeActivityProjection"},"maxItems":100,"type":"array"},"agentEdges":{"items":{"$ref":"#/$defs/RuntimeAgentEdgeProjection"},"maxItems":512,"type":"array"},"agents":{"items":{"$ref":"#/$defs/RuntimeAgentProjection"},"maxItems":256,"type":"array"},"asOfSequence":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"attempt":{"maximum":9007199254740991,"minimum":1,"type":"integer"},"codexThreadId":{"$ref":"#/$defs/CodexThreadId"},"deliveryTaskId":{"oneOf":[{"$ref":"#/$defs/DeliveryTaskId"},{"type":"null"}]},"diffSummary":{"oneOf":[{"$ref":"#/$defs/RuntimeDiffSummaryProjection"},{"type":"null"}]},"executionJobId":{"$ref":"#/$defs/ExecutionJobId"},"fencingToken":{"pattern":"^[1-9][0-9]{0,19}$","type":"string"},"leaseId":{"$ref":"#/$defs/LeaseId"},"plan":{"oneOf":[{"$ref":"#/$defs/RuntimePlanProjection"},{"type":"null"}]},"productSessionId":{"$ref":"#/$defs/ProductSessionId"},"recovery":{"$ref":"#/$defs/RuntimeRecoveryProjection"},"sessionBindingId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"stageRunId":{"oneOf":[{"$ref":"#/$defs/StageRunId"},{"type":"null"}]},"usage":{"oneOf":[{"$ref":"#/$defs/RuntimeUsageProjection"},{"type":"null"}]},"workerSessionId":{"$ref":"#/$defs/WorkerSessionId"}},"required":["sessionBindingId","stageRunId","deliveryTaskId","productSessionId","workerSessionId","codexThreadId","executionJobId","leaseId","attempt","fencingToken","asOfSequence","plan","agents","agentEdges","activities","usage","recovery","diffSummary"],"type":"object"},"RuntimeUsageMetricProjection":{"additionalProperties":false,"properties":{"name":{"pattern":"^[A-Za-z][A-Za-z0-9._:-]{0,99}$","type":"string"},"value":{"maximum":9007199254740991,"minimum":0,"type":"integer"}},"required":["name","value"],"type":"object"},"RuntimeUsageProjection":{"additionalProperties":false,"description":"Usage totals are sorted by metric name before publication.","properties":{"sourceRef":{"maxLength":1024,"minLength":1,"type":"string"},"totals":{"items":{"$ref":"#/$defs/RuntimeUsageMetricProjection"},"maxItems":64,"type":"array","uniqueItems":true}},"required":["totals","sourceRef"],"type":"object"},"SchemaVersion":{"const":"winwincode/v1","type":"string"},"Scope":{"oneOf":[{"$ref":"#/$defs/OrganizationScope"},{"$ref":"#/$defs/WorkspaceScope"},{"$ref":"#/$defs/ProjectScope"},{"$ref":"#/$defs/RepositoryScope"}]},"ServiceAccountActor":{"additionalProperties":false,"properties":{"id":{"$ref":"#/$defs/ServiceAccountId"},"kind":{"const":"service_account"}},"required":["kind","id"],"type":"object"},"ServiceAccountId":{"pattern":"^svc_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"SettingsProjection":{"additionalProperties":false,"properties":{"defaultModelRoute":{"oneOf":[{"$ref":"#/$defs/ModelRoute"},{"type":"null"}]},"revision":{"$ref":"#/$defs/Revision"},"workerConcurrencyLimit":{"maximum":10000,"minimum":1,"type":"integer"}},"required":["revision","defaultModelRoute","workerConcurrencyLimit"],"type":"object"},"Sha256Digest":{"pattern":"^sha256:[0-9a-f]{64}$","type":"string"},"SolutionReviewComponentProjection":{"additionalProperties":false,"properties":{"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"kind":{"enum":["component","external","data-store"],"type":"string"},"label":{"maxLength":8192,"minLength":1,"type":"string"},"repositoryPathPrefixes":{"items":{"maxLength":4096,"minLength":1,"type":"string"},"maxItems":200,"type":"array","uniqueItems":true},"responsibility":{"maxLength":8192,"minLength":1,"type":"string"},"trustBoundary":{"oneOf":[{"maxLength":8192,"minLength":1,"type":"string"},{"type":"null"}]},"unresolved":{"type":"boolean"}},"required":["id","label","responsibility","kind","trustBoundary","unresolved","repositoryPathPrefixes"],"type":"object"},"SolutionReviewConnectionProjection":{"additionalProperties":false,"properties":{"from":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"label":{"maxLength":8192,"minLength":1,"type":"string"},"to":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"}},"required":["id","from","to","label"],"type":"object"},"SolutionReviewDecision":{"enum":["approve","request_changes","reject"],"type":"string"},"SolutionReviewDiagramEdgeProjection":{"additionalProperties":false,"properties":{"from":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"label":{"maxLength":8192,"minLength":1,"type":"string"},"to":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"}},"required":["id","from","to","label"],"type":"object"},"SolutionReviewDiagramNodeProjection":{"additionalProperties":false,"properties":{"description":{"maxLength":8192,"minLength":1,"type":"string"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"kind":{"enum":["interaction","delivery-control","execution","repository","component","external","data-store","stage","decision"],"type":"string"},"label":{"maxLength":8192,"minLength":1,"type":"string"},"trustBoundary":{"oneOf":[{"maxLength":8192,"minLength":1,"type":"string"},{"type":"null"}]},"unresolved":{"type":"boolean"}},"required":["id","label","description","kind","trustBoundary","unresolved"],"type":"object"},"SolutionReviewDiagramProjection":{"additionalProperties":false,"properties":{"edges":{"items":{"$ref":"#/$defs/SolutionReviewDiagramEdgeProjection"},"maxItems":400,"type":"array"},"id":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"kind":{"enum":["system-architecture","process-flow"],"type":"string"},"nodes":{"items":{"$ref":"#/$defs/SolutionReviewDiagramNodeProjection"},"maxItems":200,"minItems":1,"type":"array"},"title":{"maxLength":8192,"minLength":1,"type":"string"}},"required":["id","kind","title","nodes","edges"],"type":"object"},"SolutionReviewProjection":{"additionalProperties":false,"description":"Current validated solution review, including pending review content and the ordered task proposals sealed into reviewSetSha256. Human review has no ExecutionJob SessionBinding.","oneOf":[{"properties":{"comments":{"type":"null"},"decision":{"type":"null"},"requestedChanges":{"type":"null"},"reviewedAt":{"type":"null"},"reviewerId":{"type":"null"},"reviewStatus":{"const":"pending"}}},{"properties":{"decision":{"const":"approve"},"requestedChanges":{"type":"null"},"reviewedAt":{"$ref":"#/$defs/Instant"},"reviewerId":{"$ref":"#/$defs/ActorId"},"reviewStatus":{"const":"approved"}}},{"properties":{"decision":{"const":"request_changes"},"requestedChanges":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":200,"minItems":1,"type":"array"},"reviewedAt":{"$ref":"#/$defs/Instant"},"reviewerId":{"$ref":"#/$defs/ActorId"},"reviewStatus":{"const":"changes_requested"}}},{"properties":{"decision":{"const":"reject"},"requestedChanges":{"type":"null"},"reviewedAt":{"$ref":"#/$defs/Instant"},"reviewerId":{"$ref":"#/$defs/ActorId"},"reviewStatus":{"const":"rejected"}}}],"properties":{"approach":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":200,"minItems":1,"type":"array"},"architectureDiagram":{"$ref":"#/$defs/SolutionReviewDiagramProjection"},"attentionItemId":{"$ref":"#/$defs/AttentionItemId"},"comments":{"oneOf":[{"maxLength":65536,"minLength":1,"type":"string"},{"type":"null"}]},"components":{"items":{"$ref":"#/$defs/SolutionReviewComponentProjection"},"maxItems":200,"type":"array"},"connections":{"items":{"$ref":"#/$defs/SolutionReviewConnectionProjection"},"maxItems":400,"type":"array"},"decision":{"oneOf":[{"$ref":"#/$defs/SolutionReviewDecision"},{"type":"null"}]},"deliveryId":{"$ref":"#/$defs/DeliveryId"},"deliverySpecId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"deliverySpecRevision":{"$ref":"#/$defs/Revision"},"planningSessionBindingId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"planningStageRunId":{"$ref":"#/$defs/StageRunId"},"processDiagram":{"$ref":"#/$defs/SolutionReviewDiagramProjection"},"requestedChanges":{"oneOf":[{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":200,"minItems":1,"type":"array"},{"type":"null"}]},"reviewedAt":{"oneOf":[{"$ref":"#/$defs/Instant"},{"type":"null"}]},"reviewerId":{"oneOf":[{"$ref":"#/$defs/ActorId"},{"type":"null"}]},"reviewSetSha256":{"$ref":"#/$defs/Sha256Digest"},"reviewStageRunId":{"$ref":"#/$defs/StageRunId"},"reviewStatus":{"$ref":"#/$defs/SolutionReviewStatus"},"risks":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":200,"type":"array"},"solutionId":{"maxLength":200,"minLength":1,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$","type":"string"},"summary":{"maxLength":65536,"minLength":1,"type":"string"},"taskProposals":{"description":"Canonical order is part of reviewSetSha256 and is preserved during task promotion.","items":{"$ref":"#/$defs/DeliveryTaskProposalProjection"},"maxItems":200,"minItems":1,"type":"array","uniqueItems":true},"unresolvedItems":{"items":{"maxLength":65536,"minLength":1,"type":"string"},"maxItems":200,"type":"array"}},"required":["deliveryId","deliverySpecId","deliverySpecRevision","planningStageRunId","planningSessionBindingId","reviewStageRunId","attentionItemId","reviewSetSha256","reviewStatus","decision","comments","requestedChanges","reviewerId","reviewedAt","solutionId","summary","approach","components","connections","architectureDiagram","processDiagram","risks","unresolvedItems","taskProposals"],"type":"object"},"SolutionReviewStatus":{"enum":["pending","approved","changes_requested","rejected"],"type":"string"},"StageRunId":{"pattern":"^run_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"StrongFlowReadCursor":{"additionalProperties":false,"description":"Server-issued, fully comparable StrongFlow read cut. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate.","properties":{"deliveryId":{"$ref":"#/$defs/DeliveryId"},"deliveryRevision":{"$ref":"#/$defs/Revision"},"publicationRevision":{"$ref":"#/$defs/Revision"},"runtimeAcceptedSequence":{"maximum":9007199254740991,"minimum":0,"type":"integer"},"runtimeLedgerRevision":{"$ref":"#/$defs/Revision"},"scope":{"$ref":"#/$defs/RepositoryScope"},"token":{"description":"Opaque authenticated token issued by the Control Plane for these exact read coordinates.","maxLength":2048,"minLength":32,"pattern":"^[A-Za-z0-9_-]+$","type":"string"}},"required":["token","scope","deliveryId","deliveryRevision","runtimeLedgerRevision","runtimeAcceptedSequence","publicationRevision"],"type":"object"},"SystemActor":{"additionalProperties":false,"properties":{"id":{"$ref":"#/$defs/SystemActorId"},"kind":{"const":"system"}},"required":["kind","id"],"type":"object"},"SystemActorId":{"pattern":"^sys_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"TerminalError":{"additionalProperties":false,"properties":{"code":{"$ref":"#/$defs/TerminalErrorCode"},"details":{"$ref":"#/$defs/ErrorDetails"},"message":{"maxLength":4096,"minLength":1,"type":"string"},"retryable":{"const":false}},"required":["code","message","retryable","details"],"type":"object"},"TerminalErrorCode":{"enum":["INVALID_REQUEST","AUTHENTICATION_REQUIRED","PERMISSION_DENIED","RESOURCE_NOT_FOUND","IDEMPOTENCY_CONFLICT","REVISION_CONFLICT","CANDIDATE_STALE","WRONG_STATE","INTERNAL_ERROR"],"type":"string"},"UserActor":{"additionalProperties":false,"properties":{"id":{"$ref":"#/$defs/UserId"},"kind":{"const":"user"}},"required":["kind","id"],"type":"object"},"UserId":{"pattern":"^usr_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"WorkerId":{"pattern":"^wrk_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"WorkerPage":{"additionalProperties":false,"properties":{"items":{"items":{"$ref":"#/$defs/WorkerProjection"},"maxItems":200,"type":"array"},"kind":{"const":"worker_page"}},"required":["kind","items"],"type":"object"},"WorkerProjection":{"additionalProperties":false,"properties":{"capacity":{"maximum":10000,"minimum":0,"type":"integer"},"id":{"$ref":"#/$defs/WorkerId"},"lastHeartbeatAt":{"oneOf":[{"$ref":"#/$defs/Instant"},{"type":"null"}]},"revision":{"$ref":"#/$defs/Revision"},"state":{"enum":["enabled","draining","offline"],"type":"string"}},"required":["id","revision","state","capacity","lastHeartbeatAt"],"type":"object"},"WorkerSessionId":{"pattern":"^wsn_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"WorkspaceId":{"pattern":"^wsp_[0-9A-HJKMNP-TV-Z]{26}$","type":"string"},"WorkspaceScope":{"additionalProperties":false,"properties":{"kind":{"const":"workspace"},"organizationId":{"$ref":"#/$defs/OrganizationId"},"workspaceId":{"$ref":"#/$defs/WorkspaceId"}},"required":["kind","organizationId","workspaceId"],"type":"object"}}
 
 import type {
   Actor,
@@ -47,7 +47,8 @@ const MAX_ERROR_ENTRIES = 256
 const MAX_ERROR_STRING_CHARACTERS = 4_096
 const MAX_REMEMBERED_EVENTS = 2_048
 const MAX_READ_CURSOR_RESTARTS = 2
-const FORBIDDEN_ERROR_KEYS = [
+const MAX_SCHEMA_DEPTH = 128
+const FORBIDDEN_ERROR_KEY_FRAGMENTS = [
   'authorization',
   'body',
   'credential',
@@ -59,6 +60,7 @@ const FORBIDDEN_ERROR_KEYS = [
   'token',
   'url',
 ] as const
+const PROTOTYPE_CONTROL_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
 export interface ControlPlaneClientErrorFields {
   readonly code: string
@@ -126,10 +128,127 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function hasExactKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).toSorted()
-  return actual.length === expected.length
-    && actual.every((key, index) => key === expected.toSorted()[index])
+function schemaRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return isRecord(value) ? value : null
+}
+
+function schemaDefinition(name: string): Readonly<Record<string, unknown>> | null {
+  return schemaRecord(CONTROL_PLANE_RUNTIME_SCHEMAS[name])
+}
+
+function canonicalValueEquals(left: unknown, right: unknown): boolean {
+  return stableIdentity(left) === stableIdentity(right)
+}
+
+function matchesSchemaNode(schemaValue: unknown, value: unknown, depth = 0): boolean {
+  if (schemaValue === true) return true
+  if (schemaValue === false || depth > MAX_SCHEMA_DEPTH) return false
+  const schema = schemaRecord(schemaValue)
+  if (schema === null) return false
+
+  if (typeof schema.$ref === 'string') {
+    const name = schema.$ref.split('/').at(-1)
+    const definition = name === undefined ? null : schemaDefinition(name)
+    if (definition === null || !matchesSchemaNode(definition, value, depth + 1)) return false
+  }
+  if (Object.hasOwn(schema, 'const') && !canonicalValueEquals(value, schema.const)) return false
+  if (
+    Array.isArray(schema.enum)
+    && !schema.enum.some(candidate => canonicalValueEquals(value, candidate))
+  ) return false
+  if (
+    Array.isArray(schema.allOf)
+    && !schema.allOf.every(branch => matchesSchemaNode(branch, value, depth + 1))
+  ) return false
+  if (
+    Array.isArray(schema.anyOf)
+    && !schema.anyOf.some(branch => matchesSchemaNode(branch, value, depth + 1))
+  ) return false
+  if (Array.isArray(schema.oneOf)) {
+    let matches = 0
+    for (const branch of schema.oneOf) {
+      if (matchesSchemaNode(branch, value, depth + 1)) matches += 1
+    }
+    if (matches !== 1) return false
+  }
+  if (Object.hasOwn(schema, 'not') && matchesSchemaNode(schema.not, value, depth + 1)) return false
+
+  if (schema.type === 'null') return value === null
+  if (schema.type === 'boolean' && typeof value !== 'boolean') return false
+  if (schema.type === 'string') {
+    if (typeof value !== 'string') return false
+    const length = [...value].length
+    if (typeof schema.minLength === 'number' && length < schema.minLength) return false
+    if (typeof schema.maxLength === 'number' && length > schema.maxLength) return false
+    if (typeof schema.pattern === 'string') {
+      try {
+        if (!new RegExp(schema.pattern, 'u').test(value)) return false
+      } catch {
+        return false
+      }
+    }
+  }
+  if (schema.type === 'number' || schema.type === 'integer') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return false
+    if (schema.type === 'integer' && !Number.isSafeInteger(value)) return false
+    if (typeof schema.minimum === 'number' && value < schema.minimum) return false
+    if (typeof schema.maximum === 'number' && value > schema.maximum) return false
+  }
+  if (schema.type === 'array') {
+    if (!Array.isArray(value)) return false
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) return false
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return false
+    if (schema.uniqueItems === true) {
+      const identities = new Set(value.map(stableIdentity))
+      if (identities.size !== value.length) return false
+    }
+    const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : []
+    for (let index = 0; index < Math.min(prefixItems.length, value.length); index += 1) {
+      if (!matchesSchemaNode(prefixItems[index], value[index], depth + 1)) return false
+    }
+    if (schema.items === false && value.length > prefixItems.length) return false
+    if (schemaRecord(schema.items) !== null) {
+      for (let index = prefixItems.length; index < value.length; index += 1) {
+        if (!matchesSchemaNode(schema.items, value[index], depth + 1)) return false
+      }
+    }
+  }
+
+  const objectShape = schema.type === 'object'
+    || schema.properties !== undefined
+    || schema.required !== undefined
+    || schema.additionalProperties !== undefined
+  if (objectShape) {
+    if (!isRecord(value)) return false
+    const properties = schemaRecord(schema.properties) ?? {}
+    if (
+      Array.isArray(schema.required)
+      && !schema.required.every(key => typeof key === 'string' && Object.hasOwn(value, key))
+    ) return false
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (Object.hasOwn(value, key) && !matchesSchemaNode(propertySchema, value[key], depth + 1)) {
+        return false
+      }
+    }
+    const extraKeys = Object.keys(value).filter(key => !Object.hasOwn(properties, key))
+    if (schema.additionalProperties === false && extraKeys.length > 0) return false
+    if (schemaRecord(schema.additionalProperties) !== null) {
+      for (const key of extraKeys) {
+        if (!matchesSchemaNode(schema.additionalProperties, value[key], depth + 1)) return false
+      }
+    }
+    if (schema.propertyNames !== undefined) {
+      for (const key of Object.keys(value)) {
+        if (!matchesSchemaNode(schema.propertyNames, key, depth + 1)) return false
+      }
+    }
+  }
+  return true
+}
+
+function matchesCanonicalSchema(name: string, value: unknown): boolean {
+  const definition = schemaDefinition(name)
+  return definition !== null && matchesSchemaNode(definition, value)
 }
 
 function sanitizeDetail(value: unknown, depth = 0, entries = 0): SanitizedDetail {
@@ -162,21 +281,23 @@ function sanitizeDetail(value: unknown, depth = 0, entries = 0): SanitizedDetail
     return { valid: true, value: result, entries: consumed }
   }
   if (!isRecord(value)) return { valid: false, value: null, entries }
-  const result: Record<string, ErrorDetailValue> = {}
+  const entriesResult: Array<readonly [string, ErrorDetailValue]> = []
   let consumed = entries + 1
   for (const [key, item] of Object.entries(value)) {
     const normalized = key.toLowerCase()
     if (
       key.length === 0
       || key.length > 128
-      || FORBIDDEN_ERROR_KEYS.some(forbidden => normalized.includes(forbidden))
+      || CANONICAL_FORBIDDEN_ERROR_KEYS.has(key)
+      || PROTOTYPE_CONTROL_KEYS.has(normalized)
+      || FORBIDDEN_ERROR_KEY_FRAGMENTS.some(forbidden => normalized.includes(forbidden))
     ) return { valid: false, value: null, entries: consumed }
     const sanitized = sanitizeDetail(item, depth + 1, consumed)
     if (!sanitized.valid) return { valid: false, value: null, entries: sanitized.entries }
-    result[key] = sanitized.value
+    entriesResult.push([key, sanitized.value])
     consumed = sanitized.entries
   }
-  return { valid: true, value: result, entries: consumed }
+  return { valid: true, value: Object.fromEntries(entriesResult), entries: consumed }
 }
 
 function invalidResponse(requestId: RequestId | null): ControlPlaneClientError {
@@ -199,26 +320,14 @@ function clientFailure(
 }
 
 function parseErrorEnvelope(value: unknown, expectedRequestId: RequestId | null): ControlPlaneClientError {
-  if (!isRecord(value) || !hasExactKeys(value, ['error', 'requestId', 'schemaVersion'])) {
+  if (!matchesCanonicalSchema('ErrorEnvelope', value) || !isRecord(value)) {
     return invalidResponse(expectedRequestId)
   }
   if (
-    value.schemaVersion !== 'winwincode/v1'
-    || typeof value.requestId !== 'string'
-    || (expectedRequestId !== null && value.requestId !== expectedRequestId)
+    expectedRequestId !== null && value.requestId !== expectedRequestId
     || !isRecord(value.error)
-    || !hasExactKeys(value.error, ['code', 'details', 'message', 'retryable'])
   ) return invalidResponse(expectedRequestId)
   const error = value.error
-  if (
-    typeof error.code !== 'string'
-    || !CANONICAL_ERROR_CODES.has(error.code)
-    || typeof error.message !== 'string'
-    || error.message.length === 0
-    || error.message.length > 2_048
-    || typeof error.retryable !== 'boolean'
-    || error.retryable !== RETRYABLE_ERROR_CODES.has(error.code)
-  ) return invalidResponse(expectedRequestId)
   const details = sanitizeDetail(error.details)
   if (!details.valid || !isRecord(details.value)) return invalidResponse(expectedRequestId)
   const envelope = value as unknown as ErrorEnvelope
@@ -278,31 +387,13 @@ function parseCommandResponse(
   ) throw invalidResponse(request.requestId)
   if (value.outcome === 'accepted') {
     if (
-      !hasExactKeys(value, [
-        'acceptedAt',
-        'command',
-        'currentRevision',
-        'outcome',
-        'requestId',
-        'schemaVersion',
-      ])
-      || typeof value.acceptedAt !== 'string'
+      !matchesCanonicalSchema('CommandAcceptedResponse', value)
     ) throw invalidResponse(request.requestId)
     return value as unknown as CommandAcceptedResponse
   }
   if (
     value.outcome !== 'completed'
-    || !hasExactKeys(value, [
-      'command',
-      'currentRevision',
-      'outcome',
-      'previousRevision',
-      'requestId',
-      'result',
-      'schemaVersion',
-    ])
-    || !Number.isSafeInteger(value.previousRevision)
-    || !isRecord(value.result)
+    || !matchesCanonicalSchema('CommandCompletedResponse', value)
   ) throw invalidResponse(request.requestId)
   return value as unknown as CommandCompletedResponse
 }
@@ -310,15 +401,10 @@ function parseCommandResponse(
 function parseQueryResponse(value: unknown, request: QueryRequest): QueryResultResponse {
   if (
     !isRecord(value)
-    || !hasExactKeys(value, ['page', 'query', 'requestId', 'result', 'schemaVersion'])
+    || !matchesCanonicalSchema('QueryResultResponse', value)
     || value.schemaVersion !== 'winwincode/v1'
     || value.requestId !== request.requestId
     || value.query !== request.query
-    || !isRecord(value.result)
-    || !isRecord(value.page)
-    || !hasExactKeys(value.page, ['hasMore', 'nextCursor'])
-    || typeof value.page.hasMore !== 'boolean'
-    || !(value.page.nextCursor === null || typeof value.page.nextCursor === 'string')
   ) throw invalidResponse(request.requestId)
   return value as unknown as QueryResultResponse
 }
@@ -442,6 +528,7 @@ export interface ControlPlaneWebSocketClient {
 }
 
 type ConnectMode = 'subscribe' | 'resume'
+type ConnectionPhase = 'idle' | 'awaiting-subscribe' | 'awaiting-resume' | 'active'
 
 function defaultSocketFactory(url: string): ControlPlaneWebSocketConnection {
   const candidate: unknown = Reflect.get(globalThis, 'WebSocket')
@@ -466,128 +553,8 @@ function stableIdentity(value: unknown): string {
   return JSON.stringify(stableJsonValue(value))
 }
 
-function isSocketCursor(value: unknown, eventIdMayBeNull: boolean): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ['eventId', 'scope', 'sequence', 'stream'])
-    && isRecord(value.scope)
-    && isRecord(value.stream)
-    && typeof value.sequence === 'number'
-    && Number.isSafeInteger(value.sequence)
-    && value.sequence >= 0
-    && (typeof value.eventId === 'string' || (eventIdMayBeNull && value.eventId === null))
-}
-
 function parseServerFrame(value: unknown): ControlPlaneWebSocketServerFrame {
-  if (!isRecord(value) || typeof value.type !== 'string') {
-    throw clientFailure('INVALID_WEBSOCKET_FRAME', 'The Control Plane sent an invalid event frame.')
-  }
-  let valid = false
-  switch (value.type) {
-    case 'event.v1':
-      valid = hasExactKeys(value, [
-        'authorizationEpoch',
-        'event',
-        'eventId',
-        'occurredAt',
-        'scope',
-        'sequence',
-        'source',
-        'stream',
-        'subscriptionId',
-        'type',
-      ])
-        && typeof value.subscriptionId === 'string'
-        && typeof value.eventId === 'string'
-        && isRecord(value.scope)
-        && isRecord(value.stream)
-        && typeof value.sequence === 'number'
-        && Number.isSafeInteger(value.sequence)
-        && value.sequence >= 0
-        && typeof value.occurredAt === 'string'
-        && isRecord(value.source)
-        && Number.isSafeInteger(value.authorizationEpoch)
-        && isRecord(value.event)
-        && typeof value.event.type === 'string'
-      break
-    case 'transport.subscription-accepted.v1':
-      valid = hasExactKeys(value, [
-        'authorizationEpoch',
-        'cursor',
-        'limits',
-        'subscriptionId',
-        'type',
-      ])
-        && typeof value.subscriptionId === 'string'
-        && isSocketCursor(value.cursor, true)
-        && Number.isSafeInteger(value.authorizationEpoch)
-        && isRecord(value.limits)
-      break
-    case 'transport.resume-accepted.v1':
-      valid = hasExactKeys(value, [
-        'after',
-        'authorizationEpoch',
-        'replayThrough',
-        'subscriptionId',
-        'type',
-      ])
-        && typeof value.subscriptionId === 'string'
-        && isSocketCursor(value.after, false)
-        && isSocketCursor(value.replayThrough, true)
-        && Number.isSafeInteger(value.authorizationEpoch)
-      break
-    case 'transport.backpressure.v1':
-      valid = hasExactKeys(value, [
-        'ackRequiredThrough',
-        'closeCode',
-        'disconnectAt',
-        'pendingEventCount',
-        'subscriptionId',
-        'type',
-      ])
-        && typeof value.subscriptionId === 'string'
-        && value.closeCode === 4408
-        && typeof value.disconnectAt === 'string'
-        && Number.isSafeInteger(value.pendingEventCount)
-        && isSocketCursor(value.ackRequiredThrough, false)
-      break
-    case 'transport.authorization-revoked.v1':
-      valid = hasExactKeys(value, [
-        'authorizationEpoch',
-        'closeCode',
-        'subscriptionId',
-        'type',
-      ])
-        && typeof value.subscriptionId === 'string'
-        && Number.isSafeInteger(value.authorizationEpoch)
-        && value.closeCode === 4403
-      break
-    case 'transport.reset-required.v1':
-      valid = hasExactKeys(value, [
-        'closeCode',
-        'earliestAvailable',
-        'reason',
-        'subscriptionId',
-        'type',
-      ])
-        && typeof value.subscriptionId === 'string'
-        && ['cursor-expired', 'stream-rebuilt', 'authorization-boundary'].includes(
-          typeof value.reason === 'string' ? value.reason : '',
-        )
-        && isSocketCursor(value.earliestAvailable, true)
-        && value.closeCode === 4409
-      break
-    case 'transport.ping.v1':
-      valid = hasExactKeys(value, ['nonce', 'sentAt', 'type'])
-        && typeof value.nonce === 'string'
-        && value.nonce.length >= 16
-        && value.nonce.length <= 128
-        && typeof value.sentAt === 'string'
-      break
-    case 'transport.error.v1':
-      valid = hasExactKeys(value, ['error', 'type']) && isRecord(value.error)
-      break
-  }
-  if (!valid) throw clientFailure(
+  if (!matchesCanonicalSchema('ControlPlaneWebSocketServerFrame', value)) throw clientFailure(
     'INVALID_WEBSOCKET_FRAME',
     'The Control Plane sent an invalid event frame.',
   )
@@ -615,6 +582,51 @@ function eventCursor(frame: ControlPlaneWebSocketEventFrame): ControlPlaneWebSoc
   }
 }
 
+function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
+  const stream = frame.stream
+  const event = frame.event
+  if (frame.source.kind === 'execution-worker' && stream.kind === 'lease') {
+    if (frame.source.workerId !== stream.workerId || frame.source.leaseId !== stream.leaseId) {
+      return false
+    }
+  }
+  switch (event.type) {
+    case 'product-session.changed.v1':
+    case 'approval.changed.v1':
+      return stream.kind === 'product-session'
+        && event.productSessionId === stream.productSessionId
+    case 'product-session.message.appended.v1':
+      return stream.kind === 'product-session'
+        && event.productSessionId === stream.productSessionId
+        && event.message.productSessionId === stream.productSessionId
+    case 'attention.changed.v1':
+    case 'delivery.changed.v1':
+    case 'delivery-task.changed.v1':
+      return stream.kind === 'delivery' && event.deliveryId === stream.deliveryId
+    case 'runtime-projection.invalidated.v1':
+      return event.scopeKind === 'delivery-stage'
+        ? stream.kind === 'delivery' && event.deliveryId === stream.deliveryId
+        : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
+    case 'presence.changed.v1':
+      return event.productSessionId === undefined
+        ? stream.kind === 'scope'
+        : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
+    case 'worker-health.changed.v1':
+      return stream.kind === 'lease' && event.workerId === stream.workerId
+    case 'activity.recorded.v1':
+      if (stream.kind === 'scope') {
+        return event.deliveryId === undefined && event.productSessionId === undefined
+      }
+      if (stream.kind === 'delivery') {
+        return event.deliveryId === stream.deliveryId && event.productSessionId === undefined
+      }
+      if (stream.kind === 'product-session') {
+        return event.productSessionId === stream.productSessionId && event.deliveryId === undefined
+      }
+      return false
+  }
+}
+
 export function createControlPlaneWebSocketClient(
   options: ControlPlaneWebSocketClientOptions,
 ): ControlPlaneWebSocketClient {
@@ -628,19 +640,30 @@ export function createControlPlaneWebSocketClient(
   }
   let socket: ControlPlaneWebSocketConnection | null = null
   let generation = 0
+  let subscriptionGeneration = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let currentSubscriptionId: ControlPlaneWebSocketSubscriptionId | null = null
   let currentSubscription: ControlPlaneWebSocketSubscription | null = null
   let startAt: 'latest' | 'earliest-available' = 'latest'
   let acknowledgedCursor: ControlPlaneWebSocketAcknowledgedCursor | null = null
+  let resumeAfterCursor: ControlPlaneWebSocketAcknowledgedCursor | null = null
+  let authorizationEpoch: number | null = null
+  let nextExpectedSequence: number | null = null
+  let phase: ConnectionPhase = 'idle'
   let manuallyClosed = false
   let blocked = false
   let resetting = false
   let eventQueue = Promise.resolve()
-  const pendingEvents = new Set<string>()
-  const pendingEventIds = new Map<string, string>()
-  const rememberedEvents = new Map<string, string>()
-  const rememberedOrder: string[] = []
+  let pendingEvents = new Map<string, string>()
+  let pendingEventIds = new Map<string, string>()
+  let pendingSequences = new Map<number, string>()
+  let rememberedEvents = new Map<string, string>()
+  let rememberedSequences = new Map<number, string>()
+  let rememberedOrder: Array<{
+    readonly eventId: string
+    readonly sequence: number
+    readonly identity: string
+  }> = []
 
   function report(error: ControlPlaneClientError): void {
     options.onError?.(error)
@@ -660,6 +683,8 @@ export function createControlPlaneWebSocketClient(
 
   function stopSocket(code = 1000, reason = 'client state changed'): void {
     generation += 1
+    phase = 'idle'
+    resumeAfterCursor = null
     const current = socket
     socket = null
     if (current === null) return
@@ -687,13 +712,33 @@ export function createControlPlaneWebSocketClient(
     return { id: currentSubscriptionId, value: currentSubscription }
   }
 
-  function rememberEvent(eventId: string, identity: string): void {
+  function rememberEvent(
+    eventId: string,
+    sequence: number,
+    identity: string,
+  ): void {
     rememberedEvents.set(eventId, identity)
-    rememberedOrder.push(eventId)
+    rememberedSequences.set(sequence, identity)
+    rememberedOrder.push({ eventId, sequence, identity })
     while (rememberedOrder.length > MAX_REMEMBERED_EVENTS) {
       const oldest = rememberedOrder.shift()
-      if (oldest !== undefined) rememberedEvents.delete(oldest)
+      if (oldest === undefined) continue
+      if (rememberedEvents.get(oldest.eventId) === oldest.identity) {
+        rememberedEvents.delete(oldest.eventId)
+      }
+      if (rememberedSequences.get(oldest.sequence) === oldest.identity) {
+        rememberedSequences.delete(oldest.sequence)
+      }
     }
+  }
+
+  function sendAcknowledgement(): void {
+    if (phase !== 'active' || acknowledgedCursor === null || currentSubscriptionId === null) return
+    send({
+      type: 'transport.ack.v1',
+      subscriptionId: currentSubscriptionId,
+      cursor: acknowledgedCursor,
+    })
   }
 
   function failEventProcessing(error: unknown): void {
@@ -705,18 +750,28 @@ export function createControlPlaneWebSocketClient(
     stopSocket(1011, 'event application failed')
   }
 
+  function queueProtocolFailure(error: ControlPlaneClientError): void {
+    const ownSubscriptionGeneration = subscriptionGeneration
+    eventQueue = eventQueue.then(() => {
+      if (ownSubscriptionGeneration === subscriptionGeneration && !manuallyClosed) {
+        failEventProcessing(error)
+      }
+    })
+  }
+
   function queueEvent(frame: ControlPlaneWebSocketEventFrame): void {
     const configured = requireSubscription()
     if (
-      frame.subscriptionId !== configured.id
+      phase !== 'active'
+      || authorizationEpoch === null
+      || frame.authorizationEpoch !== authorizationEpoch
+      || frame.subscriptionId !== configured.id
       || stableIdentity(frame.scope) !== stableIdentity(configured.value.scope)
       || stableIdentity(frame.stream) !== stableIdentity(configured.value.stream)
       || !configured.value.eventTypes.includes(
         frame.event.type as ControlPlaneWebSocketEventType,
       )
-      || typeof frame.eventId !== 'string'
-      || !Number.isSafeInteger(frame.sequence)
-      || frame.sequence < 0
+      || !eventMatchesStream(frame)
     ) {
       failEventProcessing(clientFailure(
         'INVALID_WEBSOCKET_FRAME',
@@ -724,59 +779,89 @@ export function createControlPlaneWebSocketClient(
       ))
       return
     }
-    const identity = stableIdentity(eventCursor(frame))
+    const identity = stableIdentity(frame)
     const remembered = rememberedEvents.get(frame.eventId)
+    const rememberedSequence = rememberedSequences.get(frame.sequence)
     const pendingIdentity = pendingEventIds.get(frame.eventId)
+    const pendingSequence = pendingSequences.get(frame.sequence)
     if (
       (remembered !== undefined && remembered !== identity)
       || (pendingIdentity !== undefined && pendingIdentity !== identity)
+      || (rememberedSequence !== undefined && rememberedSequence !== identity)
+      || (pendingSequence !== undefined && pendingSequence !== identity)
     ) {
       failEventProcessing(clientFailure(
         'INVALID_WEBSOCKET_FRAME',
-        'An event identity was reused for a different stream cursor.',
+        'An event ID or sequence was reused for a different event.',
       ))
       return
     }
-    if (remembered === identity) {
-      if (acknowledgedCursor !== null) {
-        send({
-          type: 'transport.ack.v1',
-          subscriptionId: configured.id,
-          cursor: acknowledgedCursor,
-        })
-      }
+    if (remembered === identity || rememberedSequence === identity) {
+      sendAcknowledgement()
       return
     }
-    if (pendingEvents.has(identity) || pendingIdentity === identity) return
-    pendingEvents.add(identity)
+    if (
+      pendingEvents.get(identity) === identity
+      || pendingIdentity === identity
+      || pendingSequence === identity
+    ) return
+    if (nextExpectedSequence === null || frame.sequence !== nextExpectedSequence) {
+      queueProtocolFailure(clientFailure(
+        'INVALID_WEBSOCKET_FRAME',
+        'The event sequence is not contiguous with the active subscription.',
+      ))
+      return
+    }
+    nextExpectedSequence += 1
+    const ownSubscriptionGeneration = subscriptionGeneration
+    const ownPendingEvents = pendingEvents
+    const ownPendingEventIds = pendingEventIds
+    const ownPendingSequences = pendingSequences
+    pendingEvents.set(identity, identity)
     pendingEventIds.set(frame.eventId, identity)
+    pendingSequences.set(frame.sequence, identity)
     eventQueue = eventQueue.then(async () => {
-      if (blocked || manuallyClosed) return
+      if (
+        ownSubscriptionGeneration !== subscriptionGeneration
+        || blocked
+        || manuallyClosed
+      ) return
       try {
         await options.onEvent(frame)
+        if (
+          ownSubscriptionGeneration !== subscriptionGeneration
+          || blocked
+          || manuallyClosed
+        ) return
         const cursor = eventCursor(frame)
         acknowledgedCursor = cursor
-        rememberEvent(frame.eventId, identity)
-        send({
-          type: 'transport.ack.v1',
-          subscriptionId: configured.id,
-          cursor,
-        })
+        rememberEvent(frame.eventId, frame.sequence, identity)
+        sendAcknowledgement()
       } catch (error) {
-        failEventProcessing(error)
+        if (ownSubscriptionGeneration === subscriptionGeneration) {
+          failEventProcessing(error)
+        }
       } finally {
-        pendingEvents.delete(identity)
-        pendingEventIds.delete(frame.eventId)
+        ownPendingEvents.delete(identity)
+        ownPendingEventIds.delete(frame.eventId)
+        ownPendingSequences.delete(frame.sequence)
       }
     })
   }
 
   function clearReplayState(): void {
+    subscriptionGeneration += 1
     acknowledgedCursor = null
-    pendingEvents.clear()
-    pendingEventIds.clear()
-    rememberedEvents.clear()
-    rememberedOrder.length = 0
+    resumeAfterCursor = null
+    authorizationEpoch = null
+    nextExpectedSequence = null
+    phase = 'idle'
+    pendingEvents = new Map()
+    pendingEventIds = new Map()
+    pendingSequences = new Map()
+    rememberedEvents = new Map()
+    rememberedSequences = new Map()
+    rememberedOrder = []
     eventQueue = Promise.resolve()
   }
 
@@ -792,18 +877,25 @@ export function createControlPlaneWebSocketClient(
     clearTimer()
     stopSocket(1000, 'projection reset')
     clearReplayState()
+    const ownSubscriptionGeneration = subscriptionGeneration
     try {
       if (options.onResetRequired === undefined) {
         throw clientFailure('RESET_REQUIRED', 'The subscription needs a complete HTTP reload.')
       }
       await options.onResetRequired(frame)
-      if (!manuallyClosed && currentSubscription !== null) connect('subscribe')
+      if (
+        ownSubscriptionGeneration === subscriptionGeneration
+        && !manuallyClosed
+        && currentSubscription !== null
+      ) connect('subscribe')
     } catch (error) {
-      report(error instanceof ControlPlaneClientError
-        ? error
-        : clientFailure('RESET_FAILED', 'The complete HTTP reload did not finish.'))
+      if (ownSubscriptionGeneration === subscriptionGeneration) {
+        report(error instanceof ControlPlaneClientError
+          ? error
+          : clientFailure('RESET_FAILED', 'The complete HTTP reload did not finish.'))
+      }
     } finally {
-      resetting = false
+      if (ownSubscriptionGeneration === subscriptionGeneration) resetting = false
     }
   }
 
@@ -814,7 +906,20 @@ export function createControlPlaneWebSocketClient(
     currentSubscription = null
     clearReplayState()
     stopSocket(1000, 'authorization revoked')
-    options.onAuthorizationRevoked?.(frame)
+    try {
+      const notification = options.onAuthorizationRevoked?.(frame)
+      if (notification !== undefined) void Promise.resolve(notification).catch(() => {
+        report(clientFailure(
+          'AUTHORIZATION_NOTIFICATION_FAILED',
+          'The page did not finish its authorization revocation notification.',
+        ))
+      })
+    } catch {
+      report(clientFailure(
+        'AUTHORIZATION_NOTIFICATION_FAILED',
+        'The page did not finish its authorization revocation notification.',
+      ))
+    }
   }
 
   function handleFrame(frame: ControlPlaneWebSocketServerFrame): void {
@@ -834,7 +939,8 @@ export function createControlPlaneWebSocketClient(
         return
       case 'transport.reset-required.v1':
         if (
-          frame.subscriptionId !== currentSubscriptionId
+          (phase !== 'active' && phase !== 'awaiting-resume')
+          || frame.subscriptionId !== currentSubscriptionId
           || !cursorMatchesSubscription(frame.earliestAvailable)
         ) {
           failEventProcessing(clientFailure(
@@ -846,7 +952,12 @@ export function createControlPlaneWebSocketClient(
         void reset(frame)
         return
       case 'transport.authorization-revoked.v1':
-        if (frame.subscriptionId !== currentSubscriptionId) {
+        if (
+          phase !== 'active'
+          || frame.subscriptionId !== currentSubscriptionId
+          || authorizationEpoch === null
+          || frame.authorizationEpoch <= authorizationEpoch
+        ) {
           failEventProcessing(clientFailure(
             'INVALID_WEBSOCKET_FRAME',
             'The authorization change does not belong to the active subscription.',
@@ -860,33 +971,59 @@ export function createControlPlaneWebSocketClient(
         return
       case 'transport.subscription-accepted.v1':
         if (
-          frame.subscriptionId !== currentSubscriptionId
+          phase !== 'awaiting-subscribe'
+          || frame.subscriptionId !== currentSubscriptionId
           || !cursorMatchesSubscription(frame.cursor)
         ) {
           failEventProcessing(clientFailure(
             'INVALID_WEBSOCKET_FRAME',
             'The transport frame does not belong to the active subscription.',
           ))
+          return
+        }
+        authorizationEpoch = frame.authorizationEpoch
+        nextExpectedSequence = frame.cursor.sequence + 1
+        phase = 'active'
+        if (frame.cursor.eventId !== null) {
+          acknowledgedCursor = frame.cursor as ControlPlaneWebSocketAcknowledgedCursor
         }
         return
       case 'transport.resume-accepted.v1':
         if (
-          frame.subscriptionId !== currentSubscriptionId
+          phase !== 'awaiting-resume'
+          || frame.subscriptionId !== currentSubscriptionId
+          || resumeAfterCursor === null
+          || stableIdentity(frame.after) !== stableIdentity(resumeAfterCursor)
           || !cursorMatchesSubscription(frame.after)
           || !cursorMatchesSubscription(frame.replayThrough)
-        ) failEventProcessing(clientFailure(
-          'INVALID_WEBSOCKET_FRAME',
-          'The transport frame does not belong to the active subscription.',
-        ))
+          || frame.replayThrough.sequence < frame.after.sequence
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The transport frame does not belong to the active subscription.',
+          ))
+          return
+        }
+        authorizationEpoch = frame.authorizationEpoch
+        nextExpectedSequence = Math.max(
+          nextExpectedSequence ?? frame.after.sequence + 1,
+          frame.after.sequence + 1,
+        )
+        resumeAfterCursor = null
+        phase = 'active'
+        sendAcknowledgement()
         return
       case 'transport.backpressure.v1':
         if (
-          frame.subscriptionId !== currentSubscriptionId
+          phase !== 'active'
+          || frame.subscriptionId !== currentSubscriptionId
           || !cursorMatchesSubscription(frame.ackRequiredThrough)
-        ) failEventProcessing(clientFailure(
-          'INVALID_WEBSOCKET_FRAME',
-          'The transport frame does not belong to the active subscription.',
-        ))
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The transport frame does not belong to the active subscription.',
+          ))
+        }
         return
     }
   }
@@ -903,19 +1040,25 @@ export function createControlPlaneWebSocketClient(
 
   function connect(mode: ConnectMode): void {
     const configured = requireSubscription()
+    const selectedMode: ConnectMode = mode === 'resume' && acknowledgedCursor !== null
+      ? 'resume'
+      : 'subscribe'
     clearTimer()
     stopSocket(1000, 'reconnecting')
     const ownGeneration = generation
+    const requestedResumeCursor = selectedMode === 'resume' ? acknowledgedCursor : null
+    resumeAfterCursor = requestedResumeCursor
+    phase = selectedMode === 'resume' ? 'awaiting-resume' : 'awaiting-subscribe'
     const created = createSocket(endpoint(options.baseUrl, CONTROL_PLANE_EVENTS_PATH))
     socket = created
     created.onopen = () => {
       if (ownGeneration !== generation || socket !== created) return
-      if (mode === 'resume' && acknowledgedCursor !== null) {
+      if (selectedMode === 'resume' && requestedResumeCursor !== null) {
         send({
           type: 'transport.resume.v1',
           subscriptionId: configured.id,
           subscription: configured.value,
-          after: acknowledgedCursor,
+          after: requestedResumeCursor,
         })
       } else {
         send({
@@ -937,6 +1080,8 @@ export function createControlPlaneWebSocketClient(
     created.onclose = event => {
       if (ownGeneration !== generation || socket !== created) return
       socket = null
+      phase = 'idle'
+      resumeAfterCursor = null
       if (event.code === 4403) {
         revoke(null)
       } else if (event.code === 4409) {
@@ -954,12 +1099,9 @@ export function createControlPlaneWebSocketClient(
     },
     subscribe(subscriptionId, subscription, requestedStart = 'latest') {
       if (
-        typeof subscriptionId !== 'string'
-        || !isRecord(subscription)
-        || !isRecord(subscription.scope)
-        || !isRecord(subscription.stream)
-        || !Array.isArray(subscription.eventTypes)
-        || subscription.eventTypes.length === 0
+        !matchesCanonicalSchema('ControlPlaneWebSocketSubscriptionId', subscriptionId)
+        || !matchesCanonicalSchema('ControlPlaneWebSocketSubscription', subscription)
+        || (requestedStart !== 'latest' && requestedStart !== 'earliest-available')
       ) throw clientFailure('INVALID_SUBSCRIPTION', 'The WebSocket subscription is invalid.')
       manuallyClosed = false
       blocked = false
@@ -1013,6 +1155,12 @@ interface ProjectionSubscriptionTransportOptions {
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly eventTypes: ReadonlyArray<ControlPlaneWebSocketEventType>
   readonly createRequestId: () => RequestId
+  readonly onSnapshotCleared?: (
+    reason: 'reset' | 'authorization-revoked',
+  ) => Promise<void> | void
+  readonly onAuthorizationRevoked?: (
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ) => Promise<void> | void
   readonly onError?: (error: ControlPlaneClientError) => void
 }
 
@@ -1080,6 +1228,19 @@ function reportProjectionError(
     : clientFailure('PROJECTION_RELOAD_FAILED', 'The projection reload did not finish.'))
 }
 
+type ProjectionOperationQueue = <Result>(
+  operation: () => Promise<Result>,
+) => Promise<Result>
+
+function createProjectionOperationQueue(): ProjectionOperationQueue {
+  let tail = Promise.resolve()
+  return function enqueue<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = tail.then(operation, operation)
+    tail = result.then(() => undefined, () => undefined)
+    return result
+  }
+}
+
 export function createStrongFlowProjectionSubscription(
   options: StrongFlowProjectionSubscriptionOptions,
 ): StrongFlowProjectionSubscription {
@@ -1087,10 +1248,17 @@ export function createStrongFlowProjectionSubscription(
   let webSocket: ControlPlaneWebSocketClient | null = null
   let closed = false
   let startPromise: Promise<void> | null = null
+  let operationGeneration = 0
+  const enqueue = createProjectionOperationQueue()
 
-  async function reload(): Promise<void> {
+  function operationIsCurrent(ownGeneration: number): boolean {
+    return !closed && ownGeneration === operationGeneration
+  }
+
+  async function reloadAt(ownGeneration: number): Promise<boolean> {
     let restarts = 0
     for (;;) {
+      if (!operationIsCurrent(ownGeneration)) return false
       const deliveryRequestId = requestId(options)
       const deliveryResponse = await options.httpClient.submitQuery({
         schemaVersion: 'winwincode/v1',
@@ -1101,6 +1269,7 @@ export function createStrongFlowProjectionSubscription(
         parameters: { deliveryId: options.deliveryId },
         page: { cursor: null, limit: 1 },
       })
+      if (!operationIsCurrent(ownGeneration)) return false
       const delivery = projectionResult(deliveryResponse)
       if (delivery.kind !== 'delivery_detail' || delivery.deliveryId !== options.deliveryId) {
         throw invalidResponse(deliveryRequestId)
@@ -1130,6 +1299,7 @@ export function createStrongFlowProjectionSubscription(
           page: { cursor: null, limit: 1 },
         })
       } catch (error) {
+        if (!operationIsCurrent(ownGeneration)) return false
         if (
           error instanceof ControlPlaneClientError
           && error.code === 'READ_CURSOR_EXPIRED'
@@ -1140,6 +1310,7 @@ export function createStrongFlowProjectionSubscription(
         }
         throw error
       }
+      if (!operationIsCurrent(ownGeneration)) return false
       const runtime = projectionResult(runtimeResponse)
       if (
         runtime.kind !== 'runtime_projection'
@@ -1153,10 +1324,44 @@ export function createStrongFlowProjectionSubscription(
         delivery: delivery as unknown as DeliveryDetailProjection,
         runtime: runtime as unknown as RuntimeProjectionSnapshot,
       }
+      if (!operationIsCurrent(ownGeneration)) return false
       await options.onSnapshot(snapshot)
+      if (!operationIsCurrent(ownGeneration)) return false
       readCursor = candidateCursor
-      return
+      return true
     }
+  }
+
+  function reload(): Promise<boolean> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(() => reloadAt(ownGeneration))
+  }
+
+  function clearAndReload(): Promise<boolean> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    readCursor = null
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return false
+      await options.onSnapshotCleared?.('reset')
+      if (!operationIsCurrent(ownGeneration)) return false
+      return reloadAt(ownGeneration)
+    })
+  }
+
+  function clearAuthorization(
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ): Promise<void> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    readCursor = null
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onSnapshotCleared?.('authorization-revoked')
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onAuthorizationRevoked?.(frame)
+    })
   }
 
   function validateInvalidation(frame: ControlPlaneWebSocketEventFrame): void {
@@ -1189,7 +1394,10 @@ export function createStrongFlowProjectionSubscription(
         await reload()
       },
       async onResetRequired() {
-        await reload()
+        await clearAndReload()
+      },
+      async onAuthorizationRevoked(frame) {
+        await clearAuthorization(frame)
       },
       onError(error) {
         reportProjectionError(options, error)
@@ -1200,17 +1408,23 @@ export function createStrongFlowProjectionSubscription(
   async function start(): Promise<void> {
     if (closed) throw clientFailure('SUBSCRIPTION_CLOSED', 'The StrongFlow subscription is closed.')
     if (startPromise !== null) return startPromise
+    webSocket?.close()
+    webSocket = null
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
     const operation = (async () => {
-      webSocket?.close()
-      webSocket = null
-      await reload()
-      if (closed) return
+      const loaded = await enqueue(() => reloadAt(ownGeneration))
+      if (!loaded || !operationIsCurrent(ownGeneration)) return
       const next = createRealtimeClient()
       next.subscribe(options.subscriptionId, {
         scope: options.scope,
         stream: { kind: 'delivery', deliveryId: options.deliveryId },
         eventTypes: options.eventTypes,
       })
+      if (!operationIsCurrent(ownGeneration)) {
+        next.close()
+        return
+      }
       webSocket = next
     })()
     startPromise = operation
@@ -1228,13 +1442,13 @@ export function createStrongFlowProjectionSubscription(
     start,
     close() {
       closed = true
+      operationGeneration += 1
       readCursor = null
       webSocket?.close()
       webSocket = null
     },
   }
 }
-
 export interface ProductSessionRuntimeProjectionSubscriptionOptions
   extends ProjectionSubscriptionTransportOptions {
   readonly onSnapshot: (snapshot: RuntimeProjectionSnapshot) => Promise<void> | void
@@ -1251,8 +1465,15 @@ export function createProductSessionRuntimeProjectionSubscription(
   let webSocket: ControlPlaneWebSocketClient | null = null
   let closed = false
   let startPromise: Promise<void> | null = null
+  let operationGeneration = 0
+  const enqueue = createProjectionOperationQueue()
 
-  async function reload(): Promise<void> {
+  function operationIsCurrent(ownGeneration: number): boolean {
+    return !closed && ownGeneration === operationGeneration
+  }
+
+  async function reloadAt(ownGeneration: number): Promise<boolean> {
+    if (!operationIsCurrent(ownGeneration)) return false
     const runtimeRequestId = requestId(options)
     const response = await options.httpClient.submitQuery({
       schemaVersion: 'winwincode/v1',
@@ -1266,6 +1487,7 @@ export function createProductSessionRuntimeProjectionSubscription(
       },
       page: { cursor: null, limit: 1 },
     })
+    if (!operationIsCurrent(ownGeneration)) return false
     const runtime = projectionResult(response)
     if (
       runtime.kind !== 'runtime_projection'
@@ -1275,6 +1497,37 @@ export function createProductSessionRuntimeProjectionSubscription(
       || runtime.readCursor !== null
     ) throw invalidResponse(runtimeRequestId)
     await options.onSnapshot(runtime as unknown as RuntimeProjectionSnapshot)
+    return operationIsCurrent(ownGeneration)
+  }
+
+  function reload(): Promise<boolean> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(() => reloadAt(ownGeneration))
+  }
+
+  function clearAndReload(): Promise<boolean> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return false
+      await options.onSnapshotCleared?.('reset')
+      if (!operationIsCurrent(ownGeneration)) return false
+      return reloadAt(ownGeneration)
+    })
+  }
+
+  function clearAuthorization(
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ): Promise<void> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onSnapshotCleared?.('authorization-revoked')
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onAuthorizationRevoked?.(frame)
+    })
   }
 
   function validateInvalidation(frame: ControlPlaneWebSocketEventFrame): void {
@@ -1302,7 +1555,10 @@ export function createProductSessionRuntimeProjectionSubscription(
         await reload()
       },
       async onResetRequired() {
-        await reload()
+        await clearAndReload()
+      },
+      async onAuthorizationRevoked(frame) {
+        await clearAuthorization(frame)
       },
       onError(error) {
         reportProjectionError(options, error)
@@ -1313,17 +1569,23 @@ export function createProductSessionRuntimeProjectionSubscription(
   async function start(): Promise<void> {
     if (closed) throw clientFailure('SUBSCRIPTION_CLOSED', 'The runtime subscription is closed.')
     if (startPromise !== null) return startPromise
+    webSocket?.close()
+    webSocket = null
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
     const operation = (async () => {
-      webSocket?.close()
-      webSocket = null
-      await reload()
-      if (closed) return
+      const loaded = await enqueue(() => reloadAt(ownGeneration))
+      if (!loaded || !operationIsCurrent(ownGeneration)) return
       const next = createRealtimeClient()
       next.subscribe(options.subscriptionId, {
         scope: options.scope,
         stream: { kind: 'product-session', productSessionId: options.productSessionId },
         eventTypes: options.eventTypes,
       })
+      if (!operationIsCurrent(ownGeneration)) {
+        next.close()
+        return
+      }
       webSocket = next
     })()
     startPromise = operation
@@ -1338,6 +1600,7 @@ export function createProductSessionRuntimeProjectionSubscription(
     start,
     close() {
       closed = true
+      operationGeneration += 1
       webSocket?.close()
       webSocket = null
     },
