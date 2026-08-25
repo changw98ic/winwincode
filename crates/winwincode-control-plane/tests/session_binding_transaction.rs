@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
 
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
@@ -13,8 +14,8 @@ use winwincode_control_plane::delivery_execution::{
     PendingDeliveryExecution, prepare_delivery_advance,
 };
 use winwincode_control_plane::{
-    CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
-    StateChange, StorageErrorKind,
+    CommitError, ControlPlane, ControlPlaneConfig, DeliverySessionBindingCommitError,
+    EventPublishError, EventPublisher, OutboxEvent, StateChange, StorageErrorKind,
 };
 use winwincode_delivery::application::stage::{
     AdvanceStageInput, NewStageIdentities, advance,
@@ -511,6 +512,76 @@ fn scheduler_authority_rejects_a_worker_supplied_lease_window_before_writes() {
 }
 
 #[test]
+fn concurrent_exact_session_binding_messages_all_resolve_to_the_two_durable_phases() {
+    const CALLER_COUNT: usize = 8;
+
+    let (root, control_plane, pending, authority, message) =
+        running_fixture(58, "concurrent-exact-message");
+    control_plane.shutdown().expect("fixture shutdown");
+    let control_planes = (0..CALLER_COUNT)
+        .map(|_| {
+            ControlPlane::start_local(
+                ControlPlaneConfig::local(&root),
+                Box::new(RecordingPublisher),
+            )
+            .expect("concurrent Control Plane connection")
+        })
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(Barrier::new(CALLER_COUNT));
+    let callers = control_planes
+        .into_iter()
+        .map(|mut control_plane| {
+            let barrier = Arc::clone(&barrier);
+            let authority = authority.clone();
+            let message = message.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                let result = control_plane
+                    .commit_delivery_session_binding(&message, &authority)
+                    .map(|receipt| {
+                        (
+                            receipt.worker_session_receipt().idempotent_replay,
+                            receipt.codex_thread_receipt().idempotent_replay,
+                        )
+                    })
+                    .map_err(|error| error.to_string());
+                control_plane.shutdown().expect("concurrent shutdown");
+                result
+            })
+        })
+        .collect::<Vec<_>>();
+    let receipts = callers
+        .into_iter()
+        .map(|caller| {
+            caller
+                .join()
+                .expect("concurrent caller thread")
+                .expect("exact concurrent message must resolve through durable receipts")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|(worker_replay, _)| !worker_replay)
+            .count(),
+        1
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|(_, codex_replay)| !codex_replay)
+            .count(),
+        1
+    );
+    assert_eq!(
+        durable_binding_counts(&root, pending.delivery().id()),
+        (4, 4, 2, 4)
+    );
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
 fn retry_continues_from_the_durable_worker_session_receipt_after_phase_two_failure() {
     let (root, mut control_plane, pending, authority, message) =
         running_fixture(4, "phase-two-resume");
@@ -610,6 +681,89 @@ fn complete_replay_uses_sealed_receipts_before_replacement_authority_or_current_
     assert!(replay.codex_thread_receipt().idempotent_replay);
     assert_eq!(replay.worker_session_receipt().revision, 3);
     assert_eq!(replay.codex_thread_receipt().revision, 4);
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn complete_replay_rejects_non_canonical_or_foreign_durable_execution_job_facts() {
+    for (seed, corruption) in [(55, "unknown-field"), (56, "foreign-task")] {
+        let (root, mut control_plane, pending, authority, message) =
+            running_fixture(seed, &format!("complete-replay-{corruption}"));
+        control_plane
+            .commit_delivery_session_binding(&message, &authority)
+            .expect("initial SessionBinding transaction");
+        let mut foreign_job = serde_json::to_value(pending.job()).expect("ExecutionJob JSON");
+        if corruption == "unknown-field" {
+            foreign_job
+                .as_object_mut()
+                .expect("ExecutionJob object")
+                .insert("unknownField".into(), serde_json::json!(true));
+        } else {
+            foreign_job["scope"]["deliveryTaskId"] = serde_json::json!(canonical_id("dtk", 5_600));
+        }
+        let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+            .expect("ExecutionJob mutation injector");
+        connection
+            .execute(
+                "UPDATE outbox SET payload = ?1 WHERE event_id = ?2",
+                rusqlite::params![
+                    serde_json::to_vec(&foreign_job).expect("foreign ExecutionJob bytes"),
+                    format!("execution-job:{}", pending.job().job_id.0)
+                ],
+            )
+            .expect("replace durable ExecutionJob payload");
+        connection.close().expect("mutation injector close");
+
+        control_plane
+            .commit_delivery_session_binding(&message, &authority)
+            .expect_err("complete replay must revalidate its exact durable ExecutionJob");
+        assert_eq!(
+            control_plane
+                .load_state(&format!("delivery:{}", pending.delivery().id().0))
+                .expect("state read")
+                .expect("state")
+                .revision,
+            4,
+            "{corruption}"
+        );
+
+        control_plane.shutdown().expect("shutdown");
+        fs::remove_dir_all(root).expect("database directory release");
+    }
+}
+
+#[test]
+fn the_same_session_binding_message_identity_with_changed_payload_is_a_request_conflict() {
+    let (root, mut control_plane, pending, authority, message) =
+        running_fixture(57, "session-binding-message-conflict");
+    control_plane
+        .commit_delivery_session_binding(&message, &authority)
+        .expect("initial SessionBinding transaction");
+    let mut changed_thread = message.clone();
+    changed_thread.codex_thread_id = CodexThreadId(canonical_id("cdx", 5_700));
+    let mut changed_session = message.clone();
+    changed_session.worker_session_id = WorkerSessionId(canonical_id("wsn", 5_700));
+
+    for changed in [changed_thread, changed_session] {
+        let error = control_plane
+            .commit_delivery_session_binding(&changed, &authority)
+            .expect_err("one message identity cannot authorize a changed binding payload");
+        assert!(matches!(
+            error,
+            DeliverySessionBindingCommitError::Storage(ref source)
+                if source.kind() == StorageErrorKind::RequestConflict
+        ));
+    }
+    assert_eq!(
+        control_plane
+            .load_state(&format!("delivery:{}", pending.delivery().id().0))
+            .expect("state read")
+            .expect("state")
+            .revision,
+        4
+    );
+
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }

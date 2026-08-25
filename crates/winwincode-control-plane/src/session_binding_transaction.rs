@@ -125,23 +125,27 @@ pub(crate) fn execute(
 ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
     let bound_at_millis = validate_message_shape(message)?;
     let durable = load_execution_job_event(storage, message)?;
-    let scope_key = durable.receipt_identity().scope_key().clone();
-    let worker_phase = Phase::new(message, &scope_key, WORKER_SESSION_PHASE)?;
-    let codex_phase = Phase::new(message, &scope_key, CODEX_THREAD_PHASE)?;
-    let worker_replay =
+    let job = validate_durable_job(&durable, message)?;
+    let context = BindingContext::from_durable(&durable, &job, bound_at_millis)?;
+    let worker_phase = Phase::new(message, &durable, WORKER_SESSION_PHASE)?;
+    let codex_phase = Phase::new(message, &durable, CODEX_THREAD_PHASE)?;
+    let mut worker_replay =
         storage.load_receipt(&worker_phase.receipt_identity, &worker_phase.command_digest)?;
     let codex_replay =
         storage.load_receipt(&codex_phase.receipt_identity, &codex_phase.command_digest)?;
+    if worker_replay.is_none() && codex_replay.is_some() {
+        worker_replay =
+            storage.load_receipt(&worker_phase.receipt_identity, &worker_phase.command_digest)?;
+    }
     if let (Some(worker_session_receipt), Some(codex_thread_receipt)) =
         (worker_replay.as_ref(), codex_replay.as_ref())
     {
         validate_complete_replay(
             worker_session_receipt,
             codex_thread_receipt,
-            message,
+            &context,
             &worker_phase,
             &codex_phase,
-            bound_at_millis,
         )?;
         return Ok(DeliverySessionBindingCommitReceipt {
             worker_session_receipt: worker_session_receipt.clone(),
@@ -149,8 +153,7 @@ pub(crate) fn execute(
         });
     }
 
-    let context =
-        BindingContext::from_authority(&durable, message, authority, scope_key, bound_at_millis)?;
+    validate_authority(message, authority)?;
     let worker_session_receipt = if let Some(receipt) = worker_replay {
         validate_phase_receipt(
             &receipt,
@@ -167,7 +170,15 @@ pub(crate) fn execute(
             )
             .into());
         }
-        commit_worker_session(storage, message, &context, &worker_phase)?
+        commit_worker_session(storage, message, &context, &worker_phase).or_else(|source| {
+            recover_raced_phase_receipt(
+                storage,
+                &context,
+                &worker_phase,
+                context.job_revision + 1,
+                source,
+            )
+        })?
     };
 
     let codex_thread_receipt = match codex_replay {
@@ -187,14 +198,22 @@ pub(crate) fn execute(
             )?;
             receipt
         }
-        None => {
-            commit_codex_thread(storage, message, &context, &codex_phase).map_err(|source| {
-                DeliverySessionBindingCommitError::CodexThreadPhase {
+        None => commit_codex_thread(storage, message, &context, &codex_phase)
+            .or_else(|source| {
+                recover_raced_phase_receipt(
+                    storage,
+                    &context,
+                    &codex_phase,
+                    context.job_revision + 2,
+                    source,
+                )
+            })
+            .map_err(
+                |source| DeliverySessionBindingCommitError::CodexThreadPhase {
                     worker_session_receipt: Box::new(worker_session_receipt.clone()),
                     source,
-                }
-            })?
-        }
+                },
+            )?,
     };
 
     Ok(DeliverySessionBindingCommitReceipt {
@@ -213,15 +232,11 @@ struct BindingContext {
 }
 
 impl BindingContext {
-    fn from_authority(
+    fn from_durable(
         durable: &DurableOutboxEvent,
-        message: &SessionBindingMessage,
-        authority: &SessionBindingAuthority,
-        scope_key: ReceiptScopeKey,
+        job: &ExecutionJob,
         bound_at_millis: u64,
     ) -> Result<Self, StorageError> {
-        validate_authority(message, authority)?;
-        let job = validate_durable_job(durable, message)?;
         let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
             return Err(StorageError::invalid_input(
                 "SessionBinding ExecutionJob is not a Delivery stage job",
@@ -237,14 +252,14 @@ impl BindingContext {
             ));
         }
         Ok(Self {
-            scope_key,
+            scope_key: durable.receipt_identity().scope_key().clone(),
             delivery_id: scope.delivery_id.clone(),
             identity: SessionBindingIdentity {
                 delivery_id: scope.delivery_id.clone(),
                 delivery_task_id: scope.delivery_task_id.clone(),
                 stage_run_id: scope.stage_run_id.clone(),
                 product_session_id: scope.product_session_id.clone(),
-                execution_job_id: job.job_id,
+                execution_job_id: job.job_id.clone(),
             },
             job_revision: durable.revision(),
             attempt,
@@ -261,15 +276,18 @@ struct Phase {
 impl Phase {
     fn new(
         message: &SessionBindingMessage,
-        scope_key: &ReceiptScopeKey,
+        durable: &DurableOutboxEvent,
         name: &'static str,
     ) -> Result<Self, StorageError> {
         let request_id = phase_request_id(message, name)?;
-        let receipt_identity =
-            ReceiptIdentity::new(phase_actor_key(message)?, scope_key.clone(), request_id)?;
+        let receipt_identity = ReceiptIdentity::new(
+            phase_actor_key(message)?,
+            durable.receipt_identity().scope_key().clone(),
+            request_id,
+        )?;
         Ok(Self {
             receipt_identity,
-            command_digest: phase_digest(message, name)?,
+            command_digest: phase_digest(message, durable, name)?,
         })
     }
 
@@ -370,7 +388,32 @@ fn commit_phase(
     )
     .with_journal_publication(publication);
     let receipt = storage.commit(&commit)?;
-    validate_phase_receipt(&receipt, context, phase, revision, false)?;
+    validate_phase_receipt(
+        &receipt,
+        context,
+        phase,
+        revision,
+        receipt.idempotent_replay,
+    )?;
+    Ok(receipt)
+}
+
+fn recover_raced_phase_receipt(
+    storage: &dyn ProductStateStorage,
+    context: &BindingContext,
+    phase: &Phase,
+    expected_revision: u64,
+    source: StorageError,
+) -> Result<CommitReceipt, StorageError> {
+    // Callers enter here only after this phase was absent at the first receipt
+    // read and their commit attempt lost a race. A second exact receipt proof
+    // resolves that race; ordinary retries use the receipt-first branches in
+    // `execute` instead.
+    let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)?
+    else {
+        return Err(source);
+    };
+    validate_phase_receipt(&receipt, context, phase, expected_revision, true)?;
     Ok(receipt)
 }
 
@@ -599,68 +642,24 @@ fn validate_durable_job(
 fn validate_complete_replay(
     worker_receipt: &CommitReceipt,
     codex_receipt: &CommitReceipt,
-    message: &SessionBindingMessage,
+    context: &BindingContext,
     worker_phase: &Phase,
     codex_phase: &Phase,
-    bound_at_millis: u64,
 ) -> Result<(), StorageError> {
-    let worker_payload = runtime_invalidation_payload(worker_receipt)?;
-    let worker_revision = u64::try_from(worker_payload.projection_revision.0).map_err(|_| {
-        StorageError::invalid_input("SessionBinding replay revision is out of range")
-    })?;
-    if worker_revision < 2 || codex_receipt.revision != worker_revision.saturating_add(1) {
+    let worker_revision = context
+        .job_revision
+        .checked_add(1)
+        .ok_or_else(|| StorageError::invalid_input("SessionBinding replay revision overflow"))?;
+    let codex_revision = worker_revision
+        .checked_add(1)
+        .ok_or_else(|| StorageError::invalid_input("SessionBinding replay revision overflow"))?;
+    if worker_receipt.revision != worker_revision || codex_receipt.revision != codex_revision {
         return Err(StorageError::invalid_input(
             "SessionBinding replay receipts are not consecutive",
         ));
     }
-    let attempt = u64::try_from(message.lease.attempt)
-        .map_err(|_| StorageError::invalid_input("SessionBinding attempt is out of range"))?;
-    let context = BindingContext {
-        scope_key: worker_receipt.receipt_identity.scope_key().clone(),
-        delivery_id: worker_payload.delivery_id.clone(),
-        identity: SessionBindingIdentity {
-            delivery_id: worker_payload.delivery_id,
-            delivery_task_id: None,
-            stage_run_id: worker_payload.stage_run_id,
-            product_session_id: worker_payload.product_session_id,
-            execution_job_id: message.lease.job_id.clone(),
-        },
-        job_revision: worker_revision - 1,
-        attempt,
-        bound_at_millis,
-    };
-    validate_phase_receipt(
-        worker_receipt,
-        &context,
-        worker_phase,
-        worker_revision,
-        true,
-    )?;
-    validate_phase_receipt(
-        codex_receipt,
-        &context,
-        codex_phase,
-        worker_revision + 1,
-        true,
-    )
-}
-
-fn runtime_invalidation_payload(
-    receipt: &CommitReceipt,
-) -> Result<ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent, StorageError> {
-    let matching = receipt
-        .events
-        .iter()
-        .filter(|event| event.topic == RUNTIME_INVALIDATED_TOPIC)
-        .collect::<Vec<_>>();
-    let [event] = matching.as_slice() else {
-        return Err(StorageError::invalid_input(
-            "SessionBinding receipt must contain one runtime invalidation",
-        ));
-    };
-    serde_json::from_slice(&event.payload).map_err(|_| {
-        StorageError::invalid_input("SessionBinding runtime invalidation is not canonical")
-    })
+    validate_phase_receipt(worker_receipt, context, worker_phase, worker_revision, true)?;
+    validate_phase_receipt(codex_receipt, context, codex_phase, codex_revision, true)
 }
 
 fn phase_events(
@@ -799,7 +798,14 @@ fn phase_request_id(
     message: &SessionBindingMessage,
     phase: &'static str,
 ) -> Result<RequestId, StorageError> {
-    let bytes = canonical_phase_bytes(message, phase)?;
+    // The generated message identity owns a stable two-slot idempotency key.
+    // Mutable message and durable-job facts belong in the phase digest so a
+    // changed payload reaches storage as a request conflict instead of a new
+    // request.
+    let mut bytes = Vec::with_capacity(message.message_id.0.len() + phase.len() + 64);
+    bytes.extend_from_slice(b"winwincode.session-binding-phase-request.v2\0");
+    append_phase_fact(&mut bytes, phase.as_bytes());
+    append_phase_fact(&mut bytes, message.message_id.0.as_bytes());
     let digest = Sha256::digest(bytes);
     let mut value_bytes = [0_u8; 16];
     value_bytes.copy_from_slice(&digest[..16]);
@@ -816,41 +822,53 @@ fn phase_request_id(
 
 fn phase_digest(
     message: &SessionBindingMessage,
+    durable: &DurableOutboxEvent,
     phase: &'static str,
 ) -> Result<Sha256Digest, StorageError> {
-    let digest = Sha256::digest(canonical_phase_bytes(message, phase)?);
+    let digest = Sha256::digest(canonical_phase_bytes(message, durable, phase)?);
     Ok(Sha256Digest(format!("sha256:{digest:x}")))
 }
 
 fn canonical_phase_bytes(
     message: &SessionBindingMessage,
+    durable: &DurableOutboxEvent,
     phase: &'static str,
 ) -> Result<Vec<u8>, StorageError> {
     let message = serde_json::to_vec(message).map_err(|error| {
         StorageError::adapter(format!("failed to encode SessionBinding message: {error}"))
     })?;
-    let mut bytes = Vec::with_capacity(message.len() + phase.len() + 64);
-    bytes.extend_from_slice(b"winwincode.session-binding-phase.v1\0");
-    bytes.extend_from_slice(&(phase.len() as u64).to_be_bytes());
-    bytes.extend_from_slice(phase.as_bytes());
-    bytes.extend_from_slice(&(message.len() as u64).to_be_bytes());
-    bytes.extend_from_slice(&message);
+    // A phase receipt authorizes exactly one generated message against one
+    // immutable ExecutionJob row and the receipt that owns that row. Binding
+    // every membership field keeps a complete replay independent of current
+    // Delivery state without accepting a re-parented or rewritten job.
+    let event = durable.event();
+    let receipt = durable.receipt_identity();
+    let mut bytes = Vec::with_capacity(message.len() + event.payload.len() + 512);
+    bytes.extend_from_slice(b"winwincode.session-binding-phase.v2\0");
+    append_phase_fact(&mut bytes, phase.as_bytes());
+    append_phase_fact(&mut bytes, &message);
+    append_phase_fact(&mut bytes, receipt.actor_key().as_bytes());
+    append_phase_fact(&mut bytes, receipt.scope_key().as_bytes());
+    append_phase_fact(&mut bytes, receipt.request_id().0.as_bytes());
+    append_phase_fact(&mut bytes, durable.command_digest().0.as_bytes());
+    append_phase_fact(&mut bytes, durable.stream_id().as_bytes());
+    append_phase_fact(&mut bytes, &durable.revision().to_be_bytes());
+    append_phase_fact(&mut bytes, &event.sequence.to_be_bytes());
+    append_phase_fact(&mut bytes, event.event_id.as_bytes());
+    append_phase_fact(&mut bytes, event.topic.as_bytes());
+    append_phase_fact(&mut bytes, &event.payload);
     Ok(bytes)
+}
+
+fn append_phase_fact(target: &mut Vec<u8>, value: &[u8]) {
+    target.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    target.extend_from_slice(value);
 }
 
 fn phase_actor_key(message: &SessionBindingMessage) -> Result<ReceiptActorKey, StorageError> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"winwincode.session-binding-worker-actor.v1\0");
-    for value in [
-        message.lease.worker_id.0.as_str(),
-        message.lease.worker_instance_id.0.as_str(),
-        message.lease.lease_id.0.as_str(),
-        message.lease.fencing_token.0.as_str(),
-        message.worker_session_id.0.as_str(),
-    ] {
-        bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(value.as_bytes());
-    }
+    bytes.extend_from_slice(b"winwincode.execution-port-message-actor.v1\0");
+    append_phase_fact(&mut bytes, message.message_id.0.as_bytes());
     ReceiptActorKey::from_encoded(bytes)
 }
 
