@@ -25,7 +25,10 @@ use crate::{
         attention::ResolvedAttentionTransition,
         session_binding::{SessionBindingIdentity, accept_worker_session, report_codex_thread},
         solution_review::resolve_current_solution_review,
-        stage::StageAdvanceResult,
+        stage::{
+            DeliveryTerminalOutcomeFacts, StageAdvanceResult,
+            apply_terminal_outcome as settle_terminal_outcome,
+        },
         task_breakdown::{
             DeliveryTaskBreakdownApprovedEvent, TaskBreakdownPromotionTransition,
             prepare_task_breakdown_promotion, restore_task_breakdown_event,
@@ -49,6 +52,8 @@ pub enum DeliveryMutationOperation {
     DeliverySpecUpdated,
     #[serde(rename = "stage.started")]
     StageStarted,
+    #[serde(rename = "stage.terminal")]
+    StageTerminal,
     #[serde(rename = "session.bound")]
     SessionBound,
     #[serde(rename = "attention.resolved")]
@@ -69,6 +74,7 @@ impl FromStr for DeliveryMutationOperation {
             "delivery.created" => Ok(Self::DeliveryCreated),
             "delivery.spec.updated" => Ok(Self::DeliverySpecUpdated),
             "stage.started" => Ok(Self::StageStarted),
+            "stage.terminal" => Ok(Self::StageTerminal),
             "session.bound" => Ok(Self::SessionBound),
             "attention.resolved" => Ok(Self::AttentionResolved),
             "verdict.submitted" => Ok(Self::VerdictSubmitted),
@@ -253,6 +259,18 @@ pub struct StartDeliveryStage {
     pub transition: StageAdvanceResult,
 }
 
+/// Specialized terminal-outcome append. The Store re-verifies the sealed
+/// scheduler/Worker facts against its current journal tail before applying the
+/// canonical terminal transition.
+#[derive(Debug, Clone)]
+pub struct ApplyDeliveryTerminalOutcome {
+    pub delivery_id: DeliveryId,
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub facts: DeliveryTerminalOutcomeFacts,
+}
+
 /// Specialized Attention append created only from
 /// [`crate::application::attention::resolve_attention`].
 #[derive(Debug, Clone)]
@@ -280,6 +298,7 @@ pub enum DeliveryCommand {
     SeedForTest(CreateDelivery),
     Append(AppendDelivery),
     StartStage(Box<StartDeliveryStage>),
+    ApplyTerminalOutcome(Box<ApplyDeliveryTerminalOutcome>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
     SubmitVerdict(Box<SubmitDeliveryVerdict>),
     ClarifyRework(Box<ClarifyDeliveryRework>),
@@ -628,6 +647,7 @@ impl<'journal> DeliveryStore<'journal> {
         if matches!(
             command.operation,
             DeliveryMutationOperation::StageStarted
+                | DeliveryMutationOperation::StageTerminal
                 | DeliveryMutationOperation::AttentionResolved
                 | DeliveryMutationOperation::VerdictSubmitted
                 | DeliveryMutationOperation::ReworkClarified
@@ -654,6 +674,33 @@ impl<'journal> DeliveryStore<'journal> {
             snapshot: command.transition.delivery.clone(),
         };
         self.append_authorized(append, AppendAuthority::Stage(&command.transition))
+    }
+
+    fn apply_terminal_outcome(
+        &self,
+        command: ApplyDeliveryTerminalOutcome,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        let stored = self.read(&command.delivery_id)?;
+        let verified = command
+            .facts
+            .verify(&stored.snapshot)
+            .map_err(|error| map_terminal_outcome_error(&error, &command, &stored.snapshot))?;
+        let snapshot = settle_terminal_outcome(
+            &stored.snapshot,
+            command.expected_revision,
+            command.facts.authority().active_lease(),
+            &verified,
+        )
+        .map_err(|error| map_terminal_outcome_error(&error, &command, &stored.snapshot))?;
+        let append = AppendDelivery {
+            delivery_id: command.delivery_id,
+            request_id: command.request_id,
+            request_digest: command.request_digest,
+            operation: DeliveryMutationOperation::StageTerminal,
+            expected_revision: command.expected_revision,
+            snapshot,
+        };
+        self.append_authorized(append, AppendAuthority::Terminal(&command.facts))
     }
 
     fn resolve_attention(
@@ -888,6 +935,29 @@ impl<'journal> DeliveryStore<'journal> {
                     .validate_start_source(&stored.snapshot)
                     .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
             }
+            AppendAuthority::Terminal(facts) => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::StageTerminal,
+                    "stage.terminal",
+                )?;
+                let verified = facts
+                    .verify(&stored.snapshot)
+                    .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                let expected = settle_terminal_outcome(
+                    &stored.snapshot,
+                    command.expected_revision,
+                    facts.authority().active_lease(),
+                    &verified,
+                )
+                .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                if expected != command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "terminal outcome command differs from its sealed transition",
+                    ));
+                }
+            }
             AppendAuthority::Attention(transition) => {
                 validate_authorized_operation(
                     command.operation,
@@ -1027,6 +1097,7 @@ impl<'journal> DeliveryStore<'journal> {
 enum AppendAuthority<'transition> {
     Generic,
     Stage(&'transition StageAdvanceResult),
+    Terminal(&'transition DeliveryTerminalOutcomeFacts),
     Attention(&'transition ResolvedAttentionTransition),
     Verdict(&'transition ComputedVerdictTransition),
     ReworkClarification(&'transition StageAdvanceResult),
@@ -1039,6 +1110,7 @@ impl AppendAuthority<'_> {
             Self::TaskBreakdown(transition) => Some(transition.event().clone()),
             Self::Generic
             | Self::Stage(_)
+            | Self::Terminal(_)
             | Self::Attention(_)
             | Self::Verdict(_)
             | Self::ReworkClarification(_) => None,
@@ -1080,6 +1152,25 @@ fn map_transition_error(
     }
 }
 
+fn map_terminal_outcome_error(
+    error: &CoordinationError,
+    command: &ApplyDeliveryTerminalOutcome,
+    current: &Delivery,
+) -> DeliveryStoreError {
+    if error.code() == CoordinationErrorCode::RevisionConflict {
+        revision_conflict(
+            command.expected_revision,
+            current.revision(),
+            error.to_string(),
+        )
+    } else {
+        store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            error.to_string(),
+        )
+    }
+}
+
 fn map_task_breakdown_error(
     error: &crate::application::task_breakdown::TaskBreakdownPromotionError,
 ) -> DeliveryStoreError {
@@ -1100,6 +1191,7 @@ fn validate_generic_append_delta(
         DeliveryMutationOperation::SessionBound => validate_session_binding_delta(before, after),
         DeliveryMutationOperation::DeliveryCreated
         | DeliveryMutationOperation::StageStarted
+        | DeliveryMutationOperation::StageTerminal
         | DeliveryMutationOperation::AttentionResolved
         | DeliveryMutationOperation::VerdictSubmitted
         | DeliveryMutationOperation::ReworkClarified
@@ -1268,6 +1360,7 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             DeliveryCommand::SeedForTest(seed) => self.seed_for_test(seed),
             DeliveryCommand::Append(append) => self.append(append),
             DeliveryCommand::StartStage(start) => self.start_stage(*start),
+            DeliveryCommand::ApplyTerminalOutcome(outcome) => self.apply_terminal_outcome(*outcome),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
             DeliveryCommand::SubmitVerdict(submit) => self.submit_verdict(*submit),
             DeliveryCommand::ClarifyRework(clarify) => self.clarify_rework(*clarify),

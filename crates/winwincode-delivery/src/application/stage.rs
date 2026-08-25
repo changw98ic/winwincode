@@ -56,8 +56,22 @@
 //! let _caller_callable_resolver =
 //!     winwincode_delivery::application::stage::verify_terminal_outcome;
 //! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts;
+//!
+//! let _caller_built_facts = DeliveryTerminalOutcomeFacts {
+//!     authority: todo!(),
+//!     outcome: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts;
+//!
+//! let _deserialized: DeliveryTerminalOutcomeFacts = serde_json::from_str("{}").unwrap();
+//! ```
 
-#[cfg(any(test, feature = "test-support"))]
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -74,7 +88,6 @@ use crate::domain::{
     SessionBindingId, StageRun, StageRunActorType, StageRunStatus,
     rework::{ReworkAuthorization, ReworkClarificationReason, ReworkDecision},
 };
-#[cfg(any(test, feature = "test-support"))]
 use crate::domain::{MAX_COLLECTION_LENGTH, MAX_SAFE_INTEGER};
 
 use super::task::{TaskFact, runnable_task, transition_task_status};
@@ -169,6 +182,46 @@ pub struct SessionBindingAuthority {
     active_lease: ActiveLeaseIdentity,
     issued_at: Instant,
     expires_at: Instant,
+}
+
+/// Scheduler- and Worker-adapter facts for one terminal `job.outcome`.
+///
+/// The raw lease and outcome fields stay private. A production adapter must
+/// obtain this value from its trusted scheduler/Worker boundary; ordinary
+/// callers cannot construct or deserialize terminal authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryTerminalOutcomeFacts {
+    authority: SessionBindingAuthority,
+    outcome: TerminalWorkerOutcome,
+}
+
+impl DeliveryTerminalOutcomeFacts {
+    pub const fn authority(&self) -> &SessionBindingAuthority {
+        &self.authority
+    }
+
+    pub const fn stage_run_id(&self) -> &StageRunId {
+        &self.outcome.stage_run_id
+    }
+
+    pub const fn status(&self) -> TerminalOutcomeStatus {
+        self.outcome.status
+    }
+
+    pub const fn metadata(&self) -> &TerminalOutcomeMetadata {
+        &self.outcome.metadata
+    }
+
+    pub(crate) fn verify(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+        verify_terminal_outcome(
+            delivery,
+            self.authority.active_lease(),
+            self.outcome.clone(),
+        )
+    }
 }
 
 impl SessionBindingAuthority {
@@ -320,7 +373,6 @@ pub(crate) fn fixture_verified_terminal_outcome(
 ///
 /// Fails closed when any Delivery, job, attempt, Worker, lease, instance, or
 /// fencing identity differs.
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn verify_terminal_outcome(
     delivery: &Delivery,
     lease: &ActiveLeaseIdentity,
@@ -376,11 +428,11 @@ pub(crate) fn verify_terminal_outcome(
 #[doc(hidden)]
 pub mod test_support {
     use super::{
-        ActiveLeaseIdentity, CodexThreadId, CoordinationError, Delivery, ExecutionAckSequence,
-        ExecutionJobId, FencingToken, Instant, LeaseId, SessionBindingAuthority, Sha256Digest,
-        StageRunId, TerminalArtifactReference, TerminalOutcomeMetadata, TerminalOutcomeStatus,
-        TerminalWorkerOutcome, VerifiedTerminalOutcome, WorkerId, WorkerInstanceId,
-        WorkerSessionId,
+        ActiveLeaseIdentity, CodexThreadId, CoordinationError, Delivery,
+        DeliveryTerminalOutcomeFacts, ExecutionAckSequence, ExecutionJobId, FencingToken, Instant,
+        LeaseId, SessionBindingAuthority, Sha256Digest, StageRunId, TerminalArtifactReference,
+        TerminalOutcomeMetadata, TerminalOutcomeStatus, TerminalWorkerOutcome,
+        VerifiedTerminalOutcome, WorkerId, WorkerInstanceId, WorkerSessionId,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -417,6 +469,15 @@ pub mod test_support {
             issued_at,
             expires_at,
         }
+    }
+
+    /// Seals one scheduler lease and raw Worker outcome for Control Plane
+    /// transaction tests. Production builds expose no equivalent constructor.
+    pub fn delivery_terminal_outcome_facts(
+        authority: SessionBindingAuthority,
+        outcome: TerminalWorkerOutcome,
+    ) -> DeliveryTerminalOutcomeFacts {
+        DeliveryTerminalOutcomeFacts { authority, outcome }
     }
 
     pub fn terminal_outcome_metadata(
@@ -509,7 +570,6 @@ pub mod test_support {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn validate_terminal_metadata(
     run: &StageRun,
     binding: &SessionBinding,
