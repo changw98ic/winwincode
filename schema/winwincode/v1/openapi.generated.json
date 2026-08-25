@@ -1126,6 +1126,11 @@
           }
         ]
       },
+      "ControlPlaneEventId": {
+        "description": "Stable identity of one persisted Control Plane event, independent of transport.",
+        "pattern": "^evt_[A-Za-z0-9_-]{16,128}$",
+        "type": "string"
+      },
       "ControlPlaneWebSocketAckFrame": {
         "additionalProperties": false,
         "properties": {
@@ -1150,16 +1155,16 @@
         "additionalProperties": false,
         "properties": {
           "eventId": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketEventId"
+            "$ref": "#/components/schemas/ControlPlaneEventId"
           },
           "scope": {
             "$ref": "#/components/schemas/Scope"
           },
           "sequence": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketStreamPosition"
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEventSequence"
           },
           "stream": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+            "$ref": "#/components/schemas/EventReadStream"
           }
         },
         "required": [
@@ -1432,37 +1437,6 @@
         ],
         "type": "object"
       },
-      "ControlPlaneWebSocketCursor": {
-        "additionalProperties": false,
-        "properties": {
-          "eventId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ControlPlaneWebSocketEventId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "scope": {
-            "$ref": "#/components/schemas/Scope"
-          },
-          "sequence": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketStreamPosition"
-          },
-          "stream": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
-          }
-        },
-        "required": [
-          "scope",
-          "stream",
-          "sequence",
-          "eventId"
-        ],
-        "type": "object"
-      },
       "ControlPlaneWebSocketDeliveryChangedEvent": {
         "additionalProperties": false,
         "properties": {
@@ -1551,22 +1525,6 @@
         ],
         "type": "object"
       },
-      "ControlPlaneWebSocketDeliveryStream": {
-        "additionalProperties": false,
-        "properties": {
-          "deliveryId": {
-            "$ref": "#/components/schemas/DeliveryId"
-          },
-          "kind": {
-            "const": "delivery"
-          }
-        },
-        "required": [
-          "kind",
-          "deliveryId"
-        ],
-        "type": "object"
-      },
       "ControlPlaneWebSocketDeliveryTaskChangedEvent": {
         "additionalProperties": false,
         "properties": {
@@ -1613,7 +1571,7 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketEventPayload"
           },
           "eventId": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketEventId"
+            "$ref": "#/components/schemas/ControlPlaneEventId"
           },
           "occurredAt": {
             "$ref": "#/components/schemas/Instant"
@@ -1628,7 +1586,7 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketEventSource"
           },
           "stream": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+            "$ref": "#/components/schemas/EventReadStream"
           },
           "subscriptionId": {
             "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
@@ -1650,10 +1608,6 @@
           "event"
         ],
         "type": "object"
-      },
-      "ControlPlaneWebSocketEventId": {
-        "pattern": "^evt_[A-Za-z0-9_-]{16,128}$",
-        "type": "string"
       },
       "ControlPlaneWebSocketEventPayload": {
         "oneOf": [
@@ -1704,22 +1658,6 @@
           }
         ]
       },
-      "ControlPlaneWebSocketEventStream": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketScopeStream"
-          },
-          {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketDeliveryStream"
-          },
-          {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketProductSessionStream"
-          },
-          {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketLeaseStream"
-          }
-        ]
-      },
       "ControlPlaneWebSocketEventType": {
         "enum": [
           "activity.recorded.v1",
@@ -1760,26 +1698,6 @@
           "workerSessionId",
           "leaseId",
           "codexThreadId"
-        ],
-        "type": "object"
-      },
-      "ControlPlaneWebSocketLeaseStream": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "const": "lease"
-          },
-          "leaseId": {
-            "$ref": "#/components/schemas/LeaseId"
-          },
-          "workerId": {
-            "$ref": "#/components/schemas/WorkerId"
-          }
-        },
-        "required": [
-          "kind",
-          "workerId",
-          "leaseId"
         ],
         "type": "object"
       },
@@ -1956,22 +1874,6 @@
         ],
         "type": "object"
       },
-      "ControlPlaneWebSocketProductSessionStream": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "const": "product-session"
-          },
-          "productSessionId": {
-            "$ref": "#/components/schemas/ProductSessionId"
-          }
-        },
-        "required": [
-          "kind",
-          "productSessionId"
-        ],
-        "type": "object"
-      },
       "ControlPlaneWebSocketProtocolErrorFrame": {
         "additionalProperties": false,
         "properties": {
@@ -1996,7 +1898,7 @@
             "const": 4409
           },
           "earliestAvailable": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketCursor"
+            "$ref": "#/components/schemas/EventReadCursor"
           },
           "reason": {
             "enum": [
@@ -2032,7 +1934,7 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationEpoch"
           },
           "replayThrough": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketCursor"
+            "$ref": "#/components/schemas/EventReadCursor"
           },
           "subscriptionId": {
             "$ref": "#/components/schemas/ControlPlaneWebSocketSubscriptionId"
@@ -2088,18 +1990,6 @@
           }
         ]
       },
-      "ControlPlaneWebSocketScopeStream": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "const": "scope"
-          }
-        },
-        "required": [
-          "kind"
-        ],
-        "type": "object"
-      },
       "ControlPlaneWebSocketServerFrame": {
         "oneOf": [
           {
@@ -2128,20 +2018,11 @@
           }
         ]
       },
-      "ControlPlaneWebSocketStreamPosition": {
-        "maximum": 9007199254740991,
-        "minimum": 0,
-        "type": "integer"
-      },
       "ControlPlaneWebSocketSubscribeFrame": {
         "additionalProperties": false,
         "properties": {
           "startAt": {
-            "enum": [
-              "latest",
-              "earliest-available"
-            ],
-            "type": "string"
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscribeStartAt"
           },
           "subscription": {
             "$ref": "#/components/schemas/ControlPlaneWebSocketSubscription"
@@ -2161,6 +2042,25 @@
         ],
         "type": "object"
       },
+      "ControlPlaneWebSocketSubscribeOrigin": {
+        "description": "Explicit subscription origin used when no HTTP snapshot cursor is available.",
+        "enum": [
+          "latest",
+          "earliest-available"
+        ],
+        "type": "string"
+      },
+      "ControlPlaneWebSocketSubscribeStartAt": {
+        "description": "Exact start point: a named origin or the cursor returned by the HTTP snapshot.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSubscribeOrigin"
+          },
+          {
+            "$ref": "#/components/schemas/EventReadCursor"
+          }
+        ]
+      },
       "ControlPlaneWebSocketSubscription": {
         "additionalProperties": false,
         "properties": {
@@ -2176,7 +2076,7 @@
             "$ref": "#/components/schemas/Scope"
           },
           "stream": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketEventStream"
+            "$ref": "#/components/schemas/EventReadStream"
           }
         },
         "required": [
@@ -2193,7 +2093,7 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketAuthorizationEpoch"
           },
           "cursor": {
-            "$ref": "#/components/schemas/ControlPlaneWebSocketCursor"
+            "$ref": "#/components/schemas/EventReadCursor"
           },
           "limits": {
             "$ref": "#/components/schemas/ControlPlaneWebSocketTransportLimits"
@@ -3103,6 +3003,78 @@
           "currentCandidate",
           "verdict",
           "publication"
+        ],
+        "type": "object"
+      },
+      "DeliveryEventReadCursor": {
+        "additionalProperties": false,
+        "description": "Exact position in one repository-scoped Delivery event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+        "oneOf": [
+          {
+            "properties": {
+              "eventId": {
+                "type": "null"
+              },
+              "sequence": {
+                "const": 0
+              }
+            }
+          },
+          {
+            "properties": {
+              "eventId": {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              "sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "eventId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/RepositoryScope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/EventReadPosition"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/DeliveryEventReadStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "sequence",
+          "eventId"
+        ],
+        "type": "object"
+      },
+      "DeliveryEventReadStream": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "kind": {
+            "const": "delivery"
+          }
+        },
+        "required": [
+          "kind",
+          "deliveryId"
         ],
         "type": "object"
       },
@@ -4576,6 +4548,46 @@
         ],
         "type": "object"
       },
+      "EventReadCursor": {
+        "description": "Transport-neutral exact stream position carried from a complete snapshot into event subscription.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ScopeEventReadCursor"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryEventReadCursor"
+          },
+          {
+            "$ref": "#/components/schemas/ProductSessionEventReadCursor"
+          },
+          {
+            "$ref": "#/components/schemas/LeaseEventReadCursor"
+          }
+        ]
+      },
+      "EventReadPosition": {
+        "description": "Last persisted sequence included in a snapshot or event-stream baseline; zero represents an empty stream.",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "EventReadStream": {
+        "description": "One exact ordered Control Plane event stream shared by snapshot and push transports.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ScopeEventReadStream"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryEventReadStream"
+          },
+          {
+            "$ref": "#/components/schemas/ProductSessionEventReadStream"
+          },
+          {
+            "$ref": "#/components/schemas/LeaseEventReadStream"
+          }
+        ]
+      },
       "EvidenceId": {
         "pattern": "^evd_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
@@ -5667,6 +5679,82 @@
         "x-authority": "lease-write",
         "x-direction": "worker-to-control-plane"
       },
+      "LeaseEventReadCursor": {
+        "additionalProperties": false,
+        "description": "Exact position in one worker lease event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+        "oneOf": [
+          {
+            "properties": {
+              "eventId": {
+                "type": "null"
+              },
+              "sequence": {
+                "const": 0
+              }
+            }
+          },
+          {
+            "properties": {
+              "eventId": {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              "sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "eventId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/EventReadPosition"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/LeaseEventReadStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "sequence",
+          "eventId"
+        ],
+        "type": "object"
+      },
+      "LeaseEventReadStream": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "lease"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          }
+        },
+        "required": [
+          "kind",
+          "workerId",
+          "leaseId"
+        ],
+        "type": "object"
+      },
       "LeaseId": {
         "pattern": "^lse_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
@@ -6102,6 +6190,78 @@
         "required": [
           "cursor",
           "limit"
+        ],
+        "type": "object"
+      },
+      "ProductSessionEventReadCursor": {
+        "additionalProperties": false,
+        "description": "Exact position in one repository-scoped ProductSession event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+        "oneOf": [
+          {
+            "properties": {
+              "eventId": {
+                "type": "null"
+              },
+              "sequence": {
+                "const": 0
+              }
+            }
+          },
+          {
+            "properties": {
+              "eventId": {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              "sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "eventId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/RepositoryScope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/EventReadPosition"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/ProductSessionEventReadStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "sequence",
+          "eventId"
+        ],
+        "type": "object"
+      },
+      "ProductSessionEventReadStream": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "product-session"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "productSessionId"
         ],
         "type": "object"
       },
@@ -7396,6 +7556,17 @@
         ],
         "type": "object"
       },
+      "RuntimeProjectionEventCursor": {
+        "description": "Exact event baseline for a ProductSession runtime snapshot or Delivery-stage runtime snapshot.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProductSessionEventReadCursor"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryEventReadCursor"
+          }
+        ]
+      },
       "RuntimeProjectionGetParameters": {
         "oneOf": [
           {
@@ -7447,12 +7618,15 @@
       },
       "RuntimeProjectionSnapshot": {
         "additionalProperties": false,
-        "description": "Complete bounded typed projection used after restart, invalidation, or WebSocket reset.",
+        "description": "Complete bounded typed projection used after restart, invalidation, or WebSocket reset. eventCursor is the only lossless handoff to the first subscription.",
         "oneOf": [
           {
             "properties": {
               "deliveryId": {
                 "type": "null"
+              },
+              "eventCursor": {
+                "$ref": "#/components/schemas/ProductSessionEventReadCursor"
               },
               "readCursor": {
                 "type": "null"
@@ -7466,6 +7640,9 @@
             "properties": {
               "deliveryId": {
                 "$ref": "#/components/schemas/DeliveryId"
+              },
+              "eventCursor": {
+                "$ref": "#/components/schemas/DeliveryEventReadCursor"
               },
               "readCursor": {
                 "$ref": "#/components/schemas/StrongFlowReadCursor"
@@ -7486,6 +7663,10 @@
                 "type": "null"
               }
             ]
+          },
+          "eventCursor": {
+            "$ref": "#/components/schemas/RuntimeProjectionEventCursor",
+            "description": "Exact WebSocket stream position represented by this complete snapshot."
           },
           "kind": {
             "const": "runtime_projection"
@@ -7536,6 +7717,7 @@
           "kind",
           "revision",
           "readCursor",
+          "eventCursor",
           "productSessionId",
           "deliveryId",
           "stageRunId",
@@ -7870,6 +8052,74 @@
           "workspaceId",
           "projectId",
           "repositoryId"
+        ],
+        "type": "object"
+      },
+      "ScopeEventReadCursor": {
+        "additionalProperties": false,
+        "description": "Exact position in one scope-wide event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+        "oneOf": [
+          {
+            "properties": {
+              "eventId": {
+                "type": "null"
+              },
+              "sequence": {
+                "const": 0
+              }
+            }
+          },
+          {
+            "properties": {
+              "eventId": {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              "sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "eventId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneEventId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/EventReadPosition"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/ScopeEventReadStream"
+          }
+        },
+        "required": [
+          "scope",
+          "stream",
+          "sequence",
+          "eventId"
+        ],
+        "type": "object"
+      },
+      "ScopeEventReadStream": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "scope"
+          }
+        },
+        "required": [
+          "kind"
         ],
         "type": "object"
       },
@@ -8971,13 +9221,17 @@
       },
       "StrongFlowReadCursor": {
         "additionalProperties": false,
-        "description": "Server-issued, fully comparable StrongFlow read cut. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate.",
+        "description": "Server-issued, fully comparable StrongFlow read cut. Its authenticated token seals every field including eventCursor. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate.",
         "properties": {
           "deliveryId": {
             "$ref": "#/components/schemas/DeliveryId"
           },
           "deliveryRevision": {
             "$ref": "#/components/schemas/Revision"
+          },
+          "eventCursor": {
+            "$ref": "#/components/schemas/DeliveryEventReadCursor",
+            "description": "Exact Delivery event stream position included in the authenticated read-cut token."
           },
           "publicationRevision": {
             "$ref": "#/components/schemas/Revision"
@@ -9008,7 +9262,8 @@
           "deliveryRevision",
           "runtimeLedgerRevision",
           "runtimeAcceptedSequence",
-          "publicationRevision"
+          "publicationRevision",
+          "eventCursor"
         ],
         "type": "object"
       },
@@ -10030,7 +10285,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:cc72794d06d70e3b0c7909b359c7de4b89cc011e98b6948b896305c571690986",
+  "x-source-digest": "sha256:29842ea31dd1d969de68878c8a50cd3a9f868c301abb76c77bec2c66c4203e51",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
@@ -10066,6 +10321,11 @@
         "command": "command",
         "mismatch": "reject",
         "query": "query"
+      },
+      "snapshotHandoff": {
+        "deliveryGetCursorPath": "result.readCursor.eventCursor",
+        "runtimeProjectionGetCursorPath": "result.eventCursor",
+        "subscribeStartAtField": "startAt"
       },
       "strongFlowRead": {
         "bootstrapQuery": "delivery.get",
@@ -10104,6 +10364,19 @@
       },
       "resetStrategy": "discard_then_full_reload_by_original_subscription_stream",
       "runtimeEvent": "runtime-projection.invalidated.v1",
+      "snapshotHandoff": {
+        "acceptedBaselineFrame": "transport.subscription-accepted.v1",
+        "authorizationEpochBaseline": "accepted.authorizationEpoch",
+        "cursorMustMatchSubscription": [
+          "scope",
+          "stream"
+        ],
+        "firstEventSequence": "accepted.cursor.sequence + 1",
+        "httpCursorField": "eventCursor",
+        "retentionLossCloseCode": 4409,
+        "retentionLossFrame": "transport.reset-required.v1",
+        "subscribeCursorField": "startAt"
+      },
       "transport": "websocket",
       "updateMode": "invalidation_then_http_reload"
     }

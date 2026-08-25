@@ -93,6 +93,12 @@ Worker 和 Publication 的列表与详情。`session.messages.list` 返回只含
 不透明字符串，并绑定当前 Scope、查询名、筛选条件和快照；换 Scope、换筛选条件、
 被篡改或已失效的 cursor 统一返回 `INVALID_REQUEST`，错误字段为 `page.cursor`。
 
+完整 Delivery 和 runtime 投影还返回传输中立的 `EventReadCursor`。Delivery 的这个位置包含在
+`StrongFlowReadCursor` 的签名字段中；product-session runtime 直接返回自己的位置。Web 完成
+HTTP 读取后把它原样放入 `transport.subscribe.v1.startAt`。订阅接受帧建立 sequence 与权限版本
+基线，后续第一条事件必须是 `baseline + 1`；保留窗口已经丢失该位置时返回 4409 并重新完整读取。
+`domain.schema.json` 只定义中立 cursor，WebSocket schema 单向引用它，不把传输对象反向塞进领域层。
+
 `input.respond` 不是 ExecutionPort 透传。Control Plane 必须先核对 Actor、Scope、当前
 revision、ProductSession、WorkerSession、ExecutionJob 和 InputRequest 的完整绑定，之后
 才生成一条 `input.response`。浏览器不能提交 Lease、messageId 或任意 Worker 消息。

@@ -64,7 +64,7 @@
       "ErrorEnvelope",
       "ControlPlaneWebSocketClientFrame",
       "ControlPlaneWebSocketServerFrame",
-      "ControlPlaneWebSocketCursor",
+      "EventReadCursor",
       "ControlPlaneWebSocketSubscription"
     ],
     "requiredClientExports": [
@@ -174,6 +174,15 @@
       "close4408": "resume-after-last-acknowledged-cursor",
       "close4409": "reload-strongflow-snapshot-then-new-subscription",
       "close4403": "clear-subscription-and-do-not-auto-retry"
+    },
+    "snapshotHandoff": {
+      "cursorType": "EventReadCursor",
+      "deliveryCursorPath": "delivery.result.readCursor.eventCursor",
+      "productSessionCursorPath": "runtime.result.eventCursor",
+      "subscribeStartAt": "exact-http-event-cursor",
+      "acceptedBaseline": "subscription-accepted.cursor-and-authorizationEpoch",
+      "firstEventSequence": "baseline.sequence+1",
+      "gap": "protocol-error-or-4409-reset"
     }
   },
   "strongFlowReset": {
@@ -184,8 +193,9 @@
     "sameScopeAndDelivery": true,
     "publishPartialReload": false,
     "subscribeBeforeBothQueriesSucceed": false,
-    "cursorRule": "resume-or-subscribe-only-after-both-responses-yield-one-compatible-returned-cursor",
-    "failureRule": "discard-partial-results-and-retry-the-pair"
+    "cursorRule": "paired-read-cursors-match-then-subscribe-from-readCursor.eventCursor",
+    "failureRule": "discard-partial-results-and-retry-the-pair",
+    "productSessionCursorRule": "runtime-read-succeeds-then-subscribe-from-runtime.eventCursor"
   },
   "errorBoundary": {
     "source": "ErrorEnvelope",

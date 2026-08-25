@@ -2,9 +2,9 @@
 
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    CommandCompletedResponse, DeliveryStageProjection, DeliveryStageSessionBindingProjection,
-    QueryRequest, QueryResultResponse, RuntimeProjectionSnapshot, SettingsProjection,
-    SolutionReviewProjection,
+    CommandCompletedResponse, ControlPlaneWebSocketSubscribeFrame, DeliveryStageProjection,
+    DeliveryStageSessionBindingProjection, QueryRequest, QueryResultResponse,
+    RuntimeProjectionSnapshot, SettingsProjection, SolutionReviewProjection, StrongFlowReadCursor,
 };
 
 fn http_examples() -> Value {
@@ -12,6 +12,13 @@ fn http_examples() -> Value {
         "../../../schema/winwincode/v1/examples/control-plane-http.examples.json"
     ))
     .expect("canonical HTTP examples")
+}
+
+fn websocket_examples() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../tests/fixtures/control-plane-websocket.valid.json"
+    ))
+    .expect("canonical WebSocket examples")
 }
 
 #[test]
@@ -107,4 +114,76 @@ fn generated_rust_dtos_preserve_object_level_one_of_constraints() {
     empty_changes["reviewerId"] = json!("usr_00000000000000000000000000");
     empty_changes["reviewedAt"] = json!("2026-08-24T09:02:00.000Z");
     assert!(serde_json::from_value::<SolutionReviewProjection>(empty_changes).is_err());
+}
+
+#[test]
+fn generated_event_cursor_handoff_is_typed_and_fail_closed() {
+    let websocket = websocket_examples();
+    let subscribe = websocket["transcripts"]
+        .as_array()
+        .expect("transcripts")
+        .iter()
+        .find(|transcript| {
+            transcript["name"] == "product-session-runtime-invalidation-reloads-runtime-only"
+        })
+        .expect("snapshot handoff transcript")["frames"][0]
+        .clone();
+    assert!(
+        serde_json::from_value::<ControlPlaneWebSocketSubscribeFrame>(subscribe.clone()).is_ok()
+    );
+
+    let mut unknown_origin = subscribe.clone();
+    unknown_origin["startAt"] = json!("after-http-snapshot");
+    assert!(serde_json::from_value::<ControlPlaneWebSocketSubscribeFrame>(unknown_origin).is_err());
+
+    let mut malformed_cursor = subscribe.clone();
+    malformed_cursor["startAt"]["stream"] = json!({
+        "kind": "product-session",
+        "deliveryId": "dlv_00000000000000000000000000"
+    });
+    assert!(
+        serde_json::from_value::<ControlPlaneWebSocketSubscribeFrame>(malformed_cursor).is_err()
+    );
+
+    let mut empty_cursor_with_event = subscribe.clone();
+    empty_cursor_with_event["startAt"]["eventId"] = json!("evt_00000000000000000000000042");
+    assert!(
+        serde_json::from_value::<ControlPlaneWebSocketSubscribeFrame>(empty_cursor_with_event)
+            .is_err()
+    );
+
+    let mut positive_cursor_without_event = subscribe;
+    positive_cursor_without_event["startAt"]["sequence"] = json!(1);
+    assert!(
+        serde_json::from_value::<ControlPlaneWebSocketSubscribeFrame>(
+            positive_cursor_without_event
+        )
+        .is_err()
+    );
+
+    let examples = http_examples();
+    let runtime = examples["responses"]["runtimeProjection"]["result"].clone();
+    assert!(serde_json::from_value::<RuntimeProjectionSnapshot>(runtime.clone()).is_ok());
+
+    let mut wrong_stream = runtime.clone();
+    wrong_stream["eventCursor"]["stream"] = json!({
+        "kind": "product-session",
+        "productSessionId": "psn_00000000000000000000000000"
+    });
+    assert!(serde_json::from_value::<RuntimeProjectionSnapshot>(wrong_stream).is_err());
+
+    let mut missing_runtime_cursor = runtime;
+    missing_runtime_cursor
+        .as_object_mut()
+        .expect("runtime object")
+        .remove("eventCursor");
+    assert!(serde_json::from_value::<RuntimeProjectionSnapshot>(missing_runtime_cursor).is_err());
+
+    let read_cursor = examples["responses"]["runtimeProjection"]["result"]["readCursor"].clone();
+    let mut missing_sealed_cursor = read_cursor;
+    missing_sealed_cursor
+        .as_object_mut()
+        .expect("StrongFlow cursor object")
+        .remove("eventCursor");
+    assert!(serde_json::from_value::<StrongFlowReadCursor>(missing_sealed_cursor).is_err());
 }

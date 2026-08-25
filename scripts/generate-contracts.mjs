@@ -815,7 +815,21 @@ function rustObjectShapeFieldNames(shape) {
   return names
 }
 
-function rustJsonValueConstraint(schema, accessor, sourcePath) {
+function rustIntegerLiteral(value, sourcePath) {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${sourcePath}: Rust integer constraint must be a safe integer`)
+  }
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/gu, '_')
+}
+
+function rustJsonValueConstraint(
+  schema,
+  accessor,
+  sourcePath,
+  document,
+  context,
+  qualifyShared,
+) {
   if (!isObject(schema)) {
     throw new Error(`${sourcePath}: oneOf property constraint must be an object`)
   }
@@ -832,7 +846,8 @@ function rustJsonValueConstraint(schema, accessor, sourcePath) {
     if (schema.const === null) return `${accessor}.is_some_and(serde_json::Value::is_null)`
   }
   if (typeof schema.$ref === 'string') {
-    return `${accessor}.is_some_and(|value| !value.is_null())`
+    const type = rustType(schema, document, context, qualifyShared)
+    return `${accessor}.is_some_and(|value| serde_json::from_value::<${type}>(value.clone()).is_ok())`
   }
   const types = schemaTypes(schema)
   if (types.length === 1 && types[0] === 'null') {
@@ -844,6 +859,19 @@ function rustJsonValueConstraint(schema, accessor, sourcePath) {
     if (schema.maxLength !== undefined) checks.push(`if value.chars().count() > ${String(schema.maxLength)} { return false; }`)
     checks.push('true')
     return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+  }
+  if (types.length === 1 && types[0] === 'integer') {
+    let predicate = 'true'
+    if (schema.minimum !== undefined && schema.maximum !== undefined) {
+      const minimum = rustIntegerLiteral(schema.minimum, sourcePath)
+      const maximum = rustIntegerLiteral(schema.maximum, sourcePath)
+      predicate = `(${minimum}..=${maximum}).contains(&value)`
+    } else if (schema.minimum !== undefined) {
+      predicate = `value >= ${rustIntegerLiteral(schema.minimum, sourcePath)}`
+    } else if (schema.maximum !== undefined) {
+      predicate = `value <= ${rustIntegerLiteral(schema.maximum, sourcePath)}`
+    }
+    return `${accessor}.and_then(serde_json::Value::as_i64).is_some_and(|value| ${predicate})`
   }
   if (types.length === 1 && types[0] === 'array') {
     const checks = ['let Some(items) = value.as_array() else { return false; };']
@@ -863,7 +891,7 @@ function rustJsonValueConstraint(schema, accessor, sourcePath) {
   throw new Error(`${sourcePath}: unsupported object-level oneOf property constraint`)
 }
 
-function rustObjectOneOfBranchExpression(branch, entry, index) {
+function rustObjectOneOfBranchExpression(branch, entry, index, context, qualifyShared) {
   if (!isObject(branch) || !isObject(branch.properties)) {
     throw new Error(
       `${entry.document.path}: ${entry.name} oneOf branch ${String(index + 1)} must use property constraints`,
@@ -874,6 +902,9 @@ function rustObjectOneOfBranchExpression(branch, entry, index) {
       constraint,
       `value.get(${JSON.stringify(name)})`,
       `${entry.document.path}: ${entry.name}.oneOf[${String(index)}].${name}`,
+      entry.document,
+      context,
+      qualifyShared,
     )
   ))
   return checks.length === 0 ? 'true' : checks.join(' && ')
@@ -922,7 +953,13 @@ function renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTy
   lines.push(`            .map_err(|error| format!(${JSON.stringify(`${entry.name} validation failed: {error}`)}))?;`)
   lines.push('        let matching_branches = [')
   entry.schema.oneOf.forEach((branch, index) => {
-    lines.push(`            ${rustObjectOneOfBranchExpression(branch, entry, index)},`)
+    lines.push(`            ${rustObjectOneOfBranchExpression(
+      branch,
+      entry,
+      index,
+      context,
+      qualifyShared,
+    )},`)
   })
   lines.push('        ]')
   lines.push('        .into_iter()')

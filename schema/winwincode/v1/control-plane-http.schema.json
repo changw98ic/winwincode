@@ -161,7 +161,8 @@
         "deliveryRevision",
         "runtimeLedgerRevision",
         "runtimeAcceptedSequence",
-        "publicationRevision"
+        "publicationRevision",
+        "eventCursor"
       ],
       "deliveryStageRuntimeRequiresReturnedCursor": true,
       "cursorAuthority": "server_issued_and_authenticated",
@@ -176,7 +177,17 @@
       "malformedCursorError": "INVALID_REQUEST",
       "foreignScopeCursorError": "PERMISSION_DENIED",
       "factAdapterUnavailableError": "TRUSTED_FACTS_UNAVAILABLE",
-      "generatedTimeIsCursor": false
+      "generatedTimeIsCursor": false,
+      "eventCursorResultPaths": {
+        "delivery.get": "result.readCursor.eventCursor",
+        "runtime.projection.get": "result.eventCursor"
+      },
+      "webSocketHandoff": "subscribe.startAt_must_equal_result_event_cursor",
+      "deliveryRuntimeEventCursorMustEqualReadCursor": true,
+      "productSessionEventCursorMustMatch": [
+        "envelope.scope",
+        "parameters.productSessionId"
+      ]
     },
     "deliveryStageSessionBinding": {
       "partialBindingFields": [
@@ -5271,6 +5282,11 @@
         "command": "command",
         "query": "query",
         "mismatch": "reject"
+      },
+      "snapshotHandoff": {
+        "deliveryGetCursorPath": "result.readCursor.eventCursor",
+        "runtimeProjectionGetCursorPath": "result.eventCursor",
+        "subscribeStartAtField": "startAt"
       }
     }
   }

@@ -16,18 +16,9 @@
       "type": "string",
       "pattern": "^sub_[A-Za-z0-9_-]{16,128}$"
     },
-    "ControlPlaneWebSocketEventId": {
-      "type": "string",
-      "pattern": "^evt_[A-Za-z0-9_-]{16,128}$"
-    },
     "ControlPlaneWebSocketEventSequence": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 9007199254740991
-    },
-    "ControlPlaneWebSocketStreamPosition": {
-      "type": "integer",
-      "minimum": 0,
       "maximum": 9007199254740991
     },
     "ControlPlaneWebSocketAuthorizationEpoch": {
@@ -50,117 +41,6 @@
         "worker-health.changed.v1"
       ]
     },
-    "ControlPlaneWebSocketScopeStream": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind"
-      ],
-      "properties": {
-        "kind": {
-          "const": "scope"
-        }
-      }
-    },
-    "ControlPlaneWebSocketDeliveryStream": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "deliveryId"
-      ],
-      "properties": {
-        "kind": {
-          "const": "delivery"
-        },
-        "deliveryId": {
-          "$ref": "./domain.schema.json#/$defs/DeliveryId"
-        }
-      }
-    },
-    "ControlPlaneWebSocketProductSessionStream": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "productSessionId"
-      ],
-      "properties": {
-        "kind": {
-          "const": "product-session"
-        },
-        "productSessionId": {
-          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
-        }
-      }
-    },
-    "ControlPlaneWebSocketLeaseStream": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "workerId",
-        "leaseId"
-      ],
-      "properties": {
-        "kind": {
-          "const": "lease"
-        },
-        "workerId": {
-          "$ref": "./domain.schema.json#/$defs/WorkerId"
-        },
-        "leaseId": {
-          "$ref": "./domain.schema.json#/$defs/LeaseId"
-        }
-      }
-    },
-    "ControlPlaneWebSocketEventStream": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ControlPlaneWebSocketScopeStream"
-        },
-        {
-          "$ref": "#/$defs/ControlPlaneWebSocketDeliveryStream"
-        },
-        {
-          "$ref": "#/$defs/ControlPlaneWebSocketProductSessionStream"
-        },
-        {
-          "$ref": "#/$defs/ControlPlaneWebSocketLeaseStream"
-        }
-      ]
-    },
-    "ControlPlaneWebSocketCursor": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "scope",
-        "stream",
-        "sequence",
-        "eventId"
-      ],
-      "properties": {
-        "scope": {
-          "$ref": "./domain.schema.json#/$defs/Scope"
-        },
-        "stream": {
-          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
-        },
-        "sequence": {
-          "$ref": "#/$defs/ControlPlaneWebSocketStreamPosition"
-        },
-        "eventId": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/ControlPlaneWebSocketEventId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
-    },
     "ControlPlaneWebSocketAcknowledgedCursor": {
       "type": "object",
       "additionalProperties": false,
@@ -175,13 +55,13 @@
           "$ref": "./domain.schema.json#/$defs/Scope"
         },
         "stream": {
-          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+          "$ref": "./domain.schema.json#/$defs/EventReadStream"
         },
         "sequence": {
-          "$ref": "#/$defs/ControlPlaneWebSocketStreamPosition"
+          "$ref": "#/$defs/ControlPlaneWebSocketEventSequence"
         },
         "eventId": {
-          "$ref": "#/$defs/ControlPlaneWebSocketEventId"
+          "$ref": "./domain.schema.json#/$defs/ControlPlaneEventId"
         }
       }
     },
@@ -198,7 +78,7 @@
           "$ref": "./domain.schema.json#/$defs/Scope"
         },
         "stream": {
-          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+          "$ref": "./domain.schema.json#/$defs/EventReadStream"
         },
         "eventTypes": {
           "type": "array",
@@ -717,11 +597,7 @@
           "$ref": "#/$defs/ControlPlaneWebSocketSubscription"
         },
         "startAt": {
-          "type": "string",
-          "enum": [
-            "latest",
-            "earliest-available"
-          ]
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscribeStartAt"
         }
       }
     },
@@ -826,13 +702,13 @@
           "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
         },
         "eventId": {
-          "$ref": "#/$defs/ControlPlaneWebSocketEventId"
+          "$ref": "./domain.schema.json#/$defs/ControlPlaneEventId"
         },
         "scope": {
           "$ref": "./domain.schema.json#/$defs/Scope"
         },
         "stream": {
-          "$ref": "#/$defs/ControlPlaneWebSocketEventStream"
+          "$ref": "./domain.schema.json#/$defs/EventReadStream"
         },
         "sequence": {
           "$ref": "#/$defs/ControlPlaneWebSocketEventSequence"
@@ -869,7 +745,7 @@
           "$ref": "#/$defs/ControlPlaneWebSocketSubscriptionId"
         },
         "cursor": {
-          "$ref": "#/$defs/ControlPlaneWebSocketCursor"
+          "$ref": "./domain.schema.json#/$defs/EventReadCursor"
         },
         "authorizationEpoch": {
           "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationEpoch"
@@ -900,7 +776,7 @@
           "$ref": "#/$defs/ControlPlaneWebSocketAcknowledgedCursor"
         },
         "replayThrough": {
-          "$ref": "#/$defs/ControlPlaneWebSocketCursor"
+          "$ref": "./domain.schema.json#/$defs/EventReadCursor"
         },
         "authorizationEpoch": {
           "$ref": "#/$defs/ControlPlaneWebSocketAuthorizationEpoch"
@@ -990,7 +866,7 @@
           ]
         },
         "earliestAvailable": {
-          "$ref": "#/$defs/ControlPlaneWebSocketCursor"
+          "$ref": "./domain.schema.json#/$defs/EventReadCursor"
         },
         "closeCode": {
           "const": 4409
@@ -1177,6 +1053,25 @@
         }
       },
       "description": "Delivery-stage invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor."
+    },
+    "ControlPlaneWebSocketSubscribeOrigin": {
+      "type": "string",
+      "enum": [
+        "latest",
+        "earliest-available"
+      ],
+      "description": "Explicit subscription origin used when no HTTP snapshot cursor is available."
+    },
+    "ControlPlaneWebSocketSubscribeStartAt": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketSubscribeOrigin"
+        },
+        {
+          "$ref": "./domain.schema.json#/$defs/EventReadCursor"
+        }
+      ],
+      "description": "Exact start point: a named origin or the cursor returned by the HTTP snapshot."
     }
   },
   "x-winwincode-transports": {
@@ -1209,6 +1104,19 @@
         },
         "credentialsInUrlQueryAllowed": false,
         "credentialsInFramesAllowed": false
+      },
+      "snapshotHandoff": {
+        "httpCursorField": "eventCursor",
+        "subscribeCursorField": "startAt",
+        "cursorMustMatchSubscription": [
+          "scope",
+          "stream"
+        ],
+        "acceptedBaselineFrame": "transport.subscription-accepted.v1",
+        "firstEventSequence": "accepted.cursor.sequence + 1",
+        "authorizationEpochBaseline": "accepted.authorizationEpoch",
+        "retentionLossFrame": "transport.reset-required.v1",
+        "retentionLossCloseCode": 4409
       }
     }
   },
@@ -1228,6 +1136,19 @@
       },
       "credentialsInUrlQueryAllowed": false,
       "credentialsInFramesAllowed": false
+    },
+    "snapshotHandoff": {
+      "httpCursorField": "eventCursor",
+      "subscribeCursorField": "startAt",
+      "cursorMustMatchSubscription": [
+        "scope",
+        "stream"
+      ],
+      "acceptedBaselineFrame": "transport.subscription-accepted.v1",
+      "firstEventSequence": "accepted.cursor.sequence + 1",
+      "authorizationEpochBaseline": "accepted.authorizationEpoch",
+      "retentionLossFrame": "transport.reset-required.v1",
+      "retentionLossCloseCode": 4409
     }
   }
 }

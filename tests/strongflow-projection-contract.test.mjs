@@ -241,7 +241,10 @@ test('canonical contracts close every StrongFlow transport finding', () => {
   assert.equal(oneOfValues(events, 'ControlPlaneWebSocketEventPayload', 'type')
     .includes('runtime-projection.appended.v1'), false)
 
-  const queryResults = http.$defs.QueryResult.oneOf.map(branch => branch.$ref)
+  const queryResults = http.$defs.QueryResultResponse.oneOf.map(branch => {
+    const name = branch.$ref.split('/').at(-1)
+    return http.$defs[name].allOf.at(1).properties.result.$ref
+  })
   assert.ok(queryResults.includes('#/$defs/DeliveryDetailProjection'))
   assert.equal(queryResults.includes('./domain.schema.json#/$defs/DeliveryProjection'), false)
   assert.equal(http.$defs.DeliveryPage.properties.items.items.$ref,

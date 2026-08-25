@@ -335,6 +335,7 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
     'runtimeLedgerRevision',
     'runtimeAcceptedSequence',
     'publicationRevision',
+    'eventCursor',
   ])
   assert.equal(cursor.properties.scope.$ref, '#/$defs/RepositoryScope')
   assert.equal(cursor.properties.deliveryId.$ref, '#/$defs/DeliveryId')
@@ -342,6 +343,10 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
   assert.equal(cursor.properties.runtimeLedgerRevision.$ref, '#/$defs/Revision')
   assert.equal(cursor.properties.runtimeAcceptedSequence.minimum, 0)
   assert.equal(cursor.properties.publicationRevision.$ref, '#/$defs/Revision')
+  assert.equal(
+    cursor.properties.eventCursor.$ref,
+    '#/$defs/DeliveryEventReadCursor',
+  )
   assert.equal(cursor.properties.generatedAt, undefined)
 
   const deliveryDetail = http.$defs.DeliveryDetailProjection
@@ -364,9 +369,15 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
 
   const runtime = domain.$defs.RuntimeProjectionSnapshot
   assert.ok(runtime.required.includes('readCursor'))
+  assert.ok(runtime.required.includes('eventCursor'))
   assert.deepEqual(runtime.properties.readCursor.oneOf, [
     { $ref: '#/$defs/StrongFlowReadCursor' },
     { type: 'null' },
+  ])
+  assert.equal(runtime.properties.eventCursor.$ref, '#/$defs/RuntimeProjectionEventCursor')
+  assert.deepEqual(domain.$defs.RuntimeProjectionEventCursor.oneOf, [
+    { $ref: '#/$defs/ProductSessionEventReadCursor' },
+    { $ref: '#/$defs/DeliveryEventReadCursor' },
   ])
   assert.deepEqual(http['x-winwincode-semantics'].strongFlowReadCut, {
     bootstrapQuery: 'delivery.get',
@@ -380,6 +391,7 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
       'runtimeLedgerRevision',
       'runtimeAcceptedSequence',
       'publicationRevision',
+      'eventCursor',
     ],
     deliveryStageRuntimeRequiresReturnedCursor: true,
     cursorAuthority: 'server_issued_and_authenticated',
@@ -396,6 +408,16 @@ test('delivery and runtime reads share one server-issued bounded read cursor', (
     foreignScopeCursorError: 'PERMISSION_DENIED',
     factAdapterUnavailableError: 'TRUSTED_FACTS_UNAVAILABLE',
     generatedTimeIsCursor: false,
+    eventCursorResultPaths: {
+      'delivery.get': 'result.readCursor.eventCursor',
+      'runtime.projection.get': 'result.eventCursor',
+    },
+    webSocketHandoff: 'subscribe.startAt_must_equal_result_event_cursor',
+    deliveryRuntimeEventCursorMustEqualReadCursor: true,
+    productSessionEventCursorMustMatch: [
+      'envelope.scope',
+      'parameters.productSessionId',
+    ],
   })
 
   const mismatch = examples.strongFlowReadCutMismatch
@@ -624,6 +646,11 @@ test('canonical schemas carry generated-client route and event metadata', () => 
       query: 'query',
       mismatch: 'reject',
     },
+    snapshotHandoff: {
+      deliveryGetCursorPath: 'result.readCursor.eventCursor',
+      runtimeProjectionGetCursorPath: 'result.eventCursor',
+      subscribeStartAtField: 'startAt',
+    },
   })
   assert.deepEqual(events['x-winwincode-transports'].generatedClient, {
     transport: 'websocket',
@@ -647,6 +674,16 @@ test('canonical schemas carry generated-client route and event metadata', () => 
       credentialsInUrlQueryAllowed: false,
       credentialsInFramesAllowed: false,
     },
+    snapshotHandoff: {
+      httpCursorField: 'eventCursor',
+      subscribeCursorField: 'startAt',
+      cursorMustMatchSubscription: ['scope', 'stream'],
+      acceptedBaselineFrame: 'transport.subscription-accepted.v1',
+      firstEventSequence: 'accepted.cursor.sequence + 1',
+      authorizationEpochBaseline: 'accepted.authorizationEpoch',
+      retentionLossFrame: 'transport.reset-required.v1',
+      retentionLossCloseCode: 4409,
+    },
   })
 
   const generated = readFileSync(join(
@@ -662,6 +699,11 @@ test('canonical schemas carry generated-client route and event metadata', () => 
   assert.match(generated, /"DeliveryDetailProjection"/u)
   assert.match(generated, /export type SolutionReviewProjection =/u)
   assert.match(generated, /export type StrongFlowReadCursor =/u)
+  assert.match(generated, /export type EventReadCursor =/u)
+  assert.match(
+    generated,
+    /readonly "eventId": null\n\s+readonly "sequence": 0\n\} \| \{\n\s+readonly "eventId": ControlPlaneEventId\n\s+readonly "sequence": number/u,
+  )
   assert.doesNotMatch(generated, /export type ApprovedSolutionProjection =/u)
   assert.match(generated, /"failureMode":\s*"discard_partial_pair"/u)
 })

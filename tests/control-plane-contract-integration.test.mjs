@@ -156,6 +156,44 @@ function streamKey(stream) {
   }`
 }
 
+function cursorKey(cursor) {
+  return `${scopeKey(cursor.scope)}:${streamKey(cursor.stream)}`
+}
+
+function transcriptBaseline(transcript, subscribe) {
+  if (subscribe.type === 'transport.resume.v1') {
+    const accepted = transcript.frames.find(frame => (
+      frame.type === 'transport.resume-accepted.v1'
+      && frame.subscriptionId === subscribe.subscriptionId
+    ))
+    if (accepted === undefined) return { error: 'resume acceptance is missing' }
+    if (
+      cursorKey(accepted.after) !== cursorKey(subscribe.after)
+      || accepted.after.sequence !== subscribe.after.sequence
+      || accepted.after.eventId !== subscribe.after.eventId
+    ) return { error: 'resume acceptance changes the requested cursor' }
+    return { cursor: accepted.after, authorizationEpoch: accepted.authorizationEpoch }
+  }
+
+  const accepted = transcript.frames.find(frame => (
+    frame.type === 'transport.subscription-accepted.v1'
+    && frame.subscriptionId === subscribe.subscriptionId
+  ))
+  if (accepted === undefined) return { error: 'subscription acceptance is missing' }
+  if (cursorKey(accepted.cursor) !== cursorKey(subscribe.subscription)) {
+    return { error: 'subscription acceptance crosses the requested stream' }
+  }
+  if (
+    typeof subscribe.startAt === 'object'
+    && (
+      cursorKey(subscribe.startAt) !== cursorKey(subscribe.subscription)
+      || accepted.cursor.sequence !== subscribe.startAt.sequence
+      || accepted.cursor.eventId !== subscribe.startAt.eventId
+    )
+  ) return { error: 'subscription acceptance changes the HTTP snapshot cursor' }
+  return { cursor: accepted.cursor, authorizationEpoch: accepted.authorizationEpoch }
+}
+
 function transcriptError(transcript) {
   const subscribe = transcript.frames.find(frame => (
     frame.type === 'transport.subscribe.v1'
@@ -164,7 +202,15 @@ function transcriptError(transcript) {
   if (subscribe === undefined) return 'subscription is missing'
 
   const expectedCursor = subscribe.subscription
-  let lastSequence = subscribe.after?.sequence ?? 0
+  if (
+    subscribe.type === 'transport.subscribe.v1'
+    && typeof subscribe.startAt === 'object'
+    && cursorKey(subscribe.startAt) !== cursorKey(expectedCursor)
+  ) return 'snapshot cursor crosses the subscribed stream'
+  const baseline = transcriptBaseline(transcript, subscribe)
+  if (baseline.error !== undefined) return baseline.error
+  let lastSequence = baseline.cursor.sequence
+  const authorizationEpochBaseline = baseline.authorizationEpoch
   let revokedEpoch = null
   for (const frame of transcript.frames) {
     if (frame.type === 'transport.authorization-revoked.v1') {
@@ -185,7 +231,10 @@ function transcriptError(transcript) {
     if (streamKey(frame.stream) !== streamKey(expectedCursor.stream)) {
       return 'event crosses the subscribed resource stream'
     }
-    if (frame.sequence <= lastSequence) return 'event sequence is not monotonic'
+    if (frame.sequence !== lastSequence + 1) return 'event sequence is not continuous'
+    if (frame.authorizationEpoch < authorizationEpochBaseline) {
+      return 'event authorization epoch predates the accepted baseline'
+    }
     if (revokedEpoch !== null && frame.authorizationEpoch <= revokedEpoch) {
       return 'event was sent after authorization was revoked'
     }
@@ -237,6 +286,43 @@ test('every raw reference resolves, including references inside generated OpenAP
       }
     })
   }
+})
+
+test('schema dependency direction keeps neutral event cursors out of transport cycles', () => {
+  const documents = schemaDocuments()
+  const dependencies = new Map(schemaFiles.map(name => [name, new Set()]))
+
+  for (const [fileName, document] of schemaFiles.map(name => [name, schema(name)])) {
+    visitSchema(document, node => {
+      if (typeof node.$ref !== 'string') return
+      const target = resolveSchemaRef(documents, document, node.$ref).document
+      const targetName = new URL(target.$id).pathname.split('/').at(-1)
+      if (targetName !== fileName) dependencies.get(fileName).add(targetName)
+    })
+  }
+
+  assert.deepEqual([...dependencies.get('domain.schema.json')], [])
+  assert.deepEqual([...dependencies.get('control-plane-events.schema.json')], [
+    'domain.schema.json',
+  ])
+  assert.deepEqual([...dependencies.get('control-plane-http.schema.json')], [
+    'domain.schema.json',
+  ])
+  assert.deepEqual([...dependencies.get('execution-port.schema.json')], [
+    'domain.schema.json',
+  ])
+
+  const domain = documents.get(`${schemaBase}domain.schema.json`)
+  assert.ok(domain.$defs.EventReadCursor)
+  assert.equal(
+    Object.keys(domain.$defs).some(name => name.startsWith('ControlPlaneWebSocket')),
+    false,
+  )
+  const events = documents.get(`${schemaBase}control-plane-events.schema.json`)
+  assert.deepEqual(events.$defs.ControlPlaneWebSocketSubscribeStartAt.oneOf, [
+    { $ref: '#/$defs/ControlPlaneWebSocketSubscribeOrigin' },
+    { $ref: './domain.schema.json#/$defs/EventReadCursor' },
+  ])
 })
 
 test('public unions have one required discriminator and no schema copies', () => {
@@ -395,7 +481,7 @@ test('strict validation covers every canonical domain sample and keeps IDs disti
     [domainId, 'WorkerId', 'wrk_01J00000000000000000000000'],
     [domainId, 'WorkerSessionId', 'wsn_01J00000000000000000000000'],
     [domainId, 'WorkspaceId', 'wsp_01J00000000000000000000000'],
-    [`${schemaBase}control-plane-events.schema.json`, 'ControlPlaneWebSocketEventId', 'evt_01J00000000000000000000000'],
+    [domainId, 'ControlPlaneEventId', 'evt_01J00000000000000000000000'],
     [`${schemaBase}control-plane-events.schema.json`, 'ControlPlaneWebSocketSubscriptionId', 'sub_01J00000000000000000000000'],
     [`${schemaBase}execution-port.schema.json`, 'ArtifactId', 'art_01J00000000000000000000000'],
     [`${schemaBase}execution-port.schema.json`, 'ExecutionEventId', 'xevt_01J00000000000000000000000'],
