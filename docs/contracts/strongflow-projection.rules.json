@@ -25,7 +25,8 @@
       "deliveryRevision",
       "runtimeLedgerRevision",
       "runtimeAcceptedSequence",
-      "publicationRevision"
+      "publicationRevision",
+      "eventCursor"
     ],
     "authority": "server-issued-authenticated-cursor",
     "reloadOrder": "delivery.get-then-runtime.projection.get-at-returned-cursor",
@@ -127,7 +128,8 @@
         "refs": [
           "packages/contracts/src/strongflow-plan-review.ts",
           "packages/strongflow/src/plan-review.ts",
-          "docs/decisions/0023-canonical-delivery-ownership.md"
+          "docs/decisions/0023-canonical-delivery-ownership.md",
+          "docs/contracts/delivery-solution-review-authority.md"
         ]
       },
       "scope": "One sealed current plan-review set whose Delivery, Spec ID/revision, planning StageRun and execution SessionBinding, human review StageRun, AttentionItem, ordered task proposals, and digest match the current Delivery. Pending review has null decision/comments/requestedChanges/reviewer/time; every settled review binds its authenticated reviewer and review time, changes_requested alone requires non-empty requestedChanges, and comments remain a nullable bounded typed decision field. Planner task proposals cannot assign an owner. A human review StageRun never receives a fabricated ExecutionJob SessionBinding.",
@@ -161,7 +163,7 @@
       "rust": {
         "trigger": "crates/winwincode-delivery/src/projection/solution.rs",
         "path": "crates/winwincode-delivery/src/projection/solution.rs",
-        "testName": "solution_projection_requires_current_validated_review_set"
+        "testName": "pending_solution_review_projects_safe_solution_and_non_empty_ordered_task_proposals"
       }
     },
     {
