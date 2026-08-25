@@ -28,6 +28,7 @@ function usage() {
     '  --rust-out PATH                 Override the generated Rust API module path',
     '  --rust-domain-out PATH          Override the generated shared Rust domain module path',
     '  --typescript-out PATH           Override the generated TypeScript path',
+    '  --typescript-client-out PATH    Override the generated TypeScript Web client path',
     '  --schema-collection-out PATH    Override the JSON Schema collection path',
     '  --openapi-out PATH              Override the OpenAPI document path',
     '  --help                          Print this help',
@@ -42,6 +43,14 @@ function parseArguments(arguments_) {
     rustOutput: join(root, 'crates', 'winwincode-api', 'src', 'generated.rs'),
     rustDomainOutput: join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs'),
     typescriptOutput: join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts'),
+    typescriptClientOutput: join(
+      root,
+      'apps',
+      'web',
+      'src',
+      'generated',
+      'control-plane-client.ts',
+    ),
     schemaCollectionOutput: join(
       root,
       'schema',
@@ -68,6 +77,7 @@ function parseArguments(arguments_) {
       ['--rust-out', 'rustOutput'],
       ['--rust-domain-out', 'rustDomainOutput'],
       ['--typescript-out', 'typescriptOutput'],
+      ['--typescript-client-out', 'typescriptClientOutput'],
       ['--schema-collection-out', 'schemaCollectionOutput'],
       ['--openapi-out', 'openapiOutput'],
     ])
@@ -93,6 +103,7 @@ function parseArguments(arguments_) {
     options.rustOutput = join(directory, 'rust', 'generated.rs')
     options.rustDomainOutput = join(directory, 'rust-domain', 'generated.rs')
     options.typescriptOutput = join(directory, 'typescript', 'generated.ts')
+    options.typescriptClientOutput = undefined
     options.schemaCollectionOutput = join(directory, 'schema-collection.generated.json')
     options.openapiOutput = join(directory, 'openapi.generated.json')
   }
@@ -581,6 +592,1811 @@ function renderTypescript(context, digest) {
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
 }
+
+function clientMetadata(context) {
+  const metadata = context.clientMetadata
+  const http = metadata?.http
+  const websocket = metadata?.websocket
+  if (
+    !isObject(http)
+    || typeof http.commandEndpoint !== 'string'
+    || typeof http.queryEndpoint !== 'string'
+  ) {
+    throw new Error('canonical HTTP schema is missing generated Web client endpoints')
+  }
+  if (!isObject(websocket) || typeof websocket.endpoint !== 'string') {
+    throw new Error('canonical WebSocket schema is missing the generated Web client endpoint')
+  }
+  return { http, websocket }
+}
+
+function enumValues(context, name) {
+  const definition = context.registry.get(name)?.schema
+  if (!Array.isArray(definition?.enum) || !definition.enum.every(value => typeof value === 'string')) {
+    throw new Error(`canonical schema is missing string enum ${name}`)
+  }
+  return definition.enum
+}
+
+function reachableRuntimeSchemas(context, rootNames) {
+  const definitions = {}
+  const pending = [...rootNames]
+  const visited = new Set()
+  while (pending.length > 0) {
+    const name = pending.pop()
+    if (visited.has(name)) continue
+    visited.add(name)
+    const entry = context.registry.get(name)
+    if (entry === undefined) throw new Error(`canonical schema is missing runtime type ${name}`)
+    const rewritten = rewriteReferences(entry.schema, entry.document, context, 'json-schema')
+    definitions[name] = rewritten
+    const visit = value => {
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item)
+        return
+      }
+      if (!isObject(value)) return
+      if (typeof value.$ref === 'string') pending.push(value.$ref.split('/').at(-1))
+      for (const item of Object.values(value)) visit(item)
+    }
+    visit(rewritten)
+  }
+  return canonicalValue(definitions)
+}
+
+function forbiddenErrorDetailKeys(context) {
+  const definition = context.registry.get('ErrorDetails')?.schema
+  const values = definition?.propertyNames?.not?.enum
+  if (!Array.isArray(values) || !values.every(value => typeof value === 'string')) {
+    throw new Error('canonical ErrorDetails must declare forbidden property names')
+  }
+  return [...new Set(values.map(value => value.toLowerCase().replaceAll(/[^a-z0-9]/gu, '')))]
+    .toSorted()
+}
+
+function renderControlPlaneClient(context, digest) {
+  const metadata = clientMetadata(context)
+  const errorCodes = enumValues(context, 'ErrorCode')
+  if (!errorCodes.includes('READ_CURSOR_EXPIRED')) {
+    throw new Error('canonical ErrorCode must include READ_CURSOR_EXPIRED')
+  }
+  const runtimeSchemas = reachableRuntimeSchemas(context, [
+    'CommandAcceptedResponse',
+    'CommandCompletedResponse',
+    'CommandRequest',
+    'ControlPlaneWebSocketSubscription',
+    'ControlPlaneWebSocketSubscriptionId',
+    'ControlPlaneWebSocketSubscribeStartAt',
+    'DeliveryDetailProjection',
+    'ControlPlaneWebSocketServerFrame',
+    'ErrorEnvelope',
+    'EventReadCursor',
+    'QueryResultResponse',
+    'QueryRequest',
+    'RuntimeProjectionSnapshot',
+    'StrongFlowReadCursor',
+  ])
+  return [
+    '// SPDX-License-Identifier: Apache-2.0',
+    `// ${GENERATED_MARKER}`,
+    `// Source digest: sha256:${digest}`,
+    '',
+    `const CONTROL_PLANE_COMMAND_PATH = ${JSON.stringify(metadata.http.commandEndpoint)}`,
+    `const CONTROL_PLANE_QUERY_PATH = ${JSON.stringify(metadata.http.queryEndpoint)}`,
+    `const CONTROL_PLANE_EVENTS_PATH = ${JSON.stringify(metadata.websocket.endpoint)}`,
+    `const CANONICAL_FORBIDDEN_ERROR_KEYS = new Set<string>(${JSON.stringify(forbiddenErrorDetailKeys(context))})`,
+    `const CONTROL_PLANE_RUNTIME_SCHEMAS: Readonly<Record<string, unknown>> = ${JSON.stringify(runtimeSchemas)}`,
+    '',
+    CONTROL_PLANE_CLIENT_TEMPLATE.trim(),
+    '',
+  ].join('\n')
+}
+
+const CONTROL_PLANE_CLIENT_TEMPLATE = String.raw`
+import type {
+  Actor,
+  CommandAcceptedResponse,
+  CommandCompletedResponse,
+  CommandRequest,
+  ControlPlaneWebSocketAcknowledgedCursor,
+  ControlPlaneWebSocketAuthorizationRevokedFrame,
+  ControlPlaneWebSocketClientFrame,
+  ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
+  ControlPlaneWebSocketEventFrame,
+  ControlPlaneWebSocketEventType,
+  ControlPlaneWebSocketResetRequiredFrame,
+  ControlPlaneWebSocketServerFrame,
+  ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
+  ControlPlaneWebSocketSubscription,
+  ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
+  DeliveryDetailProjection,
+  DeliveryId,
+  ErrorDetailValue,
+  ErrorDetails,
+  ErrorEnvelope,
+  EventReadCursor,
+  ProductSessionId,
+  QueryRequest,
+  QueryResultResponse,
+  RepositoryScope,
+  RequestId,
+  RuntimeProjectionSnapshot,
+  StageRunId,
+  StrongFlowReadCursor,
+} from './contracts.js'
+
+const MAX_RESPONSE_CHARACTERS = 4_194_304
+const MAX_ERROR_DEPTH = 8
+const MAX_ERROR_ENTRIES = 256
+const MAX_ERROR_STRING_CHARACTERS = 4_096
+const MAX_REMEMBERED_EVENTS = 2_048
+const MAX_READ_CURSOR_RESTARTS = 2
+const MAX_SCHEMA_DEPTH = 128
+const FORBIDDEN_ERROR_KEY_FRAGMENTS = [
+  'authorization',
+  'body',
+  'credential',
+  'headers',
+  'providerrequest',
+  'providerresponse',
+  'secret',
+  'stack',
+  'token',
+  'url',
+] as const
+const PROTOTYPE_CONTROL_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+export interface ControlPlaneClientErrorFields {
+  readonly code: string
+  readonly message: string
+  readonly requestId: RequestId | null
+  readonly retryable: boolean
+  readonly details: ErrorDetails
+}
+
+export class ControlPlaneClientError {
+  readonly code: string
+  readonly message: string
+  readonly requestId: RequestId | null
+  readonly retryable: boolean
+  readonly details: ErrorDetails
+
+  constructor(fields: ControlPlaneClientErrorFields) {
+    this.code = fields.code
+    this.message = fields.message
+    this.requestId = fields.requestId
+    this.retryable = fields.retryable
+    this.details = fields.details
+  }
+}
+
+export interface ControlPlaneHttpRequestInit {
+  readonly method: 'POST'
+  readonly headers: Readonly<Record<string, string>>
+  readonly body: string
+  readonly credentials: 'same-origin'
+}
+
+export interface ControlPlaneHttpResponse {
+  readonly ok: boolean
+  readonly status: number
+  text(): Promise<string>
+}
+
+export type ControlPlaneFetch = (
+  input: string,
+  init: ControlPlaneHttpRequestInit,
+) => Promise<ControlPlaneHttpResponse>
+
+export interface ControlPlaneHttpClientOptions {
+  readonly baseUrl?: string
+  readonly fetch?: ControlPlaneFetch
+  readonly maxNetworkRetries?: number
+  readonly waitBeforeRetry?: (attempt: number) => Promise<void>
+}
+
+export interface ControlPlaneHttpClient {
+  submitCommand(
+    command: CommandRequest,
+  ): Promise<CommandAcceptedResponse | CommandCompletedResponse>
+  submitQuery(query: QueryRequest): Promise<QueryResultResponse>
+}
+
+interface SanitizedDetail {
+  readonly valid: boolean
+  readonly value: ErrorDetailValue
+  readonly entries: number
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function schemaRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return isRecord(value) ? value : null
+}
+
+function schemaDefinition(name: string): Readonly<Record<string, unknown>> | null {
+  return schemaRecord(CONTROL_PLANE_RUNTIME_SCHEMAS[name])
+}
+
+function canonicalValueEquals(left: unknown, right: unknown): boolean {
+  return stableIdentity(left) === stableIdentity(right)
+}
+
+function matchesSchemaNode(schemaValue: unknown, value: unknown, depth = 0): boolean {
+  if (schemaValue === true) return true
+  if (schemaValue === false || depth > MAX_SCHEMA_DEPTH) return false
+  const schema = schemaRecord(schemaValue)
+  if (schema === null) return false
+
+  if (typeof schema.$ref === 'string') {
+    const name = schema.$ref.split('/').at(-1)
+    const definition = name === undefined ? null : schemaDefinition(name)
+    if (definition === null || !matchesSchemaNode(definition, value, depth + 1)) return false
+  }
+  if (Object.hasOwn(schema, 'const') && !canonicalValueEquals(value, schema.const)) return false
+  if (
+    Array.isArray(schema.enum)
+    && !schema.enum.some(candidate => canonicalValueEquals(value, candidate))
+  ) return false
+  if (
+    Array.isArray(schema.allOf)
+    && !schema.allOf.every(branch => matchesSchemaNode(branch, value, depth + 1))
+  ) return false
+  if (
+    Array.isArray(schema.anyOf)
+    && !schema.anyOf.some(branch => matchesSchemaNode(branch, value, depth + 1))
+  ) return false
+  if (Array.isArray(schema.oneOf)) {
+    let matches = 0
+    for (const branch of schema.oneOf) {
+      if (matchesSchemaNode(branch, value, depth + 1)) matches += 1
+    }
+    if (matches !== 1) return false
+  }
+  if (Object.hasOwn(schema, 'not') && matchesSchemaNode(schema.not, value, depth + 1)) return false
+
+  if (schema.type === 'null') return value === null
+  if (schema.type === 'boolean' && typeof value !== 'boolean') return false
+  if (schema.type === 'string') {
+    if (typeof value !== 'string') return false
+    const length = [...value].length
+    if (typeof schema.minLength === 'number' && length < schema.minLength) return false
+    if (typeof schema.maxLength === 'number' && length > schema.maxLength) return false
+    if (typeof schema.pattern === 'string') {
+      try {
+        if (!new RegExp(schema.pattern, 'u').test(value)) return false
+      } catch {
+        return false
+      }
+    }
+    if (schema.format === 'date-time') {
+      try {
+        if (new Date(value).toISOString() !== value) return false
+      } catch {
+        return false
+      }
+    }
+  }
+  if (schema.type === 'number' || schema.type === 'integer') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return false
+    if (schema.type === 'integer' && !Number.isSafeInteger(value)) return false
+    if (typeof schema.minimum === 'number' && value < schema.minimum) return false
+    if (typeof schema.maximum === 'number' && value > schema.maximum) return false
+  }
+  if (schema.type === 'array') {
+    if (!Array.isArray(value)) return false
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) return false
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return false
+    if (schema.uniqueItems === true) {
+      const identities = new Set(value.map(stableIdentity))
+      if (identities.size !== value.length) return false
+    }
+    const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : []
+    for (let index = 0; index < Math.min(prefixItems.length, value.length); index += 1) {
+      if (!matchesSchemaNode(prefixItems[index], value[index], depth + 1)) return false
+    }
+    if (schema.items === false && value.length > prefixItems.length) return false
+    if (schemaRecord(schema.items) !== null) {
+      for (let index = prefixItems.length; index < value.length; index += 1) {
+        if (!matchesSchemaNode(schema.items, value[index], depth + 1)) return false
+      }
+    }
+  }
+
+  const objectShape = schema.type === 'object'
+    || schema.properties !== undefined
+    || schema.required !== undefined
+    || schema.additionalProperties !== undefined
+  if (objectShape) {
+    if (!isRecord(value)) return false
+    const objectKeys = Object.keys(value)
+    if (typeof schema.minProperties === 'number' && objectKeys.length < schema.minProperties) {
+      return false
+    }
+    if (typeof schema.maxProperties === 'number' && objectKeys.length > schema.maxProperties) {
+      return false
+    }
+    const properties = schemaRecord(schema.properties) ?? {}
+    if (
+      Array.isArray(schema.required)
+      && !schema.required.every(key => typeof key === 'string' && Object.hasOwn(value, key))
+    ) return false
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (Object.hasOwn(value, key) && !matchesSchemaNode(propertySchema, value[key], depth + 1)) {
+        return false
+      }
+    }
+    const extraKeys = objectKeys.filter(key => !Object.hasOwn(properties, key))
+    if (schema.additionalProperties === false && extraKeys.length > 0) return false
+    if (schemaRecord(schema.additionalProperties) !== null) {
+      for (const key of extraKeys) {
+        if (!matchesSchemaNode(schema.additionalProperties, value[key], depth + 1)) return false
+      }
+    }
+    if (schema.propertyNames !== undefined) {
+      for (const key of Object.keys(value)) {
+        if (!matchesSchemaNode(schema.propertyNames, key, depth + 1)) return false
+      }
+    }
+  }
+  return true
+}
+
+function matchesCanonicalSchema(name: string, value: unknown): boolean {
+  const definition = schemaDefinition(name)
+  return definition !== null && matchesSchemaNode(definition, value)
+}
+
+function sanitizeDetail(value: unknown, depth = 0, entries = 0): SanitizedDetail {
+  if (entries > MAX_ERROR_ENTRIES || depth > MAX_ERROR_DEPTH) {
+    return { valid: false, value: null, entries }
+  }
+  if (value === null || typeof value === 'boolean') {
+    return { valid: true, value, entries: entries + 1 }
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value)
+      ? { valid: true, value, entries: entries + 1 }
+      : { valid: false, value: null, entries }
+  }
+  if (typeof value === 'string') {
+    return value.length <= MAX_ERROR_STRING_CHARACTERS
+      ? { valid: true, value, entries: entries + 1 }
+      : { valid: false, value: null, entries }
+  }
+  if (Array.isArray(value)) {
+    if (value.length > MAX_ERROR_ENTRIES) return { valid: false, value: null, entries }
+    const result: ErrorDetailValue[] = []
+    let consumed = entries + 1
+    for (const item of value) {
+      const sanitized = sanitizeDetail(item, depth + 1, consumed)
+      if (!sanitized.valid) return { valid: false, value: null, entries: sanitized.entries }
+      result.push(sanitized.value)
+      consumed = sanitized.entries
+    }
+    return { valid: true, value: result, entries: consumed }
+  }
+  if (!isRecord(value)) return { valid: false, value: null, entries }
+  const entriesResult: Array<readonly [string, ErrorDetailValue]> = []
+  let consumed = entries + 1
+  for (const [key, item] of Object.entries(value)) {
+    const normalized = key.toLowerCase()
+    const canonicalKey = normalized.replaceAll(/[^a-z0-9]/gu, '')
+    if (
+      key.length === 0
+      || key.length > 128
+      || CANONICAL_FORBIDDEN_ERROR_KEYS.has(canonicalKey)
+      || PROTOTYPE_CONTROL_KEYS.has(normalized)
+      || FORBIDDEN_ERROR_KEY_FRAGMENTS.some(forbidden => normalized.includes(forbidden))
+    ) return { valid: false, value: null, entries: consumed }
+    const sanitized = sanitizeDetail(item, depth + 1, consumed)
+    if (!sanitized.valid) return { valid: false, value: null, entries: sanitized.entries }
+    entriesResult.push([key, sanitized.value])
+    consumed = sanitized.entries
+  }
+  return { valid: true, value: Object.fromEntries(entriesResult), entries: consumed }
+}
+
+function invalidResponse(requestId: RequestId | null): ControlPlaneClientError {
+  return new ControlPlaneClientError({
+    code: 'INVALID_RESPONSE',
+    message: 'The Control Plane returned an invalid response.',
+    requestId,
+    retryable: false,
+    details: {},
+  })
+}
+
+function clientRequestId(value: unknown): RequestId | null {
+  return isRecord(value) && typeof value.requestId === 'string'
+    ? value.requestId as RequestId
+    : null
+}
+
+function clientFailure(
+  code: string,
+  message: string,
+  requestId: RequestId | null = null,
+  retryable = false,
+): ControlPlaneClientError {
+  return new ControlPlaneClientError({ code, message, requestId, retryable, details: {} })
+}
+
+function parseErrorEnvelope(value: unknown, expectedRequestId: RequestId | null): ControlPlaneClientError {
+  if (!matchesCanonicalSchema('ErrorEnvelope', value) || !isRecord(value)) {
+    return invalidResponse(expectedRequestId)
+  }
+  if (
+    expectedRequestId !== null && value.requestId !== expectedRequestId
+    || !isRecord(value.error)
+  ) return invalidResponse(expectedRequestId)
+  const error = value.error
+  const details = sanitizeDetail(error.details)
+  if (!details.valid || !isRecord(details.value)) return invalidResponse(expectedRequestId)
+  const envelope = value as unknown as ErrorEnvelope
+  return new ControlPlaneClientError({
+    code: envelope.error.code,
+    message: envelope.error.message,
+    requestId: envelope.requestId,
+    retryable: envelope.error.retryable,
+    details: details.value,
+  })
+}
+
+function endpoint(baseUrl: string | undefined, path: string): string {
+  if (baseUrl === undefined || baseUrl.length === 0) return path
+  return baseUrl.replace(/\/+$/u, '') + path
+}
+
+function defaultFetch(input: string, init: ControlPlaneHttpRequestInit): Promise<ControlPlaneHttpResponse> {
+  const candidate: unknown = Reflect.get(globalThis, 'fetch')
+  if (typeof candidate !== 'function') {
+    throw clientFailure('TRANSPORT_UNAVAILABLE', 'The browser HTTP transport is unavailable.')
+  }
+  return (candidate as ControlPlaneFetch)(input, init)
+}
+
+async function responseJson(
+  response: ControlPlaneHttpResponse,
+  requestId: RequestId,
+): Promise<unknown> {
+  let source: string
+  try {
+    source = await response.text()
+  } catch {
+    throw invalidResponse(requestId)
+  }
+  if (source.length === 0 || source.length > MAX_RESPONSE_CHARACTERS) {
+    throw invalidResponse(requestId)
+  }
+  try {
+    return JSON.parse(source) as unknown
+  } catch {
+    throw invalidResponse(requestId)
+  }
+}
+
+function parseCommandResponse(
+  value: unknown,
+  request: CommandRequest,
+): CommandAcceptedResponse | CommandCompletedResponse {
+  if (!isRecord(value) || value.schemaVersion !== 'winwincode/v1') {
+    throw invalidResponse(request.requestId)
+  }
+  if (
+    value.requestId !== request.requestId
+    || value.command !== request.command
+    || !Number.isSafeInteger(value.currentRevision)
+  ) throw invalidResponse(request.requestId)
+  if (value.outcome === 'accepted') {
+    if (
+      !matchesCanonicalSchema('CommandAcceptedResponse', value)
+    ) throw invalidResponse(request.requestId)
+    return value as unknown as CommandAcceptedResponse
+  }
+  if (
+    value.outcome !== 'completed'
+    || !matchesCanonicalSchema('CommandCompletedResponse', value)
+  ) throw invalidResponse(request.requestId)
+  return value as unknown as CommandCompletedResponse
+}
+
+function parseQueryResponse(value: unknown, request: QueryRequest): QueryResultResponse {
+  if (
+    !isRecord(value)
+    || !matchesCanonicalSchema('QueryResultResponse', value)
+    || value.schemaVersion !== 'winwincode/v1'
+    || value.requestId !== request.requestId
+    || value.query !== request.query
+  ) throw invalidResponse(request.requestId)
+  return value as unknown as QueryResultResponse
+}
+
+export function createControlPlaneHttpClient(
+  options: ControlPlaneHttpClientOptions = {},
+): ControlPlaneHttpClient {
+  const fetchImplementation = options.fetch ?? defaultFetch
+  const maximumRetries = options.maxNetworkRetries ?? 0
+  if (!Number.isSafeInteger(maximumRetries) || maximumRetries < 0 || maximumRetries > 5) {
+    throw clientFailure('INVALID_CLIENT_OPTIONS', 'maxNetworkRetries must be between zero and five.')
+  }
+  const waitBeforeRetry = options.waitBeforeRetry ?? (async () => {})
+
+  async function send(
+    path: string,
+    request: CommandRequest | QueryRequest,
+  ): Promise<unknown> {
+    let serialized: string
+    try {
+      serialized = JSON.stringify(request)
+    } catch {
+      throw clientFailure(
+        'INVALID_CLIENT_REQUEST',
+        'The Control Plane request could not be encoded.',
+        request.requestId,
+      )
+    }
+    const init: ControlPlaneHttpRequestInit = {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: serialized,
+      credentials: 'same-origin',
+    }
+    let attempt = 0
+    for (;;) {
+      let response: ControlPlaneHttpResponse
+      try {
+        response = await fetchImplementation(endpoint(options.baseUrl, path), init)
+      } catch (error) {
+        if (error instanceof ControlPlaneClientError) throw error
+        if (attempt >= maximumRetries) {
+          throw clientFailure(
+            'NETWORK_ERROR',
+            'The Control Plane request did not reach the server.',
+            request.requestId,
+            true,
+          )
+        }
+        attempt += 1
+        try {
+          await waitBeforeRetry(attempt)
+        } catch {
+          throw clientFailure(
+            'NETWORK_ERROR',
+            'The Control Plane request retry was interrupted.',
+            request.requestId,
+            true,
+          )
+        }
+        continue
+      }
+      const parsed = await responseJson(response, request.requestId)
+      if (!response.ok) throw parseErrorEnvelope(parsed, request.requestId)
+      return parsed
+    }
+  }
+
+  return {
+    async submitCommand(command) {
+      if (!matchesCanonicalSchema('CommandRequest', command)) throw clientFailure(
+        'INVALID_CLIENT_REQUEST',
+        'The command does not match its canonical discriminator.',
+        clientRequestId(command),
+      )
+      return parseCommandResponse(
+        await send(CONTROL_PLANE_COMMAND_PATH, command),
+        command,
+      )
+    },
+    async submitQuery(query) {
+      if (!matchesCanonicalSchema('QueryRequest', query)) throw clientFailure(
+        'INVALID_CLIENT_REQUEST',
+        'The query does not match its canonical discriminator.',
+        clientRequestId(query),
+      )
+      return parseQueryResponse(await send(CONTROL_PLANE_QUERY_PATH, query), query)
+    },
+  }
+}
+
+export interface ControlPlaneWebSocketConnection {
+  readonly readyState: number
+  onopen: ((event: unknown) => void) | null
+  onmessage: ((event: { readonly data: unknown }) => void) | null
+  onclose: ((event: { readonly code: number }) => void) | null
+  onerror: ((event: unknown) => void) | null
+  send(payload: string): void
+  close(code?: number, reason?: string): void
+}
+
+export type ControlPlaneWebSocketFactory = (url: string) => ControlPlaneWebSocketConnection
+
+export interface ControlPlaneWebSocketClientOptions {
+  readonly baseUrl?: string
+  readonly createSocket?: ControlPlaneWebSocketFactory
+  readonly reconnectDelayMillis?: number
+  readonly onEvent: (event: ControlPlaneWebSocketEventFrame) => Promise<void> | void
+  readonly onResetRequired?: (
+    frame: ControlPlaneWebSocketResetRequiredFrame | null,
+  ) => Promise<EventReadCursor> | EventReadCursor
+  readonly onAuthorizationRevoked?: (
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ) => Promise<void> | void
+  readonly onError?: (error: ControlPlaneClientError) => void
+}
+
+export interface ControlPlaneWebSocketClient {
+  readonly cursor: ControlPlaneWebSocketAcknowledgedCursor | null
+  subscribe(
+    subscriptionId: ControlPlaneWebSocketSubscriptionId,
+    subscription: ControlPlaneWebSocketSubscription,
+    startAt?: ControlPlaneWebSocketSubscribeStartAt,
+  ): void
+  resume(): void
+  reconnect(): void
+  close(): void
+}
+
+type ConnectMode = 'subscribe' | 'resume'
+type ConnectionPhase = 'idle' | 'awaiting-subscribe' | 'awaiting-resume' | 'active'
+
+function defaultSocketFactory(url: string): ControlPlaneWebSocketConnection {
+  const candidate: unknown = Reflect.get(globalThis, 'WebSocket')
+  if (typeof candidate !== 'function') {
+    throw clientFailure('TRANSPORT_UNAVAILABLE', 'The browser WebSocket transport is unavailable.')
+  }
+  type SocketConstructor = new (input: string) => ControlPlaneWebSocketConnection
+  return new (candidate as SocketConstructor)(url)
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue)
+  if (!isRecord(value)) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableJsonValue(item)]),
+  )
+}
+
+function stableIdentity(value: unknown): string {
+  return JSON.stringify(stableJsonValue(value))
+}
+
+function parseServerFrame(value: unknown): ControlPlaneWebSocketServerFrame {
+  if (!matchesCanonicalSchema('ControlPlaneWebSocketServerFrame', value)) throw clientFailure(
+    'INVALID_WEBSOCKET_FRAME',
+    'The Control Plane sent an invalid event frame.',
+  )
+  return value as unknown as ControlPlaneWebSocketServerFrame
+}
+
+function parseSocketPayload(value: unknown): ControlPlaneWebSocketServerFrame {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_RESPONSE_CHARACTERS) {
+    throw clientFailure('INVALID_WEBSOCKET_FRAME', 'The Control Plane sent an invalid event frame.')
+  }
+  try {
+    return parseServerFrame(JSON.parse(value) as unknown)
+  } catch (error) {
+    if (error instanceof ControlPlaneClientError) throw error
+    throw clientFailure('INVALID_WEBSOCKET_FRAME', 'The Control Plane sent an invalid event frame.')
+  }
+}
+
+function eventCursor(frame: ControlPlaneWebSocketEventFrame): ControlPlaneWebSocketAcknowledgedCursor {
+  return {
+    scope: frame.scope,
+    stream: frame.stream,
+    sequence: frame.sequence,
+    eventId: frame.eventId,
+  }
+}
+
+function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
+  const stream = frame.stream
+  const event = frame.event
+  if (frame.source.kind === 'execution-worker' && stream.kind === 'lease') {
+    if (frame.source.workerId !== stream.workerId || frame.source.leaseId !== stream.leaseId) {
+      return false
+    }
+  }
+  switch (event.type) {
+    case 'product-session.changed.v1':
+    case 'approval.changed.v1':
+      return stream.kind === 'product-session'
+        && event.productSessionId === stream.productSessionId
+    case 'product-session.message.appended.v1':
+      return stream.kind === 'product-session'
+        && event.productSessionId === stream.productSessionId
+        && event.message.productSessionId === stream.productSessionId
+    case 'attention.changed.v1':
+    case 'delivery.changed.v1':
+    case 'delivery-task.changed.v1':
+      return stream.kind === 'delivery' && event.deliveryId === stream.deliveryId
+    case 'runtime-projection.invalidated.v1':
+      return event.scopeKind === 'delivery-stage'
+        ? stream.kind === 'delivery' && event.deliveryId === stream.deliveryId
+        : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
+    case 'presence.changed.v1':
+      return event.productSessionId === undefined
+        ? stream.kind === 'scope'
+        : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
+    case 'worker-health.changed.v1':
+      return stream.kind === 'lease' && event.workerId === stream.workerId
+    case 'activity.recorded.v1':
+      if (stream.kind === 'scope') {
+        return event.deliveryId === undefined && event.productSessionId === undefined
+      }
+      if (stream.kind === 'delivery') {
+        return event.deliveryId === stream.deliveryId && event.productSessionId === undefined
+      }
+      if (stream.kind === 'product-session') {
+        return event.productSessionId === stream.productSessionId && event.deliveryId === undefined
+      }
+      return false
+  }
+}
+
+export function createControlPlaneWebSocketClient(
+  options: ControlPlaneWebSocketClientOptions,
+): ControlPlaneWebSocketClient {
+  const createSocket = options.createSocket ?? defaultSocketFactory
+  const reconnectDelay = options.reconnectDelayMillis ?? 250
+  if (!Number.isSafeInteger(reconnectDelay) || reconnectDelay < 0 || reconnectDelay > 60_000) {
+    throw clientFailure(
+      'INVALID_CLIENT_OPTIONS',
+      'reconnectDelayMillis must be between zero and sixty thousand.',
+    )
+  }
+  let socket: ControlPlaneWebSocketConnection | null = null
+  let generation = 0
+  let subscriptionGeneration = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let currentSubscriptionId: ControlPlaneWebSocketSubscriptionId | null = null
+  let currentSubscription: ControlPlaneWebSocketSubscription | null = null
+  let startAt = 'latest' as ControlPlaneWebSocketSubscribeStartAt
+  let acknowledgedCursor: ControlPlaneWebSocketAcknowledgedCursor | null = null
+  let resumeAfterCursor: ControlPlaneWebSocketAcknowledgedCursor | null = null
+  let subscribeStartCursor: EventReadCursor | null = null
+  let authorizationEpoch: number | null = null
+  let nextExpectedSequence: number | null = null
+  let phase: ConnectionPhase = 'idle'
+  let manuallyClosed = false
+  let blocked = false
+  let resetting = false
+  let eventQueue = Promise.resolve()
+  let pendingEvents = new Map<string, string>()
+  let pendingEventIds = new Map<string, string>()
+  let pendingSequences = new Map<number, string>()
+  let rememberedEvents = new Map<string, string>()
+  let rememberedSequences = new Map<number, string>()
+  let rememberedOrder: Array<{
+    readonly eventId: string
+    readonly sequence: number
+    readonly identity: string
+  }> = []
+
+  function report(error: ControlPlaneClientError): void {
+    options.onError?.(error)
+  }
+
+  function clearTimer(): void {
+    if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+
+  function detach(current: ControlPlaneWebSocketConnection): void {
+    current.onopen = null
+    current.onmessage = null
+    current.onclose = null
+    current.onerror = null
+  }
+
+  function stopSocket(code = 1000, reason = 'client state changed'): void {
+    generation += 1
+    phase = 'idle'
+    resumeAfterCursor = null
+    subscribeStartCursor = null
+    const current = socket
+    socket = null
+    if (current === null) return
+    detach(current)
+    current.close(code, reason)
+  }
+
+  function send(frame: ControlPlaneWebSocketClientFrame): boolean {
+    if (socket === null || socket.readyState !== 1) return false
+    try {
+      socket.send(JSON.stringify(frame))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function requireSubscription(): {
+    readonly id: ControlPlaneWebSocketSubscriptionId
+    readonly value: ControlPlaneWebSocketSubscription
+  } {
+    if (currentSubscriptionId === null || currentSubscription === null) {
+      throw clientFailure('NO_SUBSCRIPTION', 'No WebSocket subscription is configured.')
+    }
+    return { id: currentSubscriptionId, value: currentSubscription }
+  }
+
+  function rememberEvent(
+    eventId: string,
+    sequence: number,
+    identity: string,
+  ): void {
+    rememberedEvents.set(eventId, identity)
+    rememberedSequences.set(sequence, identity)
+    rememberedOrder.push({ eventId, sequence, identity })
+    while (rememberedOrder.length > MAX_REMEMBERED_EVENTS) {
+      const oldest = rememberedOrder.shift()
+      if (oldest === undefined) continue
+      if (rememberedEvents.get(oldest.eventId) === oldest.identity) {
+        rememberedEvents.delete(oldest.eventId)
+      }
+      if (rememberedSequences.get(oldest.sequence) === oldest.identity) {
+        rememberedSequences.delete(oldest.sequence)
+      }
+    }
+  }
+
+  function sendAcknowledgement(): void {
+    if (phase !== 'active' || acknowledgedCursor === null || currentSubscriptionId === null) return
+    send({
+      type: 'transport.ack.v1',
+      subscriptionId: currentSubscriptionId,
+      cursor: acknowledgedCursor,
+    })
+  }
+
+  function failEventProcessing(error: unknown): void {
+    blocked = true
+    const failure = error instanceof ControlPlaneClientError
+      ? error
+      : clientFailure('EVENT_HANDLER_FAILED', 'The page did not apply a Control Plane event.')
+    report(failure)
+    stopSocket(1011, 'event application failed')
+  }
+
+  function queueProtocolFailure(error: ControlPlaneClientError): void {
+    const ownSubscriptionGeneration = subscriptionGeneration
+    eventQueue = eventQueue.then(() => {
+      if (ownSubscriptionGeneration === subscriptionGeneration && !manuallyClosed) {
+        failEventProcessing(error)
+      }
+    })
+  }
+
+  function queueEvent(frame: ControlPlaneWebSocketEventFrame): void {
+    const configured = requireSubscription()
+    if (
+      phase !== 'active'
+      || authorizationEpoch === null
+      || frame.authorizationEpoch < authorizationEpoch
+      || frame.subscriptionId !== configured.id
+      || stableIdentity(frame.scope) !== stableIdentity(configured.value.scope)
+      || stableIdentity(frame.stream) !== stableIdentity(configured.value.stream)
+      || !configured.value.eventTypes.includes(
+        frame.event.type as ControlPlaneWebSocketEventType,
+      )
+      || !eventMatchesStream(frame)
+    ) {
+      failEventProcessing(clientFailure(
+        'INVALID_WEBSOCKET_FRAME',
+        'The event does not belong to the active subscription.',
+      ))
+      return
+    }
+    authorizationEpoch = frame.authorizationEpoch
+    const identity = stableIdentity(frame)
+    const remembered = rememberedEvents.get(frame.eventId)
+    const rememberedSequence = rememberedSequences.get(frame.sequence)
+    const pendingIdentity = pendingEventIds.get(frame.eventId)
+    const pendingSequence = pendingSequences.get(frame.sequence)
+    if (
+      (remembered !== undefined && remembered !== identity)
+      || (pendingIdentity !== undefined && pendingIdentity !== identity)
+      || (rememberedSequence !== undefined && rememberedSequence !== identity)
+      || (pendingSequence !== undefined && pendingSequence !== identity)
+    ) {
+      failEventProcessing(clientFailure(
+        'INVALID_WEBSOCKET_FRAME',
+        'An event ID or sequence was reused for a different event.',
+      ))
+      return
+    }
+    if (remembered === identity || rememberedSequence === identity) {
+      sendAcknowledgement()
+      return
+    }
+    if (
+      pendingEvents.get(identity) === identity
+      || pendingIdentity === identity
+      || pendingSequence === identity
+    ) return
+    if (nextExpectedSequence === null || frame.sequence !== nextExpectedSequence) {
+      queueProtocolFailure(clientFailure(
+        'INVALID_WEBSOCKET_FRAME',
+        'The event sequence is not contiguous with the active subscription.',
+      ))
+      return
+    }
+    nextExpectedSequence += 1
+    const ownSubscriptionGeneration = subscriptionGeneration
+    const ownPendingEvents = pendingEvents
+    const ownPendingEventIds = pendingEventIds
+    const ownPendingSequences = pendingSequences
+    pendingEvents.set(identity, identity)
+    pendingEventIds.set(frame.eventId, identity)
+    pendingSequences.set(frame.sequence, identity)
+    eventQueue = eventQueue.then(async () => {
+      if (
+        ownSubscriptionGeneration !== subscriptionGeneration
+        || blocked
+        || manuallyClosed
+      ) return
+      try {
+        await options.onEvent(frame)
+        if (
+          ownSubscriptionGeneration !== subscriptionGeneration
+          || blocked
+          || manuallyClosed
+        ) return
+        const cursor = eventCursor(frame)
+        acknowledgedCursor = cursor
+        rememberEvent(frame.eventId, frame.sequence, identity)
+        sendAcknowledgement()
+      } catch (error) {
+        if (ownSubscriptionGeneration === subscriptionGeneration) {
+          failEventProcessing(error)
+        }
+      } finally {
+        ownPendingEvents.delete(identity)
+        ownPendingEventIds.delete(frame.eventId)
+        ownPendingSequences.delete(frame.sequence)
+      }
+    })
+  }
+
+  function clearReplayState(): void {
+    subscriptionGeneration += 1
+    acknowledgedCursor = null
+    resumeAfterCursor = null
+    subscribeStartCursor = null
+    authorizationEpoch = null
+    nextExpectedSequence = null
+    phase = 'idle'
+    pendingEvents = new Map()
+    pendingEventIds = new Map()
+    pendingSequences = new Map()
+    rememberedEvents = new Map()
+    rememberedSequences = new Map()
+    rememberedOrder = []
+    eventQueue = Promise.resolve()
+  }
+
+  function cursorMatchesSubscription(
+    cursor: ControlPlaneWebSocketAcknowledgedCursor | EventReadCursor,
+  ): boolean {
+    return currentSubscription !== null
+      && stableIdentity(cursor.scope) === stableIdentity(currentSubscription.scope)
+      && stableIdentity(cursor.stream) === stableIdentity(currentSubscription.stream)
+  }
+
+  async function reset(frame: ControlPlaneWebSocketResetRequiredFrame | null): Promise<void> {
+    if (resetting || manuallyClosed || currentSubscription === null) return
+    resetting = true
+    clearTimer()
+    stopSocket(1000, 'projection reset')
+    clearReplayState()
+    const ownSubscriptionGeneration = subscriptionGeneration
+    try {
+      if (options.onResetRequired === undefined) {
+        throw clientFailure('RESET_REQUIRED', 'The subscription needs a complete HTTP reload.')
+      }
+      const nextStartAt = await options.onResetRequired(frame)
+      if (
+        !matchesCanonicalSchema('EventReadCursor', nextStartAt)
+        || currentSubscription === null
+        || stableIdentity(nextStartAt.scope) !== stableIdentity(currentSubscription.scope)
+        || stableIdentity(nextStartAt.stream) !== stableIdentity(currentSubscription.stream)
+      ) throw clientFailure(
+        'RESET_FAILED',
+        'The complete HTTP reload did not return the active event stream cursor.',
+      )
+      startAt = nextStartAt
+      if (
+        ownSubscriptionGeneration === subscriptionGeneration
+        && !manuallyClosed
+        && currentSubscription !== null
+      ) connect('subscribe')
+    } catch (error) {
+      if (ownSubscriptionGeneration === subscriptionGeneration) {
+        report(error instanceof ControlPlaneClientError
+          ? error
+          : clientFailure('RESET_FAILED', 'The complete HTTP reload did not finish.'))
+      }
+    } finally {
+      if (ownSubscriptionGeneration === subscriptionGeneration) resetting = false
+    }
+  }
+
+  function revoke(frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null): void {
+    clearTimer()
+    manuallyClosed = true
+    currentSubscriptionId = null
+    currentSubscription = null
+    clearReplayState()
+    stopSocket(1000, 'authorization revoked')
+    try {
+      const notification = options.onAuthorizationRevoked?.(frame)
+      if (notification !== undefined) void Promise.resolve(notification).catch(() => {
+        report(clientFailure(
+          'AUTHORIZATION_NOTIFICATION_FAILED',
+          'The page did not finish its authorization revocation notification.',
+        ))
+      })
+    } catch {
+      report(clientFailure(
+        'AUTHORIZATION_NOTIFICATION_FAILED',
+        'The page did not finish its authorization revocation notification.',
+      ))
+    }
+  }
+
+  function handleFrame(frame: ControlPlaneWebSocketServerFrame): void {
+    switch (frame.type) {
+      case 'event.v1':
+        queueEvent(frame)
+        return
+      case 'transport.ping.v1':
+        if (typeof frame.nonce !== 'string') {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The Control Plane sent an invalid ping.',
+          ))
+          return
+        }
+        send({ type: 'transport.pong.v1', nonce: frame.nonce })
+        return
+      case 'transport.reset-required.v1':
+        if (
+          (phase !== 'active' && phase !== 'awaiting-resume')
+          || frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.earliestAvailable)
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The reset does not belong to the active subscription.',
+          ))
+          return
+        }
+        void reset(frame)
+        return
+      case 'transport.authorization-revoked.v1':
+        if (
+          phase !== 'active'
+          || frame.subscriptionId !== currentSubscriptionId
+          || authorizationEpoch === null
+          || frame.authorizationEpoch <= authorizationEpoch
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The authorization change does not belong to the active subscription.',
+          ))
+          return
+        }
+        revoke(frame)
+        return
+      case 'transport.error.v1':
+        report(parseErrorEnvelope(frame.error, null))
+        return
+      case 'transport.subscription-accepted.v1':
+        if (
+          phase !== 'awaiting-subscribe'
+          || frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.cursor)
+          || (
+            subscribeStartCursor !== null
+            && stableIdentity(frame.cursor) !== stableIdentity(subscribeStartCursor)
+          )
+          || (
+            authorizationEpoch !== null
+            && frame.authorizationEpoch < authorizationEpoch
+          )
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The transport frame does not belong to the active subscription.',
+          ))
+          return
+        }
+        authorizationEpoch = frame.authorizationEpoch
+        nextExpectedSequence = frame.cursor.sequence + 1
+        subscribeStartCursor = null
+        phase = 'active'
+        if (frame.cursor.eventId !== null) {
+          acknowledgedCursor = frame.cursor as ControlPlaneWebSocketAcknowledgedCursor
+        }
+        return
+      case 'transport.resume-accepted.v1':
+        if (
+          phase !== 'awaiting-resume'
+          || frame.subscriptionId !== currentSubscriptionId
+          || resumeAfterCursor === null
+          || stableIdentity(frame.after) !== stableIdentity(resumeAfterCursor)
+          || !cursorMatchesSubscription(frame.after)
+          || !cursorMatchesSubscription(frame.replayThrough)
+          || frame.replayThrough.sequence < frame.after.sequence
+          || (
+            authorizationEpoch !== null
+            && frame.authorizationEpoch < authorizationEpoch
+          )
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The transport frame does not belong to the active subscription.',
+          ))
+          return
+        }
+        authorizationEpoch = frame.authorizationEpoch
+        nextExpectedSequence = Math.max(
+          nextExpectedSequence ?? frame.after.sequence + 1,
+          frame.after.sequence + 1,
+        )
+        resumeAfterCursor = null
+        phase = 'active'
+        sendAcknowledgement()
+        return
+      case 'transport.backpressure.v1':
+        if (
+          phase !== 'active'
+          || frame.subscriptionId !== currentSubscriptionId
+          || !cursorMatchesSubscription(frame.ackRequiredThrough)
+        ) {
+          failEventProcessing(clientFailure(
+            'INVALID_WEBSOCKET_FRAME',
+            'The transport frame does not belong to the active subscription.',
+          ))
+        }
+        return
+    }
+  }
+
+  function scheduleReconnect(): void {
+    if (manuallyClosed || blocked || currentSubscription === null || reconnectTimer !== null) return
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      if (!manuallyClosed && !blocked && currentSubscription !== null) {
+        connect(acknowledgedCursor === null ? 'subscribe' : 'resume')
+      }
+    }, reconnectDelay)
+  }
+
+  function connect(mode: ConnectMode): void {
+    const configured = requireSubscription()
+    const selectedMode: ConnectMode = mode === 'resume' && acknowledgedCursor !== null
+      ? 'resume'
+      : 'subscribe'
+    clearTimer()
+    stopSocket(1000, 'reconnecting')
+    const ownGeneration = generation
+    const requestedResumeCursor = selectedMode === 'resume' ? acknowledgedCursor : null
+    const requestedStartAt = startAt
+    resumeAfterCursor = requestedResumeCursor
+    subscribeStartCursor = selectedMode === 'subscribe' && isRecord(requestedStartAt)
+      ? requestedStartAt as EventReadCursor
+      : null
+    phase = selectedMode === 'resume' ? 'awaiting-resume' : 'awaiting-subscribe'
+    const created = createSocket(endpoint(options.baseUrl, CONTROL_PLANE_EVENTS_PATH))
+    socket = created
+    created.onopen = () => {
+      if (ownGeneration !== generation || socket !== created) return
+      if (selectedMode === 'resume' && requestedResumeCursor !== null) {
+        send({
+          type: 'transport.resume.v1',
+          subscriptionId: configured.id,
+          subscription: configured.value,
+          after: requestedResumeCursor,
+        })
+      } else {
+        send({
+          type: 'transport.subscribe.v1',
+          subscriptionId: configured.id,
+          subscription: configured.value,
+          startAt: requestedStartAt,
+        })
+      }
+    }
+    created.onmessage = event => {
+      if (ownGeneration !== generation || socket !== created) return
+      try {
+        handleFrame(parseSocketPayload(event.data))
+      } catch (error) {
+        failEventProcessing(error)
+      }
+    }
+    created.onclose = event => {
+      if (ownGeneration !== generation || socket !== created) return
+      socket = null
+      phase = 'idle'
+      resumeAfterCursor = null
+      if (event.code === 4403) {
+        revoke(null)
+      } else if (event.code === 4409) {
+        void reset(null)
+      } else {
+        scheduleReconnect()
+      }
+    }
+    created.onerror = () => {}
+  }
+
+  return {
+    get cursor() {
+      return acknowledgedCursor
+    },
+    subscribe(
+      subscriptionId,
+      subscription,
+      requestedStart = 'latest' as ControlPlaneWebSocketSubscribeStartAt,
+    ) {
+      if (
+        !matchesCanonicalSchema('ControlPlaneWebSocketSubscriptionId', subscriptionId)
+        || !matchesCanonicalSchema('ControlPlaneWebSocketSubscription', subscription)
+        || !matchesCanonicalSchema('ControlPlaneWebSocketSubscribeStartAt', requestedStart)
+        || (
+          isRecord(requestedStart)
+          && (
+            stableIdentity(requestedStart.scope) !== stableIdentity(subscription.scope)
+            || stableIdentity(requestedStart.stream) !== stableIdentity(subscription.stream)
+          )
+        )
+      ) throw clientFailure('INVALID_SUBSCRIPTION', 'The WebSocket subscription is invalid.')
+      manuallyClosed = false
+      blocked = false
+      resetting = false
+      currentSubscriptionId = subscriptionId
+      currentSubscription = subscription
+      startAt = requestedStart
+      clearReplayState()
+      connect('subscribe')
+    },
+    resume() {
+      requireSubscription()
+      if (acknowledgedCursor === null) {
+        throw clientFailure('NO_ACKNOWLEDGED_CURSOR', 'No applied event cursor is available to resume.')
+      }
+      manuallyClosed = false
+      blocked = false
+      connect('resume')
+    },
+    reconnect() {
+      requireSubscription()
+      manuallyClosed = false
+      blocked = false
+      connect(acknowledgedCursor === null ? 'subscribe' : 'resume')
+    },
+    close() {
+      manuallyClosed = true
+      clearTimer()
+      currentSubscriptionId = null
+      currentSubscription = null
+      clearReplayState()
+      stopSocket(1000, 'client closed')
+    },
+  }
+}
+
+export interface StrongFlowProjectionSnapshot {
+  readonly cursor: StrongFlowReadCursor
+  readonly delivery: DeliveryDetailProjection
+  readonly runtime: RuntimeProjectionSnapshot
+}
+
+interface ProjectionSubscriptionTransportOptions {
+  readonly baseUrl?: string
+  readonly createSocket?: ControlPlaneWebSocketFactory
+  readonly reconnectDelayMillis?: number
+  readonly httpClient: ControlPlaneHttpClient
+  readonly actor: Actor
+  readonly scope: RepositoryScope
+  readonly productSessionId: ProductSessionId
+  readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
+  readonly eventTypes: ReadonlyArray<ControlPlaneWebSocketEventType>
+  readonly createRequestId: () => RequestId
+  readonly onSnapshotCleared?: (
+    reason: 'reset' | 'authorization-revoked',
+  ) => Promise<void> | void
+  readonly onAuthorizationRevoked?: (
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ) => Promise<void> | void
+  readonly onError?: (error: ControlPlaneClientError) => void
+}
+
+export interface StrongFlowProjectionSubscriptionOptions
+  extends ProjectionSubscriptionTransportOptions {
+  readonly scope: RepositoryScope
+  readonly deliveryId: DeliveryId
+  readonly stageRunId: StageRunId
+  readonly onSnapshot: (snapshot: StrongFlowProjectionSnapshot) => Promise<void> | void
+}
+
+export interface StrongFlowProjectionSubscription {
+  readonly cursor: StrongFlowReadCursor | null
+  start(): Promise<void>
+  close(): void
+}
+
+function requestId(options: ProjectionSubscriptionTransportOptions): RequestId {
+  const value = options.createRequestId()
+  if (typeof value !== 'string' || value.length === 0) {
+    throw clientFailure('INVALID_REQUEST_ID', 'createRequestId returned an invalid request ID.')
+  }
+  return value
+}
+
+function projectionResult(response: QueryResultResponse): Readonly<Record<string, unknown>> {
+  if (!isRecord(response.result)) throw invalidResponse(response.requestId)
+  return response.result
+}
+
+function assertReadCursor(
+  value: unknown,
+  scope: RepositoryScope,
+  deliveryId: DeliveryId,
+  requestIdValue: RequestId,
+): StrongFlowReadCursor {
+  if (
+    !isRecord(value)
+    || !matchesCanonicalSchema('StrongFlowReadCursor', value)
+    || typeof value.token !== 'string'
+    || value.token.length === 0
+    || value.deliveryId !== deliveryId
+    || stableIdentity(value.scope) !== stableIdentity(scope)
+    || typeof value.deliveryRevision !== 'number'
+    || !Number.isSafeInteger(value.deliveryRevision)
+    || value.deliveryRevision < 0
+    || typeof value.runtimeLedgerRevision !== 'number'
+    || !Number.isSafeInteger(value.runtimeLedgerRevision)
+    || value.runtimeLedgerRevision < 0
+    || typeof value.runtimeAcceptedSequence !== 'number'
+    || !Number.isSafeInteger(value.runtimeAcceptedSequence)
+    || value.runtimeAcceptedSequence < 0
+    || typeof value.publicationRevision !== 'number'
+    || !Number.isSafeInteger(value.publicationRevision)
+    || value.publicationRevision < 0
+    || !isRecord(value.eventCursor)
+    || stableIdentity(value.eventCursor.scope) !== stableIdentity(scope)
+    || !isRecord(value.eventCursor.stream)
+    || value.eventCursor.stream.kind !== 'delivery'
+    || value.eventCursor.stream.deliveryId !== deliveryId
+  ) throw invalidResponse(requestIdValue)
+  return value as unknown as StrongFlowReadCursor
+}
+
+function reportProjectionError(
+  options: ProjectionSubscriptionTransportOptions,
+  error: unknown,
+): void {
+  options.onError?.(error instanceof ControlPlaneClientError
+    ? error
+    : clientFailure('PROJECTION_RELOAD_FAILED', 'The projection reload did not finish.'))
+}
+
+type ProjectionOperationQueue = <Result>(
+  operation: () => Promise<Result>,
+) => Promise<Result>
+
+function createProjectionOperationQueue(): ProjectionOperationQueue {
+  let tail = Promise.resolve()
+  return function enqueue<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = tail.then(operation, operation)
+    tail = result.then(() => undefined, () => undefined)
+    return result
+  }
+}
+
+export function createStrongFlowProjectionSubscription(
+  options: StrongFlowProjectionSubscriptionOptions,
+): StrongFlowProjectionSubscription {
+  let readCursor: StrongFlowReadCursor | null = null
+  let webSocket: ControlPlaneWebSocketClient | null = null
+  let closed = false
+  let startPromise: Promise<void> | null = null
+  let operationGeneration = 0
+  const enqueue = createProjectionOperationQueue()
+
+  function operationIsCurrent(ownGeneration: number): boolean {
+    return !closed && ownGeneration === operationGeneration
+  }
+
+  async function reloadAt(ownGeneration: number): Promise<EventReadCursor | null> {
+    let restarts = 0
+    for (;;) {
+      if (!operationIsCurrent(ownGeneration)) return null
+      const deliveryRequestId = requestId(options)
+      const deliveryResponse = await options.httpClient.submitQuery({
+        schemaVersion: 'winwincode/v1',
+        requestId: deliveryRequestId,
+        actor: options.actor,
+        scope: options.scope,
+        query: 'delivery.get',
+        parameters: { deliveryId: options.deliveryId },
+        page: { cursor: null, limit: 1 },
+      })
+      if (!operationIsCurrent(ownGeneration)) return null
+      const delivery = projectionResult(deliveryResponse)
+      if (
+        !matchesCanonicalSchema('DeliveryDetailProjection', delivery)
+        || delivery.kind !== 'delivery_detail'
+        || delivery.deliveryId !== options.deliveryId
+      ) {
+        throw invalidResponse(deliveryRequestId)
+      }
+      const candidateCursor = assertReadCursor(
+        delivery.readCursor,
+        options.scope,
+        options.deliveryId,
+        deliveryRequestId,
+      )
+      const runtimeRequestId = requestId(options)
+      let runtimeResponse: QueryResultResponse
+      try {
+        runtimeResponse = await options.httpClient.submitQuery({
+          schemaVersion: 'winwincode/v1',
+          requestId: runtimeRequestId,
+          actor: options.actor,
+          scope: options.scope,
+          query: 'runtime.projection.get',
+          parameters: {
+            kind: 'delivery-stage',
+            productSessionId: options.productSessionId,
+            deliveryId: options.deliveryId,
+            stageRunId: options.stageRunId,
+            atCursor: candidateCursor,
+          },
+          page: { cursor: null, limit: 1 },
+        })
+      } catch (error) {
+        if (!operationIsCurrent(ownGeneration)) return null
+        if (
+          error instanceof ControlPlaneClientError
+          && error.code === 'READ_CURSOR_EXPIRED'
+          && restarts < MAX_READ_CURSOR_RESTARTS
+        ) {
+          restarts += 1
+          continue
+        }
+        throw error
+      }
+      if (!operationIsCurrent(ownGeneration)) return null
+      const runtime = projectionResult(runtimeResponse)
+      if (
+        !matchesCanonicalSchema('RuntimeProjectionSnapshot', runtime)
+        || runtime.kind !== 'runtime_projection'
+        || runtime.productSessionId !== options.productSessionId
+        || runtime.deliveryId !== options.deliveryId
+        || runtime.stageRunId !== options.stageRunId
+        || stableIdentity(runtime.readCursor) !== stableIdentity(candidateCursor)
+        || stableIdentity(runtime.eventCursor) !== stableIdentity(candidateCursor.eventCursor)
+      ) throw invalidResponse(runtimeRequestId)
+      const snapshot: StrongFlowProjectionSnapshot = {
+        cursor: candidateCursor,
+        delivery: delivery as unknown as DeliveryDetailProjection,
+        runtime: runtime as unknown as RuntimeProjectionSnapshot,
+      }
+      if (!operationIsCurrent(ownGeneration)) return null
+      await options.onSnapshot(snapshot)
+      if (!operationIsCurrent(ownGeneration)) return null
+      readCursor = candidateCursor
+      return candidateCursor.eventCursor
+    }
+  }
+
+  function reload(): Promise<EventReadCursor | null> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(() => reloadAt(ownGeneration))
+  }
+
+  function clearAndReload(): Promise<EventReadCursor | null> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    readCursor = null
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return null
+      await options.onSnapshotCleared?.('reset')
+      if (!operationIsCurrent(ownGeneration)) return null
+      return reloadAt(ownGeneration)
+    })
+  }
+
+  function clearAuthorization(
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ): Promise<void> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    readCursor = null
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onSnapshotCleared?.('authorization-revoked')
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onAuthorizationRevoked?.(frame)
+    })
+  }
+
+  function validateInvalidation(frame: ControlPlaneWebSocketEventFrame): void {
+    if (frame.event.type !== 'runtime-projection.invalidated.v1') return
+    const event = frame.event
+    if (
+      event.scopeKind !== 'delivery-stage'
+      || event.productSessionId !== options.productSessionId
+      || event.deliveryId !== options.deliveryId
+      || event.stageRunId !== options.stageRunId
+      || stableIdentity(event.reloadQueries) !== stableIdentity([
+        'delivery.get',
+        'runtime.projection.get',
+      ])
+    ) throw clientFailure(
+      'INVALID_WEBSOCKET_FRAME',
+      'The runtime invalidation does not match the StrongFlow subscription.',
+    )
+  }
+
+  function createRealtimeClient(): ControlPlaneWebSocketClient {
+    return createControlPlaneWebSocketClient({
+      ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
+      ...(options.createSocket === undefined ? {} : { createSocket: options.createSocket }),
+      ...(options.reconnectDelayMillis === undefined
+        ? {}
+        : { reconnectDelayMillis: options.reconnectDelayMillis }),
+      async onEvent(frame) {
+        validateInvalidation(frame)
+        await reload()
+      },
+      async onResetRequired() {
+        const cursor = await clearAndReload()
+        if (cursor === null) throw clientFailure(
+          'RESET_FAILED',
+          'The StrongFlow snapshot reload was superseded before subscription.',
+        )
+        return cursor
+      },
+      async onAuthorizationRevoked(frame) {
+        await clearAuthorization(frame)
+      },
+      onError(error) {
+        reportProjectionError(options, error)
+      },
+    })
+  }
+
+  async function start(): Promise<void> {
+    if (closed) throw clientFailure('SUBSCRIPTION_CLOSED', 'The StrongFlow subscription is closed.')
+    if (startPromise !== null) return startPromise
+    webSocket?.close()
+    webSocket = null
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    const operation = (async () => {
+      const snapshotCursor = await enqueue(() => reloadAt(ownGeneration))
+      if (snapshotCursor === null || !operationIsCurrent(ownGeneration)) return
+      const next = createRealtimeClient()
+      next.subscribe(options.subscriptionId, {
+        scope: options.scope,
+        stream: { kind: 'delivery', deliveryId: options.deliveryId },
+        eventTypes: options.eventTypes,
+      }, snapshotCursor)
+      if (!operationIsCurrent(ownGeneration)) {
+        next.close()
+        return
+      }
+      webSocket = next
+    })()
+    startPromise = operation
+    try {
+      await operation
+    } finally {
+      startPromise = null
+    }
+  }
+
+  return {
+    get cursor() {
+      return readCursor
+    },
+    start,
+    close() {
+      closed = true
+      operationGeneration += 1
+      readCursor = null
+      webSocket?.close()
+      webSocket = null
+    },
+  }
+}
+export interface ProductSessionRuntimeProjectionSubscriptionOptions
+  extends ProjectionSubscriptionTransportOptions {
+  readonly onSnapshot: (snapshot: RuntimeProjectionSnapshot) => Promise<void> | void
+}
+
+export interface ProductSessionRuntimeProjectionSubscription {
+  start(): Promise<void>
+  close(): void
+}
+
+export function createProductSessionRuntimeProjectionSubscription(
+  options: ProductSessionRuntimeProjectionSubscriptionOptions,
+): ProductSessionRuntimeProjectionSubscription {
+  let webSocket: ControlPlaneWebSocketClient | null = null
+  let closed = false
+  let startPromise: Promise<void> | null = null
+  let operationGeneration = 0
+  const enqueue = createProjectionOperationQueue()
+
+  function operationIsCurrent(ownGeneration: number): boolean {
+    return !closed && ownGeneration === operationGeneration
+  }
+
+  async function reloadAt(ownGeneration: number): Promise<EventReadCursor | null> {
+    if (!operationIsCurrent(ownGeneration)) return null
+    const runtimeRequestId = requestId(options)
+    const response = await options.httpClient.submitQuery({
+      schemaVersion: 'winwincode/v1',
+      requestId: runtimeRequestId,
+      actor: options.actor,
+      scope: options.scope,
+      query: 'runtime.projection.get',
+      parameters: {
+        kind: 'product-session',
+        productSessionId: options.productSessionId,
+      },
+      page: { cursor: null, limit: 1 },
+    })
+    if (!operationIsCurrent(ownGeneration)) return null
+    const runtime = projectionResult(response)
+    if (
+      !matchesCanonicalSchema('RuntimeProjectionSnapshot', runtime)
+      || runtime.kind !== 'runtime_projection'
+      || runtime.productSessionId !== options.productSessionId
+      || runtime.deliveryId !== null
+      || runtime.stageRunId !== null
+      || runtime.readCursor !== null
+      || !isRecord(runtime.eventCursor)
+      || stableIdentity(runtime.eventCursor.scope) !== stableIdentity(options.scope)
+      || !isRecord(runtime.eventCursor.stream)
+      || runtime.eventCursor.stream.kind !== 'product-session'
+      || runtime.eventCursor.stream.productSessionId !== options.productSessionId
+    ) throw invalidResponse(runtimeRequestId)
+    await options.onSnapshot(runtime as unknown as RuntimeProjectionSnapshot)
+    return operationIsCurrent(ownGeneration)
+      ? runtime.eventCursor as EventReadCursor
+      : null
+  }
+
+  function reload(): Promise<EventReadCursor | null> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(() => reloadAt(ownGeneration))
+  }
+
+  function clearAndReload(): Promise<EventReadCursor | null> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return null
+      await options.onSnapshotCleared?.('reset')
+      if (!operationIsCurrent(ownGeneration)) return null
+      return reloadAt(ownGeneration)
+    })
+  }
+
+  function clearAuthorization(
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ): Promise<void> {
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    return enqueue(async () => {
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onSnapshotCleared?.('authorization-revoked')
+      if (!operationIsCurrent(ownGeneration)) return
+      await options.onAuthorizationRevoked?.(frame)
+    })
+  }
+
+  function validateInvalidation(frame: ControlPlaneWebSocketEventFrame): void {
+    if (frame.event.type !== 'runtime-projection.invalidated.v1') return
+    const event = frame.event
+    if (
+      event.scopeKind !== 'product-session'
+      || event.productSessionId !== options.productSessionId
+      || stableIdentity(event.reloadQueries) !== stableIdentity(['runtime.projection.get'])
+    ) throw clientFailure(
+      'INVALID_WEBSOCKET_FRAME',
+      'The runtime invalidation does not match the product session subscription.',
+    )
+  }
+
+  function createRealtimeClient(): ControlPlaneWebSocketClient {
+    return createControlPlaneWebSocketClient({
+      ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
+      ...(options.createSocket === undefined ? {} : { createSocket: options.createSocket }),
+      ...(options.reconnectDelayMillis === undefined
+        ? {}
+        : { reconnectDelayMillis: options.reconnectDelayMillis }),
+      async onEvent(frame) {
+        validateInvalidation(frame)
+        await reload()
+      },
+      async onResetRequired() {
+        const cursor = await clearAndReload()
+        if (cursor === null) throw clientFailure(
+          'RESET_FAILED',
+          'The product session snapshot reload was superseded before subscription.',
+        )
+        return cursor
+      },
+      async onAuthorizationRevoked(frame) {
+        await clearAuthorization(frame)
+      },
+      onError(error) {
+        reportProjectionError(options, error)
+      },
+    })
+  }
+
+  async function start(): Promise<void> {
+    if (closed) throw clientFailure('SUBSCRIPTION_CLOSED', 'The runtime subscription is closed.')
+    if (startPromise !== null) return startPromise
+    webSocket?.close()
+    webSocket = null
+    const ownGeneration = operationGeneration + 1
+    operationGeneration = ownGeneration
+    const operation = (async () => {
+      const snapshotCursor = await enqueue(() => reloadAt(ownGeneration))
+      if (snapshotCursor === null || !operationIsCurrent(ownGeneration)) return
+      const next = createRealtimeClient()
+      next.subscribe(options.subscriptionId, {
+        scope: options.scope,
+        stream: { kind: 'product-session', productSessionId: options.productSessionId },
+        eventTypes: options.eventTypes,
+      }, snapshotCursor)
+      if (!operationIsCurrent(ownGeneration)) {
+        next.close()
+        return
+      }
+      webSocket = next
+    })()
+    startPromise = operation
+    try {
+      await operation
+    } finally {
+      startPromise = null
+    }
+  }
+
+  return {
+    start,
+    close() {
+      closed = true
+      operationGeneration += 1
+      webSocket?.close()
+      webSocket = null
+    },
+  }
+}
+`
 
 const RUST_RESERVED_WORDS = new Set([
   'as',
@@ -1373,6 +3189,9 @@ function generate(options) {
     [options.schemaCollectionOutput, renderSchemaCollection(documents, context, digest)],
     [options.openapiOutput, renderOpenApi(documents, context, digest)],
   ])
+  if (options.typescriptClientOutput !== undefined) {
+    outputs.set(options.typescriptClientOutput, renderControlPlaneClient(context, digest))
+  }
 
   if (options.check) {
     const drift = []
