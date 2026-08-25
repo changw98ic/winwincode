@@ -663,6 +663,7 @@ function renderControlPlaneClient(context, digest) {
   const runtimeSchemas = reachableRuntimeSchemas(context, [
     'CommandAcceptedResponse',
     'CommandCompletedResponse',
+    'CommandRequest',
     'ControlPlaneWebSocketSubscription',
     'ControlPlaneWebSocketSubscriptionId',
     'ControlPlaneWebSocketSubscribeStartAt',
@@ -671,6 +672,7 @@ function renderControlPlaneClient(context, digest) {
     'ErrorEnvelope',
     'EventReadCursor',
     'QueryResultResponse',
+    'QueryRequest',
     'RuntimeProjectionSnapshot',
     'StrongFlowReadCursor',
   ])
@@ -1008,6 +1010,12 @@ function invalidResponse(requestId: RequestId | null): ControlPlaneClientError {
   })
 }
 
+function clientRequestId(value: unknown): RequestId | null {
+  return isRecord(value) && typeof value.requestId === 'string'
+    ? value.requestId as RequestId
+    : null
+}
+
 function clientFailure(
   code: string,
   message: string,
@@ -1176,12 +1184,22 @@ export function createControlPlaneHttpClient(
 
   return {
     async submitCommand(command) {
+      if (!matchesCanonicalSchema('CommandRequest', command)) throw clientFailure(
+        'INVALID_CLIENT_REQUEST',
+        'The command does not match its canonical discriminator.',
+        clientRequestId(command),
+      )
       return parseCommandResponse(
         await send(CONTROL_PLANE_COMMAND_PATH, command),
         command,
       )
     },
     async submitQuery(query) {
+      if (!matchesCanonicalSchema('QueryRequest', query)) throw clientFailure(
+        'INVALID_CLIENT_REQUEST',
+        'The query does not match its canonical discriminator.',
+        clientRequestId(query),
+      )
       return parseQueryResponse(await send(CONTROL_PLANE_QUERY_PATH, query), query)
     },
   }

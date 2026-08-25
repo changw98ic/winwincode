@@ -176,6 +176,8 @@
     ],
     "retryRule": "reuse-identical-command-envelope-and-request-id",
     "queryCursor": "opaque-and-bound-to-scope-query-filter-snapshot",
+    "requestValidation": "full-canonical-schema-and-operation-discriminator-before-network",
+    "responseValidation": "full-canonical-schema-and-request-discriminator",
     "webSocketCommandAllowed": false
   },
   "websocket": {
@@ -188,7 +190,11 @@
       "transport.pong.v1"
     ],
     "cursorAdvance": "after-event-handler-succeeds-before-cumulative-ack",
-    "duplicateRule": "deduplicate-by-event-id-and-stream-cursor",
+    "duplicateRule": "deduplicate-by-exact-event-id-sequence-and-payload",
+    "sequenceRule": "accepted-baseline-plus-one-without-gaps-or-rollbacks",
+    "authorizationRule": "event-epoch-at-or-after-accepted-baseline-without-client-rollback",
+    "payloadScopeRule": "payload-resource-matches-envelope-scope-and-stream",
+    "lifecycleRule": "subscription-generation-cancels-stale-cursor-and-ack-publication",
     "reconnect": {
       "ordinaryDisconnect": "resume-after-last-acknowledged-cursor",
       "close4408": "resume-after-last-acknowledged-cursor",
@@ -218,6 +224,9 @@
     "sameScopeAndDelivery": true,
     "publishPartialReload": false,
     "subscribeBeforeBothQueriesSucceed": false,
+    "clearBeforeResetReload": true,
+    "failedResetState": "empty-and-unsubscribed",
+    "staleReloadPublication": "discard",
     "cursorRule": "paired-read-cursors-match-then-subscribe-from-readCursor.eventCursor",
     "failureRule": "discard-partial-results-and-retry-the-pair",
     "expiredCursorError": "READ_CURSOR_EXPIRED",
@@ -246,7 +255,8 @@
       "token",
       "url"
     ],
-    "invalidResponse": "bounded-generic-error-without-raw-response-copy"
+    "invalidResponse": "bounded-generic-error-without-raw-response-copy",
+    "detailSanitization": "recursive-case-and-separator-insensitive-key-rejection"
   },
   "boundary": {
     "webRoot": "apps/web",

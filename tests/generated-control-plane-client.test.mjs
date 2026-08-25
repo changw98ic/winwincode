@@ -412,7 +412,7 @@ test('HTTP queries preserve opaque cursors and malformed errors stay bounded', a
       })
     },
   })
-  const opaqueCursor = 'opaque::scope/query/filter/snapshot::do-not-parse'
+  const opaqueCursor = 'opaque_scope_query_filter_snapshot_01'
   const query = {
     schemaVersion,
     requestId: requestId(2),
@@ -1417,6 +1417,27 @@ test('HTTP rejects a response result that belongs to another request discriminat
     }),
     error => error instanceof ControlPlaneClientError && error.code === 'INVALID_RESPONSE',
   )
+
+  let fetchCalls = 0
+  const requestClient = createControlPlaneHttpClient({
+    async fetch() {
+      fetchCalls += 1
+      assert.fail('an invalid request branch must not reach the network')
+    },
+  })
+  await assert.rejects(
+    requestClient.submitQuery({
+      schemaVersion,
+      requestId: requestId(802),
+      actor,
+      scope,
+      query: 'delivery.list',
+      parameters: { states: [], workerId: canonicalId('wrk', 1) },
+      page: { cursor: null, limit: 25 },
+    }),
+    error => error instanceof ControlPlaneClientError && error.code === 'INVALID_CLIENT_REQUEST',
+  )
+  assert.equal(fetchCalls, 0)
 })
 
 test('closing during an in-flight StrongFlow reload prevents later publication', async () => {
@@ -1461,4 +1482,329 @@ test('closing during an in-flight StrongFlow reload prevents later publication',
   await start
   assert.equal(snapshots.length, 0)
   assert.equal(client.cursor, null)
+})
+
+test('WebSocket binds acceptance to the HTTP cursor and authorization baseline', async t => {
+  const baseline = {
+    scope,
+    stream: { kind: 'delivery', deliveryId },
+    sequence: 5,
+    eventId: eventId(5),
+  }
+
+  await t.test('changed accepted cursor is rejected', async () => {
+    const factory = fakeWebSocketFactory()
+    const errors = []
+    const client = createControlPlaneWebSocketClient({
+      createSocket: factory.createSocket,
+      async onEvent() {},
+      onError(error) {
+        errors.push(error)
+      },
+    })
+    client.subscribe(subscriptionId, subscription(), baseline)
+    factory.sockets[0].open()
+    assert.deepEqual(factory.sockets[0].sent[0].startAt, baseline)
+    factory.sockets[0].receive(acceptedFrame(
+      scope,
+      baseline.stream,
+      baseline.sequence - 1,
+      7,
+    ))
+    await flush()
+    assert.equal(errors.at(-1)?.code, 'INVALID_WEBSOCKET_FRAME')
+    assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 1011)
+  })
+
+  await t.test('first event follows the accepted cursor and may use a newer epoch', async () => {
+    const factory = fakeWebSocketFactory()
+    const applied = []
+    const client = createControlPlaneWebSocketClient({
+      createSocket: factory.createSocket,
+      async onEvent(frame) {
+        applied.push(frame.sequence)
+      },
+    })
+    client.subscribe(subscriptionId, subscription(), baseline)
+    factory.sockets[0].open()
+    factory.sockets[0].receive({
+      ...acceptedFrame(scope, baseline.stream, baseline.sequence, 7),
+      cursor: baseline,
+    })
+    factory.sockets[0].receive({
+      ...runtimeEvent(6, {
+        type: 'runtime-projection.invalidated.v1',
+        scopeKind: 'delivery-stage',
+        productSessionId,
+        deliveryId,
+        stageRunId,
+        projectionRevision: 6,
+        lastProjectionSequence: 6,
+        reloadQueries: ['delivery.get', 'runtime.projection.get'],
+      }),
+      authorizationEpoch: 8,
+    })
+    await flush()
+    assert.deepEqual(applied, [6])
+    assert.equal(client.cursor?.sequence, 6)
+    assert.equal(factory.sockets[0].sent.at(-1).cursor.sequence, 6)
+  })
+})
+
+test('projection wrappers reject extra cursors and incomplete DTOs before publication', async t => {
+  await t.test('extra StrongFlow cursor field', async () => {
+    const snapshots = []
+    const sockets = fakeWebSocketFactory()
+    let requestSequence = 0
+    const cursor = { ...readCursor('40'), unexpected: 'not-canonical' }
+    const client = createStrongFlowProjectionSubscription({
+      httpClient: {
+        async submitCommand() {
+          throw new Error('not used')
+        },
+        async submitQuery(request) {
+          return request.query === 'delivery.get'
+            ? queryResponse(request, deliveryProjection(cursor))
+            : queryResponse(request, deliveryRuntimeProjection(cursor))
+        },
+      },
+      createSocket: sockets.createSocket,
+      actor,
+      scope,
+      deliveryId,
+      productSessionId,
+      stageRunId,
+      subscriptionId,
+      eventTypes: ['runtime-projection.invalidated.v1'],
+      createRequestId() {
+        requestSequence += 1
+        return requestId(1_000 + requestSequence)
+      },
+      async onSnapshot(snapshot) {
+        snapshots.push(snapshot)
+      },
+    })
+    await assert.rejects(client.start(), error => (
+      error instanceof ControlPlaneClientError && error.code === 'INVALID_RESPONSE'
+    ))
+    assert.equal(snapshots.length, 0)
+    assert.equal(sockets.sockets.length, 0)
+  })
+
+  await t.test('missing runtime projection field', async () => {
+    const snapshots = []
+    const sockets = fakeWebSocketFactory()
+    let requestSequence = 0
+    const { sessions: _sessions, ...incomplete } = productRuntimeProjection(1)
+    const client = createProductSessionRuntimeProjectionSubscription({
+      httpClient: {
+        async submitCommand() {
+          throw new Error('not used')
+        },
+        async submitQuery(request) {
+          return queryResponse(request, incomplete)
+        },
+      },
+      createSocket: sockets.createSocket,
+      actor,
+      scope,
+      productSessionId,
+      subscriptionId,
+      eventTypes: ['runtime-projection.invalidated.v1'],
+      createRequestId() {
+        requestSequence += 1
+        return requestId(1_100 + requestSequence)
+      },
+      async onSnapshot(snapshot) {
+        snapshots.push(snapshot)
+      },
+    })
+    await assert.rejects(client.start(), error => (
+      error instanceof ControlPlaneClientError && error.code === 'INVALID_RESPONSE'
+    ))
+    assert.equal(snapshots.length, 0)
+    assert.equal(sockets.sockets.length, 0)
+  })
+})
+
+test('close and authorization or reset boundaries cancel old event completions', async t => {
+  for (const boundary of ['close', 'authorization', 'reset']) {
+    await t.test(boundary, async () => {
+      const factory = fakeWebSocketFactory()
+      const pending = deferred()
+      const revoked = []
+      const client = createControlPlaneWebSocketClient({
+        createSocket: factory.createSocket,
+        async onEvent() {
+          await pending.promise
+        },
+        async onResetRequired() {
+          return {
+            scope,
+            stream: { kind: 'delivery', deliveryId },
+            sequence: 10,
+            eventId: eventId(10),
+          }
+        },
+        async onAuthorizationRevoked(frame) {
+          revoked.push(frame)
+        },
+      })
+      client.subscribe(subscriptionId, subscription())
+      factory.sockets[0].open()
+      factory.sockets[0].receive(acceptedFrame())
+      factory.sockets[0].receive(runtimeEvent(1, {
+        type: 'runtime-projection.invalidated.v1',
+        scopeKind: 'delivery-stage',
+        productSessionId,
+        deliveryId,
+        stageRunId,
+        projectionRevision: 1,
+        lastProjectionSequence: 1,
+        reloadQueries: ['delivery.get', 'runtime.projection.get'],
+      }))
+      await flush()
+
+      if (boundary === 'close') client.close()
+      if (boundary === 'authorization') factory.sockets[0].serverClose(4403)
+      if (boundary === 'reset') factory.sockets[0].serverClose(4409)
+      pending.resolve()
+      await flush()
+
+      assert.equal(client.cursor, null)
+      assert.equal(
+        factory.sockets[0].sent.some(frame => frame.type === 'transport.ack.v1'),
+        false,
+      )
+      assert.equal(revoked.length, boundary === 'authorization' ? 1 : 0)
+    })
+  }
+})
+
+test('StrongFlow reset discards stale reloads and publishes only the new cursor', async () => {
+  const pendingOldRead = deferred()
+  const snapshots = []
+  const cleared = []
+  const sockets = fakeWebSocketFactory()
+  let deliveryRead = 0
+  let requestSequence = 0
+  const client = createStrongFlowProjectionSubscription({
+    httpClient: {
+      async submitCommand() {
+        throw new Error('not used')
+      },
+      async submitQuery(request) {
+        if (request.query === 'delivery.get') {
+          deliveryRead += 1
+          if (deliveryRead === 2) await pendingOldRead.promise
+          return queryResponse(request, deliveryProjection(readCursor(String(deliveryRead))))
+        }
+        return queryResponse(request, deliveryRuntimeProjection(request.parameters.atCursor))
+      },
+    },
+    createSocket: sockets.createSocket,
+    actor,
+    scope,
+    deliveryId,
+    productSessionId,
+    stageRunId,
+    subscriptionId,
+    eventTypes: ['runtime-projection.invalidated.v1'],
+    createRequestId() {
+      requestSequence += 1
+      return requestId(1_200 + requestSequence)
+    },
+    async onSnapshot(snapshot) {
+      snapshots.push(snapshot)
+    },
+    async onSnapshotCleared(reason) {
+      cleared.push(reason)
+    },
+  })
+
+  await client.start()
+  sockets.sockets[0].open()
+  acceptSubscription(sockets.sockets[0])
+  sockets.sockets[0].receive(runtimeEvent(2, {
+    type: 'runtime-projection.invalidated.v1',
+    scopeKind: 'delivery-stage',
+    productSessionId,
+    deliveryId,
+    stageRunId,
+    projectionRevision: 2,
+    lastProjectionSequence: 2,
+    reloadQueries: ['delivery.get', 'runtime.projection.get'],
+  }))
+  await flush()
+  assert.equal(deliveryRead, 2)
+
+  sockets.sockets[0].serverClose(4409)
+  assert.equal(client.cursor, null)
+  pendingOldRead.resolve()
+  await flush()
+  await flush()
+
+  assert.deepEqual(snapshots.map(snapshot => snapshot.cursor.deliveryRevision), [1, 3])
+  assert.deepEqual(cleared, ['reset'])
+  assert.equal(client.cursor?.deliveryRevision, 3)
+  assert.equal(sockets.sockets.length, 2)
+  sockets.sockets[1].open()
+  assert.deepEqual(sockets.sockets[1].sent[0].startAt, readCursor('3').eventCursor)
+})
+
+test('failed StrongFlow reset keeps the cleared projection empty', async () => {
+  const sockets = fakeWebSocketFactory()
+  const errors = []
+  let visibleSnapshot = null
+  let failReload = false
+  let requestSequence = 0
+  const cursor = readCursor('50')
+  const client = createStrongFlowProjectionSubscription({
+    httpClient: {
+      async submitCommand() {
+        throw new Error('not used')
+      },
+      async submitQuery(request) {
+        if (failReload) throw new Error('reset read failed')
+        return request.query === 'delivery.get'
+          ? queryResponse(request, deliveryProjection(cursor))
+          : queryResponse(request, deliveryRuntimeProjection(cursor))
+      },
+    },
+    createSocket: sockets.createSocket,
+    actor,
+    scope,
+    deliveryId,
+    productSessionId,
+    stageRunId,
+    subscriptionId,
+    eventTypes: ['runtime-projection.invalidated.v1'],
+    createRequestId() {
+      requestSequence += 1
+      return requestId(1_300 + requestSequence)
+    },
+    async onSnapshot(snapshot) {
+      visibleSnapshot = snapshot
+    },
+    async onSnapshotCleared() {
+      visibleSnapshot = null
+    },
+    onError(error) {
+      errors.push(error)
+    },
+  })
+
+  await client.start()
+  sockets.sockets[0].open()
+  acceptSubscription(sockets.sockets[0])
+  assert.notEqual(visibleSnapshot, null)
+  failReload = true
+  sockets.sockets[0].serverClose(4409)
+  await flush()
+  await flush()
+
+  assert.equal(visibleSnapshot, null)
+  assert.equal(client.cursor, null)
+  assert.equal(sockets.sockets.length, 1)
+  assert.equal(errors.at(-1)?.code, 'RESET_FAILED')
 })
