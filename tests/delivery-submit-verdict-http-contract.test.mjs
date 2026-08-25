@@ -6,6 +6,7 @@ import test from 'node:test'
 
 import Ajv2020 from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
+import ts from 'typescript'
 
 const root = resolve(import.meta.dirname, '..')
 const schemaRoot = join(root, 'schema', 'winwincode', 'v1')
@@ -59,6 +60,95 @@ function command() {
 
 function copy(value) {
   return structuredClone(value)
+}
+
+function propertyName(node) {
+  if (!node) return null
+  if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNumericLiteral(node)) {
+    return node.text
+  }
+  return null
+}
+
+function objectProperty(node, name) {
+  return node.properties.find(property => (
+    ts.isPropertyAssignment(property) && propertyName(property.name) === name
+  ))
+}
+
+function generatedRuntimeSchemas(source, path) {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  let initializer = null
+  function visit(node) {
+    if (ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'CONTROL_PLANE_RUNTIME_SCHEMAS') {
+      initializer = node.initializer
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  assert.ok(initializer && ts.isObjectLiteralExpression(initializer))
+  return JSON.parse(initializer.getText(file))
+}
+
+function assertCanonicalHandwrittenVerdictRequests(source, path) {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  function assertCanonicalFields(properties, description) {
+    const fields = properties.map(property => propertyName(property.name))
+    assert.equal(
+      fields.every(name => name !== null),
+      true,
+      `${path} cannot prove the fields in ${description}`,
+    )
+    assert.deepEqual(
+      fields.sort(),
+      ['candidateDigest', 'deliveryId'],
+      `${path} constructs a non-canonical ${description}`,
+    )
+  }
+  function inspectTypeMembers(members) {
+    const commandMember = members.find(member => (
+      ts.isPropertySignature(member) && propertyName(member.name) === 'command'
+    ))
+    if (!commandMember
+      || !commandMember.type
+      || !ts.isLiteralTypeNode(commandMember.type)
+      || !ts.isStringLiteral(commandMember.type.literal)
+      || commandMember.type.literal.text !== 'delivery.submit_verdict') return
+    const payloadMember = members.find(member => (
+      ts.isPropertySignature(member) && propertyName(member.name) === 'payload'
+    ))
+    assert.ok(
+      payloadMember?.type && ts.isTypeLiteralNode(payloadMember.type),
+      `${path} hand-maintains delivery.submit_verdict without an inspectable generated payload`,
+    )
+    assertCanonicalFields(payloadMember.type.members, 'delivery.submit_verdict payload type')
+  }
+  function visit(node) {
+    if ((ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+      && /^(?:DeliverySubmitVerdictCommand|DeliverySubmitVerdictPayload)$/u.test(node.name.text)) {
+      assert.fail(`${path} redeclares generated ${node.name.text}`)
+    }
+    if (ts.isInterfaceDeclaration(node)) inspectTypeMembers(node.members)
+    if (ts.isTypeLiteralNode(node)) inspectTypeMembers(node.members)
+    if (ts.isObjectLiteralExpression(node)) {
+      const commandProperty = objectProperty(node, 'command')
+      if (commandProperty
+        && ts.isStringLiteral(commandProperty.initializer)
+        && commandProperty.initializer.text === 'delivery.submit_verdict') {
+        const payloadProperty = objectProperty(node, 'payload')
+        if (payloadProperty && ts.isObjectLiteralExpression(payloadProperty.initializer)) {
+          assertCanonicalFields(
+            payloadProperty.initializer.properties,
+            'delivery.submit_verdict payload',
+          )
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
 }
 
 test('submit verdict accepts one stale-check request and rejects caller-derived facts', () => {
@@ -173,12 +263,52 @@ test('all generated clients and docs expose only the canonical verdict request',
     ['candidateDigest', 'deliveryId'],
   )
 
+  const generatedClientPath = join(
+    root,
+    'apps',
+    'web',
+    'src',
+    'generated',
+    'control-plane-client.ts',
+  )
+  const generatedClient = readFileSync(generatedClientPath, 'utf8')
+  const runtimePayload = generatedRuntimeSchemas(generatedClient, generatedClientPath)
+    .DeliverySubmitVerdictPayload
+  assert.equal(runtimePayload.additionalProperties, false)
+  assert.deepEqual([...runtimePayload.required].sort(), ['candidateDigest', 'deliveryId'])
+  assert.deepEqual(
+    Object.keys(runtimePayload.properties).sort(),
+    ['candidateDigest', 'deliveryId'],
+  )
+
+  assert.doesNotThrow(() => assertCanonicalHandwrittenVerdictRequests(`
+    const request = {
+      command: 'delivery.submit_verdict',
+      payload: { deliveryId, candidateDigest },
+    }
+  `, 'canonical-verdict-request.ts'))
+  assert.throws(() => assertCanonicalHandwrittenVerdictRequests(`
+    const request = {
+      command: 'delivery.submit_verdict',
+      payload: { deliveryId, candidateDigest, evidence: [] },
+    }
+  `, 'caller-derived-verdict-request.ts'), /non-canonical delivery\.submit_verdict payload/u)
+  assert.throws(() => assertCanonicalHandwrittenVerdictRequests(`
+    type HandwrittenVerdictCommand = {
+      command: 'delivery.submit_verdict'
+      payload: { deliveryId: string; candidateDigest: string; verdict: unknown }
+    }
+  `, 'caller-derived-verdict-type.ts'), /non-canonical delivery\.submit_verdict payload type/u)
+  assert.throws(() => assertCanonicalHandwrittenVerdictRequests(`
+    type DeliverySubmitVerdictPayload = { deliveryId: string; candidateDigest: string }
+  `, 'duplicate-verdict-dto.ts'), /redeclares generated DeliverySubmitVerdictPayload/u)
+
   const webFiles = readdirSync(join(root, 'apps', 'web', 'src'), { recursive: true })
     .filter(path => typeof path === 'string' && /\.(?:ts|tsx)$/u.test(path))
-    .filter(path => path !== join('generated', 'contracts.ts'))
+    .filter(path => path.split(/[\\/]/u)[0] !== 'generated')
   for (const path of webFiles) {
     const source = readFileSync(join(root, 'apps', 'web', 'src', path), 'utf8')
-    assert.doesNotMatch(source, /DeliverySubmitVerdict(?:Command|Payload)|candidateDigest/u)
+    assertCanonicalHandwrittenVerdictRequests(source, path)
   }
 
   const coverage = readFileSync(
