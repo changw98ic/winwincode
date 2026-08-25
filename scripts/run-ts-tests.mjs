@@ -42,3 +42,8 @@ for (const path of serialProcessTests) runTests(['--test', path])
 // The full ten-scenario oracle runs after the parallel Node suite and reuses
 // the TypeScript build already produced by test:ts.
 runTests(['scripts/export-delivery-strongflow-oracle.mjs', '--check'])
+
+// The Rust differential gate validates the frozen migration plan until its
+// integration target appears. Once triggered, it executes Cargo and compares
+// the complete canonical result instead of trusting a Rust test name.
+runTests(['scripts/run-delivery-strongflow-rust-differential.mjs', '--check'])
