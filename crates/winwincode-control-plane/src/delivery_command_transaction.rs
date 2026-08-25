@@ -363,13 +363,14 @@ fn create(
         return Err(StorageError::invalid_input("delivery.create.tasks must be empty").into());
     }
     validate_create_tasks_empty(&[]).map_err(storage_error)?;
-    if storage
-        .load_journal(&delivery_journal_key(&payload.delivery_id)?)?
-        .is_some()
-    {
-        return Err(DeliveryCommandCommitError::AlreadyExists {
-            delivery_id: payload.delivery_id,
-        });
+    if let Some(receipt) = replay_if_create_target_exists(
+        storage,
+        command,
+        receipt_identity,
+        command_digest,
+        &payload.delivery_id,
+    )? {
+        return Ok(receipt);
     }
     let snapshot = DeliverySnapshot {
         schema_version: DELIVERY_SCHEMA_VERSION,
@@ -433,12 +434,62 @@ fn create(
                     | winwincode_storage::StorageErrorKind::JournalAlreadyExists
             ) =>
         {
-            Err(DeliveryCommandCommitError::AlreadyExists {
-                delivery_id: payload.delivery_id,
-            })
+            exact_create_replay_or_already_exists(
+                storage,
+                command,
+                receipt_identity,
+                command_digest,
+                &payload.delivery_id,
+            )
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn replay_if_create_target_exists(
+    storage: &dyn ProductStateStorage,
+    command: &CommandEnvelope,
+    receipt_identity: &ReceiptIdentity,
+    command_digest: &Sha256Digest,
+    delivery_id: &DeliveryId,
+) -> Result<Option<CommitReceipt>, DeliveryCommandCommitError> {
+    if storage
+        .load_journal(&delivery_journal_key(delivery_id)?)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    exact_create_replay_or_already_exists(
+        storage,
+        command,
+        receipt_identity,
+        command_digest,
+        delivery_id,
+    )
+    .map(Some)
+}
+
+fn exact_create_replay_or_already_exists(
+    storage: &dyn ProductStateStorage,
+    command: &CommandEnvelope,
+    receipt_identity: &ReceiptIdentity,
+    command_digest: &Sha256Digest,
+    delivery_id: &DeliveryId,
+) -> Result<CommitReceipt, DeliveryCommandCommitError> {
+    if let Some(receipt) = storage.load_receipt(receipt_identity, command_digest)? {
+        validate_receipt(
+            &receipt,
+            receipt_identity,
+            delivery_id,
+            command,
+            DeliveryChangeKind::Created,
+            true,
+        )?;
+        return Ok(receipt);
+    }
+    Err(DeliveryCommandCommitError::AlreadyExists {
+        delivery_id: delivery_id.clone(),
+    })
 }
 
 fn update_spec(
