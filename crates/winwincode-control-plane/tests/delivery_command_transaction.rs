@@ -851,6 +851,126 @@ fn create_rejects_caller_tasks_and_accepts_a_target_without_an_issue_source() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn spec_authority_requires_exact_ordered_verification_methods_and_preserves_all_semantics() {
+    let root = temporary_directory("spec-authority");
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }),
+    )
+    .expect("Control Plane start");
+    let mut command = create_command(45);
+    command.payload["spec"]["acceptanceCriteria"] = serde_json::json!([
+        {
+            "id": "criterion-first",
+            "title": "The first behavior is verified.",
+            "required": true
+        },
+        {
+            "id": "criterion-second",
+            "title": "The second behavior is verified.",
+            "required": true
+        }
+    ]);
+    let fixture = |methods: Vec<(String, String)>| DeliverySpecFactsFixture {
+        repository_scope: repository_scope(45),
+        now_millis: 1_800_000_000_045,
+        repository: RepositoryRef {
+            schema_version: DELIVERY_SCHEMA_VERSION,
+            kind: RepositoryKind::LocalGit,
+            locator: "/trusted/repository-45".into(),
+        },
+        source_ref: None,
+        scope: vec!["Implement both accepted behaviors.".into()],
+        out_of_scope: vec!["A third unreviewed behavior.".into()],
+        constraints: vec!["Keep both checks deterministic.".into()],
+        max_rework_attempts: 3,
+        criterion_verification_methods: methods,
+    };
+    let first = (
+        "criterion-first".to_owned(),
+        "Run the first acceptance test.".to_owned(),
+    );
+    let second = (
+        "criterion-second".to_owned(),
+        "Run the second acceptance test.".to_owned(),
+    );
+    for (case, methods) in [
+        ("missing", vec![first.clone()]),
+        ("reordered", vec![second.clone(), first.clone()]),
+        ("duplicate", vec![first.clone(), first.clone()]),
+        (
+            "foreign",
+            vec![
+                first.clone(),
+                ("criterion-foreign".into(), "Run a foreign test.".into()),
+            ],
+        ),
+    ] {
+        let sealed = delivery_spec_command_facts(&command, fixture(methods))
+            .expect("repository authority is exact");
+        let error = control_plane
+            .commit_delivery_command(&command, &sealed)
+            .expect_err("criterion authority must match exactly");
+        assert!(
+            matches!(
+                error,
+                DeliveryCommandCommitError::Storage(ref source)
+                    if source.kind() == StorageErrorKind::InvalidInput
+            ),
+            "{case}"
+        );
+        assert!(
+            control_plane
+                .load_state(&format!("delivery:{}", canonical_id("dlv", 45)))
+                .expect("state read")
+                .is_none(),
+            "{case}"
+        );
+    }
+
+    let sealed = delivery_spec_command_facts(&command, fixture(vec![first, second]))
+        .expect("complete Spec authority");
+    control_plane
+        .commit_delivery_command(&command, &sealed)
+        .expect("complete Spec authority commits");
+    let state = control_plane
+        .load_state(&format!("delivery:{}", canonical_id("dlv", 45)))
+        .expect("state read")
+        .expect("Delivery state");
+    let delivery = Delivery::decode_json(&state.payload).expect("Delivery JSON");
+    assert_eq!(
+        delivery.snapshot().spec.scope,
+        ["Implement both accepted behaviors."]
+    );
+    assert_eq!(
+        delivery.snapshot().spec.out_of_scope,
+        ["A third unreviewed behavior."]
+    );
+    assert_eq!(
+        delivery.snapshot().spec.constraints,
+        ["Keep both checks deterministic."]
+    );
+    assert_eq!(delivery.snapshot().spec.max_rework_attempts, 3);
+    assert_eq!(
+        delivery.snapshot().spec.acceptance_criteria[0]
+            .verification_method
+            .as_deref(),
+        Some("Run the first acceptance test.")
+    );
+    assert_eq!(
+        delivery.snapshot().spec.acceptance_criteria[1]
+            .verification_method
+            .as_deref(),
+        Some("Run the second acceptance test.")
+    );
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
 fn duplicate_create_is_wrong_state_and_does_not_write_another_atomic_member() {
     let root = temporary_directory("duplicate-create");
     let mut control_plane = ControlPlane::start_local(
