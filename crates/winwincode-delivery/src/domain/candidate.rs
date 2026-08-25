@@ -400,7 +400,6 @@ impl FrozenDeliveryCandidate {
         &self.changed_paths
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn changed_hunks(&self) -> &[CandidateHunkFact] {
         &self.changed_hunks
     }
