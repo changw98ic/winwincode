@@ -74,9 +74,7 @@ const expectedDeliveryTests = Object.freeze([
   'active_stage_run_resumes_before_worker_acceptance_without_new_identity',
   'cancel_request_waits_for_terminal_job_outcome',
   'cancelled_outcome_settles_the_same_stage_run',
-  'task_breakdown_approval_replaces_empty_graph_once',
   'approved_plan_without_a_frozen_task_graph_cannot_start_execution',
-  'task_breakdown_rejects_missing_self_and_cyclic_dependencies',
   'blocked_task_never_becomes_runnable',
   'task_status_tracks_execution_verification_rework_and_cancel',
   'session_binding_matches_exact_delivery_task_stage_job_and_session_identities',
@@ -93,6 +91,14 @@ const expectedDeliveryTests = Object.freeze([
   'successful_handoff_rejects_a_lease_that_changed_after_verification',
   'unsuccessful_terminal_outcome_settles_without_advancing_delivery',
   'worker_can_cancel_and_finish_before_reporting_a_codex_thread',
+])
+
+const expectedTaskPromotionTests = Object.freeze([
+  'task_breakdown_store_promotes_the_exact_ordered_graph_once',
+  'task_breakdown_store_rejects_stale_foreign_revised_or_changed_review',
+  'task_breakdown_store_replay_returns_the_original_graph',
+  'generic_append_cannot_write_task_breakdown_approved',
+  'task_breakdown_revision_race_has_one_winner_and_no_partial_graph',
 ])
 
 const expectedControlPlaneTests = Object.freeze([
@@ -454,6 +460,7 @@ test('future phase 2.3 Rust modules must satisfy the frozen black-box seam', () 
   assert.deepEqual(gate.requiredModules, [
     'crates/winwincode-delivery/src/application/stage.rs',
     'crates/winwincode-delivery/src/application/task.rs',
+    'crates/winwincode-delivery/src/application/task_breakdown.rs',
     'crates/winwincode-delivery/src/application/session_binding.rs',
     'crates/winwincode-delivery/src/application/attention.rs',
     'crates/winwincode-control-plane/src/delivery_execution.rs',
@@ -464,6 +471,12 @@ test('future phase 2.3 Rust modules must satisfy the frozen black-box seam', () 
       target: 'stage_task_lifecycle',
       path: 'crates/winwincode-delivery/tests/stage_task_lifecycle.rs',
       requiredTests: expectedDeliveryTests,
+    },
+    {
+      package: 'winwincode-delivery',
+      target: 'task_breakdown_promotion',
+      path: 'crates/winwincode-delivery/tests/task_breakdown_promotion.rs',
+      requiredTests: expectedTaskPromotionTests,
     },
     {
       package: 'winwincode-control-plane',

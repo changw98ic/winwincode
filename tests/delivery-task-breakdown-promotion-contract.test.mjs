@@ -479,6 +479,36 @@ test('HTTP preflight records the caller-tasks gap or enforces the one canonical 
   const typescriptPayload = namedTypeScriptType(typescript, rules.http.payload.type)
   assert.deepEqual(typescriptTypeFields(typescriptPayload).sort(), canonical)
   assert.doesNotMatch(typescriptPayload, /\b(?:tasks|ownerActorId)\b/u)
+
+  assert.equal(
+    schema['x-winwincode-semantics'].taskBreakdownApproval.staleDigestError,
+    'REVISION_CONFLICT',
+  )
+  assert.deepEqual(schema['x-winwincode-semantics'].errors.REVISION_CONFLICT, {
+    httpStatus: 409,
+    retryable: false,
+  })
+
+  const transaction = readFileSync(repositoryPath(
+    'crates/winwincode-control-plane/src/task_breakdown_transaction.rs',
+  ), 'utf8')
+  assert.match(
+    transaction,
+    /DeliveryStoreErrorCode::ReviewSetStale\s*=>\s*\{[\s\S]*?StorageError::revision_token_conflict\("reviewSetSha256"\)/u,
+  )
+
+  const transactionTests = readFileSync(repositoryPath(
+    'crates/winwincode-control-plane/tests/task_breakdown_transaction.rs',
+  ), 'utf8')
+  const staleDigestTest = namedRustFunction(
+    transactionTests,
+    'task_breakdown_same_revision_stale_review_digest_maps_to_revision_conflict',
+  )
+  assert.match(staleDigestTest, /StorageErrorKind::RevisionConflict/u)
+  assert.match(
+    staleDigestTest,
+    /reviewSetSha256 no longer identifies the current solution review/u,
+  )
 })
 
 test('plain-language contract states every concrete promotion and replay outcome', () => {
