@@ -164,6 +164,61 @@ fn assert_projection_stream_heads(
     }
 }
 
+fn assert_projection_cursor_key_is_exact(
+    storage: &SqliteStorage,
+    cursor: &ProjectionEventCursor,
+    another_delivery: ProjectionEventStream,
+    another_session: ProjectionEventStream,
+) {
+    let error = storage
+        .load_projection_event_cursor(&projection_key(another_delivery), Some(cursor))
+        .expect_err("another Delivery stream must reject this cursor");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    let foreign_scope_key = ProjectionEventStreamKey::new(
+        ReceiptScopeKey::from_encoded(b"scope:repository-two".to_vec()).expect("scope key"),
+        cursor.key().stream().clone(),
+    )
+    .expect("foreign scope stream key");
+    let error = storage
+        .load_projection_event_cursor(&foreign_scope_key, Some(cursor))
+        .expect_err("another repository scope must reject this cursor");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    let error = storage
+        .load_projection_event_cursor(&projection_key(another_session), Some(cursor))
+        .expect_err("another resource stream kind must reject this cursor");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+}
+
+fn assert_never_issued_projection_cursors_are_invalid(
+    storage: &SqliteStorage,
+    first_delivery_key: &ProjectionEventStreamKey,
+) {
+    let future = ProjectionEventCursor::try_new(
+        first_delivery_key.clone(),
+        3,
+        Some(ControlPlaneEventId("evt_delivery_one_future".into())),
+    )
+    .expect("shape-valid future cursor");
+    let error = storage
+        .load_projection_event_cursor(first_delivery_key, Some(&future))
+        .expect_err("a cursor beyond the durable stream head was never retained");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+
+    let empty_key = projection_key(ProjectionEventStream::Delivery(DeliveryId(
+        "delivery-never-written".into(),
+    )));
+    let never_issued = ProjectionEventCursor::try_new(
+        empty_key.clone(),
+        1,
+        Some(ControlPlaneEventId("evt_delivery_never_written".into())),
+    )
+    .expect("shape-valid never-issued cursor");
+    let error = storage
+        .load_projection_event_cursor(&empty_key, Some(&never_issued))
+        .expect_err("a positive cursor for an empty stream was never retained");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+}
+
 fn journal_key() -> AggregateJournalKey {
     AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
         .expect("aggregate journal key")
@@ -559,24 +614,12 @@ fn projection_event_positions_are_stream_local_durable_and_exact() {
     );
 
     let first_delivery_key = projection_key(delivery_one);
-    let error = storage
-        .load_projection_event_cursor(&projection_key(delivery_two), Some(&first_delivery_cursor))
-        .expect_err("another Delivery stream must reject this cursor");
-    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
-    let foreign_scope_key = ProjectionEventStreamKey::new(
-        ReceiptScopeKey::from_encoded(b"scope:repository-two".to_vec()).expect("scope key"),
-        session_one,
-    )
-    .expect("foreign scope stream key");
-    let error = storage
-        .load_projection_event_cursor(&foreign_scope_key, Some(&first_delivery_cursor))
-        .expect_err("another repository scope must reject this cursor");
-    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
-    let different_kind_key = projection_key(session_two);
-    let error = storage
-        .load_projection_event_cursor(&different_kind_key, Some(&first_delivery_cursor))
-        .expect_err("another resource stream kind must reject this cursor");
-    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    assert_projection_cursor_key_is_exact(
+        &storage,
+        &first_delivery_cursor,
+        delivery_two,
+        session_two,
+    );
     assert_eq!(
         storage
             .load_projection_event_cursor(&first_delivery_key, Some(&first_delivery_cursor),)
@@ -626,31 +669,7 @@ fn projection_event_positions_are_stream_local_durable_and_exact() {
         .load_projection_event_cursor(&first_delivery_key, Some(&forged))
         .expect_err("eventId mismatch is not retention loss");
     assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
-
-    let future = ProjectionEventCursor::try_new(
-        first_delivery_key.clone(),
-        3,
-        Some(ControlPlaneEventId("evt_delivery_one_future".into())),
-    )
-    .expect("shape-valid future cursor");
-    let error = storage
-        .load_projection_event_cursor(&first_delivery_key, Some(&future))
-        .expect_err("a cursor beyond the durable stream head was never retained");
-    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
-
-    let empty_key = projection_key(ProjectionEventStream::Delivery(DeliveryId(
-        "delivery-never-written".into(),
-    )));
-    let never_issued = ProjectionEventCursor::try_new(
-        empty_key.clone(),
-        1,
-        Some(ControlPlaneEventId("evt_delivery_never_written".into())),
-    )
-    .expect("shape-valid never-issued cursor");
-    let error = storage
-        .load_projection_event_cursor(&empty_key, Some(&never_issued))
-        .expect_err("a positive cursor for an empty stream was never retained");
-    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    assert_never_issued_projection_cursors_are_invalid(&storage, &first_delivery_key);
     Box::new(storage).close().expect("storage should close");
     fs::remove_dir_all(root).expect("database directory should be released");
 }
