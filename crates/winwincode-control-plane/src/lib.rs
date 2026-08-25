@@ -9,6 +9,7 @@
 pub mod delivery_execution;
 mod delivery_transaction;
 mod rework_transaction;
+mod session_binding_transaction;
 pub mod strongflow_projection;
 mod task_breakdown_transaction;
 mod verdict_transaction;
@@ -23,6 +24,9 @@ use delivery_execution::{
     DeliveryExecutionDispatchReceipt, DeliveryExecutionError, DeliveryExecutionPortError,
     ExecutionJobDispatcher, PendingDeliveryExecution,
 };
+pub use session_binding_transaction::{
+    DeliverySessionBindingCommitError, DeliverySessionBindingCommitReceipt,
+};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
@@ -33,7 +37,7 @@ use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdict
 use winwincode_domain::{ControlPlaneEventId, DeliveryId, Revision, Sha256Digest};
 pub use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-    LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage,
+    DurableOutboxEvent, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage,
     ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey, StorageError,
     StorageErrorKind, StoredState,
 };
@@ -540,6 +544,39 @@ impl ControlPlane {
         Ok(receipt)
     }
 
+    /// Persists one authoritative Worker `session.binding` message as the two
+    /// canonical Delivery mutations that attach its WorkerSession and then its
+    /// CodexThread.
+    ///
+    /// The generated message is the only wire input. The second argument is an
+    /// opaque scheduler-owned lease fact; the message cannot authorize itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns before the first write for a foreign job, stale binding, lease
+    /// mismatch, or malformed message. If the WorkerSession phase committed
+    /// but the CodexThread phase failed, the returned error carries the first
+    /// durable receipt so an exact retry can continue receipt-first.
+    pub fn commit_delivery_session_binding(
+        &mut self,
+        message: &winwincode_api::generated::SessionBindingMessage,
+        active_lease: &winwincode_delivery::application::stage::ActiveLeaseIdentity,
+    ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
+        let commit = {
+            let storage = self
+                .storage_mut()
+                .map_err(DeliverySessionBindingCommitError::Storage)?;
+            session_binding_transaction::execute(storage, message, active_lease)?
+        };
+        self.flush_outbox().map_err(|source| {
+            DeliverySessionBindingCommitError::PublicationPending {
+                commit: Box::new(commit.clone()),
+                source,
+            }
+        })?;
+        Ok(commit)
+    }
+
     /// Atomically commits a constructor-derived bounded-rework clarification
     /// without creating or dispatching an `ExecutionJob`.
     ///
@@ -749,6 +786,16 @@ pub(crate) fn delivery_changed_event(
             "Delivery change events require repository scope",
         ));
     };
+    let scope_key = repository_scope_key(scope)?;
+    delivery_changed_event_for_scope(&scope_key, delivery_id, delivery_revision, change_kind)
+}
+
+pub(crate) fn delivery_changed_event_for_scope(
+    scope_key: &ReceiptScopeKey,
+    delivery_id: &DeliveryId,
+    delivery_revision: u64,
+    change_kind: DeliveryChangeKind,
+) -> Result<NewOutboxEvent, StorageError> {
     let revision = i64::try_from(delivery_revision)
         .map(Revision)
         .map_err(|_| StorageError::invalid_input("Delivery revision exceeds the public range"))?;
@@ -762,8 +809,7 @@ pub(crate) fn delivery_changed_event(
         StorageError::adapter(format!("failed to encode Delivery change event: {error}"))
     })?;
     let topic = delivery_changed_topic()?;
-    let scope_key = repository_scope_key(scope)?;
-    let event_id = delivery_changed_event_id(&scope_key, &payload);
+    let event_id = delivery_changed_event_id(scope_key, &payload);
     Ok(NewOutboxEvent::projection(
         event_id,
         topic,
