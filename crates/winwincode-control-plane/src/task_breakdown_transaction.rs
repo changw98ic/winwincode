@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use winwincode_api::generated::{
-    CommandEnvelope, CommandName, DeliveryApproveTaskBreakdownPayload,
+    CommandEnvelope, CommandName, DeliveryApproveTaskBreakdownPayload, Scope,
 };
 use winwincode_delivery::{
     application::task_breakdown::DeliveryTaskBreakdownApprovedEvent,
@@ -43,6 +43,11 @@ pub(crate) fn execute(
             "task-breakdown transaction requires delivery.approve_task_breakdown",
         ));
     }
+    if !matches!(command.scope, Scope::RepositoryScope(_)) {
+        return Err(StorageError::invalid_input(
+            "delivery.approve_task_breakdown requires repository scope",
+        ));
+    }
     let (receipt_identity, command_digest) = command_receipt(command)?;
     let prior_receipt = storage.load_receipt(&receipt_identity, &command_digest)?;
     let payload = validate_payload(command)?;
@@ -66,7 +71,7 @@ pub(crate) fn execute(
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
     let source = DeliveryStore::borrowed(&journal)
         .query(DeliveryQuery::Get(delivery_id.clone()))
-        .map_err(|error| delivery_store_error(&error))?;
+        .map_err(|error| delivery_store_error(&error, &command.request_id))?;
     let request_digest = command_digest
         .0
         .strip_prefix("sha256:")
@@ -82,7 +87,7 @@ pub(crate) fn execute(
                 review_set_sha256: review_set_sha256.clone(),
             },
         )))
-        .map_err(|error| delivery_store_error(&error))?;
+        .map_err(|error| delivery_store_error(&error, &command.request_id))?;
     if mutation.replayed {
         return Err(StorageError::invalid_input(
             "task-breakdown journal replay is missing its scoped command receipt",
@@ -352,7 +357,10 @@ fn task_breakdown_event_id(event: &DeliveryTaskBreakdownApprovedEvent) -> String
     )
 }
 
-fn delivery_store_error(error: &DeliveryStoreError) -> StorageError {
+fn delivery_store_error(
+    error: &DeliveryStoreError,
+    request_id: &winwincode_domain::RequestId,
+) -> StorageError {
     match error.code() {
         DeliveryStoreErrorCode::RevisionConflict => {
             if let (Some(expected), Some(current)) =
@@ -364,12 +372,14 @@ fn delivery_store_error(error: &DeliveryStoreError) -> StorageError {
         DeliveryStoreErrorCode::ReviewSetStale => {
             return StorageError::revision_token_conflict("reviewSetSha256");
         }
+        DeliveryStoreErrorCode::RequestConflict => {
+            return StorageError::request_conflict(request_id);
+        }
         DeliveryStoreErrorCode::InvalidStoreOptions
         | DeliveryStoreErrorCode::DeliveryAlreadyExists
         | DeliveryStoreErrorCode::DeliveryNotFound
         | DeliveryStoreErrorCode::StoreCorrupt
         | DeliveryStoreErrorCode::DeliveryIdMismatch
-        | DeliveryStoreErrorCode::RequestConflict
         | DeliveryStoreErrorCode::StoreIoError => {}
     }
     StorageError::invalid_input(error.to_string())

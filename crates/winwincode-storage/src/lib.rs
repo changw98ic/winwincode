@@ -481,7 +481,10 @@ impl StorageError {
         }
     }
 
-    fn request_conflict(request_id: &RequestId) -> Self {
+    /// Builds the adapter-neutral result for a reused scoped request whose
+    /// canonical command digest differs from the first committed command.
+    #[must_use]
+    pub fn request_conflict(request_id: &RequestId) -> Self {
         Self {
             kind: StorageErrorKind::RequestConflict,
             message: format!(

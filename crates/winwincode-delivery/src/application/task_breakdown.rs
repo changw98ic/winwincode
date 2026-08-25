@@ -244,13 +244,13 @@ mod tests {
 
     use crate::application::solution_review::{
         ReviewFixtureState, duplicate_task_and_criterion_fixtures, empty_task_proposals_fixture,
-        invalid_dependency_fixtures, resolve_current_solution_review, review_delivery,
-        with_newer_review_attempt,
+        invalid_criterion_fixtures, invalid_dependency_fixtures, ordered_task_proposals_fixture,
+        resolve_current_solution_review, review_delivery, with_newer_review_attempt,
     };
 
     #[test]
     fn approved_task_promotion_maps_exact_ordered_proposals() {
-        let delivery = review_delivery(ReviewFixtureState::Approved);
+        let delivery = ordered_task_proposals_fixture();
         let review = resolve_current_solution_review(&delivery)
             .expect("current review")
             .expect("solution review");
@@ -273,6 +273,16 @@ mod tests {
                 .iter()
                 .map(|proposal| proposal.id().clone())
                 .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            transition
+                .delivery()
+                .snapshot()
+                .tasks
+                .iter()
+                .map(|task| task.id.0.as_str())
+                .collect::<Vec<_>>(),
+            ["task:invitation", "task:verification"]
         );
         for (task, proposal) in transition
             .delivery()
@@ -342,6 +352,13 @@ mod tests {
         );
         assert!(resolve_current_solution_review(&duplicate).is_err());
         assert!(resolve_current_solution_review(&duplicate_criterion).is_err());
+    }
+
+    #[test]
+    fn solution_review_rejects_empty_foreign_and_incomplete_criterion_sets() {
+        for invalid in invalid_criterion_fixtures() {
+            assert!(resolve_current_solution_review(&invalid).is_err());
+        }
     }
 
     #[test]

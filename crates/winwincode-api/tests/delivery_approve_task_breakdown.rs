@@ -87,6 +87,21 @@ fn generated_task_breakdown_command_rejects_caller_authored_task_fields() {
 }
 
 #[test]
+fn generated_task_breakdown_command_requires_repository_scope() {
+    let mut command = canonical_command();
+    command["scope"] = json!({
+        "kind": "workspace",
+        "organizationId": "org_01J00000000000000000000000",
+        "workspaceId": "wsp_01J00000000000000000000000"
+    });
+
+    assert!(
+        serde_json::from_value::<DeliveryApproveTaskBreakdownCommand>(command.clone()).is_err()
+    );
+    assert!(serde_json::from_value::<CommandRequest>(command).is_err());
+}
+
+#[test]
 fn generated_http_error_codes_spell_revision_conflict_exactly() {
     assert_eq!(
         serde_json::to_value(ErrorCode::RevisionConflict).expect("generic error code JSON"),

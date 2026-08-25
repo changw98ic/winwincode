@@ -212,6 +212,38 @@ fn generic_append_cannot_write_task_breakdown_approved() {
 }
 
 #[test]
+fn generic_append_cannot_hide_a_task_graph_under_another_operation() {
+    let authorized_store = seeded_store();
+    let promoted = authorized_store
+        .execute(approval("authorized-task-breakdown", 1))
+        .expect("authorized task graph")
+        .snapshot;
+
+    for operation in [
+        DeliveryMutationOperation::SessionBound,
+        DeliveryMutationOperation::DeliverySpecUpdated,
+    ] {
+        let store = seeded_store();
+        let rejected = store
+            .execute(DeliveryCommand::Append(AppendDelivery {
+                delivery_id: promoted.id().clone(),
+                request_id: RequestId(format!("hidden-task-graph-{operation:?}")),
+                request_digest: "e".repeat(64),
+                operation,
+                expected_revision: 1,
+                snapshot: promoted.clone(),
+            }))
+            .expect_err("another generic operation cannot smuggle the task graph");
+        assert_eq!(rejected.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
+        let current = store
+            .query(DeliveryQuery::Get(DeliveryId("delivery-main".into())))
+            .expect("current Delivery");
+        assert!(current.snapshot().tasks.is_empty());
+        assert_eq!(current.revision(), 1);
+    }
+}
+
+#[test]
 fn task_breakdown_revision_race_has_one_winner_and_no_partial_graph() {
     let store = seeded_store();
     let winner = store
