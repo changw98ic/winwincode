@@ -283,6 +283,16 @@ fn validate_message_shape(message: &JobOutcomeMessage) -> Result<(), StorageErro
             "job.outcome lastEventSequence is outside the public integer range",
         ));
     }
+    if message
+        .outcome
+        .error
+        .as_ref()
+        .is_some_and(|error| error.message.is_empty() || error.message.chars().count() > 500)
+    {
+        return Err(StorageError::invalid_input(
+            "job.outcome error message does not match the generated schema",
+        ));
+    }
     let mut artifact_ids = HashSet::with_capacity(message.outcome.artifacts.len());
     for artifact in &message.outcome.artifacts {
         require_id(

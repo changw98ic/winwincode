@@ -11,9 +11,9 @@ use std::{
 use winwincode_api::generated::{
     Actor, ArtifactReference, CommandEnvelope, CommandName, DeliveryStageExecutionScope,
     DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
-    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionScope, ExecutionWorkspace,
-    ExecutionWorkspaceWriteMode, JobOutcomeMessage, JobOutcomeMessageKind, RepositoryScope,
-    SchemaVersion, Scope, UserActor,
+    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionPortError, ExecutionPortErrorCode,
+    ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobOutcomeMessage,
+    JobOutcomeMessageKind, RepositoryScope, SchemaVersion, Scope, UserActor,
 };
 use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
@@ -1021,6 +1021,37 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
     assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn outcome_error_must_match_the_generated_schema_before_persistence() {
+    for (offset, error_message) in [(0_u64, String::new()), (1, "x".repeat(501))] {
+        let seed = 45 + offset;
+        let root = temporary_directory("invalid-outcome-error");
+        let scope = repository_scope(seed);
+        let (delivery, _candidate) = running_final_verifier(seed);
+        let job = execution_job(&delivery, &scope);
+        let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Failed);
+        message.outcome.error = Some(ExecutionPortError {
+            code: ExecutionPortErrorCode::ExecutionFailed,
+            message: error_message,
+            retryable: false,
+        });
+        let facts = outcome_facts(&delivery, &message);
+        seed_delivery_and_job(&root, &delivery, &job);
+        let mut control_plane = ControlPlane::start_local(
+            ControlPlaneConfig::local(&root),
+            Box::new(RecordingPublisher),
+        )
+        .expect("Control Plane start");
+
+        control_plane
+            .commit_delivery_terminal_outcome(&scope, &message, &facts)
+            .expect_err("schema-invalid outcome.error must be rejected");
+        assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+        control_plane.shutdown().expect("shutdown");
+        fs::remove_dir_all(root).expect("database directory release");
+    }
 }
 
 #[test]
