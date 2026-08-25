@@ -55,7 +55,7 @@ export const DELIVERY_FIXTURE_BASE_TIME = 2_900_000_000_000
 export const DELIVERY_FIXTURE_UI_PROOF = 'fixture-local-session-proof-value'
 export const DELIVERY_FIXTURE_CLI_PROOF = 'fixture-local-peer-proof-value'
 
-const DEFAULT_DELIVERY_ID = 'delivery-deterministic-fixture'
+const DEFAULT_DELIVERY_ID = 'dlv_01J00000000000000000000007'
 const DEFAULT_MODEL = 'fixture-coder'
 const DEFAULT_PROVIDER = 'fixture'
 const CREDENTIAL_ENVIRONMENT_PATTERN = /(?:API_KEY|CREDENTIAL|SECRET|TOKEN)/iu

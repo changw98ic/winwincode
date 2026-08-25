@@ -233,7 +233,7 @@ impl TrustedPublicationProjectionAdapter for PublicationAdapter {
         if self.unavailable {
             return Err(TrustedProjectionReadError::Unavailable);
         }
-        if delivery_id.0 != "delivery-main"
+        if delivery_id.0 != "dlv_01J00000000000000000000000"
             || delivery_revision != self.read.delivery_revision()
             || expected.is_some_and(|value| value != self.read.publication_revision())
         {

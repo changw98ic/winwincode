@@ -14,7 +14,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_300_000_000_000
-const deliveryId = 'delivery-attention-fixture'
+const deliveryId = 'dlv_5PQMH8V1RF6S6VEGYMZQQ4QWAV'
 const specId = 'delivery-spec-attention-v1'
 const candidateRef = `git-candidate:sha256:${'a'.repeat(64)}`
 const verificationStageRunId = 'stage-attention-verifier'

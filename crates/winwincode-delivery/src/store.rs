@@ -1750,7 +1750,7 @@ mod tests {
         crate::domain::FrozenDeliveryCandidate,
     ) {
         let fixture = verdict_fixture(
-            &DeliveryId("delivery-store-verdict".into()),
+            &DeliveryId("dlv_01J00000000000000000000003".into()),
             VerdictFixtureOutcome::Fail,
         );
         let backend = Arc::new(InMemoryDeliveryJournal::new());
@@ -1934,7 +1934,7 @@ mod tests {
         ] {
             let (store, failed, _) = create_store_with_failed_verdict();
             let passing_fixture = verdict_fixture(
-                &DeliveryId("delivery-store-verdict".into()),
+                &DeliveryId("dlv_01J00000000000000000000003".into()),
                 VerdictFixtureOutcome::Pass,
             );
             let passing = compute_verdict_transition(
@@ -1970,7 +1970,7 @@ mod tests {
     #[test]
     fn creation_rejects_a_precomputed_passing_delivery() {
         let fixture = verdict_fixture(
-            &DeliveryId("delivery-create-authority-bypass".into()),
+            &DeliveryId("dlv_01J00000000000000000000004".into()),
             VerdictFixtureOutcome::Pass,
         );
         let transition = compute_verdict_transition(
@@ -2044,7 +2044,7 @@ mod tests {
     fn request_id_replays_identical_mutation_and_rejects_conflict() {
         let (_, store) = create_store();
         let command = AppendDelivery {
-            delivery_id: DeliveryId("delivery-store-main".into()),
+            delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
             request_id: RequestId("update-spec".into()),
             request_digest: REQUEST_B.into(),
             operation: DeliveryMutationOperation::DeliverySpecUpdated,
@@ -2066,7 +2066,7 @@ mod tests {
         let (_, store) = create_store();
         let error = store
             .append(AppendDelivery {
-                delivery_id: DeliveryId("delivery-store-main".into()),
+                delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
                 request_id: RequestId("stale".into()),
                 request_digest: REQUEST_B.into(),
                 operation: DeliveryMutationOperation::DeliverySpecUpdated,
@@ -2084,7 +2084,7 @@ mod tests {
         let (_, store) = create_store();
         let error = store
             .append(AppendDelivery {
-                delivery_id: DeliveryId("delivery-store-main".into()),
+                delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
                 request_id: RequestId("raw-verdict".into()),
                 request_digest: REQUEST_B.into(),
                 operation: DeliveryMutationOperation::VerdictSubmitted,
@@ -2101,7 +2101,7 @@ mod tests {
         let (_, store) = create_store();
         store
             .append(AppendDelivery {
-                delivery_id: DeliveryId("delivery-store-main".into()),
+                delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
                 request_id: RequestId("update".into()),
                 request_digest: REQUEST_B.into(),
                 operation: DeliveryMutationOperation::DeliverySpecUpdated,
@@ -2121,7 +2121,7 @@ mod tests {
         let (_, store) = create_store();
         store
             .append(AppendDelivery {
-                delivery_id: DeliveryId("delivery-store-main".into()),
+                delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
                 request_id: RequestId("update-spec".into()),
                 request_digest: REQUEST_B.into(),
                 operation: DeliveryMutationOperation::DeliverySpecUpdated,
@@ -2137,8 +2137,8 @@ mod tests {
                 .map(|record| record.digest.as_str())
                 .collect::<Vec<_>>(),
             [
-                "252e847b49b5deb592d6490d1479b465bf998382133b38418c47271d5706e913",
-                "2544747a9f138d62316435c442ff611aebf24126a8bc8b0bceac13f7b9db6300",
+                "2e15941dc69500ae73cf21052ea3378c337599463a544d2ea162634b7c8368de",
+                "ad36db8bd4f227c9a7d0fa24e70191b0f694b3f7f4af8ffa139d809b6d481f8e",
             ]
         );
     }
@@ -2147,7 +2147,9 @@ mod tests {
     fn corrupt_delivery_store_is_rejected() {
         let (backend, store) = create_store();
         let mut journals = backend.journals.lock().expect("lock");
-        let journal = journals.get_mut("delivery-store-main").expect("journal");
+        let journal = journals
+            .get_mut("dlv_01J00000000000000000000002")
+            .expect("journal");
         let mut value: serde_json::Value =
             serde_json::from_slice(&journal.records[0].bytes).expect("record json");
         value["snapshot"]["status"] = serde_json::Value::String("ready".into());
@@ -2169,7 +2171,7 @@ mod tests {
             .journals
             .lock()
             .expect("lock")
-            .get_mut("delivery-store-main")
+            .get_mut("dlv_01J00000000000000000000002")
             .expect("journal")
             .records[0]
             .digest = REQUEST_B.into();
@@ -2219,7 +2221,7 @@ mod tests {
         let right = DeliveryStore::new(Arc::clone(&backend));
         let left = std::thread::spawn(move || {
             left.append(AppendDelivery {
-                delivery_id: DeliveryId("delivery-store-main".into()),
+                delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
                 request_id: RequestId("left".into()),
                 request_digest: REQUEST_A.into(),
                 operation: DeliveryMutationOperation::DeliverySpecUpdated,
@@ -2229,7 +2231,7 @@ mod tests {
         });
         let right = std::thread::spawn(move || {
             right.append(AppendDelivery {
-                delivery_id: DeliveryId("delivery-store-main".into()),
+                delivery_id: DeliveryId("dlv_01J00000000000000000000002".into()),
                 request_id: RequestId("right".into()),
                 request_digest: REQUEST_B.into(),
                 operation: DeliveryMutationOperation::DeliverySpecUpdated,
@@ -2266,7 +2268,7 @@ mod tests {
             .journals
             .lock()
             .expect("lock")
-            .get_mut("delivery-store-main")
+            .get_mut("dlv_01J00000000000000000000002")
             .expect("journal")
             .records
             .push(JournalRecordBytes {

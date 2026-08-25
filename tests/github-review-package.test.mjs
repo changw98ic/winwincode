@@ -7,6 +7,7 @@ import test from 'node:test'
 
 import {
   DELIVERY_SCHEMA_VERSION,
+  DeliveryId,
   RUNTIME_EVENT_SCHEMA_VERSION,
   deliveryIdForGitHubIssueSource,
   parseDelivery,

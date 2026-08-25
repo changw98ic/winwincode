@@ -242,7 +242,7 @@ function createMutationRunner(home, restartEveryMutation) {
 }
 
 async function runDefinitionScenario(home, restartEveryMutation) {
-  const deliveryId = 'delivery-restart-definition'
+  const deliveryId = 'dlv_4G8PCANZJR80KP8YVK3EWK60GP'
   const mutate = createMutationRunner(home, restartEveryMutation)
   const firstSpec = spec(deliveryId, 1, 'definition-v1')
   let current = await mutate({
@@ -398,7 +398,7 @@ function seededVerification(deliveryId) {
 }
 
 async function runReworkScenario(home, restartEveryMutation) {
-  const deliveryId = 'delivery-restart-rework'
+  const deliveryId = 'dlv_4HG6H5KN92BBM3B8WG7D2W1Y0F'
   let current = seededVerification(deliveryId)
   await DeliveryStore.create({
     home,

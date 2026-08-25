@@ -1,4 +1,21 @@
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
+
+const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+
+function oracleDeliveryId(label) {
+  const bytes = createHash('sha256')
+    .update(`winwincode.delivery-oracle-id.v1\0${label}`)
+    .digest()
+    .subarray(0, 16)
+  let value = BigInt(`0x${bytes.toString('hex')}`)
+  const suffix = Array(26)
+  for (let index = suffix.length - 1; index >= 0; index -= 1) {
+    suffix[index] = CROCKFORD_BASE32[Number(value & 31n)]
+    value >>= 5n
+  }
+  return `dlv_${suffix.join('')}`
+}
 
 function replaceEvery(value, from, to) {
   return from.length === 0 ? value : value.split(from).join(to)
@@ -65,7 +82,7 @@ async function createScenarioContext(id) {
     DeliveryServiceFixtureTestkit,
   } = await import('./delivery-service-testkit.mjs')
   const kit = await DeliveryServiceFixtureTestkit.create({
-    deliveryId: `oracle-${id}`,
+    deliveryId: oracleDeliveryId(id),
     repositoryLocator: `/workspace/oracle/${id}`,
   })
   const commands = []
@@ -380,7 +397,7 @@ async function taskDagScenario() {
     )
     if (blocked.ok) throw new Error('blocked DeliveryTask unexpectedly started')
 
-    const cyclicDeliveryId = 'oracle-task-dag-cycle'
+    const cyclicDeliveryId = oracleDeliveryId('task-dag-cycle')
     const cyclicSpec = {
       ...specification,
       id: 'spec-oracle-task-dag-cycle',

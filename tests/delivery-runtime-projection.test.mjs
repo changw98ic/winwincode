@@ -19,7 +19,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_300_000_000_000
-const deliveryId = 'delivery-runtime-projection'
+const deliveryId = 'dlv_5S859XC5EW0MP7KHHJJQSDWGYQ'
 const dshSessionId = 'dsh-runtime-projection'
 const codexSessionId = 'codex-runtime-projection'
 const stageRunId = 'stage-runtime-executing'

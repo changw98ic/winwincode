@@ -18,7 +18,7 @@ import {
 } from '../packages/contracts/dist/index.js'
 
 const now = 1_800_000_000_000
-const deliveryId = 'delivery-api-fixture'
+const deliveryId = 'dlv_59R8PHECCYFKT33TN110NWQ08B'
 const proof = 'fixture-local-proof-value'
 
 function spec() {
@@ -584,9 +584,9 @@ test('Delivery API binds a success response to the exact request and Delivery', 
   expectApiError('RELATIONSHIP_MISMATCH', 'response.result.delivery.id', () => (
     materializeStrongFlowDeliverySuccess(request, {
       ...draftDelivery(),
-      id: 'delivery-other',
-      spec: { ...spec(), deliveryId: 'delivery-other' },
-      tasks: [{ ...task(), deliveryId: 'delivery-other' }],
+      id: 'dlv_113N3BH0SKS8J6HYD69M35KBQP',
+      spec: { ...spec(), deliveryId: 'dlv_113N3BH0SKS8J6HYD69M35KBQP' },
+      tasks: [{ ...task(), deliveryId: 'dlv_113N3BH0SKS8J6HYD69M35KBQP' }],
     })
   ))
 })

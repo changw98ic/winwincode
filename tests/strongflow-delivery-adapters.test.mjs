@@ -185,7 +185,7 @@ test('DSH Remote and CLI read and create through one durable Delivery service', 
   assert.equal(invalidRemote.error.code, 'INVALID_REQUEST')
   assert.equal(invalidRemote.requestId, null)
 
-  const remoteDeliveryId = 'delivery-created-from-remote'
+  const remoteDeliveryId = 'dlv_01J00000000000000000000005'
   const remoteCreate = await ctx.typertGateway.invoke({
     namespace: 'strongflow',
     method: 'invoke',
@@ -241,7 +241,7 @@ test('DSH Remote and CLI read and create through one durable Delivery service', 
   assert.equal(cliStderr.length, 0)
   assert.equal(JSON.parse(cliStdout.join('')).result.delivery.id, remoteDeliveryId)
 
-  const cliDeliveryId = 'delivery-created-from-cli'
+  const cliDeliveryId = 'dlv_01J00000000000000000000006'
   const cliCreateOutput = []
   const cliCreateCode = await runStrongFlowCli([
     'delivery',
@@ -275,7 +275,7 @@ test('DSH Remote and CLI read and create through one durable Delivery service', 
 
 test('Attention resolution authenticates the human and never stores the proof', async t => {
   const current = await fixture(t, 'attention')
-  const deliveryId = 'delivery-adapter-attention'
+  const deliveryId = 'dlv_32ARCQRKKE7YQXECD73W2JDCF8'
   const currentSpec = spec(deliveryId)
   const planningRun = {
     schemaVersion: DELIVERY_SCHEMA_VERSION,
@@ -427,7 +427,7 @@ test('Attention resolution authenticates the human and never stores the proof', 
 
 test('local UI plan review accepts only the bound DSH Session and current revision', async t => {
   const current = await fixture(t, 'local-ui-review')
-  const deliveryId = 'delivery-adapter-local-ui-review'
+  const deliveryId = 'dlv_2C7MVKWY2TXECXN58QT2830AF0'
   const currentSpec = spec(deliveryId)
   const planningRun = {
     schemaVersion: DELIVERY_SCHEMA_VERSION,
@@ -607,7 +607,7 @@ test('local UI plan review accepts only the bound DSH Session and current revisi
 
 test('invoker reports current revision and aborts only before dispatch', async t => {
   const current = await fixture(t, 'failures')
-  const deliveryId = 'delivery-adapter-failures'
+  const deliveryId = 'dlv_3Q0T1HMKMPAZY6G3K4J57GNCED'
   await current.invoker.invoke(materializeStrongFlowDeliveryRequest(
     'createDelivery',
     'create-for-conflict',

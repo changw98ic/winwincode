@@ -948,7 +948,7 @@ mod tests {
     #[test]
     fn computed_failure_attention_resolves_to_bounded_rework() {
         let fixture = test_support::verdict_fixture(
-            &winwincode_domain::DeliveryId("delivery-verdict-attention-resolution".into()),
+            &winwincode_domain::DeliveryId("dlv_01J00000000000000000000005".into()),
             test_support::VerdictFixtureOutcome::Fail,
         );
         let transition = compute_verdict_transition(

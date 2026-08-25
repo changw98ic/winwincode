@@ -22,7 +22,7 @@ async function git(repository, ...args) {
 }
 
 function deliveryFixture(repository, baseRevision, { reviewer = false } = {}) {
-  const deliveryId = 'delivery-local-git-workspace'
+  const deliveryId = 'dlv_2JF4XEC6099JJVXXPW9VM0JPGF'
   const writer = {
     schemaVersion: DELIVERY_SCHEMA_VERSION,
     id: 'stage-local-git-executor',

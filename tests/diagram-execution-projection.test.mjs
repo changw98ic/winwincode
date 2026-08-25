@@ -18,7 +18,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const baseTime = 2_400_000_000_000
-const deliveryId = 'delivery-diagram-cycle'
+const deliveryId = 'dlv_1KWR3RHJ1T8KJZNQ1TVVGDTZB5'
 const exactDiff = [
   'diff --git a/src/invitations/api.ts b/src/invitations/api.ts',
   'index 1111111..2222222 100644',

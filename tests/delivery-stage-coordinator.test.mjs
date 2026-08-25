@@ -423,7 +423,7 @@ test('one browser action per role drives approved spec through both human review
     runtime,
     workspace,
   })
-  const deliveryId = 'delivery-browser-loop'
+  const deliveryId = 'dlv_1GSSFJ2FJ4N06K1R41D8XYP6GB'
   const created = await service.createDelivery({
     requestId: 'create-browser-loop',
     spec: draftSpec(deliveryId, repository, baseRevision, 1, 'draft'),
@@ -681,7 +681,7 @@ test('an aborted role StageRun resumes after coordinator restart without a secon
   ).delivery)
   runtime.baseRevision = baseRevision
   const workspace = new LocalGitDeliveryWorkspace({ home })
-  const deliveryId = 'delivery-restart-loop'
+  const deliveryId = 'dlv_3N0AMNQQX75367AGFTG98Q6WVC'
   const created = await service.createDelivery({
     requestId: 'create-restart-loop',
     spec: draftSpec(deliveryId, repository, baseRevision, 1, 'restart-draft'),

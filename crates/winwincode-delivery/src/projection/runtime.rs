@@ -1345,7 +1345,7 @@ mod tests {
         let mut projection =
             RuntimeProjection::new(&delivery, vec![binding]).expect("exact binding");
         let mut foreign = event;
-        foreign.identity.delivery_id = DeliveryId("foreign-delivery".into());
+        foreign.identity.delivery_id = DeliveryId("dlv_01J00000000000000000000009".into());
         foreign.seal = seal_event(&foreign).expect("foreign sealed event");
         let error = projection
             .apply(&foreign)

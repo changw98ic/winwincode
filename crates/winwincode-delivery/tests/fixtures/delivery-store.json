@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "id": "delivery-store-main",
+  "id": "dlv_01J00000000000000000000002",
   "revision": 1,
   "status": "draft",
   "spec": {
     "schemaVersion": 3,
     "id": "delivery-store-spec-v1",
-    "deliveryId": "delivery-store-main",
+    "deliveryId": "dlv_01J00000000000000000000002",
     "revision": 1,
     "title": "Durable delivery",
     "goal": "Persist one canonical Delivery without copying runtime state.",

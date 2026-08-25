@@ -7,6 +7,7 @@ import {
   DELIVERY_SCHEMA_VERSION,
   DeliveryId,
   DeliverySpecId,
+  DeliveryValidationError,
   STRONGFLOW_DELIVERY_API_SCHEMA_VERSION,
   STRONGFLOW_DELIVERY_REMEDIATION_PROTOCOL,
   STRONGFLOW_GITHUB_PUBLICATION_DECISION_PROTOCOL,
@@ -16,6 +17,7 @@ import {
   materializeStrongFlowDeliveryAdvanceRequest,
   materializeStrongFlowDeliveryRequest,
   deliveryIdForGitHubIssueSource,
+  generateDeliveryId,
   parseGitHubIssueSourceRef,
   parseGitHubPullRequestTargetRef,
   parseStrongFlowPlanReviewContextText,
@@ -262,9 +264,21 @@ export function createDeliveryRequestFromDraft(
   const sourceRef = draft.repositoryKind === 'github'
     ? githubIssueSource(draft.githubIssue)
     : null
+  const requestedDeliveryId = draft.deliveryId.trim()
   const parsedDeliveryId = sourceRef === null
-    ? DeliveryId(draft.deliveryId.trim())
+    ? requestedDeliveryId.length === 0
+      ? generateDeliveryId(createdAtMillis)
+      : DeliveryId(requestedDeliveryId)
     : deliveryIdForGitHubIssueSource(sourceRef)
+  if (sourceRef !== null
+    && requestedDeliveryId.length > 0
+    && DeliveryId(requestedDeliveryId) !== parsedDeliveryId) {
+    throw new DeliveryValidationError(
+      'RELATIONSHIP_MISMATCH',
+      'deliveryId',
+      'GitHub Issue 对应的 Delivery ID 与来源不一致',
+    )
+  }
   const deliveryId = parsedDeliveryId
   const publicationTarget = sourceRef === null
     ? null
@@ -819,12 +833,10 @@ function EmptyState(props: EmptyStateProps): ReactElement {
             label: 'Delivery ID',
             name: 'delivery-id',
             value: props.draft.deliveryId,
-            required: props.draft.repositoryKind !== 'github',
+            required: false,
             maxLength: 160,
-            placeholder: 'invite-flow',
-            help: props.draft.repositoryKind === 'github'
-              ? 'GitHub 来源会根据 owner/repository#number 自动生成唯一 Delivery ID。'
-              : '使用字母、数字、点、下划线、冒号、斜线、@ 或连字符。',
+            placeholder: '留空时自动生成',
+            help: '使用 dlv_ 加 26 位大写标识；留空时由创建页面自动生成。',
             onChange: value => patchDraft({ deliveryId: value }),
           }),
           createElement(Field, {

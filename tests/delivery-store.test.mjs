@@ -14,7 +14,7 @@ const REQUEST_A = 'a'.repeat(64)
 const REQUEST_B = 'b'.repeat(64)
 
 function snapshot(revision = 1, status = 'draft') {
-  const deliveryId = 'delivery-store-main'
+  const deliveryId = 'dlv_07RKVY5DQ3A58N466JC8R14ER8'
   return {
     schemaVersion: DELIVERY_SCHEMA_VERSION,
     id: deliveryId,
@@ -87,7 +87,7 @@ test('DeliveryStore creates, reopens, and replays one exact snapshot chain', asy
   assert.equal(appended.replayed, false)
   assert.equal(appended.snapshot.revision, 2)
 
-  const reopened = await DeliveryStore.open(home, 'delivery-store-main')
+  const reopened = await DeliveryStore.open(home, 'dlv_07RKVY5DQ3A58N466JC8R14ER8')
   const stored = await reopened.read()
   assert.equal(stored.records.length, 2)
   assert.equal(stored.records[0].previousDigest, null)
@@ -140,8 +140,8 @@ test('competing DeliveryStore instances publish one revision', async t => {
     requestDigest: REQUEST_A,
     snapshot: snapshot(),
   })
-  const left = await DeliveryStore.open(home, 'delivery-store-main')
-  const right = await DeliveryStore.open(home, 'delivery-store-main')
+  const left = await DeliveryStore.open(home, 'dlv_07RKVY5DQ3A58N466JC8R14ER8')
+  const right = await DeliveryStore.open(home, 'dlv_07RKVY5DQ3A58N466JC8R14ER8')
   const results = await Promise.allSettled([
     left.append({
       requestId: 'left-update',

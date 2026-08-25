@@ -85,6 +85,10 @@ fn projection_key(stream: ProjectionEventStream) -> ProjectionEventStreamKey {
     .expect("projection stream key")
 }
 
+fn delivery_projection_stream(value: &str) -> ProjectionEventStream {
+    ProjectionEventStream::Delivery(DeliveryId(value.into()))
+}
+
 fn write_interleaved_projection_events(
     storage: &mut SqliteStorage,
     delivery_one: &ProjectionEventStream,
@@ -571,8 +575,8 @@ fn sqlite_adapter_uses_no_dynamic_savepoint_or_sql_identifier_path() {
 fn projection_event_positions_are_stream_local_durable_and_exact() {
     let root = temporary_directory("projection-event-streams");
     let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
-    let delivery_one = ProjectionEventStream::Delivery(DeliveryId("delivery-one".into()));
-    let delivery_two = ProjectionEventStream::Delivery(DeliveryId("delivery-two".into()));
+    let delivery_one = delivery_projection_stream("dlv_14P4FYB8C2ZEFAWXKNB3A9TXZR");
+    let delivery_two = delivery_projection_stream("dlv_6KSS07PEY1TVMHGNR5DT4GN9KX");
     let session_one = ProjectionEventStream::ProductSession(ProductSessionId("session-one".into()));
     let session_two = ProjectionEventStream::ProductSession(ProductSessionId("session-two".into()));
     let first_delivery_cursor = write_interleaved_projection_events(
@@ -1002,7 +1006,7 @@ fn later_outbox_failure_rolls_back_the_first_projection_cursor() {
         .expect("failure trigger should install");
     connection.close().expect("failure injector should close");
 
-    let stream = ProjectionEventStream::Delivery(DeliveryId("delivery-rollback".into()));
+    let stream = delivery_projection_stream("dlv_7Q71DWFHAZN7S6NPCS27WTTX4V");
     let mut storage = SqliteStorage::open(&root).expect("storage with trigger should open");
     let commit = StateCommit::new(
         receipt_identity(

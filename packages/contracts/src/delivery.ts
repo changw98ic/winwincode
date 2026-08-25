@@ -132,6 +132,32 @@ export type CriterionResultId = DeliveryIdentifier<'CriterionResultId'>
 export type DeliveryVerdictId = DeliveryIdentifier<'DeliveryVerdictId'>
 
 const PORTABLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$/u
+const DELIVERY_ID_PATTERN = /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u
+const CROCKFORD_BASE32_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+const ULID_TIMESTAMP_LIMIT = 2 ** 48
+const GITHUB_ISSUE_DELIVERY_ID_NAMESPACE = 'winwincode.github-issue-delivery-id.v1'
+const SHA256_INITIAL_STATE = Object.freeze([
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+])
+const SHA256_ROUND_CONSTANTS = Object.freeze([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+])
 const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/u
 const MAX_TEXT_LENGTH = 65_536
 const MAX_REFERENCE_LENGTH = 4_096
@@ -161,7 +187,127 @@ function deliveryIdentifier<Name extends string>(
 }
 
 export function DeliveryId(value: string): DeliveryId {
-  return deliveryIdentifier(value, 'DeliveryId')
+  if (typeof value !== 'string' || !DELIVERY_ID_PATTERN.test(value)) {
+    deliveryError(
+      'INVALID_IDENTIFIER',
+      'DeliveryId',
+      'DeliveryId must use dlv_ followed by 26 uppercase Crockford Base32 characters',
+    )
+  }
+  return value as DeliveryId
+}
+
+function rotateRight(value: number, bits: number): number {
+  return (value >>> bits) | (value << (32 - bits))
+}
+
+function sha256Bytes(value: string): Uint8Array {
+  const input = Uint8Array.from(value, character => {
+    const code = character.charCodeAt(0)
+    if (code > 0x7f) throw new TypeError('GitHub issue identity bytes must be ASCII')
+    return code
+  })
+  const paddedLength = Math.ceil((input.length + 9) / 64) * 64
+  const padded = new Uint8Array(paddedLength)
+  padded.set(input)
+  padded[input.length] = 0x80
+  const view = new DataView(padded.buffer)
+  const bitLength = input.length * 8
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / (2 ** 32)), false)
+  view.setUint32(paddedLength - 4, bitLength >>> 0, false)
+  const state = Uint32Array.from(SHA256_INITIAL_STATE)
+  const words = new Uint32Array(64)
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) {
+      words[index] = view.getUint32(offset + index * 4, false)
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const previous15 = words[index - 15]!
+      const previous2 = words[index - 2]!
+      const sigma0 = rotateRight(previous15, 7)
+        ^ rotateRight(previous15, 18)
+        ^ (previous15 >>> 3)
+      const sigma1 = rotateRight(previous2, 17)
+        ^ rotateRight(previous2, 19)
+        ^ (previous2 >>> 10)
+      words[index] = (words[index - 16]! + sigma0 + words[index - 7]! + sigma1) >>> 0
+    }
+    let a = state[0]!
+    let b = state[1]!
+    let c = state[2]!
+    let d = state[3]!
+    let e = state[4]!
+    let f = state[5]!
+    let g = state[6]!
+    let h = state[7]!
+    for (let index = 0; index < 64; index += 1) {
+      const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+      const choice = (e & f) ^ (~e & g)
+      const temporary1 = (h + sum1 + choice + SHA256_ROUND_CONSTANTS[index]! + words[index]!) >>> 0
+      const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+      const majority = (a & b) ^ (a & c) ^ (b & c)
+      const temporary2 = (sum0 + majority) >>> 0
+      h = g
+      g = f
+      f = e
+      e = (d + temporary1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (temporary1 + temporary2) >>> 0
+    }
+    state[0] = (state[0]! + a) >>> 0
+    state[1] = (state[1]! + b) >>> 0
+    state[2] = (state[2]! + c) >>> 0
+    state[3] = (state[3]! + d) >>> 0
+    state[4] = (state[4]! + e) >>> 0
+    state[5] = (state[5]! + f) >>> 0
+    state[6] = (state[6]! + g) >>> 0
+    state[7] = (state[7]! + h) >>> 0
+  }
+  const digest = new Uint8Array(32)
+  const digestView = new DataView(digest.buffer)
+  for (let index = 0; index < state.length; index += 1) {
+    digestView.setUint32(index * 4, state[index]!, false)
+  }
+  return digest
+}
+
+function deliveryIdFrom128Bits(bytes: Uint8Array): DeliveryId {
+  if (bytes.length < 16) throw new TypeError('Delivery identity requires 128 bits')
+  let value = 0n
+  for (let index = 0; index < 16; index += 1) {
+    value = (value << 8n) | BigInt(bytes[index]!)
+  }
+  let encoded = ''
+  for (let index = 0; index < 26; index += 1) {
+    encoded = `${CROCKFORD_BASE32_ALPHABET[Number(value & 31n)]}${encoded}`
+    value >>= 5n
+  }
+  return DeliveryId(`dlv_${encoded}`)
+}
+
+/** Generate one canonical, time-sortable Delivery identity for a create command. */
+export function generateDeliveryId(createdAtMillis = Date.now()): DeliveryId {
+  if (!Number.isSafeInteger(createdAtMillis)
+    || createdAtMillis < 0
+    || createdAtMillis >= ULID_TIMESTAMP_LIMIT) {
+    deliveryError(
+      'INVALID_VALUE',
+      'createdAtMillis',
+      'createdAtMillis must fit the 48-bit ULID timestamp range',
+    )
+  }
+  const randomBytes = new Uint8Array(10)
+  globalThis.crypto.getRandomValues(randomBytes)
+  let value = BigInt(createdAtMillis)
+  for (const byte of randomBytes) value = (value << 8n) | BigInt(byte)
+  const bytes = new Uint8Array(16)
+  for (let index = 15; index >= 0; index -= 1) {
+    bytes[index] = Number(value & 0xffn)
+    value >>= 8n
+  }
+  return deliveryIdFrom128Bits(bytes)
 }
 
 export function DeliverySpecId(value: string): DeliverySpecId {
@@ -620,11 +766,19 @@ export function parseGitHubPullRequestTargetRef(
   })
 }
 
+/** Map one normalized GitHub issue to its single stable canonical Delivery identity. */
 export function deliveryIdForGitHubIssueSource(
   value: GitHubIssueSourceRef,
 ): DeliveryId {
   const source = parseGitHubIssueSourceRef(value)
-  return DeliveryId(`github-issue:${source.repository}:${String(source.number)}`)
+  const identityBytes = [
+    GITHUB_ISSUE_DELIVERY_ID_NAMESPACE,
+    source.provider,
+    source.kind,
+    source.repository,
+    String(source.number),
+  ].join('\0')
+  return deliveryIdFrom128Bits(sha256Bytes(identityBytes))
 }
 
 export function parseRepositoryRef(value: unknown, path = 'repository'): RepositoryRef {
@@ -710,7 +864,7 @@ export function parseDeliverySpec(value: unknown, path = 'deliverySpec'): Delive
     deliveryError(
       'RELATIONSHIP_MISMATCH',
       `${path}.deliveryId`,
-      'a GitHub issue source must use its deterministic Delivery identity',
+      'a GitHub issue source must use its stable canonical Delivery identity',
     )
   }
   if (publicationTarget !== null && sourceRef === null) {

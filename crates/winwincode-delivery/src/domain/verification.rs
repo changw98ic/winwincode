@@ -1699,7 +1699,7 @@ mod tests {
         StageRun {
             schema_version: super::super::DELIVERY_SCHEMA_VERSION,
             id: StageRunId(id.into()),
-            delivery_id: DeliveryId("delivery-main".into()),
+            delivery_id: DeliveryId("dlv_01J00000000000000000000000".into()),
             delivery_task_id: Some(DeliveryTaskId("delivery-task-api".into())),
             stage: if role == "executor" {
                 DeliveryStage::Executing
@@ -1724,7 +1724,7 @@ mod tests {
         SessionBinding {
             schema_version: super::super::DELIVERY_SCHEMA_VERSION,
             id: SessionBindingId(id.into()),
-            delivery_id: DeliveryId("delivery-main".into()),
+            delivery_id: DeliveryId("dlv_01J00000000000000000000000".into()),
             delivery_task_id: Some(DeliveryTaskId("delivery-task-api".into())),
             stage_run_id: StageRunId(stage_run_id.into()),
             product_session_id: ProductSessionId(format!("product-{identity}")),

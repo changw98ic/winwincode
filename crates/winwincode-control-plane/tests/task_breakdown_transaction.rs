@@ -34,7 +34,7 @@ use winwincode_storage::{
     StateCommit,
 };
 
-const REVIEW_SET_SHA256: &str = "06123389bf88cb8915e399fdb2baccc9460d836de763bccdea3effd7084435e3";
+const REVIEW_SET_SHA256: &str = "33d34d80dd21af9d1e2cd17b0fa9f746e7d39f40c3e7f158b71469ca39377ef0";
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 fn temporary_directory(name: &str) -> PathBuf {
@@ -103,7 +103,7 @@ fn task_breakdown_command(seed: u64) -> CommandEnvelope {
         command: CommandName::DeliveryApproveTaskBreakdown,
         expected_revision: Revision(1),
         payload: serde_json::json!({
-            "deliveryId": "delivery-main",
+            "deliveryId": "dlv_01J00000000000000000000000",
             "reviewSetSha256": format!("sha256:{REVIEW_SET_SHA256}"),
         }),
         request_id: RequestId(canonical_id("req", seed)),
@@ -247,7 +247,7 @@ fn task_breakdown_command_commits_state_journal_receipt_and_outbox_together() {
         .commit_delivery_task_breakdown(&command)
         .expect("atomic task-breakdown commit");
     let state = control_plane
-        .load_state("delivery:delivery-main")
+        .load_state("delivery:dlv_01J00000000000000000000000")
         .expect("load_state")
         .expect("committed state");
     let committed = Delivery::decode_json(&state.payload).expect("committed Delivery");
@@ -262,7 +262,10 @@ fn task_breakdown_command_commits_state_journal_receipt_and_outbox_together() {
 
     let storage = SqliteStorage::open(&root).expect("inspection storage");
     let journal = storage
-        .load_journal(&AggregateJournalKey::new("delivery", "delivery-main").expect("journal key"))
+        .load_journal(
+            &AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+                .expect("journal key"),
+        )
         .expect("load_journal")
         .expect("Delivery journal");
     let replay = storage
@@ -315,21 +318,24 @@ fn task_breakdown_receipt_first_replay_returns_original_graph_revision_and_event
         .expect("corruption database");
     connection
         .execute(
-            "UPDATE product_state SET payload = ?1 WHERE stream_id = 'delivery:delivery-main'",
+            "UPDATE product_state SET payload = ?1 WHERE stream_id = 'delivery:dlv_01J00000000000000000000000'",
             [b"corrupt-current-state".as_slice()],
         )
         .expect("corrupt current state");
     connection
         .execute(
             "UPDATE aggregate_journal_records SET payload = ?1 \
-             WHERE aggregate_type = 'delivery' AND aggregate_id = 'delivery-main'",
+             WHERE aggregate_type = 'delivery' AND aggregate_id = 'dlv_01J00000000000000000000000'",
             [b"corrupt-current-journal".as_slice()],
         )
         .expect("corrupt current Delivery journal");
     connection.close().expect("corruption close");
     let inspection = SqliteStorage::open(&root).expect("corrupt journal inspection");
     let corrupt_journal = inspection
-        .load_journal(&AggregateJournalKey::new("delivery", "delivery-main").expect("journal key"))
+        .load_journal(
+            &AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+                .expect("journal key"),
+        )
         .expect("load_journal")
         .expect("current journal");
     assert_eq!(corrupt_journal.records.len(), 2);
@@ -380,7 +386,7 @@ fn task_breakdown_same_scoped_request_with_changed_digest_is_a_conflict() {
 
     let mut changed_digest = command.clone();
     changed_digest.payload = serde_json::json!({
-        "deliveryId": "delivery-main",
+        "deliveryId": "dlv_01J00000000000000000000000",
         "reviewSetSha256": format!("sha256:{}", "f".repeat(64)),
     });
     let rejected = control_plane
@@ -421,7 +427,7 @@ fn task_breakdown_rejects_a_non_repository_scope_before_writing_facts() {
         if error.kind() == StorageErrorKind::InvalidInput));
     assert!(published.lock().expect("published events").is_empty());
     let state = control_plane
-        .load_state("delivery:delivery-main")
+        .load_state("delivery:dlv_01J00000000000000000000000")
         .expect("state read")
         .expect("seed state");
     assert_eq!(state.revision, 1);
@@ -482,7 +488,7 @@ fn task_breakdown_receipt_cannot_be_replayed_by_another_actor_scope_or_delivery(
             "{boundary}"
         );
         let state = control_plane
-            .load_state("delivery:delivery-main")
+            .load_state("delivery:dlv_01J00000000000000000000000")
             .expect("state read")
             .expect("committed state");
         assert_eq!(state.revision, first.revision, "{boundary}");
@@ -496,7 +502,8 @@ fn task_breakdown_receipt_cannot_be_replayed_by_another_actor_scope_or_delivery(
         let storage = SqliteStorage::open(&root).expect("inspection storage");
         let journal = storage
             .load_journal(
-                &AggregateJournalKey::new("delivery", "delivery-main").expect("journal key"),
+                &AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+                    .expect("journal key"),
             )
             .expect("journal read")
             .expect("Delivery journal");
@@ -512,7 +519,7 @@ fn task_breakdown_same_revision_stale_review_digest_maps_to_revision_conflict() 
     seed_delivery(&root);
     let mut command = task_breakdown_command(6);
     command.payload = serde_json::json!({
-        "deliveryId": "delivery-main",
+        "deliveryId": "dlv_01J00000000000000000000000",
         "reviewSetSha256": format!("sha256:{}", "f".repeat(64)),
     });
     let mut control_plane = ControlPlane::start_local(
@@ -535,7 +542,7 @@ fn task_breakdown_same_revision_stale_review_digest_maps_to_revision_conflict() 
         "reviewSetSha256 no longer identifies the current solution review"
     );
     let state = control_plane
-        .load_state("delivery:delivery-main")
+        .load_state("delivery:dlv_01J00000000000000000000000")
         .expect("state read")
         .expect("seed state");
     assert_eq!(state.revision, 1);
@@ -618,7 +625,7 @@ fn assert_invalid_reviewed_graph_changes_no_fact(name: &str, proposals: &str, se
         "{name}"
     );
     let state = control_plane
-        .load_state("delivery:delivery-main")
+        .load_state("delivery:dlv_01J00000000000000000000000")
         .expect("state read")
         .expect("seed state");
     assert_eq!(state.revision, source.revision(), "{name}");
@@ -635,7 +642,10 @@ fn assert_invalid_reviewed_graph_changes_no_fact(name: &str, proposals: &str, se
 
     let storage = SqliteStorage::open(&root).expect("inspection storage");
     let journal = storage
-        .load_journal(&AggregateJournalKey::new("delivery", "delivery-main").expect("journal key"))
+        .load_journal(
+            &AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+                .expect("journal key"),
+        )
         .expect("journal read")
         .expect("Delivery journal");
     assert_eq!(journal.records.len(), 1, "{name}");
@@ -693,7 +703,10 @@ fn task_breakdown_revision_race_commits_no_partial_loser_facts() {
 
     let storage = SqliteStorage::open(&root).expect("inspection storage");
     let journal = storage
-        .load_journal(&AggregateJournalKey::new("delivery", "delivery-main").expect("journal key"))
+        .load_journal(
+            &AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+                .expect("journal key"),
+        )
         .expect("load_journal")
         .expect("Delivery journal");
     let pending = storage.pending_events().expect("pending_events");
@@ -724,7 +737,7 @@ fn task_breakdown_failure_at_each_atomic_member_rolls_back_all_four() {
         (
             "product_state",
             "CREATE TRIGGER fail_task_state BEFORE UPDATE ON product_state \
-             WHEN NEW.stream_id = 'delivery:delivery-main' \
+             WHEN NEW.stream_id = 'delivery:dlv_01J00000000000000000000000' \
              BEGIN SELECT RAISE(ABORT, 'injected task state failure'); END;",
         ),
         (
@@ -769,7 +782,7 @@ fn task_breakdown_failure_at_each_atomic_member_rolls_back_all_four() {
             .expect_err("injected atomic member failure");
         assert!(matches!(error, CommitError::Storage(_)), "{member}");
         let state = control_plane
-            .load_state("delivery:delivery-main")
+            .load_state("delivery:dlv_01J00000000000000000000000")
             .expect("state read")
             .expect("seed state");
         assert_eq!(state.revision, source.revision(), "{member}");
@@ -783,7 +796,8 @@ fn task_breakdown_failure_at_each_atomic_member_rolls_back_all_four() {
         let storage = SqliteStorage::open(&root).expect("inspection storage");
         let journal = storage
             .load_journal(
-                &AggregateJournalKey::new("delivery", "delivery-main").expect("journal key"),
+                &AggregateJournalKey::new("delivery", "dlv_01J00000000000000000000000")
+                    .expect("journal key"),
             )
             .expect("journal read")
             .expect("seed Delivery journal");
@@ -878,7 +892,7 @@ fn generic_control_plane_commit_cannot_bypass_task_breakdown_authority() {
         .commit(
             &command,
             StateChange::new(
-                "delivery:delivery-main",
+                "delivery:dlv_01J00000000000000000000000",
                 b"caller-authored-task-state".to_vec(),
                 vec![NewOutboxEvent::internal(
                     "caller-authored-task-event",
@@ -891,7 +905,7 @@ fn generic_control_plane_commit_cannot_bypass_task_breakdown_authority() {
     assert!(matches!(rejected, CommitError::Storage(_)));
     assert!(
         control_plane
-            .load_state("delivery:delivery-main")
+            .load_state("delivery:dlv_01J00000000000000000000000")
             .expect("state read")
             .is_none()
     );

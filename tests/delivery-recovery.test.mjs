@@ -78,7 +78,7 @@ function sessionBinding({
 }
 
 function deliveryFixture({
-  id = 'delivery-recovery',
+  id = 'dlv_01J00000000000000000000008',
   status = 'executing',
   taskStatus = 'active',
   stageRuns,
@@ -194,7 +194,7 @@ async function createRuntimeLedger(home, {
   }
 }
 
-function activeExecutionFixture(id = 'delivery-recovery-active') {
+function activeExecutionFixture(id = 'dlv_01J00000000000000000000009') {
   const runId = `stage-${id}-executor`
   const bindingId = `binding-${id}-executor`
   const dshSessionId = `dsh-${id}-executor`
@@ -283,7 +283,7 @@ test('restart recovery rebuilds the same DSH and StrongFlow views and continues 
 test('restart recovery recreates only the missing session boundary for an active StageRun', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-unbound-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const deliveryId = 'delivery-recovery-unbound'
+  const deliveryId = 'dlv_6CY9RT8G8VX1JPZ061ZXHZMQJE'
   const runId = 'stage-delivery-recovery-unbound'
   const delivery = deliveryFixture({
     id: deliveryId,
@@ -313,7 +313,7 @@ test('restart recovery recreates only the missing session boundary for an active
 test('restart recovery resumes an absent Codex thread but does not accept final model output', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-resume-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const fixture = activeExecutionFixture('delivery-recovery-resume')
+  const fixture = activeExecutionFixture('dlv_01J0000000000000000000000A')
   await createDeliveryStore(home, fixture.delivery)
   await createRuntimeLedger(home, {
     ...fixture,
@@ -368,7 +368,7 @@ test('restart recovery resumes an absent Codex thread but does not accept final 
 test('unresolved Codex approval and business Attention remain the one blocking action', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-blockers-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const fixture = activeExecutionFixture('delivery-recovery-approval')
+  const fixture = activeExecutionFixture('dlv_01J0000000000000000000000B')
   await createDeliveryStore(home, fixture.delivery)
   await createRuntimeLedger(home, {
     ...fixture,
@@ -404,7 +404,7 @@ test('unresolved Codex approval and business Attention remain the one blocking a
   const attentionId = 'attention-recovery-delivery-review'
   const reviewRunId = 'stage-recovery-delivery-review'
   const reviewDelivery = deliveryFixture({
-    id: 'delivery-recovery-attention',
+    id: 'dlv_01J0000000000000000000000C',
     status: 'needs-attention',
     taskStatus: 'completed',
     stageRuns: ({ deliveryId }) => [stageRun({
@@ -446,7 +446,7 @@ test('unresolved Codex approval and business Attention remain the one blocking a
 test('recovery starts the next stored stage and never repeats a settled executor', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-next-stage-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const deliveryId = 'delivery-recovery-next-stage'
+  const deliveryId = 'dlv_1VNBJ4AQ7CK0J1FTX4QJQDVBFA'
   const executorRunId = 'stage-recovery-settled-executor'
   const executorBindingId = 'binding-recovery-settled-executor'
   const dshSessionId = 'dsh-recovery-settled-executor'
@@ -500,7 +500,7 @@ test('recovery starts the next stored stage and never repeats a settled executor
 test('recovery validates a rebuilt candidate and rejects stale candidate identity', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-candidate-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const deliveryId = 'delivery-recovery-candidate'
+  const deliveryId = 'dlv_691CBF1X8J3RVMNJV0WZ0J2H1J'
   const executorRunId = 'stage-recovery-candidate-executor'
   const verifierRunId = 'stage-recovery-candidate-verifier'
   const executorBindingId = 'binding-recovery-candidate-executor'
@@ -597,7 +597,7 @@ test('recovery validates a rebuilt candidate and rejects stale candidate identit
 test('conflicting SessionBindings fail visibly instead of selecting an action', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-conflict-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const deliveryId = 'delivery-recovery-conflict'
+  const deliveryId = 'dlv_3XECNQXVMW2DGWWRB6J7B25TZD'
   const runId = 'stage-recovery-conflict'
   const delivery = deliveryFixture({
     id: deliveryId,
@@ -639,7 +639,7 @@ test('conflicting SessionBindings fail visibly instead of selecting an action', 
 test('restart recovery accepts one DSH review Session reused by settled human stages', async t => {
   const home = await mkdtemp(join(tmpdir(), 'winwincode-delivery-recovery-human-reuse-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const deliveryId = 'delivery-recovery-human-reuse'
+  const deliveryId = 'dlv_1FKP6SJSNY7S1YSK1Z9G9DCSNH'
   const sharedSessionId = 'dsh-recovery-human-review'
   const delivery = deliveryFixture({
     id: deliveryId,

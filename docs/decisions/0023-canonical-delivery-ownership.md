@@ -77,7 +77,7 @@ Delivery
 
 `DeliverySpec` 保存标题、目标、范围、明确排除项、约束、仓库、基线版本、稳定的验收条件和当前定义允许的返工次数。它回答“到底交付什么”“什么算完成”和“同一份批准定义最多允许几次代码返工”。至少要有一个必需验收条件；仓库和基线不能为空；`maxReworkAttempts` 为零到 100 的整数。
 
-来自 GitHub Issue 的 Delivery 另外保存一个最小 `sourceRef`：提供商、仓库和 Issue 编号。Delivery ID 由这项来源确定，因此同一个 Issue 总是解析到同一个 Delivery 身份。可选的 `publicationTarget` 只保存一个 Pull Request 目标所需的 base/head 仓库和分支。Spec revision 可以修改交付内容，但来源和目标在同一个 Delivery 生命周期中保持稳定；GitHub 的标题、正文、状态、标签、负责人、评论和项目字段不进入 DeliverySpec。
+来自 GitHub Issue 的 Delivery 另外保存一个最小 `sourceRef`：提供商、仓库和 Issue 编号。所有 Delivery 身份统一使用 `dlv_` 加 26 位 Crockford Base32 字符。GitHub 来源先把仓库名转成小写，再对版本化命名空间、提供商、类型、仓库和 Issue 编号的规范字节计算 SHA-256，取前 128 位生成该身份；因此同一个 Issue 在 TypeScript 和 Rust 中总是解析到同一个 Delivery。旧的 `github-issue:owner/repository:number` 形式不是 Delivery ID，并在创建和读取时直接拒绝。没有外部来源的 Delivery 才生成新的 ULID。可选的 `publicationTarget` 只保存一个 Pull Request 目标所需的 base/head 仓库和分支。Spec revision 可以修改交付内容，但来源和目标在同一个 Delivery 生命周期中保持稳定；GitHub 的标题、正文、状态、标签、负责人、评论和项目字段不进入 DeliverySpec。
 
 需求与方案严格分开：`DeliverySpec` 是交付目标、范围、排除项、约束和验收条件；结构化方案、系统架构图、流程图、风险和未决事项由规划阶段产生并供人工审核。方案不是另一个任务系统，也不能修改已批准的验收条件。
 
@@ -143,12 +143,18 @@ GitHub 仍是外部工作和协作事实的所有者。WinWinCode 的第一层�
 
 ```text
 sourceRef: owner/repository#issue
-Delivery ID: github-issue:owner/repository:issue
+Delivery ID: dlv_<26 Crockford Base32 characters>
 publicationTarget: head repository/branch → base repository/branch
 publication approval: exact Spec + Candidate + Verdict + target + human decision
 ```
 
-`publicationTarget` 是单值，Spec 更新不能把同一个 Delivery 改到另一项 Pull Request。provider idempotency key 由 Delivery、来源和目标确定，因此候选返工后仍指向同一项预期 PR；新的候选和 Verdict 会产生新的审核集合摘要和人工批准。
+GitHub Issue 的规范身份输入固定为：
+
+```text
+winwincode.github-issue-delivery-id.v1\0github\0issue\0<lowercase owner/repository>\0<number>
+```
+
+调用方可以重复提交来源，但不能为来源指定另一个合法 `dlv_` 身份。TypeScript 与 Rust 都重新计算并逐字比对。`publicationTarget` 是单值，Spec 更新不能把同一个 Delivery 改到另一项 Pull Request。provider idempotency key 由 Delivery、来源和目标确定，因此候选返工后仍指向同一项预期 PR；新的候选和 Verdict 会产生新的审核集合摘要和人工批准。
 
 在真实提供商调用前，`generateStrongFlowGitHubReviewPackage()` 从当前 Delivery、冻结候选和 DSH/Codex RuntimeEvent 生成 `winwincode.github-review-package.v1` 本地派生包。固定目录把需求、批准方案、方案决定、系统架构图、流程图、候选、Diff、EvidenceRef、CriterionResult、DeliveryVerdict、发布审核上下文和 Pull Request 预览分开。包内不复制原始 Session 日志；Evidence 仍然只保存来源引用。生成时每个引用都必须能从当前候选或原始运行事件重建，结束图也必须由同一个候选 Diff 和已批准图重新投影。
 

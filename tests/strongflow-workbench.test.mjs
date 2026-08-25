@@ -45,13 +45,13 @@ function deliveryFixture() {
   const now = 2_300_000_000_000
   return parseDelivery({
     schemaVersion: DELIVERY_SCHEMA_VERSION,
-    id: 'delivery-workbench',
+    id: 'dlv_5SCBC9KW8YEWPQ8BS08VMA5CVX',
     revision: 4,
     status: 'executing',
     spec: {
       schemaVersion: DELIVERY_SCHEMA_VERSION,
       id: 'delivery-workbench:spec:1',
-      deliveryId: 'delivery-workbench',
+      deliveryId: 'dlv_5SCBC9KW8YEWPQ8BS08VMA5CVX',
       revision: 1,
       title: '实现可审核的邀请流程',
       goal: '把用户目标、交付阶段和验收依据放在同一个只读视图中。',
@@ -79,7 +79,7 @@ function deliveryFixture() {
     tasks: [{
       schemaVersion: DELIVERY_SCHEMA_VERSION,
       id: 'delivery-workbench:task:api',
-      deliveryId: 'delivery-workbench',
+      deliveryId: 'dlv_5SCBC9KW8YEWPQ8BS08VMA5CVX',
       title: '邀请 API',
       goal: '交付可以独立验收的邀请接口。',
       acceptanceCriterionIds: ['delivery-workbench:criterion:1'],
@@ -90,7 +90,7 @@ function deliveryFixture() {
     stageRuns: [{
       schemaVersion: DELIVERY_SCHEMA_VERSION,
       id: 'delivery-workbench:stage:execute',
-      deliveryId: 'delivery-workbench',
+      deliveryId: 'dlv_5SCBC9KW8YEWPQ8BS08VMA5CVX',
       deliveryTaskId: 'delivery-workbench:task:api',
       stage: 'executing',
       actorType: 'codex',
@@ -103,7 +103,7 @@ function deliveryFixture() {
     sessionBindings: [{
       schemaVersion: DELIVERY_SCHEMA_VERSION,
       id: 'delivery-workbench:binding:execute',
-      deliveryId: 'delivery-workbench',
+      deliveryId: 'dlv_5SCBC9KW8YEWPQ8BS08VMA5CVX',
       stageRunId: 'delivery-workbench:stage:execute',
       dshSessionId: 'dsh-workbench-executor',
       codexSessionId: 'codex-workbench-executor',
@@ -440,7 +440,7 @@ function runtimeExecutionFixture(delivery) {
 test('StrongFlow create form produces one canonical DeliverySpec without promoting plan steps', () => {
   const client = loadStrongFlowClient()
   const request = client.createDeliveryRequestFromDraft({
-    deliveryId: 'delivery-created-in-workbench',
+    deliveryId: 'dlv_7N3Y3ASK5SWBB9TT46PCV6M9E4',
     title: '创建交付',
     goal: '固定目标后再进入方案和执行。',
     scope: '交付定义\n人工审核',
@@ -458,18 +458,18 @@ test('StrongFlow create form produces one canonical DeliverySpec without promoti
   }, 'ui:create:delivery-created-in-workbench:fixture', 2_300_000_000_000)
 
   assert.equal(request.operation, 'createDelivery')
-  assert.equal(request.payload.spec.id, 'delivery-created-in-workbench:spec:1')
+  assert.equal(request.payload.spec.id, 'dlv_7N3Y3ASK5SWBB9TT46PCV6M9E4:spec:1')
   assert.deepEqual(Array.from(request.payload.spec.scope), ['交付定义', '人工审核'])
   assert.deepEqual(Array.from(request.payload.spec.acceptanceCriteria, criterion => ({
     id: criterion.id,
     method: criterion.verificationMethod,
   })), [
     {
-      id: 'delivery-created-in-workbench:criterion:1',
+      id: 'dlv_7N3Y3ASK5SWBB9TT46PCV6M9E4:criterion:1',
       method: '读取 DeliverySpec',
     },
     {
-      id: 'delivery-created-in-workbench:criterion:2',
+      id: 'dlv_7N3Y3ASK5SWBB9TT46PCV6M9E4:criterion:2',
       method: null,
     },
   ])

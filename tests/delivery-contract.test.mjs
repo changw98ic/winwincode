@@ -13,7 +13,7 @@ import {
 const now = 1_800_000_000_000
 
 function deliveryFixture() {
-  const deliveryId = 'delivery-main'
+  const deliveryId = 'dlv_01J00000000000000000000000'
   const specId = 'delivery-spec-v1'
   const candidateRef = 'git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   const requiredCriterionId = 'criterion-required'
@@ -166,7 +166,7 @@ function expectDeliveryError(code, action) {
 
 test('canonical Delivery round-trips and freezes every owned fact', () => {
   const parsed = parseDelivery(JSON.parse(JSON.stringify(deliveryFixture())))
-  assert.equal(parsed.id, DeliveryId('delivery-main'))
+  assert.equal(parsed.id, DeliveryId('dlv_01J00000000000000000000000'))
   assert.equal(parsed.stageRuns[0].id, StageRunId('stage-verification-1'))
   assert.equal(parsed.verdict.status, 'pass')
   assert.equal(parsed.verdict.criteria[1].verdict, 'inconclusive')
@@ -178,6 +178,21 @@ test('canonical Delivery round-trips and freezes every owned fact', () => {
   assert.ok(Object.isFrozen(parsed.sessionBindings))
   assert.ok(Object.isFrozen(parsed.evidence))
   assert.ok(Object.isFrozen(parsed.verdict.criteria))
+})
+
+test('DeliveryId accepts only the canonical dlv_ identity', () => {
+  assert.equal(
+    DeliveryId('dlv_01J00000000000000000000000'),
+    'dlv_01J00000000000000000000000',
+  )
+  for (const value of [
+    'github-issue:example/widget:42',
+    'delivery-main',
+    'dlv_01I00000000000000000000000',
+    'dlv_01j00000000000000000000000',
+  ]) {
+    expectDeliveryError('INVALID_IDENTIFIER', () => DeliveryId(value))
+  }
 })
 
 test('DeliverySpec requires delivery boundaries and a bounded rework limit', () => {

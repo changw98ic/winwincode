@@ -860,13 +860,14 @@
     },
     {
       "id": "contract.identifier_format",
-      "kind": "conflict",
-      "current": "The TypeScript Delivery domain accepts broad portable identifiers such as delivery-main.",
-      "target": "The phase-one schema requires typed prefixes and ULID-shaped payloads such as dlv_, dtk_, run_, att_, and evd_.",
-      "action": "Use generated phase-one ID types at the new Rust command/projection seam; legacy fixture IDs stay confined to migration input.",
+      "kind": "mapping_required",
+      "current": "The TypeScript and Rust Delivery aggregate boundaries accept only dlv_ followed by 26 uppercase Crockford Base32 characters.",
+      "target": "GitHub issue sources retain their exact sourceRef while deterministically mapping to the same canonical dlv_ identity in TypeScript and Rust; source-less creation generates a ULID-shaped dlv_ identity.",
+      "action": "Derive GitHub-sourced identities from the versioned normalized source bytes, reject caller overrides and github-issue: identities, and keep sourceRef as the external issue binding.",
       "refs": [
         "packages/contracts/src/delivery.ts",
-        "schema/winwincode/v1/domain.schema.json"
+        "schema/winwincode/v1/domain.schema.json",
+        "docs/decisions/0023-canonical-delivery-ownership.md"
       ]
     },
     {

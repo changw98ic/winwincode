@@ -362,7 +362,7 @@ mod tests {
         Delivery,
     ) {
         let fixture = verdict_fixture(
-            &DeliveryId("delivery-receipt-exactness".into()),
+            &DeliveryId("dlv_5K2F6D4ZBGXG691EQ8HJXJACA1".into()),
             VerdictFixtureOutcome::Fail,
         );
         let transition = compute_verdict_transition(

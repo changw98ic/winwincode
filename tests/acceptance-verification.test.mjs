@@ -12,7 +12,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_400_000_000_000
-const deliveryId = 'delivery-acceptance-freeze'
+const deliveryId = 'dlv_7XRHEBX4M4R28PNKHG00H19BC9'
 
 function criterion(id, { required, verificationMethod }) {
   return {

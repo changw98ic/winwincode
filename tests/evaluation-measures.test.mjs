@@ -13,7 +13,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_500_000_000_000
-const deliveryId = 'delivery-measures-fixture'
+const deliveryId = 'dlv_77QK2VAYNT2WWBNB45C4AYQHST'
 const specId = 'spec-measures-fixture'
 const criterionId = 'criterion-measures-fixture'
 const taskId = 'task-measures-fixture'

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "id": "delivery-main",
+  "id": "dlv_01J00000000000000000000000",
   "revision": 7,
   "status": "ready-to-deliver",
   "spec": {
     "schemaVersion": 3,
     "id": "delivery-spec-v1",
-    "deliveryId": "delivery-main",
+    "deliveryId": "dlv_01J00000000000000000000000",
     "revision": 1,
     "title": "Implement invitation flow",
     "goal": "Users can invite a teammate and verify the result.",
@@ -50,7 +50,7 @@
     {
       "schemaVersion": 3,
       "id": "delivery-task-api",
-      "deliveryId": "delivery-main",
+      "deliveryId": "dlv_01J00000000000000000000000",
       "title": "Invitation API",
       "goal": "Deliver the independently verifiable invitation endpoint.",
       "acceptanceCriterionIds": [
@@ -65,7 +65,7 @@
     {
       "schemaVersion": 3,
       "id": "stage-verification-1",
-      "deliveryId": "delivery-main",
+      "deliveryId": "dlv_01J00000000000000000000000",
       "deliveryTaskId": "delivery-task-api",
       "stage": "verifying",
       "actorType": "codex",
@@ -80,7 +80,7 @@
     {
       "schemaVersion": 3,
       "id": "binding-verifier-1",
-      "deliveryId": "delivery-main",
+      "deliveryId": "dlv_01J00000000000000000000000",
       "deliveryTaskId": "delivery-task-api",
       "stageRunId": "stage-verification-1",
       "productSessionId": "product-session-verifier",
@@ -95,7 +95,7 @@
     {
       "schemaVersion": 3,
       "id": "evidence-test-1",
-      "deliveryId": "delivery-main",
+      "deliveryId": "dlv_01J00000000000000000000000",
       "deliverySpecId": "delivery-spec-v1",
       "deliverySpecRevision": 1,
       "stageRunId": "stage-verification-1",
@@ -109,7 +109,7 @@
   "verdict": {
     "schemaVersion": 3,
     "id": "delivery-verdict-1",
-    "deliveryId": "delivery-main",
+    "deliveryId": "dlv_01J00000000000000000000000",
     "deliverySpecId": "delivery-spec-v1",
     "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "status": "pass",
@@ -117,7 +117,7 @@
       {
         "schemaVersion": 3,
         "id": "criterion-result-required",
-        "deliveryId": "delivery-main",
+        "deliveryId": "dlv_01J00000000000000000000000",
         "deliverySpecId": "delivery-spec-v1",
         "criterionId": "criterion-required",
         "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -131,7 +131,7 @@
       {
         "schemaVersion": 3,
         "id": "criterion-result-optional",
-        "deliveryId": "delivery-main",
+        "deliveryId": "dlv_01J00000000000000000000000",
         "deliverySpecId": "delivery-spec-v1",
         "criterionId": "criterion-optional",
         "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

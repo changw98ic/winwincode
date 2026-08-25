@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -11,8 +12,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import {
   DELIVERY_SCHEMA_VERSION,
+  DeliveryId,
   DeliveryValidationError,
   deliveryIdForGitHubIssueSource,
+  generateDeliveryId,
   parseDelivery,
   parseDeliverySpec,
   parseGitHubIssueSourceRef,
@@ -55,6 +58,7 @@ function loadStrongFlowClient() {
 
 const now = 2_400_000_000_000
 const proof = 'github-publication-fixture-proof'
+const githubIssueIdentityNamespace = 'winwincode.github-issue-delivery-id.v1'
 
 const sourceRef = Object.freeze({
   schemaVersion: DELIVERY_SCHEMA_VERSION,
@@ -74,7 +78,7 @@ const publicationTarget = Object.freeze({
   headBranch: 'winwincode/issue-42',
 })
 
-const deliveryId = deliveryIdForGitHubIssueSource(sourceRef)
+const deliveryId = DeliveryId('dlv_7TEPT1B6JF7W5SASWZMKTCC4KT')
 const specId = `${deliveryId}:spec:1`
 const criterionId = `${deliveryId}:criterion:1`
 const taskId = `${deliveryId}:task:1`
@@ -261,7 +265,7 @@ function expectPublicationError(code) {
   return error => error instanceof StrongFlowGitHubPublicationError && error.code === code
 }
 
-test('GitHub references keep only stable routing identity and derive one Delivery ID', () => {
+test('GitHub references remain exact while Delivery keeps its canonical identity', () => {
   const parsedSource = parseGitHubIssueSourceRef({
     ...sourceRef,
     repository: 'Example/Widget',
@@ -272,11 +276,18 @@ test('GitHub references keep only stable routing identity and derive one Deliver
     () => parseGitHubIssueSourceRef({ ...sourceRef, title: 'duplicated issue title' }),
     error => error instanceof DeliveryValidationError && error.code === 'INVALID_SHAPE',
   )
+  assert.equal(parseDeliverySpec(deliverySpec()).deliveryId, deliveryId)
   assert.throws(
-    () => parseDeliverySpec({ ...deliverySpec(), deliveryId: 'manually-chosen-id' }),
+    () => parseDeliverySpec({
+      ...deliverySpec(),
+      deliveryId: 'dlv_01J00000000000000000000000',
+    }),
     error => error instanceof DeliveryValidationError
       && error.code === 'RELATIONSHIP_MISMATCH',
   )
+  assert.throws(() => DeliveryId('github-issue:example/widget:42'), error => (
+    error instanceof DeliveryValidationError && error.code === 'INVALID_IDENTIFIER'
+  ))
   assert.throws(
     () => parseGitHubPullRequestTargetRef({
       ...publicationTarget,
@@ -286,10 +297,53 @@ test('GitHub references keep only stable routing identity and derive one Deliver
   )
 })
 
+test('TypeScript GitHub Delivery identities match fixed Node SHA-256 vectors', () => {
+  const vectors = [
+    {
+      repository: 'Example/Widget',
+      number: 42,
+      sha256: 'fa75b4159a4f3f0b95679fa4f4c6127a14a3c8287161099b492db3cc44c43df2',
+      deliveryId: 'dlv_7TEPT1B6JF7W5SASWZMKTCC4KT',
+    },
+    {
+      repository: 'example/widget',
+      number: 43,
+      sha256: 'b6eeb6858632327056507c5fa8555b30f2dcb8944cf67d88a8f5e1353d0e2e73',
+      deliveryId: 'dlv_5PXTV8B1HJ69R5CM3WBYM5APSG',
+    },
+    {
+      repository: 'contributor/widget',
+      number: 42,
+      sha256: 'dcd30d46815fe94efdf852d0c578262f6c0766f023794bb5bc8c6ba816693328',
+      deliveryId: 'dlv_6WTC6MD0AZX57FVY2JT32QG9HF',
+    },
+  ]
+  for (const vector of vectors) {
+    const parsed = parseGitHubIssueSourceRef({
+      ...sourceRef,
+      repository: vector.repository,
+      number: vector.number,
+    })
+    const canonicalBytes = [
+      githubIssueIdentityNamespace,
+      'github',
+      'issue',
+      parsed.repository,
+      String(parsed.number),
+    ].join('\0')
+    assert.equal(createHash('sha256').update(canonicalBytes).digest('hex'), vector.sha256)
+    assert.equal(deliveryIdForGitHubIssueSource(parsed), vector.deliveryId)
+  }
+})
+
+test('source-less creation can generate a canonical ULID identity', () => {
+  assert.match(generateDeliveryId(now), /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
+})
+
 test('StrongFlow create form materializes the typed GitHub source and single PR target', () => {
   const client = loadStrongFlowClient()
-  const request = client.createDeliveryRequestFromDraft({
-    deliveryId: 'ignored-for-github-source',
+  const draft = {
+    deliveryId,
     title: 'GitHub delivery',
     goal: 'Deliver one issue through one reviewed pull request.',
     scope: 'Issue result',
@@ -304,13 +358,24 @@ test('StrongFlow create form materializes the typed GitHub source and single PR 
     githubBaseBranch: 'main',
     githubHeadRepository: '',
     githubHeadBranch: 'winwincode/issue-42',
-  }, 'ui:create:github-issue:42', now)
+  }
+  const request = client.createDeliveryRequestFromDraft(
+    draft,
+    'ui:create:github-issue:42',
+    now,
+  )
   assert.equal(request.payload.spec.deliveryId, deliveryId)
   assert.equal(JSON.stringify(request.payload.spec.sourceRef), JSON.stringify(sourceRef))
   assert.equal(
     JSON.stringify(request.payload.spec.publicationTarget),
     JSON.stringify(publicationTarget),
   )
+  assert.throws(() => client.createDeliveryRequestFromDraft({
+    ...draft,
+    deliveryId: 'dlv_01J00000000000000000000000',
+  }, 'ui:create:github-issue:42:mismatch', now), error => (
+    error?.code === 'RELATIONSHIP_MISMATCH'
+  ))
 })
 
 test('publication Attention freezes the exact source, target, candidate, verdict, and stable PR key', () => {

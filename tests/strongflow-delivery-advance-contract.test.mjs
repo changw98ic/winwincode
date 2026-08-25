@@ -11,13 +11,13 @@ import {
 test('StrongFlow stage-advance boundary rejects extra fields and materializes typed failures', () => {
   const request = materializeStrongFlowDeliveryAdvanceRequest(
     'advance-contract-1',
-    'delivery-contract-1',
+    'dlv_0Y8J5DC68YS0Y0MHYQY554KBM2',
     3,
   )
   assert.deepEqual(request, {
     schemaVersion: 1,
     requestId: 'advance-contract-1',
-    deliveryId: 'delivery-contract-1',
+    deliveryId: 'dlv_0Y8J5DC68YS0Y0MHYQY554KBM2',
     expectedRevision: 3,
   })
   assert.throws(

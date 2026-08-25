@@ -17,7 +17,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_600_000_000_000
-const deliveryId = 'delivery-independent-verification'
+const deliveryId = 'dlv_07PBAQ2TGNJV2KWF4JCS6960Z3'
 const specId = 'delivery-spec-independent-verification'
 const criterionId = 'criterion-independent-verification'
 const taskId = 'delivery-task-independent-verification'

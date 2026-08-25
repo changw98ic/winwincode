@@ -3,13 +3,14 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use winwincode_domain::DeliveryId;
 
 use super::{
     AcceptanceCriterionId, DeliverySpecId, DeliveryValidationError, DeliveryValidationErrorCode,
     MAX_DELIVERY_REWORK_ATTEMPTS, MAX_REFERENCE_LENGTH, MAX_TEXT_LENGTH, bounded_text,
-    collection_length, duplicate_ids, portable_identifier, positive, safe_non_negative,
-    schema_version, validation_error,
+    canonical_delivery_id, collection_length, duplicate_ids, portable_identifier, positive,
+    safe_non_negative, schema_version, validation_error,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +55,9 @@ pub struct GitHubPullRequestTargetRef {
 
 pub type DeliveryPublicationTarget = GitHubPullRequestTargetRef;
 
+const GITHUB_ISSUE_DELIVERY_ID_NAMESPACE: &str = "winwincode.github-issue-delivery-id.v1";
+const CROCKFORD_BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AcceptanceCriterion {
@@ -91,7 +95,7 @@ pub struct DeliverySpec {
 pub(crate) fn validate(spec: &mut DeliverySpec, path: &str) -> Result<(), DeliveryValidationError> {
     schema_version(spec.schema_version, &format!("{path}.schemaVersion"))?;
     portable_identifier(&spec.id.0, &format!("{path}.id"))?;
-    portable_identifier(&spec.delivery_id.0, &format!("{path}.deliveryId"))?;
+    canonical_delivery_id(&spec.delivery_id.0, &format!("{path}.deliveryId"))?;
     positive(spec.revision, &format!("{path}.revision"))?;
     bounded_text(&spec.title, &format!("{path}.title"), 256)?;
     bounded_text(&spec.goal, &format!("{path}.goal"), MAX_TEXT_LENGTH)?;
@@ -161,12 +165,12 @@ pub(crate) fn validate(spec: &mut DeliverySpec, path: &str) -> Result<(), Delive
 
     if let Some(source) = &mut spec.source_ref {
         validate_source_ref(source, &format!("{path}.sourceRef"))?;
-        let expected = format!("github-issue:{}:{}", source.repository, source.number);
-        if spec.delivery_id.0 != expected {
+        let expected = delivery_id_for_validated_github_issue_source(source);
+        if spec.delivery_id != expected {
             return Err(validation_error(
                 DeliveryValidationErrorCode::RelationshipMismatch,
                 format!("{path}.deliveryId"),
-                "a GitHub issue source must use its deterministic Delivery identity",
+                "a GitHub issue source must use its stable canonical Delivery identity",
             ));
         }
     }
@@ -181,6 +185,41 @@ pub(crate) fn validate(spec: &mut DeliverySpec, path: &str) -> Result<(), Delive
         }
     }
     Ok(())
+}
+
+/// Maps one valid GitHub issue source to its single stable canonical Delivery identity.
+///
+/// # Errors
+///
+/// Returns [`DeliveryValidationError`] when the source is not a canonical GitHub issue reference.
+pub fn delivery_id_for_github_issue_source(
+    source: &GitHubIssueSourceRef,
+) -> Result<DeliveryId, DeliveryValidationError> {
+    let mut source = source.clone();
+    validate_source_ref(&mut source, "githubIssueSourceRef")?;
+    Ok(delivery_id_for_validated_github_issue_source(&source))
+}
+
+fn delivery_id_for_validated_github_issue_source(source: &GitHubIssueSourceRef) -> DeliveryId {
+    let canonical = [
+        GITHUB_ISSUE_DELIVERY_ID_NAMESPACE,
+        source.provider.as_str(),
+        source.kind.as_str(),
+        source.repository.as_str(),
+        &source.number.to_string(),
+    ]
+    .join("\0");
+    let digest = Sha256::digest(canonical.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let mut value = u128::from_be_bytes(bytes);
+    let mut encoded = [b'0'; 26];
+    for byte in encoded.iter_mut().rev() {
+        *byte = CROCKFORD_BASE32_ALPHABET[(value & 31) as usize];
+        value >>= 5;
+    }
+    let suffix: String = encoded.into_iter().map(char::from).collect();
+    DeliveryId(format!("dlv_{suffix}"))
 }
 
 fn validate_unique_texts(

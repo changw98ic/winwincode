@@ -18,7 +18,7 @@ import {
 const now = 2_400_000_000_000
 
 function planningDelivery() {
-  const deliveryId = 'delivery-plan-review-contract'
+  const deliveryId = 'dlv_5V5AFQRBW43WNAQS16XP667PMR'
   return parseDelivery({
     schemaVersion: DELIVERY_SCHEMA_VERSION,
     id: deliveryId,
@@ -123,7 +123,7 @@ function reviewRun() {
   return {
     schemaVersion: DELIVERY_SCHEMA_VERSION,
     id: 'stage-plan-review-human',
-    deliveryId: 'delivery-plan-review-contract',
+    deliveryId: 'dlv_5V5AFQRBW43WNAQS16XP667PMR',
     deliveryTaskId: null,
     stage: 'plan-review',
     actorType: 'human',

@@ -80,7 +80,7 @@ function childAtCheckpoint(directory) {
 
 test('testkit drives a scripted DSH role through the real embedded Codex kernel', async t => {
   const kit = await DeliveryServiceFixtureTestkit.create({
-    deliveryId: 'delivery-testkit-dsh',
+    deliveryId: 'dlv_6PGC8PSH5XNSGV6Q4ASXTH9AEX',
   })
   t.after(() => kit.cleanup())
   const runtime = await ScriptedDshFixtureRuntime.create({
@@ -132,7 +132,7 @@ test('testkit drives a scripted DSH role through the real embedded Codex kernel'
 
 test('testkit covers every Delivery mutation, human gate, projection, evidence, and verdict', async t => {
   const kit = await DeliveryServiceFixtureTestkit.create({
-    deliveryId: 'delivery-testkit-complete',
+    deliveryId: 'dlv_6X828BCTWC881956V7XW1F7P3H',
   })
   t.after(() => kit.cleanup())
 
@@ -259,7 +259,7 @@ test('policy denial and infrastructure failure remain explicit and cannot pass',
   })
 
   const kit = await DeliveryServiceFixtureTestkit.create({
-    deliveryId: 'delivery-testkit-infrastructure',
+    deliveryId: 'dlv_00P419PPDHSRT3KGEKV544SH12',
   })
   t.after(() => kit.cleanup())
   const review = await kit.preparePlanReview()
@@ -302,7 +302,7 @@ test('policy denial and infrastructure failure remain explicit and cannot pass',
 test('malformed and foreign Codex projections fail with stable source-bound errors', async t => {
   assert.equal(assertMalformedFixtureProjection(), 'EVENT_SEQUENCE_MISSING')
   const kit = await DeliveryServiceFixtureTestkit.create({
-    deliveryId: 'delivery-testkit-malformed-projection',
+    deliveryId: 'dlv_1MT8NEWX94TWQ7NRFEXE5RR3T9',
   })
   t.after(() => kit.cleanup())
   const review = await kit.preparePlanReview()

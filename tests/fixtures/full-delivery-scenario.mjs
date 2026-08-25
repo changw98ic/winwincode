@@ -26,7 +26,7 @@ const credentialNames = Object.keys(process.env).filter(name => (
 assert.deepEqual(credentialNames, [])
 
 const kit = await DeliveryServiceFixtureTestkit.create({
-  deliveryId: 'delivery-full-keyless-rework',
+  deliveryId: 'dlv_0PTBCVJPC8TKAFZDNF1YJY6GMD',
 })
 let dshRuntime
 

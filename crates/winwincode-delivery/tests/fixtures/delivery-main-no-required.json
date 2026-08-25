@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "id": "delivery-no-required",
+  "id": "dlv_01J00000000000000000000001",
   "revision": 1,
   "status": "draft",
   "spec": {
     "schemaVersion": 3,
     "id": "delivery-spec-v1",
-    "deliveryId": "delivery-no-required",
+    "deliveryId": "dlv_01J00000000000000000000001",
     "revision": 1,
     "title": "No required criterion",
     "goal": "This must be rejected.",

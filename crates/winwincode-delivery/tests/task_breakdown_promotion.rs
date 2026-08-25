@@ -14,7 +14,7 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{DeliveryId, RequestId};
 
-const REVIEW_SET_SHA256: &str = "06123389bf88cb8915e399fdb2baccc9460d836de763bccdea3effd7084435e3";
+const REVIEW_SET_SHA256: &str = "33d34d80dd21af9d1e2cd17b0fa9f746e7d39f40c3e7f158b71469ca39377ef0";
 
 fn approved_delivery() -> Delivery {
     Delivery::decode_json(include_bytes!(
@@ -96,7 +96,7 @@ fn seed_journal(journal: &InMemoryDeliveryJournal, delivery: &Delivery, request:
 
 fn approval(request_id: &str, expected_revision: u64) -> DeliveryCommand {
     DeliveryCommand::ApproveTaskBreakdown(Box::new(ApproveDeliveryTaskBreakdown {
-        delivery_id: DeliveryId("delivery-main".into()),
+        delivery_id: DeliveryId("dlv_01J00000000000000000000000".into()),
         request_id: RequestId(request_id.into()),
         request_digest: "b".repeat(64),
         expected_revision,
@@ -151,7 +151,7 @@ fn task_breakdown_store_rejects_stale_foreign_revised_or_changed_review() {
     let DeliveryCommand::ApproveTaskBreakdown(foreign_command) = &mut foreign else {
         unreachable!();
     };
-    foreign_command.delivery_id = DeliveryId("foreign-delivery".into());
+    foreign_command.delivery_id = DeliveryId("dlv_01J00000000000000000000009".into());
     assert!(foreign_store.execute(foreign).is_err());
 
     let revised_store = seeded_store();
@@ -236,7 +236,9 @@ fn generic_append_cannot_hide_a_task_graph_under_another_operation() {
             .expect_err("another generic operation cannot smuggle the task graph");
         assert_eq!(rejected.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
         let current = store
-            .query(DeliveryQuery::Get(DeliveryId("delivery-main".into())))
+            .query(DeliveryQuery::Get(DeliveryId(
+                "dlv_01J00000000000000000000000".into(),
+            )))
             .expect("current Delivery");
         assert!(current.snapshot().tasks.is_empty());
         assert_eq!(current.revision(), 1);
@@ -255,7 +257,9 @@ fn task_breakdown_revision_race_has_one_winner_and_no_partial_graph() {
 
     assert_eq!(loser.code(), DeliveryStoreErrorCode::RevisionConflict);
     let current = store
-        .query(DeliveryQuery::Get(DeliveryId("delivery-main".into())))
+        .query(DeliveryQuery::Get(DeliveryId(
+            "dlv_01J00000000000000000000000".into(),
+        )))
         .expect("current Delivery");
     assert_eq!(current.snapshot().tasks, winner.snapshot.snapshot().tasks);
     assert_eq!(current.snapshot().tasks.len(), 1);

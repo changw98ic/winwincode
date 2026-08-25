@@ -340,7 +340,7 @@ async function seedDelivery(home, name, snapshot) {
 
 test('StrongFlowService creates, revises, starts, binds, replays, and reopens Delivery', async t => {
   const fixtureValue = await fixture(t, 'lifecycle')
-  const deliveryId = 'delivery-service-lifecycle'
+  const deliveryId = 'dlv_0C48AVZBRX3ABGZAMMKK95FG8N'
   const firstSpec = spec(deliveryId, 1)
   const createInput = {
     requestId: 'create-lifecycle',
@@ -432,7 +432,7 @@ test('StrongFlowService creates, revises, starts, binds, replays, and reopens De
 
 test('StrongFlowService completes the reviewed Delivery lifecycle through atomic stage handoffs', async t => {
   const current = await fixture(t, 'reviewed-lifecycle')
-  const deliveryId = 'delivery-service-reviewed-lifecycle'
+  const deliveryId = 'dlv_7QKT9N5FVB5EXR6549TBX1520P'
   await current.service.createDelivery({
     requestId: 'reviewed-create',
     spec: spec(deliveryId, 1, 'reviewed-draft'),
@@ -700,7 +700,7 @@ test('StrongFlowService completes the reviewed Delivery lifecycle through atomic
 
 test('StrongFlowService rejects a blocked DeliveryTask before changing durable state', async t => {
   const current = await fixture(t, 'blocked-task')
-  const deliveryId = 'delivery-service-blocked-task'
+  const deliveryId = 'dlv_10WXYFWFHX5T9XE395M76WHN9F'
   const currentSpec = spec(deliveryId, 1, 'blocked-task')
   const prerequisite = {
     ...taskFor(deliveryId, currentSpec.acceptanceCriteria[0].id),
@@ -751,7 +751,7 @@ test('StrongFlowService rejects a blocked DeliveryTask before changing durable s
 
 test('StrongFlowService resolves only current business Attention and settles its human StageRun', async t => {
   const fixtureValue = await fixture(t, 'attention')
-  const deliveryId = 'delivery-service-attention'
+  const deliveryId = 'dlv_7AMPT62PY0GVKB13GTAF2CVPNF'
   const currentSpec = spec(deliveryId, 1, 'attention')
   const attentionId = 'attention-plan-decision'
   const planningRun = {
@@ -874,7 +874,7 @@ test('StrongFlowService resolves only current business Attention and settles its
 
 test('StrongFlowService binds current evidence and computes the next state from DeliveryVerdict', async t => {
   const fixtureValue = await fixture(t, 'verdict')
-  const deliveryId = 'delivery-service-verdict'
+  const deliveryId = 'dlv_7R5SZHWCDN3WAR521Z24QN6XYZ'
   const currentSpec = spec(deliveryId, 1, 'verdict')
   const seeded = parseDelivery({
     schemaVersion: DELIVERY_SCHEMA_VERSION,
@@ -1026,7 +1026,7 @@ test('StrongFlowService binds current evidence and computes the next state from 
 
 test('StrongFlowService can hand a failed verdict through rework into a new verification run', async t => {
   const current = await fixture(t, 'rework')
-  const deliveryId = 'delivery-service-rework'
+  const deliveryId = 'dlv_7BMP6ZW6358TNN221NEWH04VEY'
   const currentSpec = spec(deliveryId, 1, 'rework')
   const task = taskFor(deliveryId, currentSpec.acceptanceCriteria[0].id, 'verifying')
   const planningRun = {
@@ -1720,7 +1720,7 @@ test('StrongFlowService can hand a failed verdict through rework into a new veri
 
 test('StrongFlowService fails before storage on malformed or credential-bearing input', async t => {
   const fixtureValue = await fixture(t, 'invalid')
-  const deliveryId = 'delivery-service-invalid'
+  const deliveryId = 'dlv_3TK0128H819JQV3JB8R069VYMW'
   const currentSpec = spec(deliveryId, 1, 'invalid')
   await assert.rejects(
     fixtureValue.service.createDelivery({

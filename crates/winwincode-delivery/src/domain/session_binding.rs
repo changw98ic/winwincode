@@ -92,7 +92,8 @@ mod tests {
         assert!(Delivery::try_from_snapshot(fixture).is_err());
 
         let mut fixture = test_fixture();
-        fixture.session_bindings[0].delivery_id = DeliveryId("foreign".into());
+        fixture.session_bindings[0].delivery_id =
+            DeliveryId("dlv_01J00000000000000000000009".into());
         assert!(Delivery::try_from_snapshot(fixture).is_err());
     }
 }

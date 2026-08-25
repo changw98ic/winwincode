@@ -572,7 +572,7 @@ fn assert_invalid_intent_values(seed: u64, request_id: &RequestId) {
             intent.product_session_id = ProductSessionId("product-session-legacy".into());
         }),
         ("deliveryId", |intent| {
-            intent.delivery_id = DeliveryId("delivery-legacy".into());
+            intent.delivery_id = DeliveryId("dlv_1D2305PEEPBFFSFS4N091XCRX6".into());
         }),
         ("stageRunId", |intent| {
             intent.stage_run_id = StageRunId("stage-legacy".into());

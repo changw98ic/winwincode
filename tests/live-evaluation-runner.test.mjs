@@ -90,7 +90,7 @@ async function fixtureRepository(rootDirectory) {
 }
 
 function configFor(repository, baseURL) {
-  const deliveryId = 'delivery-live-evaluation-fixture'
+  const deliveryId = 'dlv_1P8BR1KDNS6R1ENCA8F2KZM1TZ'
   return {
     schemaVersion: 1,
     runId: 'live-evaluation-fixture',

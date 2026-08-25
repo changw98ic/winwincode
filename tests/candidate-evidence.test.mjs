@@ -16,7 +16,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_500_000_000_000
-const deliveryId = 'delivery-candidate-evidence'
+const deliveryId = 'dlv_6AK1QKWZP38JGVA4VDXWKYH26K'
 const executorStageRunId = 'stage-candidate-executor'
 const executorBindingId = 'binding-candidate-executor'
 const verifierStageRunId = 'stage-candidate-verifier'

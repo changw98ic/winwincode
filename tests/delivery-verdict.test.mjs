@@ -15,7 +15,7 @@ import {
 } from '../packages/strongflow/dist/index.js'
 
 const now = 2_700_000_000_000
-const deliveryId = 'delivery-verdict-computation'
+const deliveryId = 'dlv_5C9F4FPD4GQR085T3GJCADZA1K'
 const specId = 'spec-verdict-computation'
 const requiredCriterionId = 'criterion-required'
 const optionalCriterionId = 'criterion-optional'

@@ -37,6 +37,7 @@ pub use session_binding::SessionBinding;
 pub use spec::{
     AcceptanceCriterion, DeliveryPublicationTarget, DeliverySourceRef, DeliverySpec,
     GitHubIssueSourceRef, GitHubPullRequestTargetRef, RepositoryKind, RepositoryRef,
+    delivery_id_for_github_issue_source,
 };
 pub use stage_run::{DeliveryStage, StageRun, StageRunActorType, StageRunStatus};
 pub use task::{DeliveryTask, DeliveryTaskStatus};
@@ -168,6 +169,36 @@ pub(crate) fn portable_identifier(value: &str, path: &str) -> Result<(), Deliver
             DeliveryValidationErrorCode::InvalidIdentifier,
             path,
             "must be a portable identifier of at most 200 characters",
+        ))
+    }
+}
+
+pub(crate) fn canonical_delivery_id(
+    value: &str,
+    path: &str,
+) -> Result<(), DeliveryValidationError> {
+    let Some(identifier) = value.strip_prefix("dlv_") else {
+        return Err(validation_error(
+            DeliveryValidationErrorCode::InvalidIdentifier,
+            path,
+            "must use dlv_ followed by 26 uppercase Crockford Base32 characters",
+        ));
+    };
+    let valid = identifier.len() == 26
+        && identifier.bytes().all(|byte| {
+            byte.is_ascii_digit()
+                || matches!(
+                    byte,
+                    b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'
+                )
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(validation_error(
+            DeliveryValidationErrorCode::InvalidIdentifier,
+            path,
+            "must use dlv_ followed by 26 uppercase Crockford Base32 characters",
         ))
     }
 }
@@ -419,7 +450,7 @@ impl<'de> Deserialize<'de> for Delivery {
 #[allow(clippy::too_many_lines)]
 fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryValidationError> {
     schema_version(snapshot.schema_version, "delivery.schemaVersion")?;
-    portable_identifier(&snapshot.id.0, "delivery.id")?;
+    canonical_delivery_id(&snapshot.id.0, "delivery.id")?;
     positive(snapshot.revision, "delivery.revision")?;
     safe_non_negative(snapshot.created_at_millis, "delivery.createdAtMillis")?;
     safe_non_negative(snapshot.updated_at_millis, "delivery.updatedAtMillis")?;

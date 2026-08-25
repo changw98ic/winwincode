@@ -13,13 +13,13 @@ const REQUEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const REQUEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn snapshot(revision: u64, status: &str) -> Delivery {
-    snapshot_for("delivery-store-main", revision, status)
+    snapshot_for("dlv_01J00000000000000000000002", revision, status)
 }
 
 fn snapshot_for(delivery_id: &str, revision: u64, status: &str) -> Delivery {
     let template = include_str!("fixtures/delivery-store.json");
     let text = template
-        .replace("delivery-store-main", delivery_id)
+        .replace("dlv_01J00000000000000000000002", delivery_id)
         .replace("\"revision\": 1", &format!("\"revision\": {revision}"))
         .replace(
             "\"status\": \"draft\"",
@@ -111,7 +111,10 @@ fn delivery_journal_scopes_request_replay_to_one_delivery() {
     let backend = Arc::new(InMemoryDeliveryJournal::new());
     let store = DeliveryStore::new(Arc::clone(&backend));
 
-    for delivery_id in ["delivery-store-left", "delivery-store-right"] {
+    for delivery_id in [
+        "dlv_01J00000000000000000000003",
+        "dlv_01J00000000000000000000004",
+    ] {
         let result = store
             .execute(DeliveryCommand::Create(CreateDelivery {
                 request_id: RequestId("create-delivery".into()),
