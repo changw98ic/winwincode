@@ -732,6 +732,27 @@ fn delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto() {
     assert_eq!(detail.delivery_id, *f.delivery.id());
     assert_eq!(detail.ownership.repository_id, f.scope.repository_id);
 }
+
+#[test]
+fn delivery_get_rejects_a_codex_stage_without_one_exact_session_binding() {
+    let mut snapshot = delivery_fixture(false).into_snapshot();
+    snapshot.session_bindings.clear();
+    let delivery = Delivery::try_from_snapshot(snapshot)
+        .expect("the canonical aggregate can represent a pre-dispatch Codex stage");
+    let f = fixture_with_delivery(delivery, false, false, false, None);
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, None, 20),
+    )
+    .expect_err("the public detail cannot emit codex plus a null SessionBinding");
+
+    assert_eq!(
+        error.code(),
+        winwincode_api::generated::ErrorCode::TrustedFactsUnavailable
+    );
+}
+
 #[test]
 fn missing_trusted_publication_adapter_keeps_production_query_closed() {
     let f = fixture(false, true, false);

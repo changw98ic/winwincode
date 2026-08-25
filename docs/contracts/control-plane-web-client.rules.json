@@ -322,5 +322,10 @@
     ],
     "publishPartialReload": false,
     "subscriptionStream": "product-session"
+  },
+  "plannedProductCutover": {
+    "strongFlowUiIssue": "winwincode-9c4.16.6.3",
+    "legacyBackendRemovalIssue": "winwincode-9c4.16.6.6",
+    "currentPhaseClaim": "generated-client-only"
   }
 }

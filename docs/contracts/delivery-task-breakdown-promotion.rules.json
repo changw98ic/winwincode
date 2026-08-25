@@ -1,6 +1,6 @@
 {
   "schemaVersion": "winwincode.delivery-task-breakdown-promotion-rules.v1",
-  "status": "required-contract-not-implementation-proof",
+  "status": "implemented-enforced",
   "issueId": "winwincode-9c4.16.2.5.7",
   "preflightIssueId": "winwincode-9c4.16.2.5.7.1",
   "documentation": "docs/contracts/delivery-task-breakdown-promotion.md",
@@ -278,32 +278,6 @@
     "approvedGraphReplacementAllowed": false,
     "newGraphRequires": "new-spec-revision-new-planning-new-review"
   },
-  "currentFindings": [
-    {
-      "id": "caller-supplied-tasks-http",
-      "observation": "The preflight base schema still accepts payload.tasks; phase 2.5.3 replaces it with reviewSetSha256 and no alias.",
-      "evidence": "schema/winwincode/v1/control-plane-http.schema.json",
-      "closure": "DeliveryApproveTaskBreakdownPayload has only deliveryId and reviewSetSha256."
-    },
-    {
-      "id": "caller-supplied-tasks-domain",
-      "observation": "The preflight base application::task function accepts Vec<DeliveryTask> from its caller.",
-      "evidence": "crates/winwincode-delivery/src/application/task.rs",
-      "closure": "Remove the old function and route the sealed approved review through application::task_breakdown."
-    },
-    {
-      "id": "specialized-store-command-missing",
-      "observation": "The preflight base DeliveryCommand has no ApproveTaskBreakdown variant.",
-      "evidence": "crates/winwincode-delivery/src/store.rs",
-      "closure": "Add the specialized sealed Store command and reject generic Append."
-    },
-    {
-      "id": "specialized-control-plane-transaction-missing",
-      "observation": "The preflight base Control Plane has no task_breakdown_transaction or receipt-first entry.",
-      "evidence": "crates/winwincode-control-plane/src/lib.rs",
-      "closure": "Add one specialized four-member transaction and committed event publication path."
-    }
-  ],
   "implementationOrder": [
     {
       "order": 1,
@@ -338,16 +312,14 @@
   ],
   "implementationGate": {
     "activation": {
+      "status": "active",
       "triggerPaths": [
         "crates/winwincode-delivery/src/application/task_breakdown.rs",
         "crates/winwincode-control-plane/src/task_breakdown_transaction.rs",
         "crates/winwincode-delivery/tests/task_breakdown_promotion.rs",
         "crates/winwincode-control-plane/tests/task_breakdown_transaction.rs"
-      ],
-      "whenMissing": "verify-current-gaps-and-keep-planned-gate",
-      "whenAnyPresent": "require-all-production-seams-tests-and-no-old-path"
+      ]
     },
-    "absentTriggerStatus": "planned-not-implemented",
     "requiredPaths": [
       "crates/winwincode-delivery/src/application/solution_review.rs",
       "crates/winwincode-delivery/src/application/task_breakdown.rs",
@@ -364,9 +336,6 @@
     "storePath": "crates/winwincode-delivery/src/store.rs",
     "controlPlanePath": "crates/winwincode-control-plane/src/lib.rs",
     "controlPlaneTransactionPath": "crates/winwincode-control-plane/src/task_breakdown_transaction.rs",
-    "currentGapEvidence": {
-      "legacyTaskPath": "crates/winwincode-delivery/src/application/task.rs"
-    },
     "minimumTransitionPrivateFieldCount": 4,
     "eventFields": [
       "schema_version",
@@ -440,7 +409,10 @@
       "DeliveryApproveTaskBreakdownPayload.tasks",
       "generic-AppendDelivery-task-breakdown",
       "generic-ControlPlane-commit-delivery-command"
-    ]
+    ],
+    "removedPathEvidence": {
+      "legacyTaskPath": "crates/winwincode-delivery/src/application/task.rs"
+    }
   },
   "rules": [
     {
@@ -553,6 +525,46 @@
       "sources": [
         "crates/winwincode-delivery/src/store.rs",
         "crates/winwincode-control-plane/src/lib.rs"
+      ]
+    }
+  ],
+  "closedFindings": [
+    {
+      "id": "caller-supplied-tasks-http",
+      "status": "closed",
+      "preflightFinding": "The preflight base schema still accepts payload.tasks; phase 2.5.3 replaces it with reviewSetSha256 and no alias.",
+      "closureEvidence": "DeliveryApproveTaskBreakdownPayload now has exactly deliveryId and reviewSetSha256 in canonical schema plus generated Rust and TypeScript.",
+      "refs": [
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "crates/winwincode-api/src/generated.rs",
+        "apps/web/src/generated/contracts.ts"
+      ]
+    },
+    {
+      "id": "caller-supplied-tasks-domain",
+      "status": "closed",
+      "preflightFinding": "The preflight base application::task function accepts Vec<DeliveryTask> from its caller.",
+      "closureEvidence": "The old application::task approval function is removed; application::task_breakdown accepts only ApprovedTaskPromotion.",
+      "refs": [
+        "crates/winwincode-delivery/src/application/task_breakdown.rs"
+      ]
+    },
+    {
+      "id": "specialized-store-command-missing",
+      "status": "closed",
+      "preflightFinding": "The preflight base DeliveryCommand has no ApproveTaskBreakdown variant.",
+      "closureEvidence": "DeliveryCommand::ApproveTaskBreakdown is the sole Store mutation and generic Append rejects TaskBreakdownApproved.",
+      "refs": [
+        "crates/winwincode-delivery/src/store.rs"
+      ]
+    },
+    {
+      "id": "specialized-control-plane-transaction-missing",
+      "status": "closed",
+      "preflightFinding": "The preflight base Control Plane has no task_breakdown_transaction or receipt-first entry.",
+      "closureEvidence": "ControlPlane::commit_delivery_task_breakdown performs receipt-first replay and one atomic state/journal/receipt/outbox transaction.",
+      "refs": [
+        "crates/winwincode-control-plane/src/task_breakdown_transaction.rs"
       ]
     }
   ]

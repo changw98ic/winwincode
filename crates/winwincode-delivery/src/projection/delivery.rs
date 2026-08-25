@@ -676,11 +676,15 @@ fn project_stages(delivery: &Delivery) -> Result<Vec<StageProjection>, Projectio
         let bindings = bindings_by_run
             .get(run.id.0.as_str())
             .map_or(&[][..], Vec::as_slice);
-        if bindings.len() > 1 {
+        let binding_count_is_invalid = match run.actor_type {
+            StageRunActorType::Codex => bindings.len() != 1,
+            StageRunActorType::Human => !bindings.is_empty(),
+        };
+        if binding_count_is_invalid {
             return Err(ProjectionError::new(
-                ProjectionErrorCode::AmbiguousSessionBinding,
+                ProjectionErrorCode::InvalidSessionBinding,
                 format!(
-                    "StageRun {} has more than one current SessionBinding",
+                    "StageRun {} does not have the exact SessionBinding count for its actor",
                     run.id.0
                 ),
             ));
@@ -986,7 +990,7 @@ mod tests {
             project_delivery_detail(ProjectionInput::new(&ambiguous))
                 .expect_err("ambiguous StageRun binding")
                 .code(),
-            ProjectionErrorCode::AmbiguousSessionBinding
+            ProjectionErrorCode::InvalidSessionBinding
         );
     }
 

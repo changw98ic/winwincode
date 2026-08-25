@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 
@@ -78,6 +78,7 @@ test('Control Plane StrongFlow rules freeze ownership, one read cut, and closed 
   )
   assert.equal(rules.issueId, 'winwincode-9c4.16.2.5.6')
   assert.equal(rules.preflightIssueId, 'winwincode-9c4.16.2.5.6.1')
+  assert.equal(rules.status, 'implemented-enforced')
   assert.equal(rules.owner, 'winwincode-control-plane')
   assert.equal(rules.trigger, 'crates/winwincode-control-plane/src/strongflow_projection.rs')
   assert.deepEqual(rules.apiContract, {
@@ -163,13 +164,14 @@ test('Control Plane StrongFlow rules freeze ownership, one read cut, and closed 
     }
   }
 
-  const riskIds = rules.p0Risks.map(risk => risk.id)
+  assert.equal(Object.hasOwn(rules, 'p0Risks'), false)
+  const riskIds = rules.closedPreflightRisks.map(risk => risk.id)
   assert.equal(new Set(riskIds).size, riskIds.length)
   assert.deepEqual([...riskIds].sort(), REQUIRED_RISK_IDS)
-  for (const risk of rules.p0Risks) {
-    assert.ok(risk.current.length > 0, risk.id)
-    assert.ok(risk.consequence.length > 0, risk.id)
-    assert.ok(risk.requiredClosure.length > 0, risk.id)
+  for (const risk of rules.closedPreflightRisks) {
+    assert.equal(risk.status, 'closed', risk.id)
+    assert.ok(risk.preflightRisk.length > 0, risk.id)
+    assert.ok(risk.closureEvidence.length > 0, risk.id)
     assert.ok(risk.refs.length > 0, risk.id)
     for (const ref of risk.refs) assert.equal(existsSync(repositoryPath(ref)), true, ref)
   }
@@ -180,6 +182,14 @@ test('Control Plane StrongFlow rules freeze ownership, one read cut, and closed 
     'publication-authority',
     'control-plane-composition',
     'http-websocket-adapters',
+  ])
+  assert.deepEqual(rules.implementationOrder.map(step => step.status), [
+    'implemented',
+    'boundary-implemented-production-adapter-phase-4',
+    'implemented',
+    'boundary-implemented-production-owner-phase-3',
+    'implemented',
+    'planned',
   ])
 })
 
@@ -203,6 +213,9 @@ test('current crate dependencies preserve Delivery ownership and generated API m
 
 test('plain-language contract states the concrete read, publication, and adapter outcomes', () => {
   const contract = readFileSync(contractPath, 'utf8')
+  assert.doesNotMatch(contract, /尚未成立的部分|当前应当不存在|## P0 风险/u)
+  assert.match(contract, /implemented\/enforced/u)
+  assert.match(contract, /已关闭的预检风险/u)
   for (const phrase of [
     'Delivery 模块先生成内部投影',
     '同一个有上限的读取截面',
@@ -231,10 +244,9 @@ test('implementation trigger activates public-seam and black-box behavior gates'
       assert.doesNotMatch(source, new RegExp(`\\b${escaped(typeName)}\\b`, 'u'), typeName)
     }
   }
-  if (!existsSync(triggerPath)) {
-    assert.equal(rules.implementationGate.absentTriggerStatus, 'planned-not-implemented')
-    return
-  }
+  assert.equal(existsSync(triggerPath), true)
+  assert.equal(rules.implementationGate.status, 'active')
+  assert.equal(Object.hasOwn(rules.implementationGate, 'absentTriggerStatus'), false)
 
   const moduleSource = readFileSync(triggerPath, 'utf8')
   const librarySource = readFileSync(
@@ -310,4 +322,20 @@ test('implementation trigger activates public-seam and black-box behavior gates'
   for (const testName of expectedNames) {
     assert.match(output, new RegExp(`test ${escaped(testName)} \\.\\.\\. ok`, 'u'), testName)
   }
+})
+
+test('public projection topics come from generated event types, not handwritten literals', () => {
+  const controlPlaneRoot = repositoryPath('crates/winwincode-control-plane/src')
+  const sources = []
+  const collect = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) collect(path)
+      else if (entry.isFile() && path.endsWith('.rs')) sources.push(path)
+    }
+  }
+  collect(controlPlaneRoot)
+  const productionSource = sources.map(path => readFileSync(path, 'utf8')).join('\n')
+  assert.doesNotMatch(productionSource, /["']delivery\.changed\.v1["']/u)
+  assert.match(productionSource, /ControlPlaneWebSocketDeliveryChangedEventTypeValue/u)
 })

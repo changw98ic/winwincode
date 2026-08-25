@@ -831,6 +831,7 @@
           "provider": "github",
           "repository": "openai/winwincode",
           "baseBranch": "main",
+          "headRepository": "contributor/winwincode",
           "headBranch": "delivery/bounded-strongflow-read"
         },
         "state": "published",

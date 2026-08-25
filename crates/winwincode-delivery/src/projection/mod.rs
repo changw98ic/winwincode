@@ -64,7 +64,7 @@ impl<'facts> ProjectionInput<'facts> {
 pub enum ProjectionErrorCode {
     MissingCurrentCandidate,
     StaleCandidate,
-    AmbiguousSessionBinding,
+    InvalidSessionBinding,
     StaleSolutionReview,
     InconsistentCurrentVerdict,
 }
@@ -176,7 +176,7 @@ impl DeliveryProjection {
 ///
 /// # Errors
 ///
-/// Rejects a stale candidate, an ambiguous `StageRun` binding, a stale solution
+/// Rejects a stale candidate, a missing or conflicting `StageRun` binding, a stale solution
 /// review, or a canonical verdict that does not identify the supplied
 /// current candidate.
 pub fn project_delivery_detail(

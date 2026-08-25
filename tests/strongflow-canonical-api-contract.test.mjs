@@ -275,6 +275,17 @@ test('current solution review and publication expose exact authority joins', () 
     './domain.schema.json#/$defs/ActorId')
   assert.equal(publication.properties.publicationSetSha256.$ref,
     './domain.schema.json#/$defs/Sha256Digest')
+  const publicationTarget = http.$defs.PublicationTarget
+  assert.equal(publicationTarget.additionalProperties, false)
+  assert.deepEqual(publicationTarget.required, [
+    'provider',
+    'repository',
+    'baseBranch',
+    'headRepository',
+    'headBranch',
+  ])
+  assert.equal(publicationTarget.properties.headRepository.$ref,
+    '#/$defs/GitHubRepositorySlug')
   assert.deepEqual(publication.properties.resourceRef.oneOf, [
     { $ref: '#/$defs/PublicationResourceRef' },
     { type: 'null' },

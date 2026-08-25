@@ -2,8 +2,8 @@
 
 机器规则位于
 [`control-plane-strongflow-projection.rules.json`](./control-plane-strongflow-projection.rules.json)。
-这份合同冻结阶段 2.5.6 的 Control Plane 组合边界，不修改 Delivery 领域模型、公开 schema、
-生成代码或 HTTP/WebSocket 实现。
+当前状态是 implemented/enforced：阶段 2.5.6 已实现 Control Plane 组合查询、共享读取截面、
+生成 DTO 映射和持久事件 cursor；生产 HTTP/WebSocket adapter 仍由后续阶段接线。
 
 ## 一句话边界
 
@@ -28,28 +28,26 @@ Delivery crate 不依赖 winwincode-api，也不读取 HTTP 类型。Control Pla
 Delivery、API 和 Storage，并负责最后一次权限、范围、读取截面和输出检查。Web 与 Worker 都
 不能越过 Control Plane 直接读取 Delivery storage。
 
-## 当前真实情况
+## 当前实现状态
 
-已经成立的部分：
+已经成立：
 
-- Delivery snapshot、追加式 journal、command receipt 和 outbox intent 可以在同一个 Rust
-  storage transaction 中提交；
-- `winwincode-control-plane` 已依赖 `winwincode-delivery`、`winwincode-api` 和
-  `winwincode-storage`；
-- `winwincode-delivery` 没有反向依赖 API 或 Control Plane；
-- Candidate、terminal outcome 和 Evidence 的测试构造入口没有在生产依赖中开放。
+- `crates/winwincode-control-plane/src/strongflow_projection.rs` 提供
+  `StrongFlowProjectionQueryPort`，输入和输出只使用 `winwincode-api` 生成类型；
+- Delivery 模块拥有 requirements、solution、stage、task、Attention、Evidence 和 Verdict 的
+  内部只读投影，且不反向依赖 API 或 Control Plane；
+- `delivery.get` 签发 `StrongFlowReadCursor`，`runtime.projection.get` 必须重放同一 Delivery、
+  runtime、publication、event stream、actor、scope 和 page limit 截面；
+- runtime 与 publication 读取端口只接受封闭的可信事实。生产 adapter 未安装时返回
+  `TRUSTED_FACTS_UNAVAILABLE`，不会用 Worker 消息或空 publication 冒充成功；
+- 生成的详情 DTO 已包含当前方案审核、候选、Verdict、发布授权与结果的精确关联；
+- storage 在同一事务中持久化 projection scope、resource stream、stream-local sequence、
+  event id 和 outbox payload；
+- Node 门禁会真实运行 Rust black-box integration test，不依靠测试名称判定完成。
 
-尚未成立的部分：
-
-- Rust Control Plane 还没有可信的追加式 runtime ledger read port；
-- `delivery.get` 和 `runtime.projection.get` 还没有共享的组合读取 cursor；
-- 生成的 `DeliveryProjection` 仍是列表摘要；
-- 生成的 `PublicationProjection` 没有 candidate、Verdict、人工批准和 target 身份；
-- Rust Publication owner、HTTP server 和 WebSocket server 尚未实现；
-- durable outbox 还没有公开 WebSocket 所需的 scope、stream 和 stream-local sequence。
-
-因此 `crates/winwincode-control-plane/src/strongflow_projection.rs` 当前应当不存在。文件出现
-后，Node 门禁会立即运行真实 Rust black-box integration test，而不是只搜索一个测试名称。
+当前还没有生产 HTTP server、WebSocket server，以及 Phase 3/4 所属的真实 Publication 与
+runtime-ledger adapter。这个缺口由“缺少 adapter 时查询关闭”处理，不改变本阶段已经实现的
+组合边界。
 
 ## 组合只允许一个方向
 
@@ -123,10 +121,9 @@ DeliveryId
 + publication intent/result revision
 ```
 
-生成的 `PublicationProjection` 目前只有 publication ID、Delivery ID、revision、state 和
-updatedAt，单凭这些字段不能证明上述关系。`publication.publish` 请求中的
-`candidateDigest` 和 `target` 也只能作为 stale-check assertion，不能成为权威 candidate 或
-target。
+生成的详情投影会带上经过上述完整集合校验的 publication 结果。`publication.publish`
+请求中的 `candidateDigest` 和 `target` 仍只作为 stale-check assertion，不能成为权威
+candidate 或 target。
 
 Publication owner 必须从当前持久事实派生一个不可伪造的授权截面，并在 provider 调用前把
 intent 与该截面原子保存。Control Plane 只能读取这个可信结果。旧 candidate、旧 Verdict、
@@ -182,50 +179,41 @@ Control Plane 返回稳定的生成错误，不输出其余“看起来还能用
 
 错误详情同样遵守公开字段红线，不复制内部 identity map、日志或 provider body。
 
-## P0 风险
+## 已关闭的预检风险
 
-### 1. Delivery/runtime torn read
+阶段 2.5.6.1 记录的六项预检风险都已有可执行关闭证据：
 
-当前两个 query 没有共享 cursor。若分别读取 latest，页面可能组合 revision A 的 Delivery、
-revision B 的 runtime 和 revision C 的 publication。
+1. Delivery/runtime torn read：两个 query 共享完整可比较的 `StrongFlowReadCursor`；
+2. 通用 loader 与 transport/storage 旁路：公开查询只走 typed query port，未来 transport
+   source gate 明确拒绝 storage、`commit` 和 `load_state`；
+3. runtime authority 缺失：查询只接受 sealed trusted adapter read，adapter 缺失时关闭；
+4. Publication 关联不足：可信 binding 同时覆盖 Delivery、Spec、candidate、Verdict、人工批准、
+   target 和 publication revision；
+5. WebSocket cursor 不可恢复：scope-local stream sequence 与 outbox 事件原子持久化；
+6. raw HTTP、WebSocket 或 Worker fact 构造：生产投影事实没有 raw/public constructor。
 
-### 2. 通用 storage 入口被 transport 误用
+机器规则把这些项目保存在 `closedPreflightRisks`，每项都带 `status=closed` 和具体关闭证据，
+不会继续把已经修复的预检状态报告为当前 P0。
 
-Control Plane 当前公开 `load_state`、`StateChange` 和 storage 类型。未来 transport 若直接使用
-它们，会绕过 Delivery journal、typed scope、投影校验与脱敏。
+## 已验证的实现链与后续接线
 
-### 3. runtime ledger authority 缺失
-
-生成 Runtime DTO 已存在，但 Rust 还没有 accepted ledger。直接投影 Worker 消息会允许
-未持久、乱序、旧 Lease 或跨 Session 的内容进入页面。
-
-### 4. Publication 关联字段不足
-
-当前 Publication DTO 无法证明 candidate、Verdict、approval 和 target 都是当前值。
-
-### 5. WebSocket cursor 尚未 durable
-
-当前 outbox 的全局 sequence 不能证明 `(scope, stream)` 内连续，也不能证明与 HTTP snapshot
-属于同一截面。
-
-## 实现顺序
-
-1. `winwincode-delivery` 完成内部 requirements/solution/stage/task/Attention/Evidence/Verdict
+1. `winwincode-delivery` 已完成内部 requirements/solution/stage/task/Attention/Evidence/Verdict
    投影，保持不依赖 API。
-2. runtime ledger adapter 持久化并重放精确 SessionBinding 事件，提供连续且有上限的 cursor。
-3. canonical schema/codegen 一次性生成 StrongFlow detail DTO 和不透明 projection cursor，
+2. trusted runtime read port 已冻结精确 SessionBinding、连续 sequence 与有上限 cursor；真实
+   runtime-ledger adapter 在 Phase 4 接入。
+3. canonical schema/codegen 已一次性生成 StrongFlow detail DTO 和不透明 projection cursor，
    同步更新 Rust 与 TypeScript。
-4. `winwincode-publication` 产生绑定 Delivery revision、candidate、Verdict、人工批准和 target
-   的可信 intent/result。
-5. Control Plane 实现 `StrongFlowProjectionQueryPort`，在同一 read cut 下组合上述三类事实。
-6. 最后接 HTTP/WebSocket adapter；Web 只消费生成 client，Worker 仍只走 ExecutionPort。
+4. trusted publication read port 已冻结完整 fact binding；真实 `winwincode-publication` owner 在
+   Phase 3 接入。
+5. Control Plane 已实现 `StrongFlowProjectionQueryPort`，在同一 read cut 下组合三类事实。
+6. 后续只接 HTTP/WebSocket adapter；Web 只消费生成 client，Worker 仍只走 ExecutionPort。
 
 这个顺序避免 Control Plane 在依赖缺失时先造一份临时领域模型，也避免 transport 层成为第二
 个 Delivery 或 runtime authority。
 
 ## 公开 API 变更性质
 
-后续 detail DTO 和 projection cursor 是一次 canonical schema revision，属于 breaking
-contract change。schema、Rust 生成类型、TypeScript 生成 client、StrongFlow Web 和 CLI 必须
-同批切换。实现不保留旧 `delivery.get` 详情形状的 alias、双读或手写 DTO；`delivery.list`
-如需继续使用紧凑列表项，应当拥有明确独立的生成类型，而不是把旧详情 DTO 留作兼容入口。
+detail DTO 和 projection cursor 已作为一次 canonical schema revision 同步生成 Rust 与
+TypeScript。StrongFlow Web 和 CLI 的产品入口切换仍需同批完成。实现不保留旧 `delivery.get`
+详情形状的 alias、双读或手写 DTO；`delivery.list` 如需继续使用紧凑列表项，应当拥有明确
+独立的生成类型，而不是把旧详情 DTO 留作兼容入口。

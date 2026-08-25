@@ -625,6 +625,82 @@ test('WebSocket handler failure sends no acknowledgement and 4403 stops reconnec
   ))
 })
 
+test('WebSocket retries a failed event from the last acknowledged cursor without skipping it', async () => {
+  const factory = fakeWebSocketFactory()
+  const errors = []
+  const attempts = []
+  let failFirstAttempt = true
+  const baseline = {
+    scope,
+    stream: { kind: 'delivery', deliveryId },
+    sequence: 1,
+    eventId: eventId(1),
+  }
+  const retriedEvent = runtimeEvent(2, {
+    type: 'runtime-projection.invalidated.v1',
+    scopeKind: 'delivery-stage',
+    productSessionId,
+    deliveryId,
+    stageRunId,
+    projectionRevision: 2,
+    lastProjectionSequence: 2,
+    reloadQueries: ['delivery.get', 'runtime.projection.get'],
+  })
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    reconnectDelayMillis: 0,
+    async onEvent(frame) {
+      attempts.push(frame.eventId)
+      if (failFirstAttempt) {
+        failFirstAttempt = false
+        throw new Error('page rejected the first application attempt')
+      }
+    },
+    onError(error) {
+      errors.push(error)
+    },
+  })
+
+  client.subscribe(subscriptionId, subscription(), baseline)
+  factory.sockets[0].open()
+  acceptSubscription(factory.sockets[0])
+  factory.sockets[0].receive(retriedEvent)
+  await flush()
+
+  assert.deepEqual(attempts, [eventId(2)])
+  assert.equal(client.cursor.sequence, 1)
+  assert.equal(errors[0].code, 'EVENT_HANDLER_FAILED')
+
+  client.reconnect()
+  factory.sockets[1].open()
+  assert.deepEqual(factory.sockets[1].sent[0], {
+    type: 'transport.resume.v1',
+    subscriptionId,
+    subscription: subscription(),
+    after: baseline,
+  })
+  factory.sockets[1].receive(resumeAcceptedFrame(baseline, {
+    ...baseline,
+    sequence: 2,
+    eventId: eventId(2),
+  }))
+  factory.sockets[1].receive(retriedEvent)
+  await flush()
+
+  assert.deepEqual(attempts, [eventId(2), eventId(2)])
+  assert.equal(errors.length, 1)
+  assert.deepEqual(factory.sockets[1].sent.at(-1), {
+    type: 'transport.ack.v1',
+    subscriptionId,
+    cursor: {
+      scope,
+      stream: { kind: 'delivery', deliveryId },
+      sequence: 2,
+      eventId: eventId(2),
+    },
+  })
+})
+
 test('generic reset frames reject the removed fixed reload query list', async () => {
   const factory = fakeWebSocketFactory()
   const errors = []

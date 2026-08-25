@@ -43,7 +43,6 @@ use winwincode_storage::{
 
 const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
 const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
-pub(crate) const DELIVERY_CHANGED_TOPIC: &str = "delivery.changed.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryChangeKind {
@@ -762,11 +761,12 @@ pub(crate) fn delivery_changed_event(
     let payload = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode Delivery change event: {error}"))
     })?;
+    let topic = delivery_changed_topic()?;
     let scope_key = repository_scope_key(scope)?;
     let event_id = delivery_changed_event_id(&scope_key, &payload);
     Ok(NewOutboxEvent::projection(
         event_id,
-        DELIVERY_CHANGED_TOPIC,
+        topic,
         payload,
         ProjectionEventStream::Delivery(delivery_id.clone()),
     ))
@@ -778,10 +778,11 @@ pub(crate) fn validate_delivery_changed_receipt(
     delivery_revision: u64,
     change_kind: DeliveryChangeKind,
 ) -> Result<(), StorageError> {
+    let topic = delivery_changed_topic()?;
     let matching = receipt
         .events
         .iter()
-        .filter(|event| event.topic == DELIVERY_CHANGED_TOPIC)
+        .filter(|event| event.topic == topic)
         .collect::<Vec<_>>();
     let [event] = matching.as_slice() else {
         return Err(StorageError::invalid_input(
@@ -820,6 +821,22 @@ pub(crate) fn validate_delivery_changed_receipt(
         ));
     }
     Ok(())
+}
+
+fn delivery_changed_topic() -> Result<String, StorageError> {
+    match serde_json::to_value(
+        ControlPlaneWebSocketDeliveryChangedEventTypeValue::DeliveryChangedV1,
+    )
+    .map_err(|error| {
+        StorageError::adapter(format!(
+            "failed to encode the generated Delivery change event type: {error}"
+        ))
+    })? {
+        serde_json::Value::String(topic) => Ok(topic),
+        _ => Err(StorageError::adapter(
+            "generated Delivery change event type did not encode as a string",
+        )),
+    }
 }
 
 fn delivery_changed_event_id(scope_key: &ReceiptScopeKey, payload: &[u8]) -> ControlPlaneEventId {

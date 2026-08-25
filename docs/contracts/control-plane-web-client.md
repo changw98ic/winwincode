@@ -11,13 +11,17 @@ implemented/enforced：生成文件和可执行行为证明已经存在，门禁
 | --- | --- | --- |
 | Schema 生成器 | `scripts/generate-contracts.mjs` 从 canonical schema 同时生成 Rust、TypeScript、OpenAPI、schema collection 和 Web client | Web client 已进入同一个生成器，没有第二个手写生成脚本 |
 | Web 生成目录 | `contracts.ts` 保存 DTO，`control-plane-client.ts` 保存唯一浏览器网络实现 | 两个文件都由同一份 canonical schema 生成并检查漂移 |
-| StrongFlow | `packages/strongflow/src/client.ts` 通过 DSH Typert 的 `strongflow.invoke` / `strongflow.advance` 调用，并每两秒读取一次完整投影 | 新 Web 页面只调用生成的 HTTP/WebSocket client；旧调用不会成为第二条长期路径 |
+| StrongFlow | `packages/strongflow/src/client.ts` 通过 DSH Typert 的 `strongflow.invoke` / `strongflow.advance` 调用，并每两秒读取一次完整投影 | 阶段 6.3 才把新 Web 页面切到生成的 HTTP/WebSocket client；阶段 2.5.4 没有宣称页面已切换 |
 | StrongFlow 浏览器状态 | 只把选中的 Delivery ID 放进 `localStorage`；Delivery 和运行投影仍由远端重新读取 | cursor 只能保存为恢复位置，不能成为 Delivery 事实 |
 | StrongFlow 重启恢复 | `delivery-recovery.ts` 从 DeliveryStore 和 RuntimeSessionLedger 重放，再决定下一项动作 | 这是服务端恢复事实，不是浏览器 cursor 的替代品 |
 | Chat | 当前页面来自 stock DSH Web App；`agent-factory.ts` 用 RuntimeSessionLedger 恢复 Codex Session，仓库没有 project-owned Chat 页面源码 | 本阶段生成通用 Query/WebSocket 能力，但不宣称 Chat 页面已经迁移 |
 
 这份盘点使用 Git 文件清单、`rg` 和 `ast-grep`。仓库本地索引脚本在该 worktree 中缺失，
 所以这里只声明文件级覆盖，不声明完整调用图覆盖。
+
+阶段 2.5.4 只实现并验证生成客户端，不声称产品页面已经接线。后续切换由
+`winwincode-9c4.16.6.3` 负责，旧 DSH/Cordis 产品后端与 adapter 的删除由
+`winwincode-9c4.16.6.6` 负责；在这两个任务完成前，表格中的 DSH 路径仍是当前事实。
 
 ## 唯一生成输出
 

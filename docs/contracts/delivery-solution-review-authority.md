@@ -158,18 +158,13 @@ raw Attention `context` 和 `resolution` 永远不进入公开投影。以下数
 
 `promotion.approved_only`：只有 `reviewStatus=approved` 才能把同一摘要中的 task proposals 原子提升为 canonical DeliveryTask 图并开始执行。`pending`、`changes_requested`、`rejected` 均不授权提升或执行。
 
-## 7. 当前实现缺口与 Rust 门禁
+## 7. 当前实现状态与 Rust 门禁
 
-当前实现有四个已确认缺口：
+当前状态是 implemented/enforced。阶段 2.5.1.2 的 trigger
+`crates/winwincode-delivery/src/application/solution_review.rs` 已存在，预检记录的 approved-only、
+caller-injected、task-proposals-missing 和 legacy-solution-wire 四项 finding 均已关闭。
 
-1. 只有 `ApprovedSolutionReviewSet`，pending review 没有 typed safe projection。
-2. `ProjectionInput.with_approved_solution` 接收调用方事实，production resolver 尚未存在。
-3. 事实、摘要和投影没有 ordered `DeliveryTaskProposal`。
-4. wire 仍叫 `solution: SolutionProjection`，不是唯一的 `solutionReview: SolutionReviewProjection`。
-
-这些 finding 在 machine rules 中标为 `present`。合同预检以 planned gate 通过，不让主线因后续实现尚未开始而常红。
-
-阶段 2.5.1.2 的明确 trigger 是 `crates/winwincode-delivery/src/application/solution_review.rs`。该文件出现后，四个 finding 必须改为 `closed`，Node gate 会检查实际代码，而不是只检查测试名：
+Node gate 直接检查实际代码，而不是只检查测试名：
 
 1. `ValidatedSolutionReviewSet` 和 `DeliveryTaskProposal` 字段私有且 exact。
 2. 事实没有 `Deserialize` 或 public raw constructor。
@@ -179,4 +174,5 @@ raw Attention `context` 和 `resolution` 永远不进入公开投影。以下数
 6. 对抗测试真实改变 pending/settled 状态、任务顺序、Spec/run/binding/Attention/reviewer/time、Human SessionBinding 和 raw secret/tool/log 内容，并断言拒绝或排除。
 7. 编码重启往返保持相同字节和摘要。
 
-这些检查只证明结构和指定行为存在；最终完成仍以 Rust 黑盒测试、完整门禁和对应 Bead 状态为准。
+门禁还会实际执行 Rust 对抗测试。机器规则只保留 `closedFindings` 和 `verificationSteps`，避免
+把已经实现的路径继续描述成计划或当前缺口。
