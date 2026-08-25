@@ -805,33 +805,30 @@ fn resolve_settlement(
         ));
     }
 
-    let (review_status, typed_decision, expected_attention, expected_stage, expected_delivery) =
-        match decision.action {
-            DecisionActionWire::Approve => (
-                ValidatedReviewStatus::Approved,
-                ValidatedReviewDecision::Approve,
-                AttentionItemStatus::Resolved,
-                StageRunStatus::Succeeded,
-                crate::domain::DeliveryStatus::Executing,
-            ),
-            DecisionActionWire::RequestChanges => (
-                ValidatedReviewStatus::ChangesRequested,
-                ValidatedReviewDecision::RequestChanges,
-                AttentionItemStatus::Dismissed,
-                StageRunStatus::Failed,
-                crate::domain::DeliveryStatus::Planning,
-            ),
-            DecisionActionWire::Reject => (
-                ValidatedReviewStatus::Rejected,
-                ValidatedReviewDecision::Reject,
-                AttentionItemStatus::Dismissed,
-                StageRunStatus::Failed,
-                crate::domain::DeliveryStatus::Clarifying,
-            ),
-        };
+    let (review_status, typed_decision, expected_attention, expected_stage) = match decision.action
+    {
+        DecisionActionWire::Approve => (
+            ValidatedReviewStatus::Approved,
+            ValidatedReviewDecision::Approve,
+            AttentionItemStatus::Resolved,
+            StageRunStatus::Succeeded,
+        ),
+        DecisionActionWire::RequestChanges => (
+            ValidatedReviewStatus::ChangesRequested,
+            ValidatedReviewDecision::RequestChanges,
+            AttentionItemStatus::Dismissed,
+            StageRunStatus::Failed,
+        ),
+        DecisionActionWire::Reject => (
+            ValidatedReviewStatus::Rejected,
+            ValidatedReviewDecision::Reject,
+            AttentionItemStatus::Dismissed,
+            StageRunStatus::Failed,
+        ),
+    };
     if attention.status != expected_attention
         || review_stage.status != expected_stage
-        || snapshot.status != expected_delivery
+        || !settlement_status_is_current(decision.action, snapshot.status)
     {
         return Err(stale_authority(
             "solution-review decision does not match Attention, StageRun, and Delivery settlement",
@@ -846,6 +843,31 @@ fn resolve_settlement(
         reviewer_id: Some(reviewer_id.to_owned()),
         reviewed_at: Some(reviewed_at),
     })
+}
+
+// Called only after the persisted Attention, PlanReview run, actor, time,
+// decision, digest, Spec revision, and highest attempt have matched exactly.
+const fn settlement_status_is_current(
+    action: DecisionActionWire,
+    status: crate::domain::DeliveryStatus,
+) -> bool {
+    match action {
+        DecisionActionWire::Approve => matches!(
+            status,
+            crate::domain::DeliveryStatus::Executing
+                | crate::domain::DeliveryStatus::Verifying
+                | crate::domain::DeliveryStatus::Reworking
+                | crate::domain::DeliveryStatus::NeedsAttention
+                | crate::domain::DeliveryStatus::ReadyToDeliver
+                | crate::domain::DeliveryStatus::Delivered
+        ),
+        DecisionActionWire::RequestChanges => {
+            matches!(status, crate::domain::DeliveryStatus::Planning)
+        }
+        DecisionActionWire::Reject => {
+            matches!(status, crate::domain::DeliveryStatus::Clarifying)
+        }
+    }
 }
 
 /// Validates one pending plan-review decision before the Attention aggregate mutates.
