@@ -2,22 +2,24 @@
 
 //! Receipt-first atomic transaction for an approved Delivery task graph.
 
+use std::collections::HashSet;
+
 use serde_json::Value;
 use winwincode_api::generated::{
     CommandEnvelope, CommandName, DeliveryApproveTaskBreakdownPayload,
 };
 use winwincode_delivery::{
     application::task_breakdown::DeliveryTaskBreakdownApprovedEvent,
-    domain::{DELIVERY_SCHEMA_VERSION, Delivery},
+    domain::{DELIVERY_SCHEMA_VERSION, Delivery, DeliveryTaskStatus},
     projection::{ProjectionInput, SolutionReviewStatusProjection, project_delivery_detail},
     store::{
         ApproveDeliveryTaskBreakdown, DeliveryCommand, DeliveryCommandPort, DeliveryQuery,
-        DeliveryQueryPort, DeliveryStore,
+        DeliveryQueryPort, DeliveryStore, DeliveryStoreError, DeliveryStoreErrorCode,
     },
 };
+use winwincode_domain::DeliveryId;
 use winwincode_storage::{
-    CommitReceipt, LoadedAggregateJournal, NewOutboxEvent, ProductStateStorage, ReceiptIdentity,
-    StorageError,
+    CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StorageError,
 };
 
 use crate::{
@@ -50,32 +52,10 @@ pub(crate) fn execute(
     let journal_key = delivery_journal_key(&delivery_id)?;
 
     if let Some(receipt) = prior_receipt {
-        let loaded = storage
-            .load_journal(&journal_key)?
-            .ok_or_else(|| StorageError::invalid_input("Delivery journal is missing"))?;
-        let historical = historical_journal(loaded, receipt.revision)?;
-        let journal = StagedDeliveryJournal::new(delivery_id.clone(), Some(historical));
-        let store = DeliveryStore::borrowed(&journal);
-        let source_revision = receipt.revision.checked_sub(1).ok_or_else(|| {
-            StorageError::invalid_input("task-breakdown receipt revision is invalid")
-        })?;
-        let source = store
-            .query(DeliveryQuery::GetRevision {
-                delivery_id: delivery_id.clone(),
-                revision: source_revision,
-            })
-            .map_err(delivery_store_error)?;
-        let committed = store
-            .query(DeliveryQuery::GetRevision {
-                delivery_id,
-                revision: receipt.revision,
-            })
-            .map_err(delivery_store_error)?;
-        validate_receipt(
+        validate_receipt_projection(
             &receipt,
-            &source,
-            &committed,
             &receipt_identity,
+            &delivery_id,
             &review_set_sha256,
             true,
         )?;
@@ -84,6 +64,12 @@ pub(crate) fn execute(
 
     let loaded = storage.load_journal(&journal_key)?;
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
+    let source = DeliveryStore::borrowed(&journal)
+        .query(DeliveryQuery::GetRevision {
+            delivery_id: delivery_id.clone(),
+            revision: expected_revision,
+        })
+        .map_err(|error| delivery_store_error(&error))?;
     let request_digest = command_digest
         .0
         .strip_prefix("sha256:")
@@ -99,7 +85,7 @@ pub(crate) fn execute(
                 review_set_sha256: review_set_sha256.clone(),
             },
         )))
-        .map_err(delivery_store_error)?;
+        .map_err(|error| delivery_store_error(&error))?;
     if mutation.replayed {
         return Err(StorageError::invalid_input(
             "task-breakdown journal replay is missing its scoped command receipt",
@@ -134,22 +120,17 @@ pub(crate) fn execute(
     commit = commit.with_journal_publication(publication);
 
     let receipt = storage.commit(&commit)?;
-    let source_journal = historical_journal(
-        storage
-            .load_journal(&journal_key)?
-            .ok_or_else(|| StorageError::invalid_input("committed Delivery journal is missing"))?,
-        expected_revision,
-    )?;
-    let source = DeliveryStore::borrowed(&StagedDeliveryJournal::new(
-        delivery_id,
-        Some(source_journal),
-    ))
-    .query(DeliveryQuery::GetRevision {
-        delivery_id: payload.delivery_id,
-        revision: expected_revision,
-    })
-    .map_err(delivery_store_error)?;
-    validate_receipt(
+    if receipt.idempotent_replay {
+        validate_receipt_projection(
+            &receipt,
+            &commit.receipt_identity,
+            &delivery_id,
+            &review_set_sha256,
+            true,
+        )?;
+        return Ok(receipt);
+    }
+    validate_committed_receipt(
         &receipt,
         &source,
         &mutation.snapshot,
@@ -202,26 +183,7 @@ fn transport_review_digest(
     Ok(digest)
 }
 
-fn historical_journal(
-    mut journal: LoadedAggregateJournal,
-    revision: u64,
-) -> Result<LoadedAggregateJournal, StorageError> {
-    journal.records.retain(|record| record.sequence <= revision);
-    if revision == 0
-        || journal.records.len() != usize::try_from(revision).unwrap_or(usize::MAX)
-        || journal
-            .records
-            .last()
-            .is_none_or(|record| record.sequence != revision)
-    {
-        return Err(StorageError::invalid_input(
-            "Delivery journal does not contain the original receipt revision",
-        ));
-    }
-    Ok(journal)
-}
-
-fn validate_receipt(
+fn validate_committed_receipt(
     receipt: &CommitReceipt,
     source: &Delivery,
     committed: &Delivery,
@@ -229,31 +191,17 @@ fn validate_receipt(
     review_set_sha256: &str,
     expected_replay: bool,
 ) -> Result<(), StorageError> {
-    if receipt.stream_id != delivery_stream_id(committed.id())
-        || receipt.revision != committed.revision()
-        || &receipt.receipt_identity != expected_identity
-        || receipt.idempotent_replay != expected_replay
-        || committed.revision() != source.revision().saturating_add(1)
-    {
-        return Err(StorageError::invalid_input(
-            "durable task-breakdown receipt does not match its scoped request or Delivery revision",
-        ));
-    }
-    let [stored_event] = receipt.events.as_slice() else {
-        return Err(StorageError::invalid_input(
-            "durable task-breakdown receipt must contain exactly one event",
-        ));
-    };
-    let event = strict_task_breakdown_event(&stored_event.payload)?;
-    if stored_event.topic != TASK_BREAKDOWN_APPROVED_TOPIC
-        || stored_event.event_id != task_breakdown_event_id(&event)
-        || event.schema_version != DELIVERY_SCHEMA_VERSION
-        || event.delivery_id != *committed.id()
-        || event.delivery_revision != committed.revision()
-        || event.delivery_spec_id != committed.snapshot().spec.id
+    let event = validate_receipt_projection(
+        receipt,
+        expected_identity,
+        committed.id(),
+        review_set_sha256,
+        expected_replay,
+    )?;
+    if event.delivery_spec_id != committed.snapshot().spec.id
         || event.delivery_spec_revision != committed.snapshot().spec.revision
-        || event.review_set_sha256 != review_set_sha256
         || event.tasks != committed.snapshot().tasks
+        || committed.revision() != source.revision().saturating_add(1)
     {
         return Err(StorageError::invalid_input(
             "durable task-breakdown event does not match the committed Delivery",
@@ -273,13 +221,115 @@ fn validate_receipt(
         ));
     }
     let mut expected_snapshot = source.clone().into_snapshot();
-    expected_snapshot.tasks = event.tasks.clone();
+    expected_snapshot.tasks.clone_from(&event.tasks);
     expected_snapshot.revision = expected_snapshot.revision.saturating_add(1);
     let expected = Delivery::try_from_snapshot(expected_snapshot).map_err(storage_error)?;
     if expected != *committed {
         return Err(StorageError::invalid_input(
             "durable task-breakdown record changed facts outside the approved graph",
         ));
+    }
+    Ok(())
+}
+
+fn validate_receipt_projection(
+    receipt: &CommitReceipt,
+    expected_identity: &ReceiptIdentity,
+    delivery_id: &DeliveryId,
+    review_set_sha256: &str,
+    expected_replay: bool,
+) -> Result<DeliveryTaskBreakdownApprovedEvent, StorageError> {
+    if receipt.stream_id != delivery_stream_id(delivery_id)
+        || &receipt.receipt_identity != expected_identity
+        || receipt.idempotent_replay != expected_replay
+    {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown receipt does not match its scoped request",
+        ));
+    }
+    let [stored_event] = receipt.events.as_slice() else {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown receipt must contain exactly one event",
+        ));
+    };
+    let event = strict_task_breakdown_event(&stored_event.payload)?;
+    if stored_event.topic != TASK_BREAKDOWN_APPROVED_TOPIC
+        || stored_event.event_id != task_breakdown_event_id(&event)
+        || event.schema_version != DELIVERY_SCHEMA_VERSION
+        || event.delivery_id != *delivery_id
+        || event.delivery_revision != receipt.revision
+        || event.review_set_sha256 != review_set_sha256
+    {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown event does not match its original receipt",
+        ));
+    }
+    validate_promoted_tasks(&event)?;
+    Ok(event)
+}
+
+fn validate_promoted_tasks(event: &DeliveryTaskBreakdownApprovedEvent) -> Result<(), StorageError> {
+    if event.tasks.is_empty() || event.tasks.len() > 200 {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown event has an invalid task count",
+        ));
+    }
+    let mut ids = HashSet::with_capacity(event.tasks.len());
+    for task in &event.tasks {
+        if task.schema_version != DELIVERY_SCHEMA_VERSION
+            || task.delivery_id != event.delivery_id
+            || task.owner.is_some()
+            || task.status != DeliveryTaskStatus::Pending
+            || task.title.is_empty()
+            || task.goal.is_empty()
+            || task.acceptance_criterion_ids.is_empty()
+            || !ids.insert(task.id.clone())
+        {
+            return Err(StorageError::invalid_input(
+                "durable task-breakdown event has a changed task projection",
+            ));
+        }
+        let criterion_ids = task.acceptance_criterion_ids.iter().collect::<HashSet<_>>();
+        if criterion_ids.len() != task.acceptance_criterion_ids.len() {
+            return Err(StorageError::invalid_input(
+                "durable task-breakdown event has duplicate criterion ids",
+            ));
+        }
+    }
+    for task in &event.tasks {
+        let dependencies = task.blocked_by_task_ids.iter().collect::<HashSet<_>>();
+        if dependencies.len() != task.blocked_by_task_ids.len()
+            || dependencies.contains(&task.id)
+            || dependencies
+                .iter()
+                .any(|dependency| !ids.contains(*dependency))
+        {
+            return Err(StorageError::invalid_input(
+                "durable task-breakdown event has invalid dependencies",
+            ));
+        }
+    }
+    let mut remaining = ids;
+    while !remaining.is_empty() {
+        let ready = event
+            .tasks
+            .iter()
+            .filter(|task| remaining.contains(&task.id))
+            .filter(|task| {
+                task.blocked_by_task_ids
+                    .iter()
+                    .all(|dependency| !remaining.contains(dependency))
+            })
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            return Err(StorageError::invalid_input(
+                "durable task-breakdown event has a dependency cycle",
+            ));
+        }
+        for task_id in ready {
+            remaining.remove(&task_id);
+        }
     }
     Ok(())
 }
@@ -305,7 +355,13 @@ fn task_breakdown_event_id(event: &DeliveryTaskBreakdownApprovedEvent) -> String
     )
 }
 
-fn delivery_store_error(error: impl std::fmt::Display) -> StorageError {
+fn delivery_store_error(error: &DeliveryStoreError) -> StorageError {
+    if error.code() == DeliveryStoreErrorCode::RevisionConflict
+        && let (Some(expected), Some(current)) =
+            (error.expected_revision(), error.current_revision())
+    {
+        return StorageError::revision_conflict(expected, current);
+    }
     StorageError::invalid_input(error.to_string())
 }
 

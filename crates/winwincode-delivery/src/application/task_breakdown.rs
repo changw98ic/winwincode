@@ -51,6 +51,8 @@ impl Error for TaskBreakdownPromotionError {}
 
 /// Immutable public event derived from the same sealed transition as the
 /// canonical Delivery journal record.
+pub type PromotedDeliveryTasks = Vec<DeliveryTask>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryTaskBreakdownApprovedEvent {
@@ -60,7 +62,7 @@ pub struct DeliveryTaskBreakdownApprovedEvent {
     pub delivery_spec_id: DeliverySpecId,
     pub delivery_spec_revision: u64,
     pub review_set_sha256: String,
-    pub tasks: Vec<DeliveryTask>,
+    pub tasks: PromotedDeliveryTasks,
 }
 
 /// Sealed next Delivery and its exact public event.
@@ -109,9 +111,10 @@ impl TaskBreakdownPromotionTransition {
 ///
 /// Rejects a stale or foreign seal, a non-executing Delivery, an existing task
 /// graph, or any graph that fails canonical Delivery validation.
+#[rustfmt::skip]
 pub(crate) fn prepare_task_breakdown_promotion(
     delivery: &Delivery,
-    approved: &ApprovedTaskPromotion<'_>,
+    approved: &ApprovedTaskPromotion<'_>
 ) -> Result<TaskBreakdownPromotionTransition, TaskBreakdownPromotionError> {
     approved.validate_for_delivery(delivery).map_err(|error| {
         promotion_error(
@@ -318,23 +321,40 @@ mod tests {
 
     #[test]
     fn solution_review_rejects_empty_task_proposals() {
-        let _wire_field = "taskProposals";
         let empty = empty_task_proposals_fixture();
+        assert!(
+            empty.snapshot().attention_items[0]
+                .context
+                .contains("\"taskProposals\":[]")
+        );
         assert!(resolve_current_solution_review(&empty).is_err());
     }
 
     #[test]
     fn solution_review_rejects_duplicate_task_and_criterion_ids() {
-        let _wire_fields = ("taskProposals", "acceptanceCriterionIds");
         let (duplicate, duplicate_criterion) = duplicate_task_and_criterion_fixtures();
+        assert!(
+            duplicate.snapshot().attention_items[0]
+                .context
+                .contains("taskProposals")
+        );
+        assert!(
+            duplicate_criterion.snapshot().attention_items[0]
+                .context
+                .contains("acceptanceCriterionIds")
+        );
         assert!(resolve_current_solution_review(&duplicate).is_err());
         assert!(resolve_current_solution_review(&duplicate_criterion).is_err());
     }
 
     #[test]
     fn solution_review_rejects_self_missing_duplicate_and_cyclic_dependencies() {
-        let _wire_field = "blockedByTaskIds";
         let [self_dependency, missing, duplicate, cycle] = invalid_dependency_fixtures();
+        assert!(
+            self_dependency.snapshot().attention_items[0]
+                .context
+                .contains("blockedByTaskIds")
+        );
         assert!(resolve_current_solution_review(&self_dependency).is_err());
         assert!(resolve_current_solution_review(&missing).is_err());
         assert!(resolve_current_solution_review(&duplicate).is_err());

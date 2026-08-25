@@ -1879,7 +1879,7 @@ pub(crate) mod tests {
 
     pub(crate) fn empty_task_proposals_fixture() -> Delivery {
         rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
-            context.task_proposals.clear()
+            context.task_proposals.clear();
         })
     }
 
@@ -1887,7 +1887,7 @@ pub(crate) mod tests {
         let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
             context
                 .task_proposals
-                .push(context.task_proposals[0].clone())
+                .push(context.task_proposals[0].clone());
         });
         let duplicate_criterion =
             rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {

@@ -9,7 +9,7 @@ use winwincode_domain::{RequestId, Sha256Digest};
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit, StorageErrorKind,
+    StateCommit, StorageError, StorageErrorKind,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -929,4 +929,15 @@ fn replay_only_commit_refuses_to_fill_a_journal_without_its_original_receipt() {
 
     Box::new(storage).close().expect("storage should close");
     fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn revision_conflict_constructor_preserves_expected_and_actual_revisions() {
+    let error = StorageError::revision_conflict(7, 9);
+
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert_eq!(
+        error.to_string(),
+        "expected revision 7, but current revision is 9"
+    );
 }

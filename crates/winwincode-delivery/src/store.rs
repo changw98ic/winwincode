@@ -757,7 +757,7 @@ impl<'journal> DeliveryStore<'journal> {
                 })?;
             let event =
                 restore_task_breakdown_event(source, &prior.snapshot, &command.review_set_sha256)
-                    .map_err(map_task_breakdown_error)?;
+                    .map_err(|error| map_task_breakdown_error(&error))?;
             return Ok(DeliveryStoreMutationResult {
                 snapshot: prior.snapshot.clone(),
                 replayed: true,
@@ -798,7 +798,7 @@ impl<'journal> DeliveryStore<'journal> {
             ));
         }
         let transition = prepare_task_breakdown_promotion(&stored.snapshot, &approved)
-            .map_err(map_task_breakdown_error)?;
+            .map_err(|error| map_task_breakdown_error(&error))?;
         let append = AppendDelivery {
             delivery_id: command.delivery_id,
             request_id: command.request_id,
@@ -925,7 +925,7 @@ impl<'journal> DeliveryStore<'journal> {
                 )?;
                 transition
                     .validate_source(&stored.snapshot)
-                    .map_err(map_task_breakdown_error)?;
+                    .map_err(|error| map_task_breakdown_error(&error))?;
                 if transition.delivery() != &command.snapshot
                     || transition.review_set_sha256() != transition.event().review_set_sha256
                 {
@@ -1080,7 +1080,7 @@ fn map_transition_error(
 }
 
 fn map_task_breakdown_error(
-    error: crate::application::task_breakdown::TaskBreakdownPromotionError,
+    error: &crate::application::task_breakdown::TaskBreakdownPromotionError,
 ) -> DeliveryStoreError {
     let code = error.code();
     store_error(

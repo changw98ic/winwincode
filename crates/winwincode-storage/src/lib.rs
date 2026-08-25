@@ -458,7 +458,10 @@ impl StorageError {
         }
     }
 
-    fn revision_conflict(expected: u64, actual: u64) -> Self {
+    /// Builds the adapter-neutral concurrency result used by application
+    /// adapters that already validated a typed aggregate revision conflict.
+    #[must_use]
+    pub fn revision_conflict(expected: u64, actual: u64) -> Self {
         Self {
             kind: StorageErrorKind::RevisionConflict,
             message: format!("expected revision {expected}, but current revision is {actual}"),
