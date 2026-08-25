@@ -4,6 +4,21 @@
 //!
 //! The values in this module are derived authorization facts. They are not an
 //! extra persisted Delivery object and they do not schedule Codex work.
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::rework::ReworkAuthorization;
+//!
+//! let _caller_built_authorization = ReworkAuthorization {
+//!     previous_candidate: todo!(),
+//!     ..todo!()
+//! };
+//! ```
+//!
+//! ```compile_fail
+//! use winwincode_delivery::domain::rework::ReworkAuthorization;
+//!
+//! let _: ReworkAuthorization = serde_json::from_str("{}").unwrap();
+//! ```
 
 use std::collections::HashSet;
 
@@ -1050,11 +1065,11 @@ fn invalid_rework(message: &str) -> DeliveryValidationError {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{
-        CriterionVerdict, CurrentReworkScope, Delivery, DeliveryStatus, EvidenceId,
-        FrozenDeliveryCandidate, PreciseReworkAnnotation, ReworkAuthorization,
-        ReworkClarificationReason, ReworkDecision, ReworkTargetFact, decide_precise_rework,
-        derive_rework_clarification, derive_validated_rework_history,
-        freeze_rework_replacement_candidate,
+        CriterionVerdict, CurrentReworkScope, Delivery, DeliveryStatus, DeliveryValidationError,
+        DeliveryVerdictStatus, EvidenceId, FrozenDeliveryCandidate, PreciseReworkAnnotation,
+        ReworkAuthorization, ReworkClarificationReason, ReworkDecision, ReworkTargetFact,
+        assert_frozen_candidate_current, decide_precise_rework, derive_rework_clarification,
+        derive_validated_rework_history, freeze_rework_replacement_candidate, invalid_rework,
     };
     use crate::application::attention::ResolvedAttentionTransition;
     use crate::application::{
@@ -1122,6 +1137,100 @@ pub mod test_support {
         );
         freeze_rework_replacement_candidate(delivery, authorization, &replacement_facts, &delta)
             .expect("rework fixture must match the current authorization and sealed observations")
+    }
+
+    /// Derives one first-failure remediator authorization from the current
+    /// Delivery, its failed Evidence, and the exact first sealed candidate hunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the candidate is stale, the Delivery is not in `Reworking`,
+    /// the current verdict has no failed Evidence, or the candidate has no
+    /// sealed changed hunk.
+    #[must_use]
+    pub fn precise_rework_authorization_fixture(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+    ) -> ReworkAuthorization {
+        try_precise_rework_authorization_fixture(delivery, candidate)
+            .expect("rework fixture requires one current first-failure hunk authorization")
+    }
+
+    pub(crate) fn try_precise_rework_authorization_fixture(
+        delivery: &Delivery,
+        candidate: &FrozenDeliveryCandidate,
+    ) -> Result<ReworkAuthorization, DeliveryValidationError> {
+        assert_frozen_candidate_current(delivery, candidate)?;
+        let verdict = delivery.snapshot().verdict.as_ref().ok_or_else(|| {
+            invalid_rework("rework fixture requires current failing verdict Evidence")
+        })?;
+        let mut evidence_ref_ids = verdict
+            .criteria
+            .iter()
+            .filter(|result| result.verdict == CriterionVerdict::Fail)
+            .flat_map(|result| result.evidence_refs.iter().cloned())
+            .collect::<Vec<_>>();
+        evidence_ref_ids.sort_by(|left, right| left.0.cmp(&right.0));
+        evidence_ref_ids.dedup();
+        if verdict.status != DeliveryVerdictStatus::Fail || evidence_ref_ids.is_empty() {
+            return Err(invalid_rework(
+                "rework fixture requires current failing verdict Evidence",
+            ));
+        }
+        if delivery.snapshot().status != DeliveryStatus::Reworking {
+            return Err(invalid_rework(
+                "rework fixture requires the current Delivery to be Reworking",
+            ));
+        }
+        let hunk = candidate
+            .changed_hunks()
+            .first()
+            .ok_or_else(|| invalid_rework("rework fixture requires one sealed candidate hunk"))?;
+        if !candidate
+            .changed_paths()
+            .iter()
+            .any(|path| path.path == hunk.file_path)
+        {
+            return Err(invalid_rework(
+                "rework fixture candidate hunk is not present in its sealed changed paths",
+            ));
+        }
+        let delivery_task_id = candidate
+            .producer_delivery_task_id()
+            .ok_or_else(|| invalid_rework("rework fixture candidate is not task scoped"))?
+            .clone();
+        let target = ReworkTargetFact {
+            delivery_task_id: delivery_task_id.clone(),
+            diagram_id: "diagram-current-verdict".into(),
+            node_id: "node-current-failure".into(),
+            file_path: hunk.file_path.clone(),
+            hunk_sha256: hunk.hunk_sha256.clone(),
+            evidence_ref_ids: evidence_ref_ids.clone(),
+        };
+        let scope = CurrentReworkScope {
+            candidate_ref: candidate.candidate_ref().into(),
+            diff_sha256: candidate.diff_sha256().into(),
+            targets: vec![target.clone()],
+        };
+        let annotation = PreciseReworkAnnotation {
+            candidate_ref: candidate.candidate_ref().into(),
+            diff_sha256: candidate.diff_sha256().into(),
+            delivery_task_id,
+            diagram_id: target.diagram_id,
+            node_id: target.node_id,
+            file_path: target.file_path,
+            hunk_sha256: target.hunk_sha256,
+            evidence_ref_ids,
+        };
+        let history = derive_validated_rework_history(delivery, &[])?;
+        let decision = decide_precise_rework(delivery, candidate, &scope, &[annotation], &history)?;
+        let ReworkDecision::Start(authorization) = decision else {
+            return Err(invalid_rework(
+                "rework fixture first failure requires clarification instead of dispatch",
+            ));
+        };
+        authorization.validate_for_dispatch(delivery)?;
+        Ok(*authorization)
     }
 
     /// Builds one production-derived, sealed rework dispatch fixture.
@@ -1312,7 +1421,10 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::freeze_rework_replacement_candidate_fixture;
+    use super::test_support::{
+        freeze_rework_replacement_candidate_fixture, precise_rework_authorization_fixture,
+        try_precise_rework_authorization_fixture,
+    };
     use super::*;
     use crate::application::{
         CoordinationErrorCode,
@@ -1332,7 +1444,7 @@ mod tests {
         SessionBindingId, StageRun, test_fixture,
     };
     use winwincode_domain::{
-        AttentionItemId, CodexThreadId, ExecutionJobId, ProductSessionId, StageRunId,
+        AttentionItemId, CodexThreadId, DeliveryId, ExecutionJobId, ProductSessionId, StageRunId,
         WorkerSessionId,
     };
 
@@ -1472,6 +1584,94 @@ mod tests {
             evidence_ref_ids: target.evidence_ref_ids.clone(),
         };
         (delivery, candidate, scope, annotation)
+    }
+
+    #[test]
+    fn precise_rework_authorization_fixture_uses_current_failure_and_exact_candidate_hunk() {
+        let (delivery, candidate, _, _) = current_failure();
+        let reworking = resolve_rework_attention(delivery);
+
+        let authorization = precise_rework_authorization_fixture(&reworking, &candidate);
+
+        authorization
+            .validate_for_dispatch(&reworking)
+            .expect("fixture authorization stays dispatchable");
+        assert_eq!(authorization.targets().len(), 1);
+        assert_eq!(authorization.targets()[0].file_path(), "src/invitation.rs");
+        assert_eq!(authorization.targets()[0].hunk_sha256(), "b".repeat(64));
+    }
+
+    #[test]
+    fn precise_rework_authorization_fixture_rejects_stale_candidate() {
+        let (delivery, _, _, _) = current_failure();
+        let reworking = resolve_rework_attention(delivery);
+        let foreign = crate::application::verdict::test_support::verdict_fixture(
+            &DeliveryId("dlv_01J00000000000000000000020".into()),
+            crate::application::verdict::test_support::VerdictFixtureOutcome::Fail,
+        );
+
+        let error = try_precise_rework_authorization_fixture(&reworking, &foreign.candidate)
+            .expect_err("foreign candidate must stay stale");
+        assert!(error.message().contains("current DeliverySpec"));
+    }
+
+    #[test]
+    fn precise_rework_authorization_fixture_rejects_non_reworking_delivery() {
+        let (delivery, candidate, _, _) = current_failure();
+
+        let error = try_precise_rework_authorization_fixture(&delivery, &candidate)
+            .expect_err("unresolved failure must not authorize remediator dispatch");
+        assert!(error.message().contains("Reworking"));
+    }
+
+    #[test]
+    fn precise_rework_authorization_fixture_rejects_missing_failed_evidence() {
+        let fixture = crate::application::verdict::test_support::verdict_fixture(
+            &DeliveryId("dlv_01J00000000000000000000021".into()),
+            crate::application::verdict::test_support::VerdictFixtureOutcome::Inconclusive,
+        );
+
+        let error = try_precise_rework_authorization_fixture(&fixture.delivery, &fixture.candidate)
+            .expect_err("a verdict without failed Evidence cannot authorize rework");
+        assert!(error.message().contains("failing verdict Evidence"));
+    }
+
+    #[test]
+    fn precise_rework_authorization_fixture_rejects_candidate_without_changed_hunk() {
+        let (delivery, candidate, _, _) = current_failure();
+        let no_hunk_snapshot = with_changed_hunks(
+            validated_git_snapshot(
+                &delivery,
+                candidate.producer_stage_run_id(),
+                candidate.producer_session_binding_id(),
+                candidate.candidate_commit_id(),
+                candidate.candidate_tree_id(),
+                candidate.diff_sha256(),
+                candidate.changed_paths().to_vec(),
+            ),
+            vec![],
+        );
+        let no_hunk = super::super::freeze_delivery_candidate(
+            &delivery,
+            &freeze_facts(&delivery, no_hunk_snapshot),
+        )
+        .expect("candidate without hunk remains a valid frozen Git snapshot");
+        let mut snapshot = delivery.into_snapshot();
+        for evidence in &mut snapshot.evidence {
+            evidence.candidate_ref = no_hunk.candidate_ref().into();
+        }
+        let verdict = snapshot.verdict.as_mut().expect("failing verdict");
+        verdict.candidate_ref = no_hunk.candidate_ref().into();
+        for result in &mut verdict.criteria {
+            result.candidate_ref = no_hunk.candidate_ref().into();
+        }
+        let reworking = resolve_rework_attention(
+            Delivery::try_from_snapshot(snapshot).expect("current no-hunk failure"),
+        );
+
+        let error = try_precise_rework_authorization_fixture(&reworking, &no_hunk)
+            .expect_err("missing sealed hunk must reject precise rework");
+        assert!(error.message().contains("sealed candidate hunk"));
     }
 
     fn empty_history(delivery: &Delivery) -> ValidatedReworkHistoryFact {
@@ -1897,6 +2097,36 @@ mod tests {
         )
         .expect("authorized sealed replacement delta");
         assert_eq!(replacement.producer_role(), "remediator");
+
+        let wrong_source_hunk_delta = with_changed_hunks(
+            validated_git_snapshot_between(
+                &remediated,
+                &StageRunId("remediator-finished".into()),
+                &SessionBindingId("remediator-finished-binding".into()),
+                previous.candidate_commit_id(),
+                previous.candidate_tree_id(),
+                &"5".repeat(40),
+                &"6".repeat(40),
+                &"d".repeat(64),
+                vec![super::super::CandidatePathFact {
+                    path: "src/invitation.rs".into(),
+                    state: CandidatePathState::Present,
+                    object_id: Some("7".repeat(40)),
+                }],
+            ),
+            vec![CandidateHunkFact {
+                file_path: "src/invitation.rs".into(),
+                hunk_sha256: "f".repeat(64),
+                source_hunk_sha256: Some("c".repeat(64)),
+            }],
+        );
+        freeze_rework_replacement_candidate(
+            &remediated,
+            &authorization,
+            &replacement_facts,
+            &wrong_source_hunk_delta,
+        )
+        .expect_err("replacement must join the exact sealed old candidate hunk");
 
         let out_of_scope_snapshot = validated_git_snapshot(
             &remediated,
