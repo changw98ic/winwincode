@@ -188,6 +188,12 @@ test('preflight records the real current Web, StrongFlow, Chat, and codegen seam
     'agent-factory-resume-from-runtime-session-ledger',
   )
   assert.equal(rules.inventory.chat.projectOwnedPageSource, false)
+  assert.equal(rules.inventory.web.pageImplementation, false)
+  assert.deepEqual(rules.plannedProductCutover, {
+    strongFlowUiIssue: 'winwincode-9c4.16.6.3',
+    legacyBackendRemovalIssue: 'winwincode-9c4.16.6.6',
+    currentPhaseClaim: 'generated-client-only',
+  })
 
   const triggerExists = existsSync(repositoryPath(rules.activation.trigger))
   if (!triggerExists) {
@@ -216,6 +222,11 @@ test('preflight records the real current Web, StrongFlow, Chat, and codegen seam
   assert.match(agentFactory, /async resume\(/u)
   assert.match(agentFactory, /RuntimeSessionLedger\.open\(/u)
   assert.match(agentFactory, /#kernel\.resumeSession\(/u)
+
+  const contract = readFileSync(contractPath, 'utf8')
+  assert.match(contract, /winwincode-9c4\.16\.6\.3/u)
+  assert.match(contract, /winwincode-9c4\.16\.6\.6/u)
+  assert.match(contract, /阶段 2\.5\.4.*只.*生成客户端/u)
 })
 
 test('implemented HTTP and WebSocket clients stay anchored to canonical generated types', () => {

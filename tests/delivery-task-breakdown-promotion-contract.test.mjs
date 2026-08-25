@@ -335,7 +335,7 @@ test('phase 2.5.7.1 freezes one reviewed-proposal to canonical-task authority ch
     documentation: rules.documentation,
   }, {
     schemaVersion: 'winwincode.delivery-task-breakdown-promotion-rules.v1',
-    status: 'required-contract-not-implementation-proof',
+    status: 'implemented-enforced',
     issueId: 'winwincode-9c4.16.2.5.7',
     preflightIssueId: 'winwincode-9c4.16.2.5.7.1',
     documentation: relative(root, contractPath),
@@ -417,6 +417,17 @@ test('phase 2.5.7.1 freezes one reviewed-proposal to canonical-task authority ch
   assert.equal(rules.controlPlane.publishSource, 'committed-outbox-only')
   assert.equal(rules.controlPlane.preCommitFailure, 'rollback-all-four-and-publish-nothing')
 
+  assert.equal(Object.hasOwn(rules, 'currentFindings'), false)
+  assert.deepEqual(
+    rules.closedFindings.map(finding => ({ id: finding.id, status: finding.status })),
+    [
+      { id: 'caller-supplied-tasks-http', status: 'closed' },
+      { id: 'caller-supplied-tasks-domain', status: 'closed' },
+      { id: 'specialized-store-command-missing', status: 'closed' },
+      { id: 'specialized-control-plane-transaction-missing', status: 'closed' },
+    ],
+  )
+
   assert.deepEqual(rules.replay.order.slice(0, 2), [
     'derive-scoped-receipt-identity-and-command-digest',
     'load-receipt-before-current-delivery-or-review',
@@ -437,7 +448,7 @@ test('phase 2.5.7.1 freezes one reviewed-proposal to canonical-task authority ch
   }
 })
 
-test('HTTP preflight records the caller-tasks gap or enforces the one canonical payload', () => {
+test('HTTP exposes only the canonical task-breakdown approval payload', () => {
   const rules = json(rulesPath)
   const schema = json(repositoryPath(rules.http.schemaPath))
   const payload = schema.$defs.DeliveryApproveTaskBreakdownPayload
@@ -446,17 +457,6 @@ test('HTTP preflight records the caller-tasks gap or enforces the one canonical 
   const canonical = [...rules.http.payload.exactFields].sort()
 
   assert.equal(payload.additionalProperties, false)
-  if (fields.includes('tasks')) {
-    assert.deepEqual(fields, ['deliveryId', 'tasks'])
-    assert.deepEqual(required, ['deliveryId', 'tasks'])
-    assert.equal(
-      rules.currentFindings.some(finding => finding.id === 'caller-supplied-tasks-http'),
-      true,
-    )
-    assert.equal(rules.implementationGate.absentTriggerStatus, 'planned-not-implemented')
-    return
-  }
-
   assert.deepEqual(fields, canonical)
   assert.deepEqual(required, canonical)
   assert.equal(
@@ -530,20 +530,21 @@ test('plain-language contract states every concrete promotion and replay outcome
   for (const rule of rules.rules) {
     assert.equal(contract.includes(`\`${rule.id}\``), true, `${rule.id} is absent from prose`)
   }
+  assert.match(contract, /implemented\/enforced/u)
+  assert.doesNotMatch(contract, /已记录缺口|planned-not-implemented/u)
 })
 
 test('implementation trigger activates real Rust seams, test bodies, and executable gates', () => {
   const rules = json(rulesPath)
   const gate = rules.implementationGate
   assert.deepEqual(gate.activation, {
+    status: 'active',
     triggerPaths: [
       'crates/winwincode-delivery/src/application/task_breakdown.rs',
       'crates/winwincode-control-plane/src/task_breakdown_transaction.rs',
       'crates/winwincode-delivery/tests/task_breakdown_promotion.rs',
       'crates/winwincode-control-plane/tests/task_breakdown_transaction.rs',
     ],
-    whenMissing: 'verify-current-gaps-and-keep-planned-gate',
-    whenAnyPresent: 'require-all-production-seams-tests-and-no-old-path',
   })
   assert.deepEqual(gate.domainUnitTests.requiredTests, DOMAIN_UNIT_TESTS.map(test => test.name))
   assert.deepEqual(
@@ -559,17 +560,9 @@ test('implementation trigger activates real Rust seams, test bodies, and executa
     CONTROL_PLANE_TESTS.map(test => test.name),
   )
 
-  if (!implementationTriggered(gate)) {
-    const legacyTaskSource = readFileSync(
-      repositoryPath(gate.currentGapEvidence.legacyTaskPath),
-      'utf8',
-    )
-    assert.match(legacyTaskSource, /pub\s+fn\s+approve_task_breakdown\b/u)
-    assert.match(legacyTaskSource, /tasks\s*:\s*Vec<DeliveryTask>/u)
-    assert.doesNotMatch(legacyTaskSource, /\bApprovedTaskPromotion\b/u)
-    assert.equal(gate.absentTriggerStatus, 'planned-not-implemented')
-    return
-  }
+  assert.equal(implementationTriggered(gate), true)
+  assert.equal(Object.hasOwn(gate, 'absentTriggerStatus'), false)
+  assert.equal(Object.hasOwn(gate, 'currentGapEvidence'), false)
 
   for (const path of gate.requiredPaths) {
     assert.equal(existsSync(repositoryPath(path)), true, `${path} is missing after trigger`)
@@ -662,7 +655,7 @@ test('implementation trigger activates real Rust seams, test bodies, and executa
   assert.match(taskBreakdown, /#\[serde\([^\]]*deny_unknown_fields[^\]]*\)\]/u)
 
   const legacyTaskSource = readFileSync(
-    repositoryPath(gate.currentGapEvidence.legacyTaskPath),
+    repositoryPath(gate.removedPathEvidence.legacyTaskPath),
     'utf8',
   )
   assert.doesNotMatch(legacyTaskSource, /pub\s+fn\s+approve_task_breakdown\b/u)

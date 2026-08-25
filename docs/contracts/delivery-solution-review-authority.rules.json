@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "required-contract-not-implementation-proof",
+  "status": "implemented-enforced",
   "phaseTask": "winwincode-9c4.16.2.5.1.1",
   "documentation": "docs/contracts/delivery-solution-review-authority.md",
   "sourceTrace": {
@@ -305,115 +305,10 @@
     "resolverSource": "current-canonical-delivery-attention",
     "testSupport": "module-local-cfg-test-only"
   },
-  "currentFindings": [
-    {
-      "id": "approved-only-authority",
-      "status": "closed",
-      "meaning": "The current fact exists only after approval, so an open human review has no typed safe solution projection.",
-      "evidence": {
-        "path": "crates/winwincode-delivery/src/projection/solution.rs",
-        "presentPatterns": [
-          "pub\\s+struct\\s+ApprovedSolutionReviewSet\\b"
-        ],
-        "absentPatterns": [
-          "pub\\s+struct\\s+ValidatedSolutionReviewSet\\b"
-        ]
-      },
-      "closeCondition": "ValidatedSolutionReviewSet represents pending and all settled states."
-    },
-    {
-      "id": "caller-injected-review-fact",
-      "status": "closed",
-      "meaning": "ProjectionInput currently accepts a caller-supplied review fact instead of rebuilding current canonical Attention authority.",
-      "evidence": {
-        "path": "crates/winwincode-delivery/src/projection/mod.rs",
-        "presentPatterns": [
-          "with_approved_solution"
-        ],
-        "absentPatterns": [
-          "resolve_current_solution_review"
-        ]
-      },
-      "closeCondition": "The Delivery application resolver is the only production construction path and caller injection is removed."
-    },
-    {
-      "id": "pending-task-proposals-missing",
-      "status": "closed",
-      "meaning": "The current approved fact and digest do not contain the ordered DeliveryTaskProposal graph needed for human review and later promotion.",
-      "evidence": {
-        "path": "crates/winwincode-delivery/src/projection/solution.rs",
-        "presentPatterns": [
-          "pub\\s+struct\\s+ApprovedSolutionReviewSet\\b"
-        ],
-        "absentPatterns": [
-          "task_proposals\\s*:"
-        ]
-      },
-      "closeCondition": "A non-empty ordered task proposal graph is parsed, validated, hashed, projected, and retained in every state."
-    },
-    {
-      "id": "legacy-solution-wire",
-      "status": "closed",
-      "meaning": "The current detail wire uses solution and SolutionProjection instead of the single solutionReview field and SolutionReviewProjection type.",
-      "evidence": {
-        "path": "crates/winwincode-delivery/src/projection/mod.rs",
-        "presentPatterns": [
-          "solution\\s*:\\s*Option<SolutionProjection>"
-        ],
-        "absentPatterns": [
-          "solution_review\\s*:\\s*Option<SolutionReviewProjection>"
-        ]
-      },
-      "closeCondition": "Only solutionReview and SolutionReviewProjection remain."
-    }
-  ],
-  "implementationPlan": [
-    {
-      "order": 1,
-      "action": "Add crates/winwincode-delivery/src/application/solution_review.rs and register it in the application module.",
-      "proof": "The planned trigger exists and owns typed v1 parsing plus production resolution."
-    },
-    {
-      "order": 2,
-      "action": "Define strict exact-key v1 context and decision decoders with no legacy aliases or dual reads.",
-      "proof": "Unknown fields and both TypeScript v2 protocol markers fail in executable Rust tests."
-    },
-    {
-      "order": 3,
-      "action": "Resolve one opaque ValidatedSolutionReviewSet from current Delivery, StageRun, planning SessionBinding, and Attention facts.",
-      "proof": "Missing, duplicate, stale, foreign, and human SessionBinding cases fail before projection."
-    },
-    {
-      "order": 4,
-      "action": "Validate the non-empty ordered DeliveryTaskProposal DAG and include it in reviewSetSha256.",
-      "proof": "Changing task content or order changes the digest and invalid graphs fail."
-    },
-    {
-      "order": 5,
-      "action": "Replace approved-only projection input with automatic pending-or-settled resolution from canonical Delivery.",
-      "proof": "Pending review is visible without a caller-supplied fact and caller injection no longer compiles."
-    },
-    {
-      "order": 6,
-      "action": "Replace solution and SolutionProjection with solutionReview and SolutionReviewProjection.",
-      "proof": "The public JSON has one canonical field, all four statuses, and no alias."
-    },
-    {
-      "order": 7,
-      "action": "Expose reviewerId and reviewedAt for every settled action and authorize task promotion only for approved.",
-      "proof": "All settlement mappings and four promotion decisions are tested."
-    },
-    {
-      "order": 8,
-      "action": "Prove restart stability and safe redaction while keeping the production fact opaque.",
-      "proof": "Byte-stable reparse, compile-fail deserialization, and raw secret/tool/log exclusion tests pass."
-    }
-  ],
   "rustGate": {
     "activation": {
       "trigger": "crates/winwincode-delivery/src/application/solution_review.rs",
-      "whenMissing": "planned-gate-with-four-present-findings",
-      "whenPresent": "require-typed-v1-resolver-and-adversarial-tests"
+      "status": "active"
     },
     "factTypeName": "ValidatedSolutionReviewSet",
     "factVisibility": "pub(crate)",
@@ -588,6 +483,87 @@
         "crates/winwincode-delivery/src/application/task.rs",
         "crates/winwincode-delivery/src/application/stage.rs"
       ]
+    }
+  ],
+  "implementationTask": "winwincode-9c4.16.2.5.1.2",
+  "closedFindings": [
+    {
+      "id": "approved-only-authority",
+      "status": "closed",
+      "preflightFinding": "The current fact exists only after approval, so an open human review has no typed safe solution projection.",
+      "closureEvidence": "ValidatedSolutionReviewSet represents pending and all settled states.",
+      "refs": [
+        "crates/winwincode-delivery/src/projection/solution.rs"
+      ]
+    },
+    {
+      "id": "caller-injected-review-fact",
+      "status": "closed",
+      "preflightFinding": "ProjectionInput currently accepts a caller-supplied review fact instead of rebuilding current canonical Attention authority.",
+      "closureEvidence": "The Delivery application resolver is the only production construction path and caller injection is removed.",
+      "refs": [
+        "crates/winwincode-delivery/src/projection/mod.rs"
+      ]
+    },
+    {
+      "id": "pending-task-proposals-missing",
+      "status": "closed",
+      "preflightFinding": "The current approved fact and digest do not contain the ordered DeliveryTaskProposal graph needed for human review and later promotion.",
+      "closureEvidence": "A non-empty ordered task proposal graph is parsed, validated, hashed, projected, and retained in every state.",
+      "refs": [
+        "crates/winwincode-delivery/src/projection/solution.rs"
+      ]
+    },
+    {
+      "id": "legacy-solution-wire",
+      "status": "closed",
+      "preflightFinding": "The current detail wire uses solution and SolutionProjection instead of the single solutionReview field and SolutionReviewProjection type.",
+      "closureEvidence": "Only solutionReview and SolutionReviewProjection remain.",
+      "refs": [
+        "crates/winwincode-delivery/src/projection/mod.rs"
+      ]
+    }
+  ],
+  "verificationSteps": [
+    {
+      "order": 1,
+      "action": "Verify the typed v1 resolver module is registered in the Delivery application layer.",
+      "proof": "The planned trigger exists and owns typed v1 parsing plus production resolution."
+    },
+    {
+      "order": 2,
+      "action": "Verify exact-key v1 context and decision decoding rejects unknown fields and legacy aliases.",
+      "proof": "Unknown fields and both TypeScript v2 protocol markers fail in executable Rust tests."
+    },
+    {
+      "order": 3,
+      "action": "Verify one opaque ValidatedSolutionReviewSet is rebuilt only from current Delivery authority.",
+      "proof": "Missing, duplicate, stale, foreign, and human SessionBinding cases fail before projection."
+    },
+    {
+      "order": 4,
+      "action": "Verify the ordered DeliveryTaskProposal DAG is validated and covered by reviewSetSha256.",
+      "proof": "Changing task content or order changes the digest and invalid graphs fail."
+    },
+    {
+      "order": 5,
+      "action": "Verify pending and settled review projection is resolved without caller-injected authority.",
+      "proof": "Pending review is visible without a caller-supplied fact and caller injection no longer compiles."
+    },
+    {
+      "order": 6,
+      "action": "Verify solutionReview and SolutionReviewProjection are the only public wire path.",
+      "proof": "The public JSON has one canonical field, all four statuses, and no alias."
+    },
+    {
+      "order": 7,
+      "action": "Verify every settled state binds exact reviewer/time and only approved authorizes promotion.",
+      "proof": "All settlement mappings and four promotion decisions are tested."
+    },
+    {
+      "order": 8,
+      "action": "Verify restart-stable encoding, redaction, and opaque production construction.",
+      "proof": "Byte-stable reparse, compile-fail deserialization, and raw secret/tool/log exclusion tests pass."
     }
   ]
 }

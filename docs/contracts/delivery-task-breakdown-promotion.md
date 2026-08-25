@@ -1,8 +1,8 @@
 # DeliveryTask 图原子提升合同
 
-本合同冻结阶段 2.5.7 的唯一任务提升路径。它不是实现完成声明。当前主线仍有一个旧入口
-接收调用方给出的 `Vec<DeliveryTask>`，当前 HTTP schema 仍有 `payload.tasks`；这两个入口
-必须被新路径替换并删除，不能保留别名、双读或旧格式回退。
+本合同冻结阶段 2.5.7 的唯一任务提升路径。当前状态是 implemented/enforced：旧的
+`Vec<DeliveryTask>` 调用入口和 HTTP `payload.tasks` 已被替换并删除，没有别名、双读或旧格式
+回退。
 
 本次盘点先检查了本地代码索引状态。仓库没有可执行的 `dist/scripts/code-index.js`，所以
 后续结论来自 Git 文件清单、`rg` 和逐文件读取，只声称文件级覆盖，不声称完整符号图或
@@ -190,9 +190,8 @@ HTTP 使用生成的 `Sha256Digest`，格式是 `sha256:` 加 64 位小写十六
 seal 当前保存 64 位小写十六进制；adapter 只剥离一个固定前缀并做逐字节比较，不接受
 第二种 digest 表示。
 
-当前 preflight base 的 schema 仍有 `tasks`。阶段 2.5.3 的 canonical schema 修改落地后，
-门禁会自动从“已记录缺口”切换为严格检查 Rust 与 TypeScript 生成类型只剩两个字段。
-旧 payload 不作为兼容格式保留。
+canonical schema、Rust 生成类型和 TypeScript 生成类型现在都只保留这两个字段。门禁会拒绝
+`tasks` 再次进入 payload；旧 payload 不作为兼容格式保留。
 
 ## 8. Store 只有专用命令
 
@@ -230,7 +229,7 @@ outbox rows: internal DeliveryTaskBreakdownApprovedEvent + public delivery.chang
 分别打断 `product_state`、`aggregate_journal_records`、`command_receipts` 和 `outbox`，然后
 逐表证明没有部分数据。
 
-`DeliveryTaskBreakdownApprovedEvent` 是同一个 transition 的 immutable public projection，
+`DeliveryTaskBreakdownApprovedEvent` 是同一个 transition 的 immutable internal event，
 严格字段是：
 
 ```text
@@ -286,9 +285,9 @@ pending，结果明确表示 publication pending。启动恢复或下一次 flus
 HTTP adapter 只能调用 `ControlPlane::commit_delivery_task_breakdown`。它不能直接拿
 `ProductStateStorage`、`StateChange` 或 `AppendDelivery` 拼一个看似相同的提交。
 
-## 13. 实现出现后的真实门禁
+## 13. 当前启用的真实门禁
 
-以下任一路径出现就视为实现已经开始：
+以下四条实现与测试路径都已存在：
 
 ```text
 crates/winwincode-delivery/src/application/task_breakdown.rs
@@ -297,7 +296,7 @@ crates/winwincode-delivery/tests/task_breakdown_promotion.rs
 crates/winwincode-control-plane/tests/task_breakdown_transaction.rs
 ```
 
-从那一刻起，门禁要求四条路径和 typed solution review 全部存在，并做三层验证：
+当前门禁要求四条路径和 typed solution review 全部存在，并做三层验证：
 
 1. 读取真实 Rust source，检查 crate-private seal、唯一 constructor、private transition、
    current-attempt validation、specialized Store command、receipt-first 调用顺序、四成员 commit

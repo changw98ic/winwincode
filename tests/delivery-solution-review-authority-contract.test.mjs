@@ -219,7 +219,7 @@ test('phase 2.5.1.1 freezes one typed pending-or-settled solution review authori
     documentation: rules.documentation,
   }, {
     schemaVersion: 1,
-    status: 'required-contract-not-implementation-proof',
+    status: 'implemented-enforced',
     phaseTask: 'winwincode-9c4.16.2.5.1.1',
     documentation: relative(root, contractPath),
   })
@@ -297,28 +297,26 @@ test('phase 2.5.1.1 freezes one typed pending-or-settled solution review authori
     testSupport: 'module-local-cfg-test-only',
   })
 
-  const implementationTriggered = existsSync(repositoryPath(
-    'crates/winwincode-delivery/src/application/solution_review.rs',
-  ))
-  const expectedFindingStatus = implementationTriggered ? 'closed' : 'present'
+  assert.equal(Object.hasOwn(rules, 'currentFindings'), false)
   assert.deepEqual(
-    rules.currentFindings.map(finding => ({
+    rules.closedFindings.map(finding => ({
       id: finding.id,
       status: finding.status,
     })),
     [
-      { id: 'approved-only-authority', status: expectedFindingStatus },
-      { id: 'caller-injected-review-fact', status: expectedFindingStatus },
-      { id: 'pending-task-proposals-missing', status: expectedFindingStatus },
-      { id: 'legacy-solution-wire', status: expectedFindingStatus },
+      { id: 'approved-only-authority', status: 'closed' },
+      { id: 'caller-injected-review-fact', status: 'closed' },
+      { id: 'pending-task-proposals-missing', status: 'closed' },
+      { id: 'legacy-solution-wire', status: 'closed' },
     ],
   )
-  assert.equal(rules.implementationPlan.length, 8)
+  assert.equal(Object.hasOwn(rules, 'implementationPlan'), false)
+  assert.equal(rules.verificationSteps.length, 8)
   assert.deepEqual(
-    rules.implementationPlan.map(step => step.order),
+    rules.verificationSteps.map(step => step.order),
     [1, 2, 3, 4, 5, 6, 7, 8],
   )
-  for (const step of rules.implementationPlan) {
+  for (const step of rules.verificationSteps) {
     assert.ok(step.action.length > 0)
     assert.ok(step.proof.length > 0)
   }
@@ -380,6 +378,8 @@ test('plain-language solution review authority contract and machine rules stay p
   assert.match(contract, /`solutionReview`.*`SolutionReviewProjection`/u)
   assert.match(contract, /旧.*v2.*拒绝/u)
   assert.match(contract, /raw Attention.*context.*resolution/iu)
+  assert.doesNotMatch(contract, /当前实现缺口|planned gate/u)
+  assert.match(contract, /implemented\/enforced/u)
   for (const rule of rules.rules) {
     assert.equal(contract.includes(`\`${rule.id}\``), true, `${rule.id} is absent from prose`)
   }
@@ -389,8 +389,7 @@ test('the phase 2.5.1.2 application trigger activates typed resolver and adversa
   const gate = json(rulesPath).rustGate
   assert.deepEqual(gate.activation, {
     trigger: 'crates/winwincode-delivery/src/application/solution_review.rs',
-    whenMissing: 'planned-gate-with-four-present-findings',
-    whenPresent: 'require-typed-v1-resolver-and-adversarial-tests',
+    status: 'active',
   })
   assert.equal(gate.factTypeName, 'ValidatedSolutionReviewSet')
   assert.equal(gate.factVisibility, 'pub(crate)')
@@ -402,24 +401,10 @@ test('the phase 2.5.1.2 application trigger activates typed resolver and adversa
   assert.deepEqual([...gate.requiredTests].sort(), REQUIRED_RUST_TESTS)
 
   const trigger = repositoryPath(gate.activation.trigger)
-  if (!existsSync(trigger)) {
-    const rules = json(rulesPath)
-    assert.equal(rules.currentFindings.length, 4)
-    for (const finding of rules.currentFindings) {
-      assert.equal(finding.status, 'present')
-      const evidence = readFileSync(repositoryPath(finding.evidence.path), 'utf8')
-      for (const pattern of finding.evidence.presentPatterns) {
-        assert.match(evidence, new RegExp(pattern, 'u'), `${finding.id} is no longer present`)
-      }
-      for (const pattern of finding.evidence.absentPatterns) {
-        assert.doesNotMatch(evidence, new RegExp(pattern, 'u'), `${finding.id} is already closed`)
-      }
-    }
-    return
-  }
+  assert.equal(existsSync(trigger), true)
 
   const rules = json(rulesPath)
-  for (const finding of rules.currentFindings) assert.equal(finding.status, 'closed')
+  for (const finding of rules.closedFindings) assert.equal(finding.status, 'closed')
   const rawApplicationSource = readFileSync(repositoryPath(gate.applicationPath), 'utf8')
   const rawProjectionSource = readFileSync(repositoryPath(gate.projectionPath), 'utf8')
   const applicationSource = stripRustComments(rawApplicationSource)
