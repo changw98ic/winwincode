@@ -438,6 +438,87 @@ fn durable_replay_uses_the_original_verdict_after_facts_and_current_revision_cha
 }
 
 #[test]
+fn durable_replay_returns_original_verdict_before_broken_state_journal_or_replacement_facts() {
+    let root = temporary_directory("receipt-before-broken-facts");
+    let original = fixture(11, VerdictFixtureOutcome::Fail);
+    let command = verdict_command(11, &original);
+    seed_delivery(&root, &original.delivery);
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }),
+    )
+    .expect("Control Plane start");
+    let first = control_plane
+        .commit_delivery_verdict(&command, verdict_facts(&original, 1_800_000_000_100))
+        .expect("initial verdict commit");
+    control_plane.shutdown().expect("initial shutdown");
+
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("corruption database");
+    connection
+        .execute(
+            "UPDATE aggregate_journal_records SET payload = X'00' \
+             WHERE aggregate_type = 'delivery' AND aggregate_id = ?1",
+            [original.delivery.id().0.as_str()],
+        )
+        .expect("corrupt current Delivery journal");
+    connection
+        .execute(
+            "UPDATE product_state SET payload = X'00' WHERE stream_id = ?1",
+            [format!("delivery:{}", original.delivery.id().0)],
+        )
+        .expect("corrupt current Delivery state");
+    connection.close().expect("corruption close");
+
+    let replacement = fixture(999, VerdictFixtureOutcome::Pass);
+    let replayed_publications = Arc::new(Mutex::new(Vec::new()));
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&replayed_publications),
+        }),
+    )
+    .expect("replay Control Plane start");
+    let replay = control_plane
+        .commit_delivery_verdict(&command, verdict_facts(&replacement, 1_900_000_000_000))
+        .expect(
+            "durable receipt replay must precede current state, journal, and replacement facts",
+        );
+
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.revision, first.revision);
+    assert_eq!(replay.events, first.events);
+    assert!(
+        replayed_publications
+            .lock()
+            .expect("replayed publications")
+            .is_empty()
+    );
+    control_plane.shutdown().expect("replay shutdown");
+
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("inspection database");
+    let facts: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_type = 'delivery' AND aggregate_id = ?1), \
+               (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?2), \
+               (SELECT COUNT(*) FROM outbox WHERE topic = 'delivery.verdict.submitted')",
+            [
+                original.delivery.id().0.as_str(),
+                command.request_id.0.as_str(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("receipt-first replay counts");
+    assert_eq!(facts, (2, 1, 1));
+    connection.close().expect("inspection close");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
 fn passing_verdict_enters_final_manual_delivery_review_state() {
     let root = temporary_directory("passing-review");
     let fixture = fixture(2, VerdictFixtureOutcome::Pass);
