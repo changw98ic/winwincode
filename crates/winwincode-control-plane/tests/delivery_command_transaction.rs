@@ -4,9 +4,10 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Barrier, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    thread,
 };
 
 use sha2::{Digest, Sha256};
@@ -264,14 +265,18 @@ impl DeliveryJournalPort for CapturingJournal {
     }
 }
 
-fn seed_ready_to_deliver(root: &PathBuf) -> Delivery {
+fn ready_to_deliver_fixture() -> Delivery {
     let mut snapshot = Delivery::decode_json(include_bytes!(
         "../../winwincode-delivery/tests/fixtures/delivery-main.json"
     ))
     .expect("canonical Delivery fixture")
     .into_snapshot();
     snapshot.revision = 1;
-    let delivery = Delivery::try_from_snapshot(snapshot).expect("ReadyToDeliver seed");
+    Delivery::try_from_snapshot(snapshot).expect("ReadyToDeliver seed")
+}
+
+fn seed_ready_to_deliver(root: &PathBuf) -> Delivery {
+    let delivery = ready_to_deliver_fixture();
     let journal = CapturingJournal::default();
     DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::SeedForTest(CreateDelivery {
@@ -431,6 +436,94 @@ fn create_commits_the_canonical_empty_delivery_and_public_event() {
 }
 
 #[test]
+fn concurrent_exact_create_returns_one_commit_and_only_durable_replays() {
+    const CONTENDER_COUNT: usize = 8;
+
+    let root = temporary_directory("concurrent-create-replay");
+    let command = create_command(80);
+    let trusted_facts = facts(&command, 80);
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let planes = (0..CONTENDER_COUNT)
+        .map(|_| {
+            ControlPlane::start_local(
+                ControlPlaneConfig::local(&root),
+                Box::new(CapturingPublisher {
+                    events: Arc::clone(&published),
+                }),
+            )
+            .expect("Control Plane start")
+        })
+        .collect::<Vec<_>>();
+    let start = Arc::new(Barrier::new(CONTENDER_COUNT + 1));
+    let handles = planes
+        .into_iter()
+        .map(|mut control_plane| {
+            let command = command.clone();
+            let trusted_facts = trusted_facts.clone();
+            let start = Arc::clone(&start);
+            thread::spawn(move || {
+                start.wait();
+                let result = control_plane.commit_delivery_command(&command, &trusted_facts);
+                control_plane.shutdown().expect("shutdown");
+                result
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait();
+    let receipts = handles
+        .into_iter()
+        .map(|handle| {
+            handle
+                .join()
+                .expect("create thread")
+                .expect("exact concurrent create")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| !receipt.idempotent_replay)
+            .count(),
+        1
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt.idempotent_replay)
+            .count(),
+        CONTENDER_COUNT - 1
+    );
+    for receipt in &receipts[1..] {
+        assert_eq!(receipt.receipt_identity, receipts[0].receipt_identity);
+        assert_eq!(receipt.stream_id, receipts[0].stream_id);
+        assert_eq!(receipt.revision, receipts[0].revision);
+        assert_eq!(receipt.events, receipts[0].events);
+    }
+
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("inspection database");
+    let counts: (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM aggregate_journal_records WHERE aggregate_id = ?1), \
+               (SELECT COUNT(*) FROM product_state WHERE stream_id = ?2), \
+               (SELECT COUNT(*) FROM command_receipts WHERE request_id = ?3), \
+               (SELECT COUNT(*) FROM outbox WHERE request_id = ?3)",
+            (
+                canonical_id("dlv", 80),
+                format!("delivery:{}", canonical_id("dlv", 80)),
+                command.request_id.0,
+            ),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("atomic member counts");
+    assert_eq!(counts, (1, 1, 1, 1));
+    connection.close().expect("inspection close");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
 fn update_spec_replaces_only_the_canonical_spec_and_replays_the_exact_receipt() {
     let root = temporary_directory("update-spec");
     let published = Arc::new(Mutex::new(Vec::new()));
@@ -490,6 +583,114 @@ fn update_spec_replaces_only_the_canonical_spec_and_replays_the_exact_receipt() 
         DeliveryCommandCommitError::Storage(ref source)
             if source.kind() == StorageErrorKind::RevisionConflict
     ));
+
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
+fn missing_delivery_is_a_public_resource_not_found_for_every_base_mutation() {
+    let root = temporary_directory("missing-delivery");
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }),
+    )
+    .expect("Control Plane start");
+
+    let update = update_spec_command(81);
+    let update_error = control_plane
+        .commit_delivery_command(&update, &facts(&update, 81))
+        .expect_err("Spec replacement requires an existing Delivery");
+
+    let source = ready_to_deliver_fixture();
+    let advance = delivery_command(
+        82,
+        CommandName::DeliveryAdvance,
+        1,
+        serde_json::json!({"deliveryId": canonical_id("dlv", 82)}),
+    );
+    let advance_facts = delivery_advance_command_facts(
+        &advance,
+        repository_authority(82, "/workspace/repository", None),
+        human_review_transition(
+            &source,
+            &canonical_id("usr", 82),
+            source.snapshot().updated_at_millis + 1,
+            82,
+        ),
+    )
+    .expect("sealed advance facts");
+    let advance_error = control_plane
+        .commit_delivery_command(&advance, &advance_facts)
+        .expect_err("human advance requires an existing Delivery");
+
+    let reviewing_transition = human_review_transition(
+        &source,
+        &canonical_id("usr", 83),
+        source.snapshot().updated_at_millis + 1,
+        83,
+    );
+    let reviewing = reviewing_transition.delivery;
+    let attention = reviewing
+        .snapshot()
+        .attention_items
+        .last()
+        .expect("review Attention");
+    let resolve = delivery_command(
+        83,
+        CommandName::DeliveryResolveAttention,
+        2,
+        serde_json::json!({
+            "deliveryId": canonical_id("dlv", 83),
+            "attentionItemId": attention.id,
+            "decision": "resolve",
+            "resolution": "Resolve a missing Delivery only through its public error.",
+            "remediation": null
+        }),
+    );
+    let resolve_transition = resolve_attention(
+        &reviewing,
+        ResolveAttentionInput {
+            expected_revision: reviewing.revision(),
+            attention_item_id: attention.id.clone(),
+            stage_run_id: attention.stage_run_id.clone().expect("review StageRun"),
+            expected_context: attention.context.clone(),
+            actor: canonical_id("usr", 83),
+            decision: AttentionDecision::Resolved,
+            resolution: "Resolve a missing Delivery only through its public error.".into(),
+            now_millis: source.snapshot().updated_at_millis + 2,
+        },
+    )
+    .expect("sealed Attention transition");
+    let resolve_facts = delivery_attention_command_facts(
+        &resolve,
+        repository_authority(83, "/workspace/repository", None),
+        resolve_transition,
+    )
+    .expect("sealed Attention facts");
+    let resolve_error = control_plane
+        .commit_delivery_command(&resolve, &resolve_facts)
+        .expect_err("Attention resolution requires an existing Delivery");
+
+    for (error, delivery_id) in [
+        (update_error, canonical_id("dlv", 81)),
+        (advance_error, canonical_id("dlv", 82)),
+        (resolve_error, canonical_id("dlv", 83)),
+    ] {
+        assert_eq!(error.public_code(), ErrorCode::ResourceNotFound);
+        assert!(!error.retryable());
+        assert_eq!(
+            error.public_details().get("field"),
+            Some(&ErrorDetailValue::Variant4("deliveryId".into()))
+        );
+        assert_eq!(
+            error.public_details().get("deliveryId"),
+            Some(&ErrorDetailValue::Variant4(delivery_id))
+        );
+        assert!(error.committed_receipt().is_none());
+    }
 
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database cleanup");

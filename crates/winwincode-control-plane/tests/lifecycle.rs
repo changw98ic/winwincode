@@ -130,6 +130,7 @@ impl ProductStateStorage for TraceStorage {
             .collect();
         Ok(CommitReceipt {
             receipt_identity: commit.receipt_identity.clone(),
+            command_digest: commit.command_digest.clone(),
             stream_id: commit.stream_id.clone(),
             revision,
             events: commit

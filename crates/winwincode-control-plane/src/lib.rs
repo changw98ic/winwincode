@@ -362,6 +362,8 @@ impl std::error::Error for CommitError {}
 pub enum DeliveryCommandCommitError {
     /// No durable member committed because command or storage validation failed.
     Storage(StorageError),
+    /// The scoped Delivery required by a mutation does not exist.
+    NotFound { delivery_id: DeliveryId },
     /// A different scoped request tried to create an existing Delivery.
     AlreadyExists { delivery_id: DeliveryId },
     /// The atomic transaction committed and only publication remains pending.
@@ -376,6 +378,7 @@ impl DeliveryCommandCommitError {
     pub fn public_code(&self) -> winwincode_api::generated::ErrorCode {
         use winwincode_api::generated::ErrorCode;
         match self {
+            Self::NotFound { .. } => ErrorCode::ResourceNotFound,
             Self::AlreadyExists { .. } => ErrorCode::WrongState,
             Self::PublicationPending { .. } => ErrorCode::ServiceUnavailable,
             Self::Storage(error) => match error.kind() {
@@ -397,7 +400,7 @@ impl DeliveryCommandCommitError {
     pub fn public_details(&self) -> winwincode_api::generated::ErrorDetails {
         use winwincode_api::generated::ErrorDetailValue;
         let mut details = winwincode_api::generated::ErrorDetails::new();
-        if let Self::AlreadyExists { delivery_id } = self {
+        if let Self::NotFound { delivery_id } | Self::AlreadyExists { delivery_id } = self {
             details.insert(
                 "field".to_owned(),
                 ErrorDetailValue::Variant4("deliveryId".to_owned()),
@@ -428,7 +431,7 @@ impl DeliveryCommandCommitError {
     pub fn committed_receipt(&self) -> Option<&CommitReceipt> {
         match self {
             Self::PublicationPending { receipt, .. } => Some(receipt),
-            Self::Storage(_) | Self::AlreadyExists { .. } => None,
+            Self::Storage(_) | Self::NotFound { .. } | Self::AlreadyExists { .. } => None,
         }
     }
 }
@@ -443,6 +446,9 @@ impl fmt::Display for DeliveryCommandCommitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Storage(error) => write!(formatter, "Delivery command failed: {error}"),
+            Self::NotFound { delivery_id } => {
+                write!(formatter, "Delivery {} was not found", delivery_id.0)
+            }
             Self::AlreadyExists { delivery_id } => {
                 write!(formatter, "Delivery {} already exists", delivery_id.0)
             }
@@ -697,9 +703,9 @@ impl ControlPlane {
         command: &CommandEnvelope,
         change: StateChange,
     ) -> Result<CommitReceipt, CommitError> {
-        if delivery_command(&command.command) {
+        if delivery_command(&command.command) || change.stream_id.starts_with("delivery:") {
             return Err(CommitError::Storage(StorageError::invalid_input(
-                "Delivery commands require the atomic Delivery command path",
+                "Delivery commands and state streams require a typed atomic Delivery transaction",
             )));
         }
         if change.events.iter().any(|event| {
@@ -782,28 +788,29 @@ impl ControlPlane {
     }
 
     /// Persists one authoritative Worker `session.binding` message as the two
-    /// canonical Delivery mutations that attach its WorkerSession and then its
-    /// CodexThread.
+    /// canonical Delivery mutations that attach its `WorkerSession` and then its
+    /// `CodexThread`.
     ///
     /// The generated message is the only wire input. The second argument is an
-    /// opaque scheduler-owned lease fact; the message cannot authorize itself.
+    /// opaque scheduler-owned `SessionBinding` authority; the message cannot
+    /// authorize itself.
     ///
     /// # Errors
     ///
     /// Returns before the first write for a foreign job, stale binding, lease
-    /// mismatch, or malformed message. If the WorkerSession phase committed
-    /// but the CodexThread phase failed, the returned error carries the first
+    /// mismatch, or malformed message. If the `WorkerSession` phase committed
+    /// but the `CodexThread` phase failed, the returned error carries the first
     /// durable receipt so an exact retry can continue receipt-first.
     pub fn commit_delivery_session_binding(
         &mut self,
         message: &winwincode_api::generated::SessionBindingMessage,
-        active_lease: &winwincode_delivery::application::stage::ActiveLeaseIdentity,
+        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliverySessionBindingCommitError::Storage)?;
-            session_binding_transaction::execute(storage, message, active_lease)?
+            session_binding_transaction::execute(storage, message, authority)?
         };
         self.flush_outbox().map_err(|source| {
             DeliverySessionBindingCommitError::PublicationPending {

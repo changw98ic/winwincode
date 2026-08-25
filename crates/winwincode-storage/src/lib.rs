@@ -614,6 +614,8 @@ impl DurableOutboxEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitReceipt {
     pub receipt_identity: ReceiptIdentity,
+    /// Exact canonical digest accepted for this scoped request.
+    pub command_digest: Sha256Digest,
     pub stream_id: String,
     pub revision: u64,
     /// Exact durable events attached to the original scoped request.
@@ -1304,6 +1306,7 @@ fn replay_stored_receipt(
     }
     Ok(CommitReceipt {
         receipt_identity: identity.clone(),
+        command_digest: command_digest.clone(),
         stream_id: prior.stream_id,
         revision: u64::try_from(prior.revision)
             .map_err(|_| StorageError::adapter("stored revision is negative"))?,
@@ -1348,6 +1351,7 @@ fn append_state_commit(
 
     Ok(CommitReceipt {
         receipt_identity: commit.receipt_identity.clone(),
+        command_digest: commit.command_digest.clone(),
         stream_id: commit.stream_id.clone(),
         revision: u64::try_from(revision)
             .map_err(|_| StorageError::adapter("committed revision is negative"))?,

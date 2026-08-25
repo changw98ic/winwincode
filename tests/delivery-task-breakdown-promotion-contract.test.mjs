@@ -711,16 +711,35 @@ test('implementation trigger activates real Rust seams, test bodies, and executa
   assert.match(transaction, /DeliveryTaskBreakdownApprovedEvent/u)
   assert.match(transaction, /serde_json::to_value[\s\S]*!=/u)
   assert.match(transaction, /delivery\.task_breakdown\.approved/u)
-  const receiptValidator = namedRustFunction(transaction, 'validate_receipt_projection')
+  const receiptProjectionValidator = namedRustFunction(
+    transaction,
+    'validate_receipt_projection',
+  )
+  assert.match(
+    receiptProjectionValidator,
+    /\bvalidate_receipt_contents\s*\(/u,
+    'receipt projection validation must delegate to the exact durable contents validator',
+  )
+  for (const token of [
+    'receipt.receipt_identity != expected_identity',
+    'receipt.idempotent_replay != expected_replay',
+    'event.delivery_id != *delivery_id',
+    'event.review_set_sha256 != review_set_sha256',
+  ]) assert.equal(
+    receiptProjectionValidator.includes(token),
+    true,
+    `receipt projection validation omits ${token}`,
+  )
+  const receiptContentsValidator = namedRustFunction(transaction, 'validate_receipt_contents')
   for (const token of [
     'receipt.events.len() != 2',
     'stored_event.projection_cursor.is_some()',
     'validate_delivery_changed_receipt',
     'DeliveryChangeKind::Advanced',
   ]) assert.equal(
-    receiptValidator.includes(token),
+    receiptContentsValidator.includes(token),
     true,
-    `receipt validation omits ${token}`,
+    `receipt contents validation omits ${token}`,
   )
 
   const domainUnitSource = `${solutionReview}\n${taskBreakdown}`

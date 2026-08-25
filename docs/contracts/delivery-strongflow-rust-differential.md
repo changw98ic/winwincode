@@ -67,11 +67,36 @@ the current closed types.
 | rejected foreign `bindSession` | one strict `SessionBindingMessage` sent to the real typed seam; its canonical rejection writes nothing. |
 | `resolveAttention` | `delivery.resolve_attention`. |
 | `submitVerdict` | `delivery.submit_verdict` with only the current candidate digest; sealed facts build Evidence and Verdict server-side. |
-| `getDeliveryProjection` | `delivery.get`, then `runtime.projection.get` at the exact returned read cursor. A failed `delivery.get` stops before the runtime query because no cursor exists. |
+| `getDeliveryProjection` | Always `delivery.get`. Append `runtime.projection.get` only when the returned Delivery projection contains an eligible complete Codex binding. |
 | `fixture.*` | a closed test-only fixture command; never a `CommandRequest`. |
 
 The rules JSON lists every source command index and canonical group for every
 scenario. A source command without a disposition is a contract error.
+
+### Conditional runtime projection
+
+After a completed `delivery.get`, the migration scans
+`response.result.stages` in its canonical array order. A stage is eligible only
+when `actorType` is `codex`, `sessionBinding` is present, and both
+`workerSessionId` and `codexThreadId` are non-null. It selects the last eligible
+stage. Exactly one `runtime.projection.get` then uses:
+
+- `deliveryId` from `delivery.get.response.result.deliveryId`;
+- `atCursor` from `delivery.get.response.result.readCursor`;
+- `stageRunId` from the selected stage `id`; and
+- `productSessionId` from the selected stage binding.
+
+The runtime response must be the completed closed generated response, must
+carry those same Delivery, StageRun, ProductSession, and read-cursor values,
+and must contain exactly one runtime session. The observation's `runtime`
+value is that complete response result.
+
+A failed `delivery.get`, a Delivery with no binding, or a Delivery whose only
+binding is still pending produces no runtime query. Its observation's
+`runtime` value is exactly `null`. This applies to `request-id-replay`,
+`revision-conflict`, `corruption-recovery`, and `task-dag`; the pending
+task-DAG binding is not complete. The migration never invents fallback StageRun
+or ProductSession identities.
 
 ### Mandatory task promotion
 
@@ -256,8 +281,8 @@ The order is part of the contract:
 
 For every scenario, the comparison includes all canonical requests and
 responses, the final strict Delivery snapshot, accepted runtime event order,
-both projections, Verdict, state, the complete journal digest chain, receipts,
-outbox events, and cursors.
+the Delivery projection, the exact runtime projection or `null`, Verdict,
+state, the complete journal digest chain, receipts, outbox events, and cursors.
 
 The migrated checkpoints are also frozen as ordinary facts, not normalization:
 

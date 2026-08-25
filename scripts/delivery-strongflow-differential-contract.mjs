@@ -139,6 +139,130 @@ function validateNormalizationRules(rules) {
   requireEqual(rules.comparison.noTestNameEvidence, true, 'noTestNameEvidence')
 }
 
+function validateRuntimeProjectionRules(rules) {
+  const policy = rules.canonicalMigration.runtimeProjectionFollowup
+  requireExactKeys(policy, [
+    'completeBindingRequirements',
+    'deliveryQueryTarget',
+    'failedDeliveryGetPolicy',
+    'noFallbackIdentities',
+    'noQueryScenarioIds',
+    'observationAbsentValue',
+    'observationPresentSource',
+    'pendingBindingPolicy',
+    'queryScenarioIds',
+    'requestValueSources',
+    'runtimeQueryTarget',
+    'runtimeResponseSessionCount',
+    'selectionRule',
+    'selectionSource',
+    'sourceOperation',
+  ], 'runtime projection follow-up policy')
+  requireEqual(policy.sourceOperation, 'getDeliveryProjection', 'runtime source operation')
+  requireEqual(policy.deliveryQueryTarget, 'delivery.get', 'runtime delivery query')
+  requireEqual(policy.runtimeQueryTarget, 'runtime.projection.get', 'runtime query')
+  requireEqual(
+    policy.selectionRule,
+    'last-complete-codex-stage-in-delivery-projection-order',
+    'runtime selection rule',
+  )
+  requireDeepEqual(policy.completeBindingRequirements, {
+    actorType: 'codex',
+    codexThreadId: 'non-null',
+    sessionBinding: 'non-null',
+    workerSessionId: 'non-null',
+  }, 'runtime complete binding requirements')
+  requireDeepEqual(policy.requestValueSources, {
+    atCursor: 'delivery.get.response.result.readCursor',
+    deliveryId: 'delivery.get.response.result.deliveryId',
+    productSessionId: 'selectedStage.sessionBinding.productSessionId',
+    stageRunId: 'selectedStage.id',
+  }, 'runtime request value sources')
+  requireEqual(policy.runtimeResponseSessionCount, 1, 'runtime response session count')
+  requireEqual(policy.observationAbsentValue, null, 'runtime absent observation')
+  requireEqual(policy.noFallbackIdentities, true, 'runtime fallback identity policy')
+  const observation = rules.canonicalExpected.runtimeProjectionObservation
+  requireExactKeys(
+    observation,
+    ['exactKeys', 'runtimeAbsentValue', 'runtimePresentSource'],
+    'runtime projection observation contract',
+  )
+  requireDeepEqual(observation.exactKeys, ['delivery', 'runtime'], 'runtime observation keys')
+  requireEqual(observation.runtimeAbsentValue, null, 'runtime observation absent value')
+  const responseContracts = rules.canonicalExpected.responseContracts
+  requireEqual(
+    responseContracts.runtimeProjectionGetSessionsExactLength,
+    policy.runtimeResponseSessionCount,
+    'runtime response contract session count',
+  )
+  requireDeepEqual(responseContracts.runtimeProjectionGetResultExactKeys, [
+    'deliveryId',
+    'eventCursor',
+    'kind',
+    'lastProjectionSequence',
+    'productSessionId',
+    'readCursor',
+    'rebuiltAt',
+    'revision',
+    'sessions',
+    'stageRunId',
+  ], 'runtime result keys')
+  requireDeepEqual(responseContracts.runtimeProjectionSessionExactKeys, [
+    'activities',
+    'agentEdges',
+    'agents',
+    'asOfSequence',
+    'attempt',
+    'codexThreadId',
+    'deliveryTaskId',
+    'diffSummary',
+    'executionJobId',
+    'fencingToken',
+    'leaseId',
+    'plan',
+    'productSessionId',
+    'recovery',
+    'sessionBindingId',
+    'stageRunId',
+    'usage',
+    'workerSessionId',
+  ], 'runtime session keys')
+
+  const scenarioIds = rules.scenarios.map(scenario => scenario.id)
+  const declaredIds = [...policy.queryScenarioIds, ...policy.noQueryScenarioIds]
+  requireDeepEqual(declaredIds.toSorted(), scenarioIds.toSorted(), 'runtime scenario partition')
+  requireEqual(new Set(declaredIds).size, scenarioIds.length, 'runtime scenario uniqueness')
+
+  const queryScenarios = new Set(policy.queryScenarioIds)
+  for (const scenario of rules.scenarios) {
+    const runtimeGroups = scenario.canonicalGroups.filter(group => (
+      group.target === policy.runtimeQueryTarget
+    ))
+    requireEqual(
+      runtimeGroups.length,
+      queryScenarios.has(scenario.id) ? 1 : 0,
+      `${scenario.id} runtime query count`,
+    )
+    for (const [sourceIndex, signature] of scenario.sourceCommandSignatures.entries()) {
+      if (signature !== `strongflow.request:${policy.sourceOperation}`) continue
+      const groups = scenario.canonicalGroups.filter(group => (
+        group.sourceCommandIndexes.includes(sourceIndex)
+      ))
+      const targets = groups.map(group => group.target)
+      const runtimeForSource = runtimeGroups.some(group => (
+        group.sourceCommandIndexes.includes(sourceIndex)
+      ))
+      requireDeepEqual(
+        targets,
+        runtimeForSource
+          ? [policy.deliveryQueryTarget, policy.runtimeQueryTarget]
+          : [policy.deliveryQueryTarget],
+        `${scenario.id} source ${sourceIndex} projection query mapping`,
+      )
+    }
+  }
+}
+
 export function validateDifferentialContract(rules, oracle, options = {}) {
   requireEqual(
     rules.schemaVersion,
@@ -246,6 +370,7 @@ export function validateDifferentialContract(rules, oracle, options = {}) {
 
   validateMigrationRules(rules, oracle)
   validateNormalizationRules(rules)
+  validateRuntimeProjectionRules(rules)
   return {
     scenarioCount: oracleScenarios.length,
     scenarioIds: oracleScenarios.map(scenario => scenario.id),
@@ -564,6 +689,171 @@ function validateCanonicalCommand(command, group, rules, label) {
   validateControlPlaneResponse(command, target, responseContracts, label)
 }
 
+function selectRuntimeProjectionStage(deliveryResult, label) {
+  requireObject(deliveryResult, `${label} delivery result`)
+  const stages = requireArray(deliveryResult.stages, `${label} delivery result stages`)
+  let selected = null
+  for (let index = 0; index < stages.length; index += 1) {
+    const stage = requireObject(stages[index], `${label} delivery result stages[${index}]`)
+    if (stage.actorType !== 'codex' || stage.sessionBinding === null) continue
+    const binding = requireObject(
+      stage.sessionBinding,
+      `${label} delivery result stages[${index}].sessionBinding`,
+    )
+    if (binding.workerSessionId == null || binding.codexThreadId == null) continue
+    if (typeof stage.id !== 'string' || stage.id.length === 0) {
+      fail(`${label} selected stage id must be a non-empty string`)
+    }
+    if (typeof binding.productSessionId !== 'string'
+      || binding.productSessionId.length === 0) {
+      fail(`${label} selected ProductSession identity must be a non-empty string`)
+    }
+    selected = {
+      codexThreadId: binding.codexThreadId,
+      productSessionId: binding.productSessionId,
+      stageRunId: stage.id,
+      workerSessionId: binding.workerSessionId,
+    }
+  }
+  return selected
+}
+
+function validateRuntimeProjectionScenario(mapping, scenario, rules, label) {
+  const policy = rules.canonicalMigration.runtimeProjectionFollowup
+  const responseContracts = rules.canonicalExpected.responseContracts
+  let lastRuntimeResult = null
+
+  for (const [sourceIndex, signature] of mapping.sourceCommandSignatures.entries()) {
+    if (signature !== `strongflow.request:${policy.sourceOperation}`) continue
+    const deliveryCommands = scenario.commands.filter(command => (
+      command.sourceCommandIndexes.includes(sourceIndex)
+        && commandTarget(command) === policy.deliveryQueryTarget
+    ))
+    requireEqual(
+      deliveryCommands.length,
+      1,
+      `${label} source ${sourceIndex} delivery query count`,
+    )
+    const deliveryCommand = deliveryCommands[0]
+    const runtimeCommands = scenario.commands.filter(command => (
+      command.sourceCommandIndexes.includes(sourceIndex)
+        && commandTarget(command) === policy.runtimeQueryTarget
+    ))
+    const selected = Object.hasOwn(deliveryCommand.response, 'error')
+      ? null
+      : selectRuntimeProjectionStage(
+          deliveryCommand.response.result,
+          `${label} source ${sourceIndex}`,
+        )
+    requireEqual(
+      runtimeCommands.length,
+      selected === null ? 0 : 1,
+      `${label} source ${sourceIndex} runtime query count`,
+    )
+    if (selected === null) {
+      if (!Object.hasOwn(deliveryCommand.response, 'error')) lastRuntimeResult = null
+      continue
+    }
+
+    const runtimeCommand = runtimeCommands[0]
+    const deliveryIndex = scenario.commands.indexOf(deliveryCommand)
+    requireEqual(
+      scenario.commands[deliveryIndex + 1],
+      runtimeCommand,
+      `${label} source ${sourceIndex} runtime query position`,
+    )
+    requireDeepEqual(
+      runtimeCommand.request.parameters.atCursor,
+      deliveryCommand.response.result.readCursor,
+      `${label} source ${sourceIndex} runtime atCursor`,
+    )
+    requireEqual(
+      runtimeCommand.request.parameters.deliveryId,
+      deliveryCommand.response.result.deliveryId,
+      `${label} source ${sourceIndex} runtime deliveryId`,
+    )
+    requireEqual(
+      runtimeCommand.request.parameters.productSessionId,
+      selected.productSessionId,
+      `${label} source ${sourceIndex} runtime productSessionId`,
+    )
+    requireEqual(
+      runtimeCommand.request.parameters.stageRunId,
+      selected.stageRunId,
+      `${label} source ${sourceIndex} runtime stageRunId`,
+    )
+    if (Object.hasOwn(runtimeCommand.response, 'error')) {
+      fail(`${label} source ${sourceIndex} selected runtime query must complete`)
+    }
+    const result = runtimeCommand.response.result
+    requireExactKeys(
+      result,
+      responseContracts.runtimeProjectionGetResultExactKeys,
+      `${label} source ${sourceIndex} runtime result`,
+    )
+    requireEqual(result.kind, 'runtime_projection', `${label} runtime result kind`)
+    requireEqual(
+      result.deliveryId,
+      deliveryCommand.response.result.deliveryId,
+      `${label} runtime result deliveryId`,
+    )
+    requireEqual(
+      result.productSessionId,
+      selected.productSessionId,
+      `${label} runtime result productSessionId`,
+    )
+    requireEqual(
+      result.stageRunId,
+      selected.stageRunId,
+      `${label} runtime result stageRunId`,
+    )
+    requireDeepEqual(
+      result.readCursor,
+      deliveryCommand.response.result.readCursor,
+      `${label} runtime result readCursor`,
+    )
+    const sessions = requireArray(result.sessions, `${label} runtime result sessions`)
+    requireEqual(
+      sessions.length,
+      responseContracts.runtimeProjectionGetSessionsExactLength,
+      `${label} runtime result session count`,
+    )
+    const session = sessions[0]
+    requireExactKeys(
+      session,
+      responseContracts.runtimeProjectionSessionExactKeys,
+      `${label} runtime result session`,
+    )
+    requireEqual(
+      session.stageRunId,
+      selected.stageRunId,
+      `${label} runtime session stageRunId`,
+    )
+    requireEqual(
+      session.productSessionId,
+      selected.productSessionId,
+      `${label} runtime session productSessionId`,
+    )
+    requireEqual(
+      session.workerSessionId,
+      selected.workerSessionId,
+      `${label} runtime session workerSessionId`,
+    )
+    requireEqual(
+      session.codexThreadId,
+      selected.codexThreadId,
+      `${label} runtime session codexThreadId`,
+    )
+    lastRuntimeResult = result
+  }
+
+  requireDeepEqual(
+    scenario.observation.projection.runtime,
+    lastRuntimeResult,
+    `${label} runtime observation`,
+  )
+}
+
 function commandFromSource(scenario, sourceCommandIndex, target) {
   const matches = scenario.commands.filter(command => (
     command.sourceCommandIndexes.includes(sourceCommandIndex)
@@ -879,6 +1169,7 @@ export function validateCanonicalExpected(rules, oracle, expected) {
         `${label}.commands[${commandIndex}]`,
       )
     }
+    validateRuntimeProjectionScenario(mapping, scenario, rules, label)
     validateCanonicalAssertions(mapping, scenario)
   }
   return { scenarioCount: scenarios.length }
