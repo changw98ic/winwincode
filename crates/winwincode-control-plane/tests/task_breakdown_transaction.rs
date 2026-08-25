@@ -369,6 +369,77 @@ fn task_breakdown_receipt_first_replay_returns_original_graph_revision_and_event
 }
 
 #[test]
+fn task_breakdown_receipt_first_replay_does_not_parse_receipt_bound_fields() {
+    let root = temporary_directory("receipt-first-command");
+    seed_delivery(&root);
+    let command = task_breakdown_command(20);
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&published),
+        }),
+    )
+    .expect("Control Plane start");
+    let first = control_plane
+        .commit_delivery_task_breakdown(&command)
+        .expect("initial task-breakdown commit");
+    control_plane.shutdown().expect("initial shutdown");
+    published.lock().expect("published events").clear();
+
+    // Bind the stored receipt to command fields that are deliberately unusable
+    // on the mutation path. A receipt hit must prove its result from the stored
+    // events instead of decoding the payload or expected revision again.
+    let mut receipt_bound_command = command.clone();
+    receipt_bound_command.expected_revision = Revision(-1);
+    receipt_bound_command.payload = serde_json::json!({"receiptBoundField": true});
+    let receipt_bound_digest = command_digest(&receipt_bound_command);
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("receipt-bound database");
+    connection
+        .execute(
+            "UPDATE command_receipts SET command_digest = ?1 WHERE request_id = ?2",
+            [
+                receipt_bound_digest.0.as_str(),
+                receipt_bound_command.request_id.0.as_str(),
+            ],
+        )
+        .expect("install receipt-bound command digest");
+    connection
+        .execute(
+            "UPDATE product_state SET payload = ?1 WHERE stream_id = 'delivery:dlv_01J00000000000000000000000'",
+            [b"corrupt-current-state".as_slice()],
+        )
+        .expect("corrupt current state");
+    connection
+        .execute(
+            "UPDATE aggregate_journal_records SET payload = ?1 \
+             WHERE aggregate_type = 'delivery' AND aggregate_id = 'dlv_01J00000000000000000000000'",
+            [b"corrupt-current-journal".as_slice()],
+        )
+        .expect("corrupt current journal");
+    connection.close().expect("receipt-bound database close");
+
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(CapturingPublisher {
+            events: Arc::clone(&published),
+        }),
+    )
+    .expect("replay Control Plane start");
+    let replay = control_plane
+        .commit_delivery_task_breakdown(&receipt_bound_command)
+        .expect("receipt replay does not decode receipt-bound command fields");
+
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.revision, first.revision);
+    assert_eq!(replay.events, first.events);
+    assert!(published.lock().expect("published events").is_empty());
+    control_plane.shutdown().expect("replay shutdown");
+    fs::remove_dir_all(root).expect("database cleanup");
+}
+
+#[test]
 fn task_breakdown_same_scoped_request_with_changed_digest_is_a_conflict() {
     let root = temporary_directory("request-conflict");
     seed_delivery(&root);

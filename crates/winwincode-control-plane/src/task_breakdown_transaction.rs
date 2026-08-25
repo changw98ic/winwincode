@@ -50,22 +50,17 @@ pub(crate) fn execute(
     }
     let (receipt_identity, command_digest) = command_receipt(command)?;
     let prior_receipt = storage.load_receipt(&receipt_identity, &command_digest)?;
+
+    if let Some(receipt) = prior_receipt {
+        validate_replayed_receipt(&receipt, &receipt_identity)?;
+        return Ok(receipt);
+    }
+
     let payload = validate_payload(command)?;
     let expected_revision = expected_revision(command)?;
     let review_set_sha256 = transport_review_digest(&payload)?.to_owned();
     let delivery_id = payload.delivery_id.clone();
     let journal_key = delivery_journal_key(&delivery_id)?;
-
-    if let Some(receipt) = prior_receipt {
-        validate_receipt_projection(
-            &receipt,
-            &receipt_identity,
-            &delivery_id,
-            &review_set_sha256,
-            true,
-        )?;
-        return Ok(receipt);
-    }
 
     let loaded = storage.load_journal(&journal_key)?;
     let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
@@ -246,14 +241,38 @@ fn validate_receipt_projection(
     review_set_sha256: &str,
     expected_replay: bool,
 ) -> Result<DeliveryTaskBreakdownApprovedEvent, StorageError> {
-    if receipt.stream_id != delivery_stream_id(delivery_id)
-        || &receipt.receipt_identity != expected_identity
+    if &receipt.receipt_identity != expected_identity
         || receipt.idempotent_replay != expected_replay
     {
         return Err(StorageError::invalid_input(
             "durable task-breakdown receipt does not match its scoped request",
         ));
     }
+    let event = validate_receipt_contents(receipt)?;
+    if event.delivery_id != *delivery_id || event.review_set_sha256 != review_set_sha256 {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown event does not match its original receipt",
+        ));
+    }
+    Ok(event)
+}
+
+fn validate_replayed_receipt(
+    receipt: &CommitReceipt,
+    expected_identity: &ReceiptIdentity,
+) -> Result<(), StorageError> {
+    if &receipt.receipt_identity != expected_identity || !receipt.idempotent_replay {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown receipt does not match its scoped request",
+        ));
+    }
+    validate_receipt_contents(receipt)?;
+    Ok(())
+}
+
+fn validate_receipt_contents(
+    receipt: &CommitReceipt,
+) -> Result<DeliveryTaskBreakdownApprovedEvent, StorageError> {
     let stored_events = receipt
         .events
         .iter()
@@ -273,9 +292,9 @@ fn validate_receipt_projection(
     if stored_event.topic != TASK_BREAKDOWN_APPROVED_TOPIC
         || stored_event.event_id != task_breakdown_event_id(&event)
         || event.schema_version != DELIVERY_SCHEMA_VERSION
-        || event.delivery_id != *delivery_id
         || event.delivery_revision != receipt.revision
-        || event.review_set_sha256 != review_set_sha256
+        || receipt.stream_id != delivery_stream_id(&event.delivery_id)
+        || !canonical_review_digest(&event.review_set_sha256)
     {
         return Err(StorageError::invalid_input(
             "durable task-breakdown event does not match its original receipt",
@@ -284,11 +303,18 @@ fn validate_receipt_projection(
     validate_promoted_tasks(&event)?;
     validate_delivery_changed_receipt(
         receipt,
-        delivery_id,
+        &event.delivery_id,
         receipt.revision,
         DeliveryChangeKind::Advanced,
     )?;
     Ok(event)
+}
+
+fn canonical_review_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn validate_promoted_tasks(event: &DeliveryTaskBreakdownApprovedEvent) -> Result<(), StorageError> {
