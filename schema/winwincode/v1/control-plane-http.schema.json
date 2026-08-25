@@ -161,7 +161,8 @@
         "deliveryRevision",
         "runtimeLedgerRevision",
         "runtimeAcceptedSequence",
-        "publicationRevision"
+        "publicationRevision",
+        "eventCursor"
       ],
       "deliveryStageRuntimeRequiresReturnedCursor": true,
       "cursorAuthority": "server_issued_and_authenticated",
@@ -176,7 +177,17 @@
       "malformedCursorError": "INVALID_REQUEST",
       "foreignScopeCursorError": "PERMISSION_DENIED",
       "factAdapterUnavailableError": "TRUSTED_FACTS_UNAVAILABLE",
-      "generatedTimeIsCursor": false
+      "generatedTimeIsCursor": false,
+      "eventCursorResultPaths": {
+        "delivery.get": "result.readCursor.eventCursor",
+        "runtime.projection.get": "result.eventCursor"
+      },
+      "webSocketHandoff": "subscribe.startAt_must_equal_result_event_cursor",
+      "deliveryRuntimeEventCursorMustEqualReadCursor": true,
+      "productSessionEventCursorMustMatch": [
+        "envelope.scope",
+        "parameters.productSessionId"
+      ]
     },
     "deliveryStageSessionBinding": {
       "partialBindingFields": [
@@ -214,6 +225,22 @@
       "callerTaskFieldsAllowed": false,
       "promotion": "copy_ordered_task_proposals_field_by_field",
       "staleDigestError": "REVISION_CONFLICT"
+    },
+    "authentication": {
+      "anonymousAllowed": false,
+      "acceptedMethods": [
+        "sessionCookie",
+        "bearerAuth"
+      ],
+      "principalBinding": "authenticated_principal_must_equal_envelope_actor",
+      "credentialsInQueryAllowed": false,
+      "credentialsInBodyAllowed": false
+    },
+    "responseCorrelation": {
+      "authority": "request_operation_discriminator",
+      "queryResult": "exact_query_to_result_projection",
+      "commandResult": "exact_command_to_result_projection",
+      "relabeling": "reject"
     }
   },
   "$defs": {
@@ -441,40 +468,66 @@
       "description": "Side-effect-free query. Authenticated identity must equal actor and authorize scope."
     },
     "CommandCompletedResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "requestId",
-        "command",
-        "outcome",
-        "previousRevision",
-        "currentRevision",
-        "result"
-      ],
-      "properties": {
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionCreateCompletedResponse"
         },
-        "requestId": {
-          "$ref": "./domain.schema.json#/$defs/RequestId"
+        {
+          "$ref": "#/$defs/ChatSubmitCompletedResponse"
         },
-        "command": {
-          "$ref": "./domain.schema.json#/$defs/CommandName"
+        {
+          "$ref": "#/$defs/InputRespondCompletedResponse"
         },
-        "outcome": {
-          "const": "completed"
+        {
+          "$ref": "#/$defs/SessionCancelCompletedResponse"
         },
-        "previousRevision": {
-          "$ref": "./domain.schema.json#/$defs/Revision"
+        {
+          "$ref": "#/$defs/SessionCloseCompletedResponse"
         },
-        "currentRevision": {
-          "$ref": "./domain.schema.json#/$defs/Revision"
+        {
+          "$ref": "#/$defs/DeliveryCreateCompletedResponse"
         },
-        "result": {
-          "$ref": "#/$defs/CommandResult"
+        {
+          "$ref": "#/$defs/DeliveryUpdateSpecCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryApproveTaskBreakdownCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryAdvanceCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryResolveAttentionCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliverySubmitVerdictCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/SettingsUpdateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceCreateCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceDeleteCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalDecideCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerDrainCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerEnableCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationPublishCompletedResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationCancelCompletedResponse"
         }
-      }
+      ],
+      "description": "Exact command/result response union. Relabeling a result under another command is invalid."
     },
     "CommandAcceptedResponse": {
       "type": "object",
@@ -509,32 +562,54 @@
       }
     },
     "QueryResultResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "requestId",
-        "query",
-        "result",
-        "page"
-      ],
-      "properties": {
-        "schemaVersion": {
-          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionListResultResponse"
         },
-        "requestId": {
-          "$ref": "./domain.schema.json#/$defs/RequestId"
+        {
+          "$ref": "#/$defs/SessionGetResultResponse"
         },
-        "query": {
-          "$ref": "#/$defs/QueryName"
+        {
+          "$ref": "#/$defs/SessionMessagesListResultResponse"
         },
-        "result": {
-          "$ref": "#/$defs/QueryResult"
+        {
+          "$ref": "#/$defs/RuntimeProjectionGetResultResponse"
         },
-        "page": {
-          "$ref": "#/$defs/PageInfo"
+        {
+          "$ref": "#/$defs/DeliveryListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/DeliveryGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/SettingsGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CredentialReferenceGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/WorkerGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/PublicationGetResultResponse"
         }
-      }
+      ],
+      "description": "Exact query/result response union. A client can narrow result by query without accepting an unrelated projection."
     },
     "ScopedResourceLocator": {
       "type": "object",
@@ -1570,6 +1645,9 @@
             },
             "payload": {
               "$ref": "#/$defs/SessionCreatePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1588,6 +1666,9 @@
             },
             "payload": {
               "$ref": "#/$defs/ChatSubmitPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1606,6 +1687,9 @@
             },
             "payload": {
               "$ref": "#/$defs/InputRespondPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1624,6 +1708,9 @@
             },
             "payload": {
               "$ref": "#/$defs/SessionCancelPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1642,6 +1729,9 @@
             },
             "payload": {
               "$ref": "#/$defs/SessionClosePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1660,6 +1750,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryCreatePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1678,6 +1771,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryUpdateSpecPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1696,6 +1792,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryApproveTaskBreakdownPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1714,6 +1813,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryAdvancePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1732,6 +1834,9 @@
             },
             "payload": {
               "$ref": "#/$defs/DeliveryResolveAttentionPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1826,6 +1931,9 @@
             },
             "payload": {
               "$ref": "#/$defs/ApprovalDecidePayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1880,6 +1988,9 @@
             },
             "payload": {
               "$ref": "#/$defs/PublicationPublishPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1898,6 +2009,9 @@
             },
             "payload": {
               "$ref": "#/$defs/PublicationCancelPayload"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1916,6 +2030,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1934,6 +2051,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1952,6 +2072,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/SessionMessagesListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1970,6 +2093,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/RuntimeProjectionGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -1988,6 +2114,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/DeliveryListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2006,6 +2135,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/DeliveryGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2078,6 +2210,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/ApprovalListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2096,6 +2231,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/ApprovalGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2150,6 +2288,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/PublicationListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2168,6 +2309,9 @@
             },
             "parameters": {
               "$ref": "#/$defs/PublicationGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
             }
           }
         }
@@ -2378,9 +2522,7 @@
           "$ref": "./domain.schema.json#/$defs/AttentionItemId"
         },
         "approvedBy": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 500
+          "$ref": "./domain.schema.json#/$defs/ActorId"
         },
         "approvedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -2452,7 +2594,7 @@
           "maximum": 9007199254740991
         }
       },
-      "description": "Secret-safe remote publication identity. Control Plane verifies repository equals PublicationTarget.repository and resolves the link from kind plus number."
+      "description": "Secret-safe remote publication identity. Control Plane verifies repository equals PublicationTarget.repository and resolves links from kind plus number."
     },
     "ProductSessionPage": {
       "type": "object",
@@ -2595,55 +2737,6 @@
         }
       }
     },
-    "QueryResult": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ProductSessionProjection"
-        },
-        {
-          "$ref": "#/$defs/DeliveryDetailProjection"
-        },
-        {
-          "$ref": "./domain.schema.json#/$defs/RuntimeProjectionSnapshot"
-        },
-        {
-          "$ref": "#/$defs/SettingsProjection"
-        },
-        {
-          "$ref": "#/$defs/CredentialReferenceProjection"
-        },
-        {
-          "$ref": "#/$defs/ApprovalProjection"
-        },
-        {
-          "$ref": "#/$defs/WorkerProjection"
-        },
-        {
-          "$ref": "#/$defs/PublicationProjection"
-        },
-        {
-          "$ref": "#/$defs/ProductSessionPage"
-        },
-        {
-          "$ref": "#/$defs/ChatMessagePage"
-        },
-        {
-          "$ref": "#/$defs/DeliveryPage"
-        },
-        {
-          "$ref": "#/$defs/CredentialReferencePage"
-        },
-        {
-          "$ref": "#/$defs/ApprovalPage"
-        },
-        {
-          "$ref": "#/$defs/WorkerPage"
-        },
-        {
-          "$ref": "#/$defs/PublicationPage"
-        }
-      ]
-    },
     "MutationReceipt": {
       "type": "object",
       "additionalProperties": false,
@@ -2668,34 +2761,6 @@
           "$ref": "./domain.schema.json#/$defs/Revision"
         }
       }
-    },
-    "CommandResult": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ProductSessionProjection"
-        },
-        {
-          "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
-        },
-        {
-          "$ref": "#/$defs/SettingsProjection"
-        },
-        {
-          "$ref": "#/$defs/CredentialReferenceProjection"
-        },
-        {
-          "$ref": "#/$defs/ApprovalProjection"
-        },
-        {
-          "$ref": "#/$defs/WorkerProjection"
-        },
-        {
-          "$ref": "#/$defs/PublicationProjection"
-        },
-        {
-          "$ref": "#/$defs/MutationReceipt"
-        }
-      ]
     },
     "DeliveryRepositoryProjection": {
       "type": "object",
@@ -3833,9 +3898,7 @@
         "assignedTo": {
           "oneOf": [
             {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 500
+              "$ref": "./domain.schema.json#/$defs/ActorId"
             },
             {
               "type": "null"
@@ -3868,9 +3931,7 @@
         "resolvedBy": {
           "oneOf": [
             {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 500
+              "$ref": "./domain.schema.json#/$defs/ActorId"
             },
             {
               "type": "null"
@@ -4242,9 +4303,697 @@
         }
       },
       "description": "StrongFlow detail read model. It is a closed projection, not a mutable Delivery entity."
+    },
+    "CommandCompletedEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "command",
+        "outcome",
+        "previousRevision",
+        "currentRevision",
+        "result"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "command": {
+          "$ref": "./domain.schema.json#/$defs/CommandName"
+        },
+        "outcome": {
+          "const": "completed"
+        },
+        "previousRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "currentRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "result": {}
+      },
+      "description": "Shared completed-command envelope. Public responses use the command-discriminated CommandCompletedResponse union."
+    },
+    "SessionCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "session.create"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ChatSubmitCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "chat.submit"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "InputRespondCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "input.respond"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionCancelCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "session.cancel"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionCloseCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "session.close"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.create"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryUpdateSpecCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.update_spec"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryApproveTaskBreakdownCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.approve_task_breakdown"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryAdvanceCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.advance"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryResolveAttentionCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.resolve_attention"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliverySubmitVerdictCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "delivery.submit_verdict"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/DeliveryProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SettingsUpdateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "settings.update"
+            },
+            "result": {
+              "$ref": "#/$defs/SettingsProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceCreateCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "credential.reference.create"
+            },
+            "result": {
+              "$ref": "#/$defs/CredentialReferenceProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceDeleteCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "credential.reference.delete"
+            },
+            "result": {
+              "$ref": "#/$defs/MutationReceipt"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalDecideCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "approval.decide"
+            },
+            "result": {
+              "$ref": "#/$defs/ApprovalProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerDrainCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "worker.drain"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerEnableCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "worker.enable"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationPublishCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "publication.publish"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationCancelCompletedResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommandCompletedEnvelope"
+        },
+        {
+          "properties": {
+            "command": {
+              "const": "publication.cancel"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "QueryResultEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "query",
+        "result",
+        "page"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "query": {
+          "$ref": "#/$defs/QueryName"
+        },
+        "result": {},
+        "page": {
+          "$ref": "#/$defs/PageInfo"
+        }
+      },
+      "description": "Shared query-result envelope. Public responses use the query-discriminated QueryResultResponse union."
+    },
+    "SessionListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.get"
+            },
+            "result": {
+              "$ref": "#/$defs/ProductSessionProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SessionMessagesListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "session.messages.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ChatMessagePage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeProjectionGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "runtime.projection.get"
+            },
+            "result": {
+              "$ref": "./domain.schema.json#/$defs/RuntimeProjectionSnapshot"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "delivery.list"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "delivery.get"
+            },
+            "result": {
+              "$ref": "#/$defs/DeliveryDetailProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "SettingsGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "settings.get"
+            },
+            "result": {
+              "$ref": "#/$defs/SettingsProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "credential.reference.list"
+            },
+            "result": {
+              "$ref": "#/$defs/CredentialReferencePage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CredentialReferenceGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "credential.reference.get"
+            },
+            "result": {
+              "$ref": "#/$defs/CredentialReferenceProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "approval.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ApprovalPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "approval.get"
+            },
+            "result": {
+              "$ref": "#/$defs/ApprovalProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "worker.list"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "WorkerGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "worker.get"
+            },
+            "result": {
+              "$ref": "#/$defs/WorkerProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "publication.list"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationPage"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "PublicationGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "properties": {
+            "query": {
+              "const": "publication.get"
+            },
+            "result": {
+              "$ref": "#/$defs/PublicationProjection"
+            }
+          },
+          "type": "object"
+        }
+      ]
     }
   },
   "x-winwincode-openapi": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "wwc_session",
+        "description": "Same-origin Web and local Host session."
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Service-account and enterprise access token."
+      }
+    },
     "paths": {
       "/api/v1/commands": {
         "post": {
@@ -4361,7 +5110,15 @@
                 }
               }
             }
-          }
+          },
+          "security": [
+            {
+              "sessionCookie": []
+            },
+            {
+              "bearerAuth": []
+            }
+          ]
         }
       },
       "/api/v1/queries": {
@@ -4469,7 +5226,15 @@
                 }
               }
             }
-          }
+          },
+          "security": [
+            {
+              "sessionCookie": []
+            },
+            {
+              "bearerAuth": []
+            }
+          ]
         }
       }
     }
@@ -4497,7 +5262,32 @@
           "requestDefinition": "RuntimeProjectionGetQuery",
           "resultDefinition": "RuntimeProjectionSnapshot"
         }
-      ]
+      ],
+      "authentication": {
+        "anonymousAllowed": false,
+        "sessionCookie": {
+          "location": "cookie",
+          "name": "wwc_session"
+        },
+        "bearerAuth": {
+          "location": "header",
+          "name": "Authorization",
+          "scheme": "Bearer",
+          "format": "JWT"
+        },
+        "credentialsInQueryAllowed": false,
+        "credentialsInBodyAllowed": false
+      },
+      "responseCorrelation": {
+        "command": "command",
+        "query": "query",
+        "mismatch": "reject"
+      },
+      "snapshotHandoff": {
+        "deliveryGetCursorPath": "result.readCursor.eventCursor",
+        "runtimeProjectionGetCursorPath": "result.eventCursor",
+        "subscribeStartAtField": "startAt"
+      }
     }
   }
 }

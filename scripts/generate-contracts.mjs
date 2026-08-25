@@ -248,16 +248,34 @@ function visitSchema(value, callback) {
   for (const entry of Object.values(value)) visitSchema(entry, callback)
 }
 
-function constDiscriminatorValue(schema, propertyName, document, context) {
+function constDiscriminatorValue(schema, propertyName, document, context, seen = new Set()) {
   let resolved = schema
+  let sourceDocument = document
   if (typeof schema.$ref === 'string') {
     const name = referencedDefinitionName(schema.$ref, document, context)
-    resolved = context.registry.get(name).schema
+    const entry = context.registry.get(name)
+    const key = `${entry.document.id}#/$defs/${name}`
+    if (seen.has(key)) return undefined
+    seen.add(key)
+    resolved = entry.schema
+    sourceDocument = entry.document
   }
   const property = resolved.properties?.[propertyName]
-  return isObject(property) && (typeof property.const === 'string' || typeof property.const === 'number')
-    ? property.const
-    : undefined
+  if (isObject(property) && (typeof property.const === 'string' || typeof property.const === 'number')) {
+    return property.const
+  }
+  for (const branch of resolved.allOf ?? []) {
+    if (!isObject(branch)) continue
+    const value = constDiscriminatorValue(
+      branch,
+      propertyName,
+      sourceDocument,
+      context,
+      new Set(seen),
+    )
+    if (value !== undefined) return value
+  }
+  return undefined
 }
 
 function validateDocuments(documents, context) {
@@ -386,11 +404,68 @@ function tsObjectShapeType(shape, context) {
   return body
 }
 
+function typescriptEnumMemberType(baseProperty, value, document, context) {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined
+  const candidates = [baseProperty, ...(baseProperty.oneOf ?? []), ...(baseProperty.anyOf ?? [])]
+  for (const candidate of candidates) {
+    if (!isObject(candidate) || typeof candidate.$ref !== 'string') continue
+    const name = referenceName(candidate, document, context)
+    const definition = context.registry.get(name)?.schema
+    if (!Array.isArray(definition?.enum) || !definition.enum.includes(value)) continue
+    const used = new Set()
+    for (const enumValue of definition.enum) {
+      const variant = typescriptEnumVariant(enumValue, used)
+      if (enumValue === value) return `${name}.${variant}`
+    }
+  }
+  return undefined
+}
+
+function tsObjectOneOfBranchType(branch, baseProperties, baseRequired, document, context) {
+  if (!isObject(branch)) return 'never'
+  if (branch.properties === undefined) return tsType(branch, document, context)
+  const required = new Set([
+    ...(branch.required ?? []),
+    ...Object.keys(branch.properties).filter(name => baseRequired.has(name)),
+  ])
+  const properties = Object.entries(branch.properties)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, property]) => {
+      const constraint = isObject(property) ? property : {}
+      const baseProperty = isObject(baseProperties[name]) ? baseProperties[name] : {}
+      const enumMember = constraint.const === undefined
+        ? undefined
+        : typescriptEnumMemberType(baseProperty, constraint.const, document, context)
+      const type = enumMember ?? tsType(constraint, document, context)
+      return `  readonly ${JSON.stringify(name)}${required.has(name) ? '' : '?'}: ${type}`
+    })
+  return properties.length === 0 ? '{}' : `{
+${properties.join('\n')}
+}`
+}
+
+function tsObjectOneOfType(schema, document, context) {
+  const base = tsObjectType(schema, document, context)
+  const baseRequired = new Set(schema.required ?? [])
+  const branches = schema.oneOf.map(branch => tsObjectOneOfBranchType(
+    branch,
+    schema.properties ?? {},
+    baseRequired,
+    document,
+    context,
+  ))
+  return `${base} & (${unique(branches).join(' | ')})`
+}
+
 function tsType(schema, document, context) {
   if (!isObject(schema)) return 'unknown'
   if (typeof schema.$ref === 'string') return referenceName(schema, document, context)
   if (schema.const !== undefined) return tsLiteral(schema.const)
   if (Array.isArray(schema.enum)) return unique(schema.enum.map(tsLiteral)).join(' | ') || 'never'
+  if (
+    Array.isArray(schema.oneOf)
+    && (schema.type === 'object' || schema.properties !== undefined)
+  ) return tsObjectOneOfType(schema, document, context)
   if (Array.isArray(schema.oneOf)) {
     return unique(schema.oneOf.map(branch => tsType(branch, document, context))).join(' | ')
   }
@@ -483,6 +558,10 @@ function renderTypescriptDefinition(entry, context) {
     }
   }
   if (schema.type === 'object' || schema.properties !== undefined) {
+    if (Array.isArray(schema.oneOf)) {
+      lines.push(`export type ${name} = ${tsObjectOneOfType(schema, document, context)}`)
+      return lines.join('\n')
+    }
     if (
       isObject(schema.additionalProperties)
       && Object.keys(schema.properties ?? {}).length === 0
@@ -571,7 +650,8 @@ function forbiddenErrorDetailKeys(context) {
   if (!Array.isArray(values) || !values.every(value => typeof value === 'string')) {
     throw new Error('canonical ErrorDetails must declare forbidden property names')
   }
-  return values.toSorted()
+  return [...new Set(values.map(value => value.toLowerCase().replaceAll(/[^a-z0-9]/gu, '')))]
+    .toSorted()
 }
 
 function renderControlPlaneClient(context, digest) {
@@ -585,9 +665,14 @@ function renderControlPlaneClient(context, digest) {
     'CommandCompletedResponse',
     'ControlPlaneWebSocketSubscription',
     'ControlPlaneWebSocketSubscriptionId',
+    'ControlPlaneWebSocketSubscribeStartAt',
+    'DeliveryDetailProjection',
     'ControlPlaneWebSocketServerFrame',
     'ErrorEnvelope',
+    'EventReadCursor',
     'QueryResultResponse',
+    'RuntimeProjectionSnapshot',
+    'StrongFlowReadCursor',
   ])
   return [
     '// SPDX-License-Identifier: Apache-2.0',
@@ -614,7 +699,6 @@ import type {
   ControlPlaneWebSocketAcknowledgedCursor,
   ControlPlaneWebSocketAuthorizationRevokedFrame,
   ControlPlaneWebSocketClientFrame,
-  ControlPlaneWebSocketCursor,
   ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
   ControlPlaneWebSocketEventFrame,
   ControlPlaneWebSocketEventType,
@@ -623,18 +707,19 @@ import type {
   ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
   ControlPlaneWebSocketSubscription,
   ControlPlaneWebSocketSubscriptionId,
+  ControlPlaneWebSocketSubscribeStartAt,
   DeliveryDetailProjection,
   DeliveryId,
   ErrorDetailValue,
   ErrorDetails,
   ErrorEnvelope,
+  EventReadCursor,
   ProductSessionId,
   QueryRequest,
   QueryResultResponse,
   RepositoryScope,
   RequestId,
   RuntimeProjectionSnapshot,
-  Scope,
   StageRunId,
   StrongFlowReadCursor,
 } from './contracts.js'
@@ -785,6 +870,13 @@ function matchesSchemaNode(schemaValue: unknown, value: unknown, depth = 0): boo
         return false
       }
     }
+    if (schema.format === 'date-time') {
+      try {
+        if (new Date(value).toISOString() !== value) return false
+      } catch {
+        return false
+      }
+    }
   }
   if (schema.type === 'number' || schema.type === 'integer') {
     if (typeof value !== 'number' || !Number.isFinite(value)) return false
@@ -818,6 +910,13 @@ function matchesSchemaNode(schemaValue: unknown, value: unknown, depth = 0): boo
     || schema.additionalProperties !== undefined
   if (objectShape) {
     if (!isRecord(value)) return false
+    const objectKeys = Object.keys(value)
+    if (typeof schema.minProperties === 'number' && objectKeys.length < schema.minProperties) {
+      return false
+    }
+    if (typeof schema.maxProperties === 'number' && objectKeys.length > schema.maxProperties) {
+      return false
+    }
     const properties = schemaRecord(schema.properties) ?? {}
     if (
       Array.isArray(schema.required)
@@ -828,7 +927,7 @@ function matchesSchemaNode(schemaValue: unknown, value: unknown, depth = 0): boo
         return false
       }
     }
-    const extraKeys = Object.keys(value).filter(key => !Object.hasOwn(properties, key))
+    const extraKeys = objectKeys.filter(key => !Object.hasOwn(properties, key))
     if (schema.additionalProperties === false && extraKeys.length > 0) return false
     if (schemaRecord(schema.additionalProperties) !== null) {
       for (const key of extraKeys) {
@@ -883,10 +982,11 @@ function sanitizeDetail(value: unknown, depth = 0, entries = 0): SanitizedDetail
   let consumed = entries + 1
   for (const [key, item] of Object.entries(value)) {
     const normalized = key.toLowerCase()
+    const canonicalKey = normalized.replaceAll(/[^a-z0-9]/gu, '')
     if (
       key.length === 0
       || key.length > 128
-      || CANONICAL_FORBIDDEN_ERROR_KEYS.has(key)
+      || CANONICAL_FORBIDDEN_ERROR_KEYS.has(canonicalKey)
       || PROTOTYPE_CONTROL_KEYS.has(normalized)
       || FORBIDDEN_ERROR_KEY_FRAGMENTS.some(forbidden => normalized.includes(forbidden))
     ) return { valid: false, value: null, entries: consumed }
@@ -1106,7 +1206,7 @@ export interface ControlPlaneWebSocketClientOptions {
   readonly onEvent: (event: ControlPlaneWebSocketEventFrame) => Promise<void> | void
   readonly onResetRequired?: (
     frame: ControlPlaneWebSocketResetRequiredFrame | null,
-  ) => Promise<void> | void
+  ) => Promise<EventReadCursor> | EventReadCursor
   readonly onAuthorizationRevoked?: (
     frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
   ) => Promise<void> | void
@@ -1118,7 +1218,7 @@ export interface ControlPlaneWebSocketClient {
   subscribe(
     subscriptionId: ControlPlaneWebSocketSubscriptionId,
     subscription: ControlPlaneWebSocketSubscription,
-    startAt?: 'latest' | 'earliest-available',
+    startAt?: ControlPlaneWebSocketSubscribeStartAt,
   ): void
   resume(): void
   reconnect(): void
@@ -1242,9 +1342,10 @@ export function createControlPlaneWebSocketClient(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let currentSubscriptionId: ControlPlaneWebSocketSubscriptionId | null = null
   let currentSubscription: ControlPlaneWebSocketSubscription | null = null
-  let startAt: 'latest' | 'earliest-available' = 'latest'
+  let startAt = 'latest' as ControlPlaneWebSocketSubscribeStartAt
   let acknowledgedCursor: ControlPlaneWebSocketAcknowledgedCursor | null = null
   let resumeAfterCursor: ControlPlaneWebSocketAcknowledgedCursor | null = null
+  let subscribeStartCursor: EventReadCursor | null = null
   let authorizationEpoch: number | null = null
   let nextExpectedSequence: number | null = null
   let phase: ConnectionPhase = 'idle'
@@ -1283,6 +1384,7 @@ export function createControlPlaneWebSocketClient(
     generation += 1
     phase = 'idle'
     resumeAfterCursor = null
+    subscribeStartCursor = null
     const current = socket
     socket = null
     if (current === null) return
@@ -1362,7 +1464,7 @@ export function createControlPlaneWebSocketClient(
     if (
       phase !== 'active'
       || authorizationEpoch === null
-      || frame.authorizationEpoch !== authorizationEpoch
+      || frame.authorizationEpoch < authorizationEpoch
       || frame.subscriptionId !== configured.id
       || stableIdentity(frame.scope) !== stableIdentity(configured.value.scope)
       || stableIdentity(frame.stream) !== stableIdentity(configured.value.stream)
@@ -1377,6 +1479,7 @@ export function createControlPlaneWebSocketClient(
       ))
       return
     }
+    authorizationEpoch = frame.authorizationEpoch
     const identity = stableIdentity(frame)
     const remembered = rememberedEvents.get(frame.eventId)
     const rememberedSequence = rememberedSequences.get(frame.sequence)
@@ -1451,6 +1554,7 @@ export function createControlPlaneWebSocketClient(
     subscriptionGeneration += 1
     acknowledgedCursor = null
     resumeAfterCursor = null
+    subscribeStartCursor = null
     authorizationEpoch = null
     nextExpectedSequence = null
     phase = 'idle'
@@ -1463,7 +1567,9 @@ export function createControlPlaneWebSocketClient(
     eventQueue = Promise.resolve()
   }
 
-  function cursorMatchesSubscription(cursor: ControlPlaneWebSocketCursor): boolean {
+  function cursorMatchesSubscription(
+    cursor: ControlPlaneWebSocketAcknowledgedCursor | EventReadCursor,
+  ): boolean {
     return currentSubscription !== null
       && stableIdentity(cursor.scope) === stableIdentity(currentSubscription.scope)
       && stableIdentity(cursor.stream) === stableIdentity(currentSubscription.stream)
@@ -1480,7 +1586,17 @@ export function createControlPlaneWebSocketClient(
       if (options.onResetRequired === undefined) {
         throw clientFailure('RESET_REQUIRED', 'The subscription needs a complete HTTP reload.')
       }
-      await options.onResetRequired(frame)
+      const nextStartAt = await options.onResetRequired(frame)
+      if (
+        !matchesCanonicalSchema('EventReadCursor', nextStartAt)
+        || currentSubscription === null
+        || stableIdentity(nextStartAt.scope) !== stableIdentity(currentSubscription.scope)
+        || stableIdentity(nextStartAt.stream) !== stableIdentity(currentSubscription.stream)
+      ) throw clientFailure(
+        'RESET_FAILED',
+        'The complete HTTP reload did not return the active event stream cursor.',
+      )
+      startAt = nextStartAt
       if (
         ownSubscriptionGeneration === subscriptionGeneration
         && !manuallyClosed
@@ -1572,6 +1688,14 @@ export function createControlPlaneWebSocketClient(
           phase !== 'awaiting-subscribe'
           || frame.subscriptionId !== currentSubscriptionId
           || !cursorMatchesSubscription(frame.cursor)
+          || (
+            subscribeStartCursor !== null
+            && stableIdentity(frame.cursor) !== stableIdentity(subscribeStartCursor)
+          )
+          || (
+            authorizationEpoch !== null
+            && frame.authorizationEpoch < authorizationEpoch
+          )
         ) {
           failEventProcessing(clientFailure(
             'INVALID_WEBSOCKET_FRAME',
@@ -1581,6 +1705,7 @@ export function createControlPlaneWebSocketClient(
         }
         authorizationEpoch = frame.authorizationEpoch
         nextExpectedSequence = frame.cursor.sequence + 1
+        subscribeStartCursor = null
         phase = 'active'
         if (frame.cursor.eventId !== null) {
           acknowledgedCursor = frame.cursor as ControlPlaneWebSocketAcknowledgedCursor
@@ -1595,6 +1720,10 @@ export function createControlPlaneWebSocketClient(
           || !cursorMatchesSubscription(frame.after)
           || !cursorMatchesSubscription(frame.replayThrough)
           || frame.replayThrough.sequence < frame.after.sequence
+          || (
+            authorizationEpoch !== null
+            && frame.authorizationEpoch < authorizationEpoch
+          )
         ) {
           failEventProcessing(clientFailure(
             'INVALID_WEBSOCKET_FRAME',
@@ -1645,7 +1774,11 @@ export function createControlPlaneWebSocketClient(
     stopSocket(1000, 'reconnecting')
     const ownGeneration = generation
     const requestedResumeCursor = selectedMode === 'resume' ? acknowledgedCursor : null
+    const requestedStartAt = startAt
     resumeAfterCursor = requestedResumeCursor
+    subscribeStartCursor = selectedMode === 'subscribe' && isRecord(requestedStartAt)
+      ? requestedStartAt as EventReadCursor
+      : null
     phase = selectedMode === 'resume' ? 'awaiting-resume' : 'awaiting-subscribe'
     const created = createSocket(endpoint(options.baseUrl, CONTROL_PLANE_EVENTS_PATH))
     socket = created
@@ -1663,7 +1796,7 @@ export function createControlPlaneWebSocketClient(
           type: 'transport.subscribe.v1',
           subscriptionId: configured.id,
           subscription: configured.value,
-          startAt,
+          startAt: requestedStartAt,
         })
       }
     }
@@ -1695,11 +1828,22 @@ export function createControlPlaneWebSocketClient(
     get cursor() {
       return acknowledgedCursor
     },
-    subscribe(subscriptionId, subscription, requestedStart = 'latest') {
+    subscribe(
+      subscriptionId,
+      subscription,
+      requestedStart = 'latest' as ControlPlaneWebSocketSubscribeStartAt,
+    ) {
       if (
         !matchesCanonicalSchema('ControlPlaneWebSocketSubscriptionId', subscriptionId)
         || !matchesCanonicalSchema('ControlPlaneWebSocketSubscription', subscription)
-        || (requestedStart !== 'latest' && requestedStart !== 'earliest-available')
+        || !matchesCanonicalSchema('ControlPlaneWebSocketSubscribeStartAt', requestedStart)
+        || (
+          isRecord(requestedStart)
+          && (
+            stableIdentity(requestedStart.scope) !== stableIdentity(subscription.scope)
+            || stableIdentity(requestedStart.stream) !== stableIdentity(subscription.stream)
+          )
+        )
       ) throw clientFailure('INVALID_SUBSCRIPTION', 'The WebSocket subscription is invalid.')
       manuallyClosed = false
       blocked = false
@@ -1748,7 +1892,7 @@ interface ProjectionSubscriptionTransportOptions {
   readonly reconnectDelayMillis?: number
   readonly httpClient: ControlPlaneHttpClient
   readonly actor: Actor
-  readonly scope: Scope
+  readonly scope: RepositoryScope
   readonly productSessionId: ProductSessionId
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly eventTypes: ReadonlyArray<ControlPlaneWebSocketEventType>
@@ -1797,6 +1941,7 @@ function assertReadCursor(
 ): StrongFlowReadCursor {
   if (
     !isRecord(value)
+    || !matchesCanonicalSchema('StrongFlowReadCursor', value)
     || typeof value.token !== 'string'
     || value.token.length === 0
     || value.deliveryId !== deliveryId
@@ -1813,6 +1958,11 @@ function assertReadCursor(
     || typeof value.publicationRevision !== 'number'
     || !Number.isSafeInteger(value.publicationRevision)
     || value.publicationRevision < 0
+    || !isRecord(value.eventCursor)
+    || stableIdentity(value.eventCursor.scope) !== stableIdentity(scope)
+    || !isRecord(value.eventCursor.stream)
+    || value.eventCursor.stream.kind !== 'delivery'
+    || value.eventCursor.stream.deliveryId !== deliveryId
   ) throw invalidResponse(requestIdValue)
   return value as unknown as StrongFlowReadCursor
 }
@@ -1853,10 +2003,10 @@ export function createStrongFlowProjectionSubscription(
     return !closed && ownGeneration === operationGeneration
   }
 
-  async function reloadAt(ownGeneration: number): Promise<boolean> {
+  async function reloadAt(ownGeneration: number): Promise<EventReadCursor | null> {
     let restarts = 0
     for (;;) {
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       const deliveryRequestId = requestId(options)
       const deliveryResponse = await options.httpClient.submitQuery({
         schemaVersion: 'winwincode/v1',
@@ -1867,9 +2017,13 @@ export function createStrongFlowProjectionSubscription(
         parameters: { deliveryId: options.deliveryId },
         page: { cursor: null, limit: 1 },
       })
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       const delivery = projectionResult(deliveryResponse)
-      if (delivery.kind !== 'delivery_detail' || delivery.deliveryId !== options.deliveryId) {
+      if (
+        !matchesCanonicalSchema('DeliveryDetailProjection', delivery)
+        || delivery.kind !== 'delivery_detail'
+        || delivery.deliveryId !== options.deliveryId
+      ) {
         throw invalidResponse(deliveryRequestId)
       }
       const candidateCursor = assertReadCursor(
@@ -1897,7 +2051,7 @@ export function createStrongFlowProjectionSubscription(
           page: { cursor: null, limit: 1 },
         })
       } catch (error) {
-        if (!operationIsCurrent(ownGeneration)) return false
+        if (!operationIsCurrent(ownGeneration)) return null
         if (
           error instanceof ControlPlaneClientError
           && error.code === 'READ_CURSOR_EXPIRED'
@@ -1908,42 +2062,44 @@ export function createStrongFlowProjectionSubscription(
         }
         throw error
       }
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       const runtime = projectionResult(runtimeResponse)
       if (
-        runtime.kind !== 'runtime_projection'
+        !matchesCanonicalSchema('RuntimeProjectionSnapshot', runtime)
+        || runtime.kind !== 'runtime_projection'
         || runtime.productSessionId !== options.productSessionId
         || runtime.deliveryId !== options.deliveryId
         || runtime.stageRunId !== options.stageRunId
         || stableIdentity(runtime.readCursor) !== stableIdentity(candidateCursor)
+        || stableIdentity(runtime.eventCursor) !== stableIdentity(candidateCursor.eventCursor)
       ) throw invalidResponse(runtimeRequestId)
       const snapshot: StrongFlowProjectionSnapshot = {
         cursor: candidateCursor,
         delivery: delivery as unknown as DeliveryDetailProjection,
         runtime: runtime as unknown as RuntimeProjectionSnapshot,
       }
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       await options.onSnapshot(snapshot)
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       readCursor = candidateCursor
-      return true
+      return candidateCursor.eventCursor
     }
   }
 
-  function reload(): Promise<boolean> {
+  function reload(): Promise<EventReadCursor | null> {
     const ownGeneration = operationGeneration + 1
     operationGeneration = ownGeneration
     return enqueue(() => reloadAt(ownGeneration))
   }
 
-  function clearAndReload(): Promise<boolean> {
+  function clearAndReload(): Promise<EventReadCursor | null> {
     const ownGeneration = operationGeneration + 1
     operationGeneration = ownGeneration
     readCursor = null
     return enqueue(async () => {
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       await options.onSnapshotCleared?.('reset')
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       return reloadAt(ownGeneration)
     })
   }
@@ -1992,7 +2148,12 @@ export function createStrongFlowProjectionSubscription(
         await reload()
       },
       async onResetRequired() {
-        await clearAndReload()
+        const cursor = await clearAndReload()
+        if (cursor === null) throw clientFailure(
+          'RESET_FAILED',
+          'The StrongFlow snapshot reload was superseded before subscription.',
+        )
+        return cursor
       },
       async onAuthorizationRevoked(frame) {
         await clearAuthorization(frame)
@@ -2011,14 +2172,14 @@ export function createStrongFlowProjectionSubscription(
     const ownGeneration = operationGeneration + 1
     operationGeneration = ownGeneration
     const operation = (async () => {
-      const loaded = await enqueue(() => reloadAt(ownGeneration))
-      if (!loaded || !operationIsCurrent(ownGeneration)) return
+      const snapshotCursor = await enqueue(() => reloadAt(ownGeneration))
+      if (snapshotCursor === null || !operationIsCurrent(ownGeneration)) return
       const next = createRealtimeClient()
       next.subscribe(options.subscriptionId, {
         scope: options.scope,
         stream: { kind: 'delivery', deliveryId: options.deliveryId },
         eventTypes: options.eventTypes,
-      })
+      }, snapshotCursor)
       if (!operationIsCurrent(ownGeneration)) {
         next.close()
         return
@@ -2070,8 +2231,8 @@ export function createProductSessionRuntimeProjectionSubscription(
     return !closed && ownGeneration === operationGeneration
   }
 
-  async function reloadAt(ownGeneration: number): Promise<boolean> {
-    if (!operationIsCurrent(ownGeneration)) return false
+  async function reloadAt(ownGeneration: number): Promise<EventReadCursor | null> {
+    if (!operationIsCurrent(ownGeneration)) return null
     const runtimeRequestId = requestId(options)
     const response = await options.httpClient.submitQuery({
       schemaVersion: 'winwincode/v1',
@@ -2085,32 +2246,40 @@ export function createProductSessionRuntimeProjectionSubscription(
       },
       page: { cursor: null, limit: 1 },
     })
-    if (!operationIsCurrent(ownGeneration)) return false
+    if (!operationIsCurrent(ownGeneration)) return null
     const runtime = projectionResult(response)
     if (
-      runtime.kind !== 'runtime_projection'
+      !matchesCanonicalSchema('RuntimeProjectionSnapshot', runtime)
+      || runtime.kind !== 'runtime_projection'
       || runtime.productSessionId !== options.productSessionId
       || runtime.deliveryId !== null
       || runtime.stageRunId !== null
       || runtime.readCursor !== null
+      || !isRecord(runtime.eventCursor)
+      || stableIdentity(runtime.eventCursor.scope) !== stableIdentity(options.scope)
+      || !isRecord(runtime.eventCursor.stream)
+      || runtime.eventCursor.stream.kind !== 'product-session'
+      || runtime.eventCursor.stream.productSessionId !== options.productSessionId
     ) throw invalidResponse(runtimeRequestId)
     await options.onSnapshot(runtime as unknown as RuntimeProjectionSnapshot)
     return operationIsCurrent(ownGeneration)
+      ? runtime.eventCursor as EventReadCursor
+      : null
   }
 
-  function reload(): Promise<boolean> {
+  function reload(): Promise<EventReadCursor | null> {
     const ownGeneration = operationGeneration + 1
     operationGeneration = ownGeneration
     return enqueue(() => reloadAt(ownGeneration))
   }
 
-  function clearAndReload(): Promise<boolean> {
+  function clearAndReload(): Promise<EventReadCursor | null> {
     const ownGeneration = operationGeneration + 1
     operationGeneration = ownGeneration
     return enqueue(async () => {
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       await options.onSnapshotCleared?.('reset')
-      if (!operationIsCurrent(ownGeneration)) return false
+      if (!operationIsCurrent(ownGeneration)) return null
       return reloadAt(ownGeneration)
     })
   }
@@ -2153,7 +2322,12 @@ export function createProductSessionRuntimeProjectionSubscription(
         await reload()
       },
       async onResetRequired() {
-        await clearAndReload()
+        const cursor = await clearAndReload()
+        if (cursor === null) throw clientFailure(
+          'RESET_FAILED',
+          'The product session snapshot reload was superseded before subscription.',
+        )
+        return cursor
       },
       async onAuthorizationRevoked(frame) {
         await clearAuthorization(frame)
@@ -2172,14 +2346,14 @@ export function createProductSessionRuntimeProjectionSubscription(
     const ownGeneration = operationGeneration + 1
     operationGeneration = ownGeneration
     const operation = (async () => {
-      const loaded = await enqueue(() => reloadAt(ownGeneration))
-      if (!loaded || !operationIsCurrent(ownGeneration)) return
+      const snapshotCursor = await enqueue(() => reloadAt(ownGeneration))
+      if (snapshotCursor === null || !operationIsCurrent(ownGeneration)) return
       const next = createRealtimeClient()
       next.subscribe(options.subscriptionId, {
         scope: options.scope,
         stream: { kind: 'product-session', productSessionId: options.productSessionId },
         eventTypes: options.eventTypes,
-      })
+      }, snapshotCursor)
       if (!operationIsCurrent(ownGeneration)) {
         next.close()
         return
@@ -2376,6 +2550,7 @@ function rustObjectShapeFields(
   existingNames,
   qualifyShared,
   typeOverrides = new Map(),
+  includeDeserializeAttributes = true,
 ) {
   const fields = []
   for (const [jsonName, property] of [...shape.properties.entries()]
@@ -2394,6 +2569,9 @@ function rustObjectShapeFields(
     if (optional && !type.startsWith('Option<')) type = `Option<${type}>`
     fields.push(...rustDocumentation(resolvedSchema.description).map(line => `    ${line}`))
     if (optional) fields.push('    #[serde(default, skip_serializing_if = "Option::is_none")]')
+    else if (includeDeserializeAttributes && type.startsWith('Option<')) {
+      fields.push('    #[serde(deserialize_with = "deserialize_required_nullable")]')
+    }
     fields.push(`    #[serde(rename = ${JSON.stringify(jsonName)})]`)
     fields.push(`    pub ${fieldName}: ${type},`)
   }
@@ -2418,6 +2596,198 @@ function rustObjectShapeFields(
   return fields
 }
 
+function rustObjectShapeFieldNames(shape) {
+  const names = []
+  const existingNames = new Set()
+  for (const [jsonName] of [...shape.properties.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))) {
+    let fieldName = rustFieldName(jsonName)
+    let suffix = 2
+    while (existingNames.has(fieldName)) {
+      fieldName = `${rustFieldName(jsonName)}_${String(suffix)}`
+      suffix += 1
+    }
+    existingNames.add(fieldName)
+    names.push(fieldName)
+  }
+  return names
+}
+
+function rustIntegerLiteral(value, sourcePath) {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${sourcePath}: Rust integer constraint must be a safe integer`)
+  }
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/gu, '_')
+}
+
+function rustJsonValueConstraint(
+  schema,
+  accessor,
+  sourcePath,
+  document,
+  context,
+  qualifyShared,
+) {
+  if (!isObject(schema)) {
+    throw new Error(`${sourcePath}: oneOf property constraint must be an object`)
+  }
+  if (schema.const !== undefined) {
+    if (typeof schema.const === 'string') {
+      return `matches!(${accessor}, Some(serde_json::Value::String(value)) if value == ${JSON.stringify(schema.const)})`
+    }
+    if (typeof schema.const === 'boolean') {
+      return `${accessor}.and_then(serde_json::Value::as_bool) == Some(${String(schema.const)})`
+    }
+    if (typeof schema.const === 'number') {
+      return `${accessor}.and_then(serde_json::Value::as_f64) == Some(${String(schema.const)}f64)`
+    }
+    if (schema.const === null) return `${accessor}.is_some_and(serde_json::Value::is_null)`
+  }
+  if (typeof schema.$ref === 'string') {
+    const type = rustType(schema, document, context, qualifyShared)
+    return `${accessor}.is_some_and(|value| serde_json::from_value::<${type}>(value.clone()).is_ok())`
+  }
+  const types = schemaTypes(schema)
+  if (types.length === 1 && types[0] === 'null') {
+    return `${accessor}.is_some_and(serde_json::Value::is_null)`
+  }
+  if (types.length === 1 && types[0] === 'string') {
+    const checks = [`let Some(value) = value.as_str() else { return false; };`]
+    if (schema.minLength !== undefined) checks.push(`if value.chars().count() < ${String(schema.minLength)} { return false; }`)
+    if (schema.maxLength !== undefined) checks.push(`if value.chars().count() > ${String(schema.maxLength)} { return false; }`)
+    checks.push('true')
+    return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+  }
+  if (types.length === 1 && types[0] === 'integer') {
+    let predicate = 'true'
+    if (schema.minimum !== undefined && schema.maximum !== undefined) {
+      const minimum = rustIntegerLiteral(schema.minimum, sourcePath)
+      const maximum = rustIntegerLiteral(schema.maximum, sourcePath)
+      predicate = `(${minimum}..=${maximum}).contains(&value)`
+    } else if (schema.minimum !== undefined) {
+      predicate = `value >= ${rustIntegerLiteral(schema.minimum, sourcePath)}`
+    } else if (schema.maximum !== undefined) {
+      predicate = `value <= ${rustIntegerLiteral(schema.maximum, sourcePath)}`
+    }
+    return `${accessor}.and_then(serde_json::Value::as_i64).is_some_and(|value| ${predicate})`
+  }
+  if (types.length === 1 && types[0] === 'array') {
+    const checks = ['let Some(items) = value.as_array() else { return false; };']
+    if (schema.minItems === 1) checks.push('if items.is_empty() { return false; }')
+    else if (schema.minItems !== undefined) checks.push(`if items.len() < ${String(schema.minItems)} { return false; }`)
+    if (schema.maxItems !== undefined) checks.push(`if items.len() > ${String(schema.maxItems)} { return false; }`)
+    if (isObject(schema.items) && schemaTypes(schema.items).includes('string')) {
+      const itemChecks = ['let Some(value) = item.as_str() else { return false; };']
+      if (schema.items.minLength !== undefined) itemChecks.push(`if value.chars().count() < ${String(schema.items.minLength)} { return false; }`)
+      if (schema.items.maxLength !== undefined) itemChecks.push(`if value.chars().count() > ${String(schema.items.maxLength)} { return false; }`)
+      itemChecks.push('true')
+      checks.push(`if !items.iter().all(|item| {\n${itemChecks.join('\n')}\n}) { return false; }`)
+    }
+    checks.push('true')
+    return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+  }
+  throw new Error(`${sourcePath}: unsupported object-level oneOf property constraint`)
+}
+
+function rustObjectOneOfBranchExpression(branch, entry, index, context, qualifyShared) {
+  if (!isObject(branch) || !isObject(branch.properties)) {
+    throw new Error(
+      `${entry.document.path}: ${entry.name} oneOf branch ${String(index + 1)} must use property constraints`,
+    )
+  }
+  const checks = Object.entries(branch.properties).map(([name, constraint]) => (
+    rustJsonValueConstraint(
+      constraint,
+      `value.get(${JSON.stringify(name)})`,
+      `${entry.document.path}: ${entry.name}.oneOf[${String(index)}].${name}`,
+      entry.document,
+      context,
+      qualifyShared,
+    )
+  ))
+  return checks.length === 0 ? 'true' : checks.join(' && ')
+}
+
+function renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTypes) {
+  const shape = {
+    properties: new Map(Object.entries(entry.schema.properties ?? {}).map(([name, property]) => [
+      name,
+      { schema: isObject(property) ? property : {}, document: entry.document },
+    ])),
+    required: new Set(entry.schema.required ?? []),
+    additionalProperties: entry.schema.additionalProperties,
+  }
+  const wireName = `${entry.name}Wire`
+  const fieldNames = rustObjectShapeFieldNames(shape)
+  lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize)]')
+  lines.push(`pub struct ${entry.name} {`)
+  lines.push(...rustObjectShapeFields(
+    shape,
+    context,
+    new Set(),
+    qualifyShared,
+    constTypes,
+    false,
+  ))
+  lines.push('}')
+  lines.push('')
+  lines.push('#[derive(serde::Serialize, serde::Deserialize)]')
+  if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
+  lines.push(`struct ${wireName} {`)
+  lines.push(...rustObjectShapeFields(
+    shape,
+    context,
+    new Set(),
+    qualifyShared,
+    constTypes,
+    true,
+  ))
+  lines.push('}')
+  lines.push('')
+  lines.push('#[rustfmt::skip]')
+  lines.push(`impl ${entry.name} {`)
+  lines.push(`    fn from_wire(wire: ${wireName}) -> Result<Self, String> {`)
+  lines.push('        let value = serde_json::to_value(&wire)')
+  lines.push(`            .map_err(|error| format!(${JSON.stringify(`${entry.name} validation failed: {error}`)}))?;`)
+  lines.push('        let matching_branches = [')
+  entry.schema.oneOf.forEach((branch, index) => {
+    lines.push(`            ${rustObjectOneOfBranchExpression(
+      branch,
+      entry,
+      index,
+      context,
+      qualifyShared,
+    )},`)
+  })
+  lines.push('        ]')
+  lines.push('        .into_iter()')
+  lines.push('        .filter(|matches| *matches)')
+  lines.push('        .count();')
+  lines.push('        if matching_branches != 1 {')
+  lines.push(`            return Err(${JSON.stringify(`${entry.name} must match exactly one oneOf branch`)}.to_owned());`)
+  lines.push('        }')
+  lines.push(`        let ${wireName} {`)
+  for (const name of fieldNames) lines.push(`            ${name},`)
+  lines.push('        } = wire;')
+  lines.push('        Ok(Self {')
+  for (const name of fieldNames) lines.push(`            ${name},`)
+  lines.push('        })')
+  lines.push('    }')
+  lines.push('}')
+  lines.push('')
+  lines.push('#[rustfmt::skip]')
+  lines.push(`impl<'de> serde::Deserialize<'de> for ${entry.name} {`)
+  lines.push('    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>')
+  lines.push('    where')
+  lines.push("        D: serde::Deserializer<'de>,")
+  lines.push('    {')
+  lines.push(`        let wire = <${wireName} as serde::Deserialize>::deserialize(deserializer)?;`)
+  lines.push('        Self::from_wire(wire).map_err(serde::de::Error::custom)')
+  lines.push('    }')
+  lines.push('}')
+  return lines.join('\n')
+}
+
 function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
   const constTypes = new Map()
@@ -2431,6 +2801,9 @@ function renderRustObject(entry, context, qualifyShared) {
     lines.push(`    ${rustVariantName(property.const)},`)
     lines.push('}')
     lines.push('')
+  }
+  if (Array.isArray(entry.schema.oneOf)) {
+    return renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTypes)
   }
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
   if (entry.schema.additionalProperties === false) lines.push('#[serde(deny_unknown_fields)]')
@@ -2587,6 +2960,15 @@ function renderRustApi(context, digest) {
     '//! Public transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared scalar value objects are defined once in `winwincode-domain`.',
     '',
+    '#[allow(clippy::missing_errors_doc)]',
+    "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",
+    'where',
+    "    D: serde::Deserializer<'de>,",
+    "    T: serde::Deserialize<'de>,",
+    '{',
+    '    <Option<T> as serde::Deserialize>::deserialize(deserializer)',
+    '}',
+    '',
     '/// Canonical Control Plane routes and projection refresh behavior for generated clients.',
     `pub const WINWINCODE_CLIENT_METADATA_JSON: &str = ${rustRawString(JSON.stringify(context.clientMetadata))};`,
     '',
@@ -2664,11 +3046,38 @@ function mergedOpenApiPaths(documents, context) {
   return paths
 }
 
+function mergedOpenApiSecuritySchemes(documents) {
+  const securitySchemes = {}
+  for (const document of documents) {
+    const extension = document.schema['x-winwincode-openapi']
+    if (extension === undefined) continue
+    const schemes = extension.securitySchemes
+    if (schemes === undefined) continue
+    if (!isObject(schemes)) {
+      throw new Error(`${document.path}: x-winwincode-openapi.securitySchemes must be an object`)
+    }
+    for (const [name, scheme] of Object.entries(schemes)) {
+      if (!isObject(scheme)) {
+        throw new Error(`${document.path}: OpenAPI security scheme ${name} must be an object`)
+      }
+      if (Object.hasOwn(securitySchemes, name)) {
+        throw new Error(`${document.path}: duplicate OpenAPI security scheme ${name}`)
+      }
+      securitySchemes[name] = canonicalValue(scheme)
+    }
+  }
+  return securitySchemes
+}
+
 function renderOpenApi(documents, context, digest) {
   const schemas = {}
   for (const entry of [...context.registry.values()].sort((left, right) => left.name.localeCompare(right.name))) {
     schemas[entry.name] = rewriteReferences(entry.schema, entry.document, context, 'openapi')
   }
+  const securitySchemes = mergedOpenApiSecuritySchemes(documents)
+  const components = Object.keys(securitySchemes).length === 0
+    ? { schemas }
+    : { schemas, securitySchemes }
   return canonicalJson({
     openapi: '3.1.0',
     jsonSchemaDialect: JSON_SCHEMA_DIALECT,
@@ -2682,7 +3091,7 @@ function renderOpenApi(documents, context, digest) {
       },
     },
     paths: mergedOpenApiPaths(documents, context),
-    components: { schemas },
+    components,
     'x-generated-from': documents.map(document => document.id).sort((left, right) => left.localeCompare(right)),
     'x-source-digest': `sha256:${digest}`,
     'x-winwincode-client-metadata': context.clientMetadata,

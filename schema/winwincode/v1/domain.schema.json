@@ -210,7 +210,8 @@
         "deliveryRevision",
         "runtimeLedgerRevision",
         "runtimeAcceptedSequence",
-        "publicationRevision"
+        "publicationRevision",
+        "eventCursor"
       ],
       "properties": {
         "token": {
@@ -239,9 +240,13 @@
         },
         "publicationRevision": {
           "$ref": "#/$defs/Revision"
+        },
+        "eventCursor": {
+          "$ref": "#/$defs/DeliveryEventReadCursor",
+          "description": "Exact Delivery event stream position included in the authenticated read-cut token."
         }
       },
-      "description": "Server-issued, fully comparable StrongFlow read cut. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate."
+      "description": "Server-issued, fully comparable StrongFlow read cut. Its authenticated token seals every field including eventCursor. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate."
     },
     "RuntimeProjectionSnapshot": {
       "type": "object",
@@ -250,6 +255,7 @@
         "kind",
         "revision",
         "readCursor",
+        "eventCursor",
         "productSessionId",
         "deliveryId",
         "stageRunId",
@@ -311,9 +317,13 @@
         },
         "rebuiltAt": {
           "$ref": "#/$defs/Instant"
+        },
+        "eventCursor": {
+          "$ref": "#/$defs/RuntimeProjectionEventCursor",
+          "description": "Exact WebSocket stream position represented by this complete snapshot."
         }
       },
-      "description": "Complete bounded typed projection used after restart, invalidation, or WebSocket reset.",
+      "description": "Complete bounded typed projection used after restart, invalidation, or WebSocket reset. eventCursor is the only lossless handoff to the first subscription.",
       "oneOf": [
         {
           "properties": {
@@ -325,6 +335,9 @@
             },
             "readCursor": {
               "type": "null"
+            },
+            "eventCursor": {
+              "$ref": "#/$defs/ProductSessionEventReadCursor"
             }
           }
         },
@@ -338,6 +351,9 @@
             },
             "readCursor": {
               "$ref": "#/$defs/StrongFlowReadCursor"
+            },
+            "eventCursor": {
+              "$ref": "#/$defs/DeliveryEventReadCursor"
             }
           }
         }
@@ -1484,6 +1500,350 @@
         }
       },
       "description": "One deterministic StrongFlow session projection built only from an exact accepted runtime binding."
+    },
+    "RuntimeProjectionEventCursor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/DeliveryEventReadCursor"
+        }
+      ],
+      "description": "Exact event baseline for a ProductSession runtime snapshot or Delivery-stage runtime snapshot."
+    },
+    "ControlPlaneEventId": {
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9_-]{16,128}$",
+      "description": "Stable identity of one persisted Control Plane event, independent of transport."
+    },
+    "EventReadPosition": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Last persisted sequence included in a snapshot or event-stream baseline; zero represents an empty stream."
+    },
+    "ScopeEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "scope"
+        }
+      }
+    },
+    "DeliveryEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "deliveryId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "delivery"
+        },
+        "deliveryId": {
+          "$ref": "#/$defs/DeliveryId"
+        }
+      }
+    },
+    "ProductSessionEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "productSessionId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "product-session"
+        },
+        "productSessionId": {
+          "$ref": "#/$defs/ProductSessionId"
+        }
+      }
+    },
+    "LeaseEventReadStream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workerId",
+        "leaseId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "lease"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        }
+      }
+    },
+    "EventReadStream": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ScopeEventReadStream"
+        },
+        {
+          "$ref": "#/$defs/DeliveryEventReadStream"
+        },
+        {
+          "$ref": "#/$defs/ProductSessionEventReadStream"
+        },
+        {
+          "$ref": "#/$defs/LeaseEventReadStream"
+        }
+      ],
+      "description": "One exact ordered Control Plane event stream shared by snapshot and push transports."
+    },
+    "ScopeEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ScopeEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one scope-wide event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "DeliveryEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/RepositoryScope"
+        },
+        "stream": {
+          "$ref": "#/$defs/DeliveryEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one repository-scoped Delivery event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "ProductSessionEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/RepositoryScope"
+        },
+        "stream": {
+          "$ref": "#/$defs/ProductSessionEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one repository-scoped ProductSession event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "LeaseEventReadCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "stream",
+        "sequence",
+        "eventId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "stream": {
+          "$ref": "#/$defs/LeaseEventReadStream"
+        },
+        "sequence": {
+          "$ref": "#/$defs/EventReadPosition"
+        },
+        "eventId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact position in one worker lease event stream. Empty streams use sequence zero with null eventId; positive positions require the persisted event ID.",
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": {
+              "const": 0
+            },
+            "eventId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "eventId": {
+              "$ref": "#/$defs/ControlPlaneEventId"
+            }
+          }
+        }
+      ]
+    },
+    "EventReadCursor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ScopeEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/DeliveryEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/ProductSessionEventReadCursor"
+        },
+        {
+          "$ref": "#/$defs/LeaseEventReadCursor"
+        }
+      ],
+      "description": "Transport-neutral exact stream position carried from a complete snapshot into event subscription."
     }
   }
 }

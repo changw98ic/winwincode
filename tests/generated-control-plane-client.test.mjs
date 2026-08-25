@@ -57,8 +57,13 @@ function completedCommandResponse(requestId, command, revision = 8) {
     previousRevision: revision - 1,
     currentRevision: revision,
     result: {
-      resourceKind: 'product_session',
+      id: productSessionId,
       revision,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+      title: 'Generated client session',
+      state: 'cancelled',
+      updatedAt: '2026-08-25T00:00:00.000Z',
     },
   }
 }
@@ -74,6 +79,7 @@ function queryResponse(request, result) {
 }
 
 function readCursor(suffix = '1') {
+  const sequence = Number(suffix)
   return {
     token: `sfread_${String(suffix).padStart(32, '0')}`,
     scope,
@@ -82,6 +88,12 @@ function readCursor(suffix = '1') {
     runtimeLedgerRevision: Number(suffix),
     runtimeAcceptedSequence: Number(suffix),
     publicationRevision: 0,
+    eventCursor: {
+      scope,
+      stream: { kind: 'delivery', deliveryId },
+      sequence,
+      eventId: sequence === 0 ? null : eventId(sequence),
+    },
   }
 }
 
@@ -139,6 +151,7 @@ function deliveryRuntimeProjection(cursor) {
     revision: cursor.runtimeLedgerRevision,
     lastProjectionSequence: cursor.runtimeAcceptedSequence,
     readCursor: cursor,
+    eventCursor: cursor.eventCursor,
     rebuiltAt: '2026-08-25T00:00:00.000Z',
     sessions: [],
   }
@@ -153,6 +166,12 @@ function productRuntimeProjection(revision = 1) {
     revision,
     lastProjectionSequence: revision,
     readCursor: null,
+    eventCursor: {
+      scope,
+      stream: { kind: 'product-session', productSessionId },
+      sequence: revision,
+      eventId: revision === 0 ? null : eventId(revision),
+    },
     rebuiltAt: '2026-08-25T00:00:00.000Z',
     sessions: [],
   }
@@ -293,6 +312,26 @@ function acceptedFrame(
     authorizationEpoch,
     limits: transportLimits(),
   }
+}
+
+function acceptSubscription(socket, authorizationEpoch = 1) {
+  const frame = socket.sent.find(candidate => candidate.type === 'transport.subscribe.v1')
+  assert.ok(frame, 'the client must send a subscription before it can be accepted')
+  const cursor = typeof frame.startAt === 'object'
+    ? frame.startAt
+    : {
+        scope: frame.subscription.scope,
+        stream: frame.subscription.stream,
+        sequence: 0,
+        eventId: null,
+      }
+  socket.receive({
+    type: 'transport.subscription-accepted.v1',
+    subscriptionId: frame.subscriptionId,
+    cursor,
+    authorizationEpoch,
+    limits: transportLimits(),
+  })
 }
 
 function resumeAcceptedFrame(
@@ -676,8 +715,8 @@ test('StrongFlow reloads delivery then runtime at the exact returned read cursor
   assert.equal(sockets.sockets.length, 1)
 
   sockets.sockets[0].open()
-  sockets.sockets[0].receive(acceptedFrame())
-  sockets.sockets[0].receive(runtimeEvent(1, {
+  acceptSubscription(sockets.sockets[0])
+  sockets.sockets[0].receive(runtimeEvent(2, {
     type: 'runtime-projection.invalidated.v1',
     scopeKind: 'delivery-stage',
     productSessionId,
@@ -895,19 +934,13 @@ test('product-session reset and invalidation reload runtime only and never inven
   await product.start()
   assert.equal(sockets.sockets.length, 1)
   sockets.sockets[0].open()
-  sockets.sockets[0].receive(acceptedFrame(
-    scope,
-    { kind: 'product-session', productSessionId },
-  ))
+  acceptSubscription(sockets.sockets[0])
   sockets.sockets[0].serverClose(4409)
   await flush()
   assert.equal(sockets.sockets.length, 2)
   sockets.sockets[1].open()
-  sockets.sockets[1].receive(acceptedFrame(
-    scope,
-    { kind: 'product-session', productSessionId },
-  ))
-  sockets.sockets[1].receive(runtimeEvent(1, {
+  acceptSubscription(sockets.sockets[1])
+  sockets.sockets[1].receive(runtimeEvent(3, {
     type: 'runtime-projection.invalidated.v1',
     scopeKind: 'product-session',
     productSessionId,
@@ -1326,7 +1359,7 @@ test('projection subscriptions clear snapshots and notify the caller on authoriz
   })
   await client.start()
   sockets.sockets[0].open()
-  sockets.sockets[0].receive(acceptedFrame())
+  acceptSubscription(sockets.sockets[0])
   assert.deepEqual(client.cursor, cursor)
 
   sockets.sockets[0].receive({

@@ -65,7 +65,7 @@
       "ErrorEnvelope",
       "ControlPlaneWebSocketClientFrame",
       "ControlPlaneWebSocketServerFrame",
-      "ControlPlaneWebSocketCursor",
+      "EventReadCursor",
       "ControlPlaneWebSocketSubscription",
       "StrongFlowReadCursor",
       "ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent",
@@ -199,6 +199,15 @@
     "resetSelection": {
       "delivery": "delivery.get-then-runtime.projection.get-at-returned-read-cursor",
       "product-session": "runtime.projection.get-only-without-delivery-stage-or-read-cursor"
+    },
+    "snapshotHandoff": {
+      "cursorType": "EventReadCursor",
+      "deliveryCursorPath": "delivery.result.readCursor.eventCursor",
+      "productSessionCursorPath": "runtime.result.eventCursor",
+      "subscribeStartAt": "exact-http-event-cursor",
+      "acceptedBaseline": "subscription-accepted.cursor-and-authorizationEpoch",
+      "firstEventSequence": "baseline.sequence+1",
+      "gap": "protocol-error-or-4409-reset"
     }
   },
   "strongFlowReset": {
@@ -209,11 +218,12 @@
     "sameScopeAndDelivery": true,
     "publishPartialReload": false,
     "subscribeBeforeBothQueriesSucceed": false,
-    "cursorRule": "resume-or-subscribe-only-after-both-responses-yield-one-compatible-returned-cursor",
+    "cursorRule": "paired-read-cursors-match-then-subscribe-from-readCursor.eventCursor",
     "failureRule": "discard-partial-results-and-retry-the-pair",
     "expiredCursorError": "READ_CURSOR_EXPIRED",
     "expiredCursorAction": "discard-partial-pair-and-restart-delivery.get-without-atCursor",
-    "invalidOrForeignCursorAction": "surface-canonical-error-without-read-cut-restart"
+    "invalidOrForeignCursorAction": "surface-canonical-error-without-read-cut-restart",
+    "productSessionCursorRule": "runtime-read-succeeds-then-subscribe-from-runtime.eventCursor"
   },
   "errorBoundary": {
     "source": "ErrorEnvelope",
