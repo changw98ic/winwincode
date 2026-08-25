@@ -169,6 +169,12 @@ pub(super) fn establish_delivery_read(
             "trusted runtime and publication facts are unavailable".to_owned(),
         )
     })?;
+    let event_key = delivery_event_stream_key(scope, delivery_id)?;
+    let event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, None)
+        .map_err(current_event_storage_error)?;
 
     let first = load_current(control_plane, delivery_id)?;
     let publication = sources
@@ -195,12 +201,6 @@ pub(super) fn establish_delivery_read(
         .read_delivery(&runtime_request)
         .map_err(current_source_error)?;
     validate_runtime_read(scope, &detail, &runtime)?;
-    let event_key = delivery_event_stream_key(scope, delivery_id)?;
-    let event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, None)
-        .map_err(current_event_storage_error)?;
 
     let second = load_current(control_plane, delivery_id)?;
     if second != first {
@@ -433,6 +433,12 @@ pub(super) fn establish_product_session_read(
             "trusted runtime facts are unavailable".to_owned(),
         )
     })?;
+    let event_key = product_session_event_stream_key(scope, product_session_id)?;
+    let event_cursor = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_projection_event_cursor(&event_key, None)
+        .map_err(current_event_storage_error)?;
     let request = ProductSessionRuntimeReadRequest::new(
         scope.clone(),
         product_session_id.clone(),
@@ -444,12 +450,6 @@ pub(super) fn establish_product_session_read(
         .read_product_session(&request)
         .map_err(current_source_error)?;
     validate_product_session_runtime(scope, product_session_id, &runtime)?;
-    let event_key = product_session_event_stream_key(scope, product_session_id)?;
-    let event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, None)
-        .map_err(current_event_storage_error)?;
     let exact_runtime = sources
         .runtime
         .read_product_session(&ProductSessionRuntimeReadRequest::new(

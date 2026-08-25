@@ -49,6 +49,8 @@ use winwincode_storage::{ReceiptIdentity, StateCommit};
 #[derive(Clone)]
 struct JournalStorage {
     journal: Arc<Mutex<LoadedAggregateJournal>>,
+    runtime_read_count: Arc<Mutex<usize>>,
+    advance_event_after_runtime_read: bool,
 }
 impl ProductStateStorage for JournalStorage {
     fn commit(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
@@ -75,19 +77,46 @@ impl ProductStateStorage for JournalStorage {
         key: &winwincode_control_plane::ProjectionEventStreamKey,
         expected: Option<&ProjectionEventCursor>,
     ) -> Result<ProjectionEventCursor, StorageError> {
+        let sequence = if self.advance_event_after_runtime_read
+            && *self.runtime_read_count.lock().expect("runtime read count") > 0
+        {
+            2
+        } else {
+            1
+        };
         let event_id = match key.stream() {
-            ProjectionEventStream::Delivery(_) => "evt_delivery_fixture_0001",
-            ProjectionEventStream::ProductSession(_) => "evt_product_session_fixture_0001",
+            ProjectionEventStream::Delivery(_) => {
+                format!("evt_delivery_fixture_{sequence:04}")
+            }
+            ProjectionEventStream::ProductSession(_) => {
+                format!("evt_product_session_fixture_{sequence:04}")
+            }
         };
         let current = ProjectionEventCursor::try_new(
             key.clone(),
-            1,
-            Some(ControlPlaneEventId(event_id.to_owned())),
+            sequence,
+            Some(ControlPlaneEventId(event_id)),
         )?;
-        if expected.is_some_and(|expected| expected != &current) {
-            return Err(StorageError::invalid_input(
-                "projection event cursor mismatch",
-            ));
+        if let Some(expected) = expected {
+            let expected_id = match key.stream() {
+                ProjectionEventStream::Delivery(_) => {
+                    format!("evt_delivery_fixture_{:04}", expected.sequence())
+                }
+                ProjectionEventStream::ProductSession(_) => {
+                    format!("evt_product_session_fixture_{:04}", expected.sequence())
+                }
+            };
+            if expected.key() != key
+                || expected.sequence() == 0
+                || expected.sequence() > current.sequence()
+                || expected.event_id().map(|event_id| event_id.0.as_str())
+                    != Some(expected_id.as_str())
+            {
+                return Err(StorageError::invalid_input(
+                    "projection event cursor mismatch",
+                ));
+            }
+            return Ok(expected.clone());
         }
         Ok(current)
     }
@@ -160,6 +189,7 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         &self,
         request: &ProductSessionRuntimeReadRequest,
     ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        *self.read_count.lock().expect("read count") += 1;
         let product_session_id = request.product_session_id();
         if self.unavailable
             || !self
@@ -222,6 +252,12 @@ struct Fixture {
     runtime: Arc<Mutex<TrustedRuntimeProjectionRead>>,
 }
 
+#[derive(Clone, Copy)]
+enum EventCursorBehavior {
+    Stable,
+    AdvanceAfterRuntimeRead,
+}
+
 fn fixture(runtime_unavailable: bool, publication_unavailable: bool, race: bool) -> Fixture {
     fixture_with_delivery(
         delivery_fixture(false),
@@ -265,6 +301,25 @@ fn fixture_with_delivery(
     publication_unavailable: bool,
     race: bool,
     expire_after_reads: Option<usize>,
+) -> Fixture {
+    fixture_with_delivery_and_event_behavior(
+        delivery,
+        runtime_unavailable,
+        publication_unavailable,
+        race,
+        expire_after_reads,
+        EventCursorBehavior::Stable,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn fixture_with_delivery_and_event_behavior(
+    delivery: Delivery,
+    runtime_unavailable: bool,
+    publication_unavailable: bool,
+    race: bool,
+    expire_after_reads: Option<usize>,
+    event_cursor_behavior: EventCursorBehavior,
 ) -> Fixture {
     let scope = RepositoryScope {
         kind: RepositoryScopeKind::Repository,
@@ -322,9 +377,15 @@ fn fixture_with_delivery(
     )
     .expect("trusted publication");
     let journal = Arc::new(Mutex::new(aggregate));
+    let runtime_read_count = Arc::new(Mutex::new(0));
     let mut control_plane = ControlPlane::start(
         Box::new(JournalStorage {
             journal: Arc::clone(&journal),
+            runtime_read_count: Arc::clone(&runtime_read_count),
+            advance_event_after_runtime_read: matches!(
+                event_cursor_behavior,
+                EventCursorBehavior::AdvanceAfterRuntimeRead
+            ),
         }),
         Box::new(NoopPublisher),
     )
@@ -334,7 +395,7 @@ fn fixture_with_delivery(
             Box::new(RuntimeAdapter {
                 read: Arc::clone(&runtime),
                 race: Arc::new(Mutex::new(false)),
-                read_count: Arc::new(Mutex::new(0)),
+                read_count: runtime_read_count,
                 expire_after_reads,
                 unavailable: runtime_unavailable,
             }),
@@ -555,6 +616,37 @@ fn delivery_and_runtime_get_share_one_bounded_snapshot_cursor() {
 }
 
 #[test]
+fn delivery_snapshot_does_not_skip_an_event_committed_after_its_source_read() {
+    let f = fixture_with_delivery_and_event_behavior(
+        delivery_fixture(false),
+        false,
+        false,
+        false,
+        None,
+        EventCursorBehavior::AdvanceAfterRuntimeRead,
+    );
+    let response = StrongFlowProjectionQueryPort::delivery_get(
+        &f.control_plane,
+        &delivery_query(&f, None, 20),
+    )
+    .expect("an event after the baseline remains available to the WebSocket subscriber");
+    let QueryResultResponse::DeliveryGetResultResponse(response) = response else {
+        panic!("delivery detail")
+    };
+    assert_eq!(response.result.read_cursor.event_cursor.sequence.0, 1);
+    assert_eq!(
+        response
+            .result
+            .read_cursor
+            .event_cursor
+            .event_id
+            .expect("baseline event")
+            .0,
+        "evt_delivery_fixture_0001"
+    );
+}
+
+#[test]
 fn product_session_snapshot_has_its_own_exact_event_cursor() {
     let f = fixture(false, false, false);
     let response = StrongFlowProjectionQueryPort::runtime_projection_get(
@@ -574,6 +666,36 @@ fn product_session_snapshot_has_its_own_exact_event_cursor() {
     assert_eq!(cursor.sequence.0, 1);
     assert_eq!(
         cursor.event_id.expect("event id").0,
+        "evt_product_session_fixture_0001"
+    );
+}
+
+#[test]
+fn product_session_snapshot_does_not_skip_an_event_committed_after_its_source_read() {
+    let f = fixture_with_delivery_and_event_behavior(
+        delivery_fixture(false),
+        false,
+        false,
+        false,
+        None,
+        EventCursorBehavior::AdvanceAfterRuntimeRead,
+    );
+    let response = StrongFlowProjectionQueryPort::runtime_projection_get(
+        &f.control_plane,
+        &product_session_runtime_query(&f, f.scope.clone()),
+    )
+    .expect("an event after the baseline remains available to the WebSocket subscriber");
+    let QueryResultResponse::RuntimeProjectionGetResultResponse(response) = response else {
+        panic!("runtime snapshot")
+    };
+    let RuntimeProjectionEventCursor::ProductSessionEventReadCursor(cursor) =
+        response.result.event_cursor
+    else {
+        panic!("product-session cursor")
+    };
+    assert_eq!(cursor.sequence.0, 1);
+    assert_eq!(
+        cursor.event_id.expect("baseline event").0,
         "evt_product_session_fixture_0001"
     );
 }
