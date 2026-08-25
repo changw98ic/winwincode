@@ -176,13 +176,6 @@ pub(crate) fn validate(spec: &mut DeliverySpec, path: &str) -> Result<(), Delive
     }
     if let Some(target) = &mut spec.publication_target {
         validate_publication_target(target, &format!("{path}.publicationTarget"))?;
-        if spec.source_ref.is_none() {
-            return Err(validation_error(
-                DeliveryValidationErrorCode::RelationshipMismatch,
-                format!("{path}.publicationTarget"),
-                "a GitHub pull-request target requires a GitHub issue source",
-            ));
-        }
     }
     Ok(())
 }
