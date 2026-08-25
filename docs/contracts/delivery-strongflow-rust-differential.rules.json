@@ -213,7 +213,7 @@
       }
     ],
     "bindSessionPolicy": "A legacy bindSession for a Codex stage becomes one strict generated SessionBindingMessage trace entry. A successful Human plan-review or delivery-review bind is provenance on its one delivery.advance and creates no SessionBindingMessage. A foreign bind becomes a strict message sent to the real typed seam and returns its canonical zero-write error.",
-    "projectionPolicy": "Legacy delivery/diagramExecution/runtimeExecution is not a canonical result. The typed builder emits DeliveryDetailProjection and RuntimeProjectionSnapshot at one read cursor.",
+    "projectionPolicy": "Every legacy getDeliveryProjection first becomes delivery.get. A runtime.projection.get follow-up exists only when that completed DeliveryDetailProjection has a complete Codex SessionBinding selected by runtimeProjectionFollowup; otherwise observation.projection.runtime is null.",
     "sessionPolicy": "Legacy dshSessionId/codexSessionId is not renamed. The versioned migration derives every field of each Codex SessionBindingMessage. One accepted message performs accept_worker_session then report_codex_thread as two production commits, each advancing revision once. Human review has no execution binding; a foreign message returns the exact typed zero-write error.",
     "storePolicy": "All canonical state, journal digests, receipts, outbox events, and cursors are rebuilt by typed Rust serialization/transactions. Legacy digests are never copied after snapshot migration.",
     "taskPromotionInsertion": {
@@ -315,6 +315,45 @@
       "revisionMapPolicy": "Every migrated expectedRevision and response revision uses the sequential canonical result after the preceding message two-commit outcome; legacy revision numbers are provenance only.",
       "taskDagInsertion": "none: the seeded task-dag transcript has no bindSession; delivery.advance creates one pending binding and final revision is 2 with workerSessionId/codexThreadId null",
       "sourcePolicy": "Codex successful bindSession only; successful Human review bind is folded into delivery.advance provenance; foreign failed bind is still a strict zero-write message"
+    },
+    "runtimeProjectionFollowup": {
+      "sourceOperation": "getDeliveryProjection",
+      "deliveryQueryTarget": "delivery.get",
+      "runtimeQueryTarget": "runtime.projection.get",
+      "selectionSource": "delivery.get.response.result.stages",
+      "selectionRule": "last-complete-codex-stage-in-delivery-projection-order",
+      "completeBindingRequirements": {
+        "actorType": "codex",
+        "sessionBinding": "non-null",
+        "workerSessionId": "non-null",
+        "codexThreadId": "non-null"
+      },
+      "requestValueSources": {
+        "atCursor": "delivery.get.response.result.readCursor",
+        "deliveryId": "delivery.get.response.result.deliveryId",
+        "productSessionId": "selectedStage.sessionBinding.productSessionId",
+        "stageRunId": "selectedStage.id"
+      },
+      "queryScenarioIds": [
+        "success-closed-loop",
+        "candidate-invalidation",
+        "attention",
+        "inconclusive",
+        "infra-error",
+        "rework"
+      ],
+      "noQueryScenarioIds": [
+        "request-id-replay",
+        "revision-conflict",
+        "corruption-recovery",
+        "task-dag"
+      ],
+      "runtimeResponseSessionCount": 1,
+      "observationPresentSource": "runtime.projection.get.response.result",
+      "observationAbsentValue": null,
+      "failedDeliveryGetPolicy": "no runtime query",
+      "pendingBindingPolicy": "not eligible",
+      "noFallbackIdentities": true
     }
   },
   "canonicalExpected": {
@@ -592,6 +631,39 @@
       "executionPortCommitOperations": [
         "accept_worker_session",
         "report_codex_thread"
+      ],
+      "runtimeProjectionGetResultExactKeys": [
+        "deliveryId",
+        "eventCursor",
+        "kind",
+        "lastProjectionSequence",
+        "productSessionId",
+        "readCursor",
+        "rebuiltAt",
+        "revision",
+        "sessions",
+        "stageRunId"
+      ],
+      "runtimeProjectionGetSessionsExactLength": 1,
+      "runtimeProjectionSessionExactKeys": [
+        "activities",
+        "agentEdges",
+        "agents",
+        "asOfSequence",
+        "attempt",
+        "codexThreadId",
+        "deliveryTaskId",
+        "diffSummary",
+        "executionJobId",
+        "fencingToken",
+        "leaseId",
+        "plan",
+        "productSessionId",
+        "recovery",
+        "sessionBindingId",
+        "stageRunId",
+        "usage",
+        "workerSessionId"
       ]
     },
     "exactStoreStateKeys": [
@@ -640,7 +712,15 @@
       "published",
       "sequence",
       "topic"
-    ]
+    ],
+    "runtimeProjectionObservation": {
+      "exactKeys": [
+        "delivery",
+        "runtime"
+      ],
+      "runtimePresentSource": "last successful runtime.projection.get response.result",
+      "runtimeAbsentValue": null
+    }
   },
   "normalization": {
     "allowedBindings": [
@@ -1032,16 +1112,6 @@
           "revisionEffect": {
             "delta": 0
           }
-        },
-        {
-          "kind": "control-plane.query",
-          "sourceCommandIndexes": [
-            3
-          ],
-          "target": "runtime.projection.get",
-          "revisionEffect": {
-            "delta": 0
-          }
         }
       ],
       "observationKeys": [
@@ -1120,16 +1190,6 @@
             4
           ],
           "target": "delivery.get",
-          "revisionEffect": {
-            "delta": 0
-          }
-        },
-        {
-          "kind": "control-plane.query",
-          "sourceCommandIndexes": [
-            4
-          ],
-          "target": "runtime.projection.get",
           "revisionEffect": {
             "delta": 0
           }
@@ -1231,16 +1291,6 @@
           }
         },
         {
-          "kind": "control-plane.query",
-          "sourceCommandIndexes": [
-            5
-          ],
-          "target": "runtime.projection.get",
-          "revisionEffect": {
-            "delta": 0
-          }
-        },
-        {
           "kind": "fixture.command",
           "sourceCommandIndexes": [
             6
@@ -1256,16 +1306,6 @@
             7
           ],
           "target": "delivery.get",
-          "revisionEffect": {
-            "delta": 0
-          }
-        },
-        {
-          "kind": "control-plane.query",
-          "sourceCommandIndexes": [
-            7
-          ],
-          "target": "runtime.projection.get",
           "revisionEffect": {
             "delta": 0
           }
@@ -1347,16 +1387,6 @@
             4
           ],
           "target": "delivery.get",
-          "revisionEffect": {
-            "delta": 0
-          }
-        },
-        {
-          "kind": "control-plane.query",
-          "sourceCommandIndexes": [
-            4
-          ],
-          "target": "runtime.projection.get",
           "revisionEffect": {
             "delta": 0
           }

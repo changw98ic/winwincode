@@ -233,6 +233,140 @@ test('machine rules freeze the ten scenario execution plan and complete result s
   )
 })
 
+test('runtime projection follows only the last complete Codex binding', async () => {
+  const [rules, oracle] = await Promise.all([json(rulesPath), json(oraclePath)])
+  const followup = rules.canonicalMigration.runtimeProjectionFollowup
+  assert.equal(
+    followup.selectionRule,
+    'last-complete-codex-stage-in-delivery-projection-order',
+  )
+  assert.deepEqual(followup.requestValueSources, {
+    atCursor: 'delivery.get.response.result.readCursor',
+    deliveryId: 'delivery.get.response.result.deliveryId',
+    productSessionId: 'selectedStage.sessionBinding.productSessionId',
+    stageRunId: 'selectedStage.id',
+  })
+  assert.equal(followup.runtimeResponseSessionCount, 1)
+  assert.equal(followup.observationAbsentValue, null)
+  assert.equal(followup.noFallbackIdentities, true)
+
+  const queryScenarioIds = [
+    'success-closed-loop',
+    'candidate-invalidation',
+    'attention',
+    'inconclusive',
+    'infra-error',
+    'rework',
+  ]
+  const noQueryScenarioIds = [
+    'request-id-replay',
+    'revision-conflict',
+    'corruption-recovery',
+    'task-dag',
+  ]
+  assert.deepEqual(followup.queryScenarioIds, queryScenarioIds)
+  assert.deepEqual(followup.noQueryScenarioIds, noQueryScenarioIds)
+
+  for (const mapping of rules.scenarios) {
+    const runtimeGroups = mapping.canonicalGroups.filter(group => (
+      group.target === 'runtime.projection.get'
+    ))
+    assert.equal(
+      runtimeGroups.length,
+      queryScenarioIds.includes(mapping.id) ? 1 : 0,
+      mapping.id,
+    )
+    for (const [sourceIndex, signature] of mapping.sourceCommandSignatures.entries()) {
+      if (signature !== 'strongflow.request:getDeliveryProjection') continue
+      const targets = mapping.canonicalGroups
+        .filter(group => group.sourceCommandIndexes.includes(sourceIndex))
+        .map(group => group.target)
+      assert.equal(targets[0], 'delivery.get', `${mapping.id}/${sourceIndex}`)
+      assert.deepEqual(
+        targets,
+        runtimeGroups.some(group => group.sourceCommandIndexes.includes(sourceIndex))
+          ? ['delivery.get', 'runtime.projection.get']
+          : ['delivery.get'],
+        `${mapping.id}/${sourceIndex}`,
+      )
+    }
+  }
+
+  const expected = canonicalExpectedFixture(oracle, rules)
+  validateCanonicalExpected(rules, oracle, expected)
+  for (const scenario of expected.result.scenarios) {
+    if (queryScenarioIds.includes(scenario.id)) {
+      const deliveryQuery = scenario.commands.find(command => (
+        command.request.query === 'delivery.get'
+      ))
+      const runtimeQuery = scenario.commands.find(command => (
+        command.request.query === 'runtime.projection.get'
+      ))
+      const selected = deliveryQuery.response.result.stages
+        .filter(stage => stage.actorType === 'codex'
+          && stage.sessionBinding?.workerSessionId != null
+          && stage.sessionBinding?.codexThreadId != null)
+        .at(-1)
+      assert.equal(runtimeQuery.request.parameters.stageRunId, selected.id)
+      assert.equal(
+        runtimeQuery.request.parameters.productSessionId,
+        selected.sessionBinding.productSessionId,
+      )
+      assert.deepEqual(
+        scenario.observation.projection.runtime,
+        runtimeQuery.response.result,
+      )
+    } else {
+      assert.equal(
+        scenario.commands.some(command => (
+          command.request.query === 'runtime.projection.get'
+        )),
+        false,
+      )
+      assert.equal(scenario.observation.projection.runtime, null)
+      if (scenario.id === 'task-dag') {
+        const pending = scenario.commands
+          .find(command => command.request.query === 'delivery.get')
+          .response.result.stages.at(-1)
+        assert.equal(pending.actorType, 'codex')
+        assert.equal(pending.sessionBinding.workerSessionId, null)
+        assert.equal(pending.sessionBinding.codexThreadId, null)
+      }
+    }
+  }
+
+  const wrongSelectedStage = structuredClone(expected)
+  const success = wrongSelectedStage.result.scenarios.find(scenario => (
+    scenario.id === 'success-closed-loop'
+  ))
+  success.commands.find(command => command.request.query === 'runtime.projection.get')
+    .request.parameters.stageRunId = 'str_99999999999999999999999999'
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, wrongSelectedStage),
+    /runtime stageRunId/u,
+  )
+
+  const multipleRuntimeSessions = structuredClone(expected)
+  const runtimeResult = multipleRuntimeSessions.result.scenarios
+    .find(scenario => scenario.id === 'success-closed-loop')
+    .commands.find(command => command.request.query === 'runtime.projection.get')
+    .response.result
+  runtimeResult.sessions.push(structuredClone(runtimeResult.sessions[0]))
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, multipleRuntimeSessions),
+    /runtime result session count/u,
+  )
+
+  const inventedRuntimeObservation = structuredClone(expected)
+  inventedRuntimeObservation.result.scenarios
+    .find(scenario => scenario.id === 'task-dag')
+    .observation.projection.runtime = { inventedProductSessionId: true }
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, inventedRuntimeObservation),
+    /runtime observation differs/u,
+  )
+})
+
 test('normalization substitutes only exact runtime bindings and preserves product facts', async () => {
   const rules = await json(rulesPath)
   const actual = {
@@ -540,9 +674,7 @@ function canonicalExpectedFixture(oracle, rules) {
       oracleSchemaVersion: oracle.schemaVersion,
       scenarios: oracle.scenarios.map(scenario => {
         const mapping = scenarioRules.get(scenario.id)
-        const migrated = {
-          id: scenario.id,
-          commands: mapping.canonicalGroups.map((group, targetIndex) => {
+        const commands = mapping.canonicalGroups.map((group, targetIndex) => {
           const sourceCommand = scenario.commands[group.sourceCommandIndexes.at(-1)]
           const legacy = sourceCommand.kind === 'strongflow.request'
             ? sourceCommand.request.operation
@@ -550,7 +682,7 @@ function canonicalExpectedFixture(oracle, rules) {
           return {
             sourceCommandIndexes: group.sourceCommandIndexes,
             kind: group.kind,
-            request: canonicalFixtureRequest(group, sourceCommand, targetIndex),
+            request: canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping),
             response: canonicalFixtureResponse(
               group,
               sourceCommand,
@@ -560,26 +692,36 @@ function canonicalExpectedFixture(oracle, rules) {
               mapping,
             ),
           }
-        }),
-        observation: {
-          events: structuredClone(scenario.observation.events),
-          projection: {
-            delivery: structuredClone(scenario.observation.snapshot),
-            runtime: structuredClone(scenario.observation.projection.runtimeExecution),
-          },
-          snapshot: structuredClone(scenario.observation.snapshot),
-          store: {
-            journal: canonicalFixtureJournal(scenario),
-            outbox: [],
-            receipts: [],
-            state: {
-              revision: scenario.observation.snapshot.revision,
-              snapshot: structuredClone(scenario.observation.snapshot),
-              streamId: scenario.observation.snapshot.id,
+        })
+        const deliveryProjection = commands
+          .filter(command => command.request.query === 'delivery.get'
+            && command.response.error === undefined)
+          .at(-1)?.response.result ?? null
+        const runtimeProjection = commands
+          .findLast(command => command.request.query === 'runtime.projection.get')
+          ?.response.result ?? null
+        const migrated = {
+          id: scenario.id,
+          commands,
+          observation: {
+            events: structuredClone(scenario.observation.events),
+            projection: {
+              delivery: structuredClone(deliveryProjection),
+              runtime: structuredClone(runtimeProjection),
             },
+            snapshot: structuredClone(scenario.observation.snapshot),
+            store: {
+              journal: canonicalFixtureJournal(scenario),
+              outbox: [],
+              receipts: [],
+              state: {
+                revision: scenario.observation.snapshot.revision,
+                snapshot: structuredClone(scenario.observation.snapshot),
+                streamId: scenario.observation.snapshot.id,
+              },
+            },
+            verdict: structuredClone(scenario.observation.verdict),
           },
-          verdict: structuredClone(scenario.observation.verdict),
-        },
         }
         applyCanonicalFixtureFacts(migrated, mapping)
         return migrated
@@ -664,7 +806,7 @@ function migrateFixtureResponse(response, legacy, rules) {
   return migrated
 }
 
-function canonicalFixtureRequest(group, sourceCommand, targetIndex) {
+function canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping) {
   if (group.kind === 'fixture.command') {
     return { input: structuredClone(sourceCommand.input ?? sourceCommand.request.payload), kind: group.target }
   }
@@ -708,13 +850,14 @@ function canonicalFixtureRequest(group, sourceCommand, targetIndex) {
     }
   }
   if (group.kind === 'control-plane.query') {
+    const selected = canonicalFixtureSelectedBinding(mapping)
     const parameters = group.target === 'runtime.projection.get'
       ? {
-          atCursor: 'cursor_fixture_00000000000000000000000000',
+          atCursor: canonicalFixtureReadCursor(source.payload.deliveryId, mapping),
           deliveryId: source.payload.deliveryId,
           kind: 'delivery-stage',
-          productSessionId: 'psn_00000000000000000000000000',
-          stageRunId: 'str_00000000000000000000000000',
+          productSessionId: selected.productSessionId,
+          stageRunId: selected.stageRunId,
         }
       : { deliveryId: source.payload.deliveryId }
     return {
@@ -729,6 +872,133 @@ function canonicalFixtureRequest(group, sourceCommand, targetIndex) {
     command: group.target,
     expectedRevision: source.payload.expectedRevision ?? 0,
     payload: canonicalFixturePayload(group.target, source.payload),
+  }
+}
+
+function canonicalFixtureStageId(index) {
+  return `str_${index.toString().padStart(26, '0')}`
+}
+
+function canonicalFixtureProductSessionId(index) {
+  return `psn_${index.toString().padStart(26, '0')}`
+}
+
+function canonicalFixtureSelectedBinding(mapping) {
+  const index = mapping.canonicalAssertions.sessionBindingCount - 1
+  return {
+    codexThreadId: `cdx_${index.toString().padStart(26, '0')}`,
+    executionJobId: `job_${index.toString().padStart(26, '0')}`,
+    productSessionId: canonicalFixtureProductSessionId(index),
+    sessionBindingId: `sbd_${index.toString().padStart(26, '0')}`,
+    stageRunId: canonicalFixtureStageId(index),
+    workerSessionId: `wsn_${index.toString().padStart(26, '0')}`,
+  }
+}
+
+function canonicalFixtureReadCursor(deliveryId, mapping) {
+  return {
+    deliveryId,
+    deliveryRevision: mapping.canonicalFinalRevision,
+    eventCursor: {
+      eventId: 'evt_00000000000000000000000000',
+      scope: {
+        kind: 'repository',
+        organizationId: 'org_00000000000000000000000000',
+        projectId: 'prj_00000000000000000000000000',
+        repositoryId: 'rep_00000000000000000000000000',
+        workspaceId: 'wsp_00000000000000000000000000',
+      },
+      sequence: 1,
+      stream: { deliveryId, kind: 'delivery' },
+    },
+    publicationRevision: 0,
+    runtimeAcceptedSequence: 1,
+    runtimeLedgerRevision: 1,
+    scope: {
+      kind: 'repository',
+      organizationId: 'org_00000000000000000000000000',
+      projectId: 'prj_00000000000000000000000000',
+      repositoryId: 'rep_00000000000000000000000000',
+      workspaceId: 'wsp_00000000000000000000000000',
+    },
+    token: 'fixture_read_cursor_token_0000000000000000',
+  }
+}
+
+function canonicalFixtureDeliveryProjection(delivery, mapping) {
+  const stageCount = mapping.canonicalAssertions.stageRunCount ?? 0
+  const bindingCount = mapping.canonicalAssertions.sessionBindingCount ?? 0
+  const hasRuntimeQuery = mapping.canonicalGroups.some(group => (
+    group.target === 'runtime.projection.get'
+  ))
+  const stages = Array.from({ length: stageCount }, (_unused, index) => {
+    const hasBinding = index < bindingCount
+    const complete = hasBinding && hasRuntimeQuery
+    return {
+      actorType: hasBinding ? 'codex' : 'human',
+      id: canonicalFixtureStageId(index),
+      sessionBinding: hasBinding
+        ? {
+            bindingId: `sbd_${index.toString().padStart(26, '0')}`,
+            boundAt: '2026-01-01T00:00:00Z',
+            codexThreadId: complete
+              ? `cdx_${index.toString().padStart(26, '0')}`
+              : null,
+            executionJobId: `job_${index.toString().padStart(26, '0')}`,
+            productSessionId: canonicalFixtureProductSessionId(index),
+            workerSessionId: complete
+              ? `wsn_${index.toString().padStart(26, '0')}`
+              : null,
+          }
+        : null,
+    }
+  })
+  return {
+    deliveryId: delivery.id,
+    readCursor: canonicalFixtureReadCursor(delivery.id, mapping),
+    stages,
+  }
+}
+
+function canonicalFixtureRuntimeProjection(sourceCommand, mapping) {
+  const deliveryId = sourceCommand.request.payload.deliveryId
+  const selected = canonicalFixtureSelectedBinding(mapping)
+  return {
+    deliveryId,
+    eventCursor: canonicalFixtureReadCursor(deliveryId, mapping).eventCursor,
+    kind: 'runtime_projection',
+    lastProjectionSequence: 1,
+    productSessionId: selected.productSessionId,
+    readCursor: canonicalFixtureReadCursor(deliveryId, mapping),
+    rebuiltAt: '2026-01-01T00:00:00Z',
+    revision: mapping.canonicalFinalRevision,
+    sessions: [{
+      activities: [],
+      agentEdges: [],
+      agents: [],
+      asOfSequence: 1,
+      attempt: 1,
+      codexThreadId: selected.codexThreadId,
+      deliveryTaskId: null,
+      diffSummary: null,
+      executionJobId: selected.executionJobId,
+      fencingToken: '1',
+      leaseId: 'lea_00000000000000000000000000',
+      plan: null,
+      productSessionId: selected.productSessionId,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
+      },
+      sessionBindingId: selected.sessionBindingId,
+      stageRunId: selected.stageRunId,
+      usage: null,
+      workerSessionId: selected.workerSessionId,
+    }],
+    stageRunId: selected.stageRunId,
   }
 }
 
@@ -811,8 +1081,8 @@ function canonicalFixtureResponse(
       query: group.target,
       requestId,
       result: group.target === 'delivery.get'
-        ? structuredClone(response.result.delivery)
-        : structuredClone(response.result.runtimeExecution),
+        ? canonicalFixtureDeliveryProjection(response.result.delivery, mapping)
+        : canonicalFixtureRuntimeProjection(sourceCommand, mapping),
       schemaVersion: 'winwincode/v1',
     }
   }
@@ -829,7 +1099,7 @@ function canonicalFixtureResponse(
 }
 
 function canonicalFixtureMessageResponse(group, sourceCommand, targetIndex, mapping) {
-  const request = canonicalFixtureRequest(group, sourceCommand, targetIndex)
+  const request = canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping)
   const previousRevision = mapping.canonicalGroups.slice(0, targetIndex)
     .reduce((revision, entry) => (
       entry.revisionEffect.seed ?? revision + entry.revisionEffect.delta
