@@ -23,7 +23,20 @@ use winwincode_control_plane::{
     },
 };
 use winwincode_delivery::{
-    domain::{AttentionItem, AttentionItemStatus, AttentionItemType, Delivery, DeliveryStatus},
+    application::{
+        attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
+        stage::{AdvanceStageInput, NewStageIdentities, ReviewAttentionSeed, advance},
+    },
+    domain::{
+        AcceptanceCriterionId, AttentionItem, AttentionItemStatus, AttentionItemType,
+        CandidatePathFact, CandidatePathState, Delivery, DeliveryStage, DeliveryStatus,
+        FrozenDeliveryCandidate, SessionBinding, SessionBindingId, StageRun, StageRunActorType,
+        StageRunStatus,
+        candidate::{
+            CandidateHunkFact,
+            test_support::{CandidateFixtureInput, freeze_candidate_fixture},
+        },
+    },
     projection::runtime::{
         RuntimeProjection,
         test_support::{
@@ -36,8 +49,9 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    AttentionItemId, ControlPlaneEventId, DeliveryId, Instant, OrganizationId, ProjectId,
-    RepositoryId, RequestId, Revision, Sha256Digest, UserId, WorkspaceId,
+    AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId,
+    ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
+    Revision, Sha256Digest, StageRunId, UserId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{ReceiptIdentity, StateCommit};
 
@@ -304,6 +318,7 @@ fn fixture_with_delivery(
 ) -> Fixture {
     fixture_with_delivery_and_event_behavior(
         delivery,
+        None,
         runtime_unavailable,
         publication_unavailable,
         race,
@@ -312,9 +327,25 @@ fn fixture_with_delivery(
     )
 }
 
+fn fixture_with_delivery_and_candidate(
+    delivery: Delivery,
+    candidate: FrozenDeliveryCandidate,
+) -> Fixture {
+    fixture_with_delivery_and_event_behavior(
+        delivery,
+        Some(candidate),
+        false,
+        false,
+        false,
+        None,
+        EventCursorBehavior::Stable,
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn fixture_with_delivery_and_event_behavior(
     delivery: Delivery,
+    candidate: Option<FrozenDeliveryCandidate>,
     runtime_unavailable: bool,
     publication_unavailable: bool,
     race: bool,
@@ -371,7 +402,7 @@ fn fixture_with_delivery_and_event_behavior(
         delivery.id().clone(),
         delivery.revision(),
         Revision(0),
-        None,
+        candidate,
         None,
         Sha256Digest(format!("sha256:{}", "b".repeat(64))),
     )
@@ -436,6 +467,138 @@ fn delivery_fixture(draft: bool) -> Delivery {
         snapshot.attention_items.clear();
     }
     Delivery::try_from_snapshot(snapshot).expect("projection fixture")
+}
+
+fn approved_solution_review_fixture(status: DeliveryStatus) -> Delivery {
+    let approved = Delivery::decode_json(include_bytes!(
+        "../../winwincode-delivery/tests/fixtures/delivery-approved-solution-review.json"
+    ))
+    .expect("approved solution-review fixture");
+    let mut snapshot = approved.into_snapshot();
+    snapshot.status = status;
+    let review_attention = snapshot
+        .attention_items
+        .first_mut()
+        .expect("approved review Attention");
+    review_attention.assigned_to = Some("usr_reviewer".into());
+    review_attention.resolved_by = Some("usr_reviewer".into());
+    snapshot.updated_at_millis += 1;
+    Delivery::try_from_snapshot(snapshot).expect("approved solution-review lifecycle fixture")
+}
+
+fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
+    let approved = approved_solution_review_fixture(DeliveryStatus::Executing).into_snapshot();
+    let mut snapshot = Delivery::decode_json(include_bytes!(
+        "../../winwincode-delivery/tests/fixtures/delivery-main.json"
+    ))
+    .expect("passing Delivery fixture")
+    .into_snapshot();
+
+    let mut verifier = snapshot.stage_runs.remove(0);
+    verifier.started_at_millis = 1_800_000_000_060;
+    verifier.finished_at_millis = Some(1_800_000_000_070);
+    let mut verifier_binding = snapshot.session_bindings.remove(0);
+    verifier_binding.bound_at_millis = 1_800_000_000_061;
+    let promoted_task = snapshot.tasks.first_mut().expect("promoted solution task");
+    promoted_task.id = DeliveryTaskId("task:invitation".into());
+    promoted_task.title = "Implement invitation flow".into();
+    promoted_task.goal = "Deliver every current acceptance criterion.".into();
+    promoted_task.acceptance_criterion_ids = vec![
+        AcceptanceCriterionId("criterion-required".into()),
+        AcceptanceCriterionId("criterion-optional".into()),
+    ];
+    promoted_task.blocked_by_task_ids.clear();
+    verifier.delivery_task_id = Some(promoted_task.id.clone());
+    verifier_binding.delivery_task_id = Some(promoted_task.id.clone());
+    snapshot.stage_runs = approved.stage_runs;
+    snapshot.session_bindings = approved.session_bindings;
+    snapshot.attention_items = approved.attention_items;
+
+    let executor_stage_run_id = StageRunId("stage:executor".into());
+    let executor_binding_id = SessionBindingId("binding:executor".into());
+    let delivery_task_id = snapshot.tasks[0].id.clone();
+    snapshot.stage_runs.push(StageRun {
+        schema_version: 3,
+        id: executor_stage_run_id.clone(),
+        delivery_id: snapshot.id.clone(),
+        delivery_task_id: Some(delivery_task_id.clone()),
+        stage: DeliveryStage::Executing,
+        actor_type: StageRunActorType::Codex,
+        role: "executor".into(),
+        status: StageRunStatus::Succeeded,
+        attempt: 1,
+        started_at_millis: 1_800_000_000_040,
+        finished_at_millis: Some(1_800_000_000_050),
+    });
+    snapshot.session_bindings.push(SessionBinding {
+        schema_version: 3,
+        id: executor_binding_id.clone(),
+        delivery_id: snapshot.id.clone(),
+        delivery_task_id: Some(delivery_task_id),
+        stage_run_id: executor_stage_run_id.clone(),
+        product_session_id: ProductSessionId("product:executor".into()),
+        execution_job_id: ExecutionJobId("job:executor".into()),
+        worker_session_id: Some(WorkerSessionId("worker-session:executor".into())),
+        codex_thread_id: Some(CodexThreadId("codex-thread:executor".into())),
+        bound_at_millis: 1_800_000_000_041,
+    });
+    snapshot.stage_runs.push(verifier);
+    snapshot.session_bindings.push(verifier_binding);
+    snapshot.evidence[0].created_at_millis = 1_800_000_000_069;
+    let verdict = snapshot.verdict.as_mut().expect("passing verdict");
+    for result in &mut verdict.criteria {
+        result.evaluated_at_millis = 1_800_000_000_071;
+    }
+    verdict.produced_at_millis = 1_800_000_000_072;
+    snapshot.revision = 1;
+    snapshot.updated_at_millis = 1_800_000_000_073;
+
+    let pre_candidate = Delivery::try_from_snapshot(snapshot).expect("candidate lifecycle facts");
+    let candidate = freeze_candidate_fixture(
+        &pre_candidate,
+        &executor_stage_run_id,
+        &executor_binding_id,
+        CandidateFixtureInput {
+            base_commit_id: "0123456789012345678901234567890123456789".into(),
+            base_tree_id: "1".repeat(40),
+            candidate_commit_id: "2".repeat(40),
+            candidate_tree_id: "3".repeat(40),
+            diff_sha256: "a".repeat(64),
+            changed_paths: vec![CandidatePathFact {
+                path: "src/invitation.rs".into(),
+                state: CandidatePathState::Present,
+                object_id: Some("4".repeat(40)),
+            }],
+            changed_hunks: vec![CandidateHunkFact {
+                file_path: "src/invitation.rs".into(),
+                hunk_sha256: "b".repeat(64),
+                source_hunk_sha256: None,
+            }],
+            artifact_ref: "artifact:executor".into(),
+            artifact_digest: Sha256Digest(format!("sha256:{}", "9".repeat(64))),
+            terminal_event_sequence: 12,
+        },
+    );
+    let mut snapshot = pre_candidate.into_snapshot();
+    for evidence in &mut snapshot.evidence {
+        evidence.candidate_ref = candidate.candidate_ref().into();
+    }
+    let verdict = snapshot.verdict.as_mut().expect("passing verdict");
+    verdict.candidate_ref = candidate.candidate_ref().into();
+    for result in &mut verdict.criteria {
+        result.candidate_ref = candidate.candidate_ref().into();
+    }
+    let ready = Delivery::try_from_snapshot(snapshot).expect("ready-to-deliver lifecycle fixture");
+    (ready, candidate)
+}
+
+fn normalize_projection_read_revision(delivery: &Delivery) -> Delivery {
+    // The read harness accepts one seeded journal record at revision one. The
+    // production transitions have already established the lifecycle facts;
+    // only the isolated query coordinate is normalized here.
+    let mut snapshot = delivery.clone().into_snapshot();
+    snapshot.revision = 1;
+    Delivery::try_from_snapshot(snapshot).expect("projection read fixture")
 }
 fn actor() -> Actor {
     Actor::UserActor(UserActor {
@@ -660,6 +823,7 @@ fn delivery_and_runtime_get_share_one_bounded_snapshot_cursor() {
 fn delivery_snapshot_does_not_skip_an_event_committed_after_its_source_read() {
     let f = fixture_with_delivery_and_event_behavior(
         delivery_fixture(false),
+        None,
         false,
         false,
         false,
@@ -715,6 +879,7 @@ fn product_session_snapshot_has_its_own_exact_event_cursor() {
 fn product_session_snapshot_does_not_skip_an_event_committed_after_its_source_read() {
     let f = fixture_with_delivery_and_event_behavior(
         delivery_fixture(false),
+        None,
         false,
         false,
         false,
@@ -746,6 +911,170 @@ fn delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto() {
     let (detail, _) = detail_and_cursor(&f);
     assert_eq!(detail.delivery_id, *f.delivery.id());
     assert_eq!(detail.ownership.repository_id, f.scope.repository_id);
+}
+
+#[test]
+fn approved_solution_review_remains_visible_in_execution_and_verification_successors() {
+    let approved = fixture_with_delivery(
+        approved_solution_review_fixture(DeliveryStatus::Executing),
+        false,
+        false,
+        false,
+        None,
+    );
+    let expected = detail_and_cursor(&approved)
+        .0
+        .solution_review
+        .expect("approved solution review");
+    for status in [DeliveryStatus::Verifying, DeliveryStatus::Reworking] {
+        let successor = fixture_with_delivery(
+            approved_solution_review_fixture(status),
+            false,
+            false,
+            false,
+            None,
+        );
+        let actual = detail_and_cursor(&successor)
+            .0
+            .solution_review
+            .expect("the approved review remains the current solution authority");
+        assert_eq!(actual, expected, "{status:?}");
+    }
+}
+
+#[test]
+fn approved_solution_review_survives_ready_delivery_review_and_delivery_settlement() {
+    let baseline = fixture_with_delivery(
+        approved_solution_review_fixture(DeliveryStatus::Executing),
+        false,
+        false,
+        false,
+        None,
+    );
+    let expected = detail_and_cursor(&baseline)
+        .0
+        .solution_review
+        .expect("approved solution review");
+    let (ready, candidate) = approved_ready_to_deliver_fixture();
+    let ready_projection = detail_and_cursor(&fixture_with_delivery_and_candidate(
+        ready.clone(),
+        candidate.clone(),
+    ))
+    .0;
+    assert_eq!(
+        ready_projection.status,
+        winwincode_api::generated::DeliveryStatus::ReadyToDeliver
+    );
+    assert_eq!(ready_projection.solution_review, Some(expected.clone()));
+
+    let review_transition = advance(
+        &ready,
+        AdvanceStageInput {
+            expected_revision: ready.revision(),
+            product_session_id: ProductSessionId("product:delivery-review".into()),
+            identities: NewStageIdentities {
+                stage_run_id: StageRunId("stage:delivery-review".into()),
+                execution_job_id: ExecutionJobId("job:delivery-review".into()),
+                session_binding_id: SessionBindingId("binding:delivery-review".into()),
+                attention_item_id: AttentionItemId("attention:delivery-review".into()),
+            },
+            review: Some(ReviewAttentionSeed {
+                title: "Approve the exact delivery candidate".into(),
+                context: "candidate-and-verdict-review-set".into(),
+                assigned_to: "usr_approver".into(),
+            }),
+            previous_outcome: None,
+            current_lease: None,
+            rework_authorization: None,
+            now_millis: 1_800_000_000_080,
+        },
+    )
+    .expect("ReadyToDeliver starts the canonical DeliveryReview");
+    let delivery_review = review_transition.delivery.clone();
+    let review_projection = detail_and_cursor(&fixture_with_delivery_and_candidate(
+        normalize_projection_read_revision(&delivery_review),
+        candidate.clone(),
+    ))
+    .0;
+    assert_eq!(
+        review_projection.status,
+        winwincode_api::generated::DeliveryStatus::NeedsAttention
+    );
+    assert_eq!(review_projection.solution_review, Some(expected.clone()));
+
+    let approval = delivery_review
+        .snapshot()
+        .attention_items
+        .iter()
+        .find(|item| item.id.0 == "attention:delivery-review")
+        .expect("DeliveryReview Attention");
+    let resolve = |decision| {
+        resolve_attention(
+            &delivery_review,
+            ResolveAttentionInput {
+                expected_revision: delivery_review.revision(),
+                attention_item_id: approval.id.clone(),
+                stage_run_id: approval
+                    .stage_run_id
+                    .clone()
+                    .expect("DeliveryReview StageRun"),
+                expected_context: approval.context.clone(),
+                actor: "usr_approver".into(),
+                decision,
+                resolution: "reviewed exact candidate and verdict".into(),
+                now_millis: 1_800_000_000_081,
+            },
+        )
+        .expect("DeliveryReview settlement")
+        .into_delivery()
+    };
+    for (settled, expected_status) in [
+        (
+            resolve(AttentionDecision::Dismissed),
+            winwincode_api::generated::DeliveryStatus::Reworking,
+        ),
+        (
+            resolve(AttentionDecision::Resolved),
+            winwincode_api::generated::DeliveryStatus::Delivered,
+        ),
+    ] {
+        let projection = detail_and_cursor(&fixture_with_delivery_and_candidate(
+            normalize_projection_read_revision(&settled),
+            candidate.clone(),
+        ))
+        .0;
+        assert_eq!(projection.status, expected_status);
+        assert_eq!(projection.solution_review, Some(expected.clone()));
+    }
+}
+
+#[test]
+fn approved_solution_review_rejects_states_outside_its_frozen_successor_set() {
+    for status in [
+        DeliveryStatus::Draft,
+        DeliveryStatus::Ready,
+        DeliveryStatus::Planning,
+        DeliveryStatus::PlanReview,
+        DeliveryStatus::Clarifying,
+    ] {
+        let fixture = fixture_with_delivery(
+            approved_solution_review_fixture(status),
+            false,
+            false,
+            false,
+            None,
+        );
+        let error = StrongFlowProjectionQueryPort::delivery_get(
+            &fixture.control_plane,
+            &delivery_query(&fixture, None, 20),
+        )
+        .expect_err("a settled approval is stale outside its explicit successor states");
+        assert_eq!(
+            error.code(),
+            winwincode_api::generated::ErrorCode::TrustedFactsUnavailable,
+            "{status:?}"
+        );
+    }
 }
 
 #[test]

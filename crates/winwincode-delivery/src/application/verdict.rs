@@ -1012,16 +1012,37 @@ mod tests {
                 candidate_commit_id: "6".repeat(40),
                 candidate_tree_id: "7".repeat(40),
                 diff_sha256: "8".repeat(64),
-                changed_paths: vec![CandidatePathFact {
-                    path: "src/oracle.rs".into(),
-                    state: CandidatePathState::Present,
-                    object_id: Some("9".repeat(40)),
-                }],
-                changed_hunks: vec![CandidateHunkFact {
-                    file_path: "src/oracle.rs".into(),
-                    hunk_sha256: "a".repeat(64),
-                    source_hunk_sha256: None,
-                }],
+                // Distinct identities and opposing orders make reconstruction
+                // observably different from copying the sealed candidate.
+                changed_paths: vec![
+                    CandidatePathFact {
+                        path: "src/zeta.rs".into(),
+                        state: CandidatePathState::Present,
+                        object_id: Some("9".repeat(40)),
+                    },
+                    CandidatePathFact {
+                        path: "src/alpha.rs".into(),
+                        state: CandidatePathState::Deleted,
+                        object_id: None,
+                    },
+                ],
+                changed_hunks: vec![
+                    CandidateHunkFact {
+                        file_path: "src/zeta.rs".into(),
+                        hunk_sha256: "a".repeat(64),
+                        source_hunk_sha256: Some("c".repeat(64)),
+                    },
+                    CandidateHunkFact {
+                        file_path: "src/alpha.rs".into(),
+                        hunk_sha256: "d".repeat(64),
+                        source_hunk_sha256: None,
+                    },
+                    CandidateHunkFact {
+                        file_path: "src/zeta.rs".into(),
+                        hunk_sha256: "e".repeat(64),
+                        source_hunk_sha256: Some("f".repeat(64)),
+                    },
+                ],
                 artifact_ref: "artifact:oracle:executor".into(),
                 artifact_digest: winwincode_domain::Sha256Digest(format!(
                     "sha256:{}",
@@ -1076,11 +1097,15 @@ mod tests {
                 candidate.candidate_ref()
             );
             assert_eq!(facts.verification().settlements().len(), 2);
+            assert_eq!(
+                facts.verification().settlements()[0].role(),
+                VerificationRole::Reviewer
+            );
+            assert_eq!(
+                facts.verification().settlements()[1].role(),
+                VerificationRole::Verifier
+            );
             for settlement in facts.verification().settlements() {
-                assert!(matches!(
-                    settlement.role(),
-                    VerificationRole::Reviewer | VerificationRole::Verifier
-                ));
                 let assignment = settlement
                     .assignment()
                     .expect("settled role keeps its exact candidate assignment");
