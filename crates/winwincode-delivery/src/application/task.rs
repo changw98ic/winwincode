@@ -2,12 +2,9 @@
 
 //! Approved `DeliveryTask` graph transitions.
 
-use crate::domain::{
-    AttentionItemStatus, AttentionItemType, Delivery, DeliveryStage, DeliveryStatus, DeliveryTask,
-    DeliveryTaskStatus, StageRunStatus,
-};
+use crate::domain::{Delivery, DeliveryStage, DeliveryTask, DeliveryTaskStatus};
 
-use super::{CoordinationError, CoordinationErrorCode, require_mutation_time};
+use super::{CoordinationError, CoordinationErrorCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskFact {
@@ -53,94 +50,12 @@ pub fn transition_task_status(
     Ok(next)
 }
 
-/// Approves one immutable `DeliveryTask` graph after the current plan review.
-///
-/// `delivery.create.tasks` remains empty. This command is the only normal path
-/// that writes the task graph, once per current `Spec` revision.
-///
-/// # Errors
-///
-/// Fails closed on stale revision, missing current plan approval, an existing
-/// graph, empty proposals, non-pending task state, or an invalid task DAG.
-pub fn approve_task_breakdown(
-    delivery: &Delivery,
-    expected_revision: u64,
-    tasks: Vec<DeliveryTask>,
-    now_millis: u64,
-) -> Result<Delivery, CoordinationError> {
-    if delivery.revision() != expected_revision {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::RevisionConflict,
-            "Delivery revision changed before task breakdown approval",
-        ));
-    }
-    require_mutation_time(delivery, now_millis)?;
-    if delivery.snapshot().status != DeliveryStatus::Executing {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "DeliveryTask graph requires the current approved plan",
-        ));
-    }
-    if !delivery.snapshot().tasks.is_empty() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::Conflict,
-            "the current Spec revision already has an approved DeliveryTask graph",
-        ));
-    }
-    if tasks.is_empty() {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "an approved DeliveryTask graph must contain at least one task",
-        ));
-    }
-    if tasks.iter().any(|task| {
-        task.delivery_id != *delivery.id() || task.status != DeliveryTaskStatus::Pending
-    }) {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::InvalidRequest,
-            "approved DeliveryTasks must belong to this Delivery and start pending",
-        ));
-    }
-    let review = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .rev()
-        .find(|run| run.stage == DeliveryStage::PlanReview)
-        .ok_or_else(|| {
-            CoordinationError::new(
-                CoordinationErrorCode::WrongState,
-                "DeliveryTask graph has no current plan review",
-            )
-        })?;
-    let approved = review.status == StageRunStatus::Succeeded
-        && delivery.snapshot().attention_items.iter().any(|item| {
-            item.delivery_spec_id == delivery.snapshot().spec.id
-                && item.stage_run_id.as_ref() == Some(&review.id)
-                && item.item_type == AttentionItemType::DecisionRequired
-                && item.status == AttentionItemStatus::Resolved
-        });
-    if !approved {
-        return Err(CoordinationError::new(
-            CoordinationErrorCode::WrongState,
-            "DeliveryTask graph is not tied to the current approved plan review",
-        ));
-    }
-    let mut snapshot = delivery.clone().into_snapshot();
-    snapshot.tasks = tasks;
-    snapshot.revision += 1;
-    snapshot.updated_at_millis = now_millis;
-    Delivery::try_from_snapshot(snapshot).map_err(|error| {
-        CoordinationError::new(CoordinationErrorCode::InvalidRequest, error.to_string())
-    })
-}
-
 /// Enforces the new `delivery.create` path before domain construction.
 ///
 /// # Errors
 ///
 /// Rejects every non-empty task list; task proposals enter only through
-/// [`approve_task_breakdown`].
+/// [`super::task_breakdown::prepare_task_breakdown_promotion`].
 pub fn validate_create_tasks_empty(tasks: &[DeliveryTask]) -> Result<(), CoordinationError> {
     if tasks.is_empty() {
         Ok(())

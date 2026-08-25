@@ -458,14 +458,33 @@ impl StorageError {
         }
     }
 
-    fn revision_conflict(expected: u64, actual: u64) -> Self {
+    /// Builds the adapter-neutral concurrency result used by application
+    /// adapters that already validated a typed aggregate revision conflict.
+    #[must_use]
+    pub fn revision_conflict(expected: u64, actual: u64) -> Self {
         Self {
             kind: StorageErrorKind::RevisionConflict,
             message: format!("expected revision {expected}, but current revision is {actual}"),
         }
     }
 
-    fn request_conflict(request_id: &RequestId) -> Self {
+    /// Builds the revision-token conflict for the one reviewed solution-set
+    /// digest accepted at the task-promotion boundary.
+    #[must_use]
+    pub fn revision_token_conflict(field: &str) -> Self {
+        if field != "reviewSetSha256" {
+            return Self::invalid_input("revision token conflict field is unsupported");
+        }
+        Self {
+            kind: StorageErrorKind::RevisionConflict,
+            message: "reviewSetSha256 no longer identifies the current solution review".to_owned(),
+        }
+    }
+
+    /// Builds the adapter-neutral result for a reused scoped request whose
+    /// canonical command digest differs from the first committed command.
+    #[must_use]
+    pub fn request_conflict(request_id: &RequestId) -> Self {
         Self {
             kind: StorageErrorKind::RequestConflict,
             message: format!(

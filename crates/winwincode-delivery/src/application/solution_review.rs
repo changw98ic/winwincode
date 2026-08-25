@@ -359,8 +359,12 @@ pub(crate) struct ApprovedTaskPromotion<'review> {
     delivery_id: &'review DeliveryId,
     delivery_spec_id: &'review DeliverySpecId,
     delivery_spec_revision: u64,
+    planning_stage_run_id: &'review StageRunId,
+    planning_session_binding_id: &'review SessionBindingId,
     review_stage_run_id: &'review StageRunId,
     attention_item_id: &'review AttentionItemId,
+    reviewer_id: &'review str,
+    reviewed_at: u64,
     review_set_sha256: &'review str,
     task_proposals: &'review [DeliveryTaskProposal],
 }
@@ -385,8 +389,12 @@ impl ApprovedTaskPromotion<'_> {
             || &current.delivery_id != self.delivery_id
             || &current.delivery_spec_id != self.delivery_spec_id
             || current.delivery_spec_revision != self.delivery_spec_revision
+            || &current.planning_stage_run_id != self.planning_stage_run_id
+            || &current.planning_session_binding_id != self.planning_session_binding_id
             || &current.review_stage_run_id != self.review_stage_run_id
             || &current.attention_item_id != self.attention_item_id
+            || current.reviewer_id.as_deref() != Some(self.reviewer_id)
+            || current.reviewed_at != Some(self.reviewed_at)
             || current.review_set_sha256 != self.review_set_sha256
             || current.task_proposals.as_slice() != self.task_proposals
         {
@@ -399,6 +407,10 @@ impl ApprovedTaskPromotion<'_> {
 }
 
 impl ValidatedSolutionReviewSet {
+    pub(crate) fn review_set_sha256(&self) -> &str {
+        &self.review_set_sha256
+    }
+
     pub(crate) fn projection_view(&self) -> SolutionReviewView<'_> {
         SolutionReviewView {
             delivery_id: &self.delivery_id,
@@ -430,12 +442,19 @@ impl ValidatedSolutionReviewSet {
 
     #[allow(dead_code)] // The only authority seam reserved for phase 2.5.7.
     pub(crate) fn approved_task_promotion(&self) -> Option<ApprovedTaskPromotion<'_>> {
-        (self.review_status == ValidatedReviewStatus::Approved).then_some(ApprovedTaskPromotion {
+        if self.review_status != ValidatedReviewStatus::Approved {
+            return None;
+        }
+        Some(ApprovedTaskPromotion {
             delivery_id: &self.delivery_id,
             delivery_spec_id: &self.delivery_spec_id,
             delivery_spec_revision: self.delivery_spec_revision,
+            planning_stage_run_id: &self.planning_stage_run_id,
+            planning_session_binding_id: &self.planning_session_binding_id,
             review_stage_run_id: &self.review_stage_run_id,
             attention_item_id: &self.attention_item_id,
+            reviewer_id: self.reviewer_id.as_deref()?,
+            reviewed_at: self.reviewed_at?,
             review_set_sha256: &self.review_set_sha256,
             task_proposals: &self.task_proposals,
         })
@@ -1281,6 +1300,13 @@ fn review_error(code: SolutionReviewErrorCode, message: &str) -> SolutionReviewE
 }
 
 #[cfg(test)]
+pub(crate) use tests::{
+    ReviewFixtureState, duplicate_task_and_criterion_fixtures, empty_task_proposals_fixture,
+    invalid_criterion_fixtures, invalid_dependency_fixtures, ordered_task_proposals_fixture,
+    review_delivery, with_newer_review_attempt,
+};
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
@@ -1309,7 +1335,7 @@ mod tests {
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ReviewFixtureState {
+    pub(crate) enum ReviewFixtureState {
         Pending,
         Approved,
         ChangesRequested,
@@ -1468,7 +1494,7 @@ mod tests {
         }
     }
 
-    fn review_delivery(state: ReviewFixtureState) -> Delivery {
+    pub(crate) fn review_delivery(state: ReviewFixtureState) -> Delivery {
         let mut snapshot = test_fixture();
         snapshot.status = match state {
             ReviewFixtureState::Pending => DeliveryStatus::NeedsAttention,
@@ -1556,7 +1582,10 @@ mod tests {
         Delivery::try_from_snapshot(snapshot).expect("solution-review Delivery")
     }
 
-    fn with_newer_review_attempt(history: Delivery, current: ReviewFixtureState) -> Delivery {
+    pub(crate) fn with_newer_review_attempt(
+        history: Delivery,
+        current: ReviewFixtureState,
+    ) -> Delivery {
         let mut snapshot = history.into_snapshot();
         snapshot.status = match current {
             ReviewFixtureState::Pending => DeliveryStatus::NeedsAttention,
@@ -1874,6 +1903,103 @@ mod tests {
         assert!(resolve_current_solution_review(&stale_order).is_err());
     }
 
+    pub(crate) fn empty_task_proposals_fixture() -> Delivery {
+        rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals.clear();
+        })
+    }
+
+    pub(crate) fn ordered_task_proposals_fixture() -> Delivery {
+        rewrite_context(review_delivery(ReviewFixtureState::Approved), |context| {
+            let second_criterion = context.task_proposals[0]
+                .acceptance_criterion_ids
+                .pop()
+                .expect("second acceptance criterion");
+            let first_id = context.task_proposals[0].id.clone();
+            context.task_proposals.push(DeliveryTaskProposal {
+                id: DeliveryTaskId("task:verification".into()),
+                title: "Verify invitation flow".into(),
+                goal: "Run the exact acceptance checks.".into(),
+                acceptance_criterion_ids: vec![second_criterion],
+                blocked_by_task_ids: vec![first_id],
+            });
+        })
+    }
+
+    pub(crate) fn duplicate_task_and_criterion_fixtures() -> (Delivery, Delivery) {
+        let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context
+                .task_proposals
+                .push(context.task_proposals[0].clone());
+        });
+        let duplicate_criterion =
+            rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+                let criterion = context.task_proposals[0].acceptance_criterion_ids[0].clone();
+                context.task_proposals[0]
+                    .acceptance_criterion_ids
+                    .push(criterion);
+            });
+        (duplicate, duplicate_criterion)
+    }
+
+    pub(crate) fn invalid_criterion_fixtures() -> [Delivery; 3] {
+        let empty = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals[0].acceptance_criterion_ids.clear();
+        });
+        let foreign = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals[0].acceptance_criterion_ids =
+                vec![AcceptanceCriterionId("criterion:foreign".into())];
+        });
+        let incomplete = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals[0]
+                .acceptance_criterion_ids
+                .pop()
+                .expect("second acceptance criterion");
+        });
+        [empty, foreign, incomplete]
+    }
+
+    pub(crate) fn invalid_dependency_fixtures() -> [Delivery; 4] {
+        let self_dependency =
+            rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+                context.task_proposals[0].blocked_by_task_ids =
+                    vec![context.task_proposals[0].id.clone()];
+            });
+        let missing = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            context.task_proposals[0].blocked_by_task_ids =
+                vec![DeliveryTaskId("task:missing".into())];
+        });
+        let duplicate = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            let dependency = DeliveryTaskProposal {
+                id: DeliveryTaskId("task:dependency".into()),
+                title: "Dependency".into(),
+                goal: "Retain current acceptance coverage.".into(),
+                acceptance_criterion_ids: context.task_proposals[0]
+                    .acceptance_criterion_ids
+                    .clone(),
+                blocked_by_task_ids: vec![],
+            };
+            context.task_proposals[0].blocked_by_task_ids =
+                vec![dependency.id.clone(), dependency.id.clone()];
+            context.task_proposals.push(dependency);
+        });
+        let cycle = rewrite_context(review_delivery(ReviewFixtureState::Pending), |context| {
+            let first_id = context.task_proposals[0].id.clone();
+            let second_id = DeliveryTaskId("task:cycle".into());
+            context.task_proposals[0].blocked_by_task_ids = vec![second_id.clone()];
+            context.task_proposals.push(DeliveryTaskProposal {
+                id: second_id,
+                title: "Cycle".into(),
+                goal: "Exercise cycle rejection.".into(),
+                acceptance_criterion_ids: context.task_proposals[0]
+                    .acceptance_criterion_ids
+                    .clone(),
+                blocked_by_task_ids: vec![first_id],
+            });
+        });
+        [self_dependency, missing, duplicate, cycle]
+    }
+
     #[test]
     fn human_solution_review_rejects_execution_session_binding() {
         let mut snapshot = review_delivery(ReviewFixtureState::Pending).into_snapshot();
@@ -2021,6 +2147,41 @@ mod tests {
         let current = with_newer_review_attempt(historical, ReviewFixtureState::Pending);
 
         assert!(old_promotion.validate_for_delivery(&current).is_err());
+    }
+
+    #[test]
+    fn approved_task_promotion_seal_binds_the_review_actor_and_time() {
+        let historical = review_delivery(ReviewFixtureState::Approved);
+        let old_review = resolve_current_solution_review(&historical)
+            .expect("historical approved review")
+            .expect("historical review fact");
+        let old_promotion = old_review
+            .approved_task_promotion()
+            .expect("historical promotion seal");
+
+        let mut snapshot = historical.into_snapshot();
+        let changed_reviewed_at = snapshot.attention_items[0]
+            .resolved_at_millis
+            .expect("review time")
+            + 1;
+        snapshot.attention_items[0].assigned_to = Some("bob".into());
+        snapshot.attention_items[0].resolved_by = Some("bob".into());
+        snapshot.attention_items[0].resolved_at_millis = Some(changed_reviewed_at);
+        snapshot
+            .stage_runs
+            .iter_mut()
+            .find(|run| run.stage == DeliveryStage::PlanReview)
+            .expect("review StageRun")
+            .finished_at_millis = Some(changed_reviewed_at);
+        snapshot.updated_at_millis = changed_reviewed_at;
+        let changed = Delivery::try_from_snapshot(snapshot).expect("changed review settlement");
+        assert!(
+            resolve_current_solution_review(&changed)
+                .expect("changed review is internally valid")
+                .is_some()
+        );
+
+        assert!(old_promotion.validate_for_delivery(&changed).is_err());
     }
 
     #[test]

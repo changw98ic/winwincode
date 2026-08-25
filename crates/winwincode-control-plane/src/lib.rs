@@ -9,6 +9,7 @@
 pub mod delivery_execution;
 mod delivery_transaction;
 mod rework_transaction;
+mod task_breakdown_transaction;
 mod verdict_transaction;
 
 use std::fmt;
@@ -494,6 +495,30 @@ impl ControlPlane {
             let storage = self.storage_mut().map_err(CommitError::Storage)?;
             rework_transaction::execute(storage, command, transition)
                 .map_err(CommitError::Storage)?
+        };
+        self.flush_outbox()
+            .map_err(|source| CommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })?;
+        Ok(receipt)
+    }
+
+    /// Atomically promotes the exact ordered task graph sealed by the current
+    /// approved solution review, then publishes only its committed outbox row.
+    ///
+    /// # Errors
+    ///
+    /// Returns before persistence for a stale review, changed revision, or any
+    /// failed atomic member. Publication failure retains the committed event
+    /// for replay.
+    pub fn commit_delivery_task_breakdown(
+        &mut self,
+        command: &CommandEnvelope,
+    ) -> Result<CommitReceipt, CommitError> {
+        let receipt = {
+            let storage = self.storage_mut().map_err(CommitError::Storage)?;
+            task_breakdown_transaction::execute(storage, command).map_err(CommitError::Storage)?
         };
         self.flush_outbox()
             .map_err(|source| CommitError::PublicationPending {
