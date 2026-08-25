@@ -16,6 +16,7 @@ import {
   runDifferentialGate,
   validateCanonicalExpected,
   validateDifferentialContract,
+  validateDifferentialExecutionPlan,
 } from '../scripts/delivery-strongflow-differential-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
@@ -104,7 +105,73 @@ test('machine rules freeze the ten scenario execution plan and complete result s
     'scenarios',
     'schemaVersion',
   ])
-  assert.deepEqual(Object.keys(plan.scenarios[0]).sort(), ['commands', 'id'])
+  assert.equal(
+    plan.schemaVersion,
+    'winwincode.delivery-strongflow-differential-plan.v2',
+  )
+  assert.deepEqual(rules.executionPlan.exactScenarioKeys, [
+    'commands',
+    'id',
+    'terminalOutcomeStatusBySourceCommandIndex',
+  ])
+  assert.deepEqual(Object.keys(plan.scenarios[0]).sort(), [
+    'commands',
+    'id',
+    'terminalOutcomeStatusBySourceCommandIndex',
+  ])
+  assert.deepEqual(
+    Object.fromEntries(plan.scenarios.map(scenario => [
+      scenario.id,
+      scenario.terminalOutcomeStatusBySourceCommandIndex,
+    ])),
+    {
+      'attention': {},
+      'candidate-invalidation': { 17: 'succeeded', 25: 'succeeded' },
+      'corruption-recovery': {},
+      'inconclusive': { 17: 'succeeded' },
+      'infra-error': { 17: 'infrastructure_error' },
+      'request-id-replay': {},
+      'revision-conflict': {},
+      'rework': { 17: 'succeeded', 25: 'succeeded' },
+      'success-closed-loop': { 17: 'succeeded' },
+      'task-dag': {},
+    },
+  )
+  const infraPlanScenario = plan.scenarios.find(scenario => scenario.id === 'infra-error')
+  for (const [name, mutate] of [
+    ['missing', statuses => { delete statuses[17] }],
+    ['extra', statuses => { statuses[18] = 'infrastructure_error' }],
+    ['wrong-index', statuses => {
+      delete statuses[17]
+      statuses[18] = 'infrastructure_error'
+    }],
+  ]) {
+    const malformed = structuredClone(plan)
+    const statuses = malformed.scenarios.find(scenario => scenario.id === 'infra-error')
+      .terminalOutcomeStatusBySourceCommandIndex
+    mutate(statuses)
+    assert.throws(
+      () => validateDifferentialExecutionPlan(malformed, oracle, rules),
+      /infra-error terminal outcome plan source indexes/u,
+      name,
+    )
+  }
+  for (const [name, status, pattern] of [
+    ['wrong-value', 'succeeded', /infra-error terminal outcome plan status/u],
+    ['non-schema-alias', 'infrastructure-error', /status is not allowed/u],
+  ]) {
+    const malformed = structuredClone(plan)
+    malformed.scenarios.find(scenario => scenario.id === 'infra-error')
+      .terminalOutcomeStatusBySourceCommandIndex[17] = status
+    assert.throws(
+      () => validateDifferentialExecutionPlan(malformed, oracle, rules),
+      pattern,
+      name,
+    )
+  }
+  assert.deepEqual(infraPlanScenario.terminalOutcomeStatusBySourceCommandIndex, {
+    17: 'infrastructure_error',
+  })
   assert.equal(JSON.stringify(plan).includes('"response"'), false)
   assert.equal(JSON.stringify(plan).includes('"assertions"'), false)
   assert.equal(JSON.stringify(plan).includes('"observation"'), false)
@@ -379,6 +446,40 @@ test('task-dag migration remaps legacy task identities and rejects the cycle bef
 test('terminal outcome messages bind the exact final verifier fact before verdict', async () => {
   const [rules, oracle] = await Promise.all([json(rulesPath), json(oraclePath)])
   const expected = canonicalExpectedFixture(oracle, rules)
+  const outcomeStatusByScenario = {
+    'attention': null,
+    'candidate-invalidation': 'succeeded',
+    'corruption-recovery': null,
+    'inconclusive': 'succeeded',
+    'infra-error': 'infrastructure_error',
+    'request-id-replay': null,
+    'revision-conflict': null,
+    'rework': 'succeeded',
+    'success-closed-loop': 'succeeded',
+    'task-dag': null,
+  }
+  assert.deepEqual(
+    rules.canonicalMigration.terminalOutcomeMessages.outcomeStatusByScenario,
+    outcomeStatusByScenario,
+  )
+  assert.deepEqual(
+    rules.canonicalExpected.requestContracts['execution-port.message']
+      .outcomeStatusesByTarget,
+    { 'job.outcome': ['infrastructure_error', 'succeeded'] },
+  )
+  for (const scenario of expected.result.scenarios) {
+    const statuses = scenario.commands
+      .filter(command => command.request.kind === 'job.outcome')
+      .map(command => command.request.outcome.status)
+    const expectedStatus = outcomeStatusByScenario[scenario.id]
+    assert.deepEqual(
+      statuses,
+      expectedStatus === null
+        ? []
+        : Array.from({ length: statuses.length }, () => expectedStatus),
+      scenario.id,
+    )
+  }
   const source = oracle.scenarios.find(scenario => scenario.id === 'success-closed-loop')
   const scenario = expected.result.scenarios.find(entry => entry.id === source.id)
   const sourceVerdict = source.commands[17]
@@ -417,6 +518,25 @@ test('terminal outcome messages bind the exact final verifier fact before verdic
   assert.throws(
     () => validateCanonicalExpected(rules, oracle, wrongTerminalFact),
     /terminal outcome finishedAt/u,
+  )
+
+  const infraSource = oracle.scenarios.find(entry => entry.id === 'infra-error')
+  const infraSourceVerdict = infraSource.commands[17]
+  assert.equal(infraSourceVerdict.response.result.delivery.stageRuns.at(-1).status, 'failed')
+  assert.equal(infraSourceVerdict.response.result.delivery.verdict.status, 'infra_error')
+  const infraScenario = expected.result.scenarios.find(entry => entry.id === 'infra-error')
+  const infraOutcome = infraScenario.commands.find(command => (
+    command.request.kind === 'job.outcome'
+  ))
+  assert.equal(infraOutcome.request.outcome.status, 'infrastructure_error')
+
+  const wrongInfraStatus = structuredClone(expected)
+  wrongInfraStatus.result.scenarios.find(entry => entry.id === 'infra-error').commands
+    .find(command => command.request.kind === 'job.outcome')
+    .request.outcome.status = 'succeeded'
+  assert.throws(
+    () => validateCanonicalExpected(rules, oracle, wrongInfraStatus),
+    /infra-error terminal outcome status/u,
   )
 })
 
@@ -891,6 +1011,8 @@ function canonicalExpectedFixture(oracle, rules) {
       oracleSchemaVersion: oracle.schemaVersion,
       scenarios: oracle.scenarios.map(scenario => {
         const mapping = scenarioRules.get(scenario.id)
+        const terminalOutcomeStatus = rules.canonicalMigration.terminalOutcomeMessages
+          .outcomeStatusByScenario[scenario.id]
         const commands = mapping.canonicalGroups.map((group, targetIndex) => {
           const sourceCommand = scenario.commands[group.sourceCommandIndexes.at(-1)]
           const legacy = sourceCommand.kind === 'strongflow.request'
@@ -899,7 +1021,13 @@ function canonicalExpectedFixture(oracle, rules) {
           return {
             sourceCommandIndexes: group.sourceCommandIndexes,
             kind: group.kind,
-            request: canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping),
+            request: canonicalFixtureRequest(
+              group,
+              sourceCommand,
+              targetIndex,
+              mapping,
+              terminalOutcomeStatus,
+            ),
             response: canonicalFixtureResponse(
               group,
               sourceCommand,
@@ -907,6 +1035,7 @@ function canonicalExpectedFixture(oracle, rules) {
               targetIndex,
               scenario,
               mapping,
+              terminalOutcomeStatus,
             ),
           }
         })
@@ -1029,7 +1158,13 @@ function migrateFixtureResponse(response, legacy, rules) {
   return migrated
 }
 
-function canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping) {
+function canonicalFixtureRequest(
+  group,
+  sourceCommand,
+  targetIndex,
+  mapping,
+  terminalOutcomeStatus,
+) {
   if (group.kind === 'fixture.command') {
     if (group.target === 'fixture.store.seed-snapshot') {
       const input = structuredClone(sourceCommand.input)
@@ -1094,7 +1229,7 @@ function canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping) {
           codexThreadId: 'cdx_00000000000000000000000000',
           finishedAt: terminalInstant,
           lastEventSequence: Number(terminal.cursor.sequence),
-          status: 'succeeded',
+          status: terminalOutcomeStatus,
           summary: terminal.data.last_agent_message,
         },
         schemaVersion: 'winwincode/v1',
@@ -1305,12 +1440,19 @@ function canonicalFixtureResponse(
   targetIndex,
   scenario,
   mapping,
+  terminalOutcomeStatus,
 ) {
   if (group.kind === 'fixture.command') {
     return canonicalFixtureCommandResponse(group.target, sourceCommand)
   }
   if (group.kind === 'execution-port.message') {
-    return canonicalFixtureMessageResponse(group, sourceCommand, targetIndex, mapping)
+    return canonicalFixtureMessageResponse(
+      group,
+      sourceCommand,
+      targetIndex,
+      mapping,
+      terminalOutcomeStatus,
+    )
   }
   const requestId = canonicalFixtureRequestId(group.sourceCommandIndexes[0], targetIndex)
   if (scenario.id === 'task-dag'
@@ -1365,8 +1507,20 @@ function canonicalFixtureResponse(
   }
 }
 
-function canonicalFixtureMessageResponse(group, sourceCommand, targetIndex, mapping) {
-  const request = canonicalFixtureRequest(group, sourceCommand, targetIndex, mapping)
+function canonicalFixtureMessageResponse(
+  group,
+  sourceCommand,
+  targetIndex,
+  mapping,
+  terminalOutcomeStatus,
+) {
+  const request = canonicalFixtureRequest(
+    group,
+    sourceCommand,
+    targetIndex,
+    mapping,
+    terminalOutcomeStatus,
+  )
   const previousRevision = mapping.canonicalGroups.slice(0, targetIndex)
     .reduce((revision, entry) => (
       entry.revisionEffect.seed ?? revision + entry.revisionEffect.delta
