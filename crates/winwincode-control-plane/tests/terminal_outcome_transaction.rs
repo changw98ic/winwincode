@@ -584,6 +584,59 @@ fn final_verifier_outcome_is_durable_before_verdict() {
 }
 
 #[test]
+fn terminal_event_excludes_raw_worker_text_and_lease_authority() {
+    let seed = 101;
+    let root = temporary_directory("secret-safe-terminal-event");
+    let scope = repository_scope(seed);
+    let (delivery, _candidate) = running_final_verifier(seed);
+    let job = execution_job(&delivery, &scope);
+    let mut message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Failed);
+    message.outcome.summary = "authorization=terminal-summary-secret".into();
+    message.outcome.error = Some(ExecutionPortError {
+        code: ExecutionPortErrorCode::ExecutionFailed,
+        message: "credential=terminal-error-secret".into(),
+        retryable: false,
+    });
+    message.lease.fencing_token = FencingToken("9876543210987654321".into());
+    let facts = outcome_facts(&delivery, &message);
+    seed_delivery_and_job(&root, &delivery, &job);
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane start");
+
+    let receipt = control_plane
+        .commit_delivery_terminal_outcome(&scope, &message, &facts)
+        .expect("terminal outcome commit");
+    let terminal_event = receipt
+        .receipt()
+        .events
+        .iter()
+        .find(|event| event.topic == "delivery.stage.terminal")
+        .expect("terminal event");
+    let durable_payload = String::from_utf8_lossy(&terminal_event.payload);
+    for forbidden in [
+        "terminal-summary-secret",
+        "terminal-error-secret",
+        "9876543210987654321",
+        "\"message\"",
+        "\"lease\"",
+        "\"fencingToken\"",
+        "\"summary\"",
+        "\"error\"",
+    ] {
+        assert!(
+            !durable_payload.contains(forbidden),
+            "terminal event leaked raw Worker or lease field {forbidden}: {durable_payload}"
+        );
+    }
+
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
 fn exact_replay_precedes_current_state_journal_job_and_replacement_facts() {
     let seed = 2;
     let root = temporary_directory("receipt-first-replay");
