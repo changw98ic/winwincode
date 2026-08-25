@@ -13,9 +13,9 @@ use winwincode_storage::{
 };
 
 use crate::{
-    StateChange, command_receipt,
+    DeliveryChangeKind, StateChange, command_receipt, delivery_changed_event,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
-    storage_commit,
+    storage_commit, validate_delivery_changed_receipt,
 };
 
 const REWORK_CLARIFIED_TOPIC: &str = "delivery.rework.clarified";
@@ -47,16 +47,25 @@ pub(crate) fn execute(
     let stream_id = delivery_stream_id(&delivery_id);
     let event = clarification_event(transition)?;
     let event_id = clarification_event_id(&event);
+    let changed_event = delivery_changed_event(
+        command,
+        &delivery_id,
+        transition.delivery.revision(),
+        DeliveryChangeKind::Reworked,
+    )?;
     let mut commit = storage_commit(
         command,
         StateChange::new(
             &stream_id,
             transition.delivery.encode_json().map_err(storage_error)?,
-            vec![NewOutboxEvent::new(
-                &event_id,
-                REWORK_CLARIFIED_TOPIC,
-                serde_json::to_vec(&event).map_err(storage_error)?,
-            )],
+            vec![
+                NewOutboxEvent::internal(
+                    &event_id,
+                    REWORK_CLARIFIED_TOPIC,
+                    serde_json::to_vec(&event).map_err(storage_error)?,
+                ),
+                changed_event,
+            ],
         ),
     )?;
     let request_digest = commit
@@ -123,7 +132,12 @@ fn validate_receipt(
             "durable rework clarification receipt does not match its scoped request, replay state, or Delivery revision",
         ));
     }
-    let [stored_event] = receipt.events.as_slice() else {
+    let stored_events = receipt
+        .events
+        .iter()
+        .filter(|event| event.topic == REWORK_CLARIFIED_TOPIC)
+        .collect::<Vec<_>>();
+    let [stored_event] = stored_events.as_slice() else {
         return Err(StorageError::invalid_input(
             "durable rework clarification receipt must contain exactly one event",
         ));
@@ -140,6 +154,12 @@ fn validate_receipt(
             "durable rework clarification event does not match the original scoped Delivery command",
         ));
     }
+    validate_delivery_changed_receipt(
+        receipt,
+        delivery_id,
+        receipt.revision,
+        DeliveryChangeKind::Reworked,
+    )?;
     Ok(())
 }
 

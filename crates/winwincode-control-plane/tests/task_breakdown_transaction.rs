@@ -194,7 +194,7 @@ fn seed_specific_delivery(root: &PathBuf, delivery: Delivery) -> Delivery {
                 format!("delivery:{}", delivery.id().0),
                 0,
                 delivery.encode_json().expect("seed Delivery JSON"),
-                vec![NewOutboxEvent::new(
+                vec![NewOutboxEvent::internal(
                     "seed-task-breakdown-event",
                     "delivery.seeded",
                     b"seed".to_vec(),
@@ -257,7 +257,7 @@ fn task_breakdown_command_commits_state_journal_receipt_and_outbox_together() {
     assert_eq!(state.revision, source.revision() + 1);
     assert_eq!(committed.snapshot().tasks, event.tasks);
     assert_eq!(event.review_set_sha256, REVIEW_SET_SHA256);
-    assert_eq!(published.lock().expect("published events").len(), 1);
+    assert_eq!(published.lock().expect("published events").len(), 2);
     control_plane.shutdown().expect("shutdown");
 
     let storage = SqliteStorage::open(&root).expect("inspection storage");
@@ -304,7 +304,7 @@ fn task_breakdown_receipt_first_replay_returns_original_graph_revision_and_event
             .lock()
             .expect("initial publications")
             .len(),
-        1
+        2
     );
     replayed_publications
         .lock()
@@ -488,7 +488,7 @@ fn task_breakdown_receipt_cannot_be_replayed_by_another_actor_scope_or_delivery(
         assert_eq!(state.revision, first.revision, "{boundary}");
         assert_eq!(
             published.lock().expect("published events").len(),
-            1,
+            2,
             "{boundary}"
         );
         control_plane.shutdown().expect("shutdown");
@@ -856,7 +856,7 @@ fn task_breakdown_publish_failure_keeps_the_committed_event_for_replay() {
     assert!(replay.idempotent_replay);
     assert_eq!(replay.revision, receipt.revision);
     assert_eq!(replay.events, receipt.events);
-    assert_eq!(published.lock().expect("published events").len(), 1);
+    assert_eq!(published.lock().expect("published events").len(), 2);
     restarted.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database cleanup");
 }
@@ -880,7 +880,7 @@ fn generic_control_plane_commit_cannot_bypass_task_breakdown_authority() {
             StateChange::new(
                 "delivery:delivery-main",
                 b"caller-authored-task-state".to_vec(),
-                vec![NewOutboxEvent::new(
+                vec![NewOutboxEvent::internal(
                     "caller-authored-task-event",
                     "delivery.task_breakdown.approved",
                     b"caller-authored-task-event".to_vec(),

@@ -189,7 +189,7 @@ fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
                 format!("delivery:{}", delivery.id().0),
                 0,
                 delivery.encode_json().expect("seed Delivery JSON"),
-                vec![NewOutboxEvent::new(
+                vec![NewOutboxEvent::internal(
                     "seed-verdict-event",
                     "delivery.seeded",
                     b"seed".to_vec(),
@@ -274,7 +274,7 @@ fn advance_after_failed_verdict(root: &PathBuf, delivery_id: &DeliveryId) -> Del
         format!("delivery:{}", delivery_id.0),
         failed.revision(),
         resolved.encode_json().expect("resolved Delivery JSON"),
-        vec![NewOutboxEvent::new(
+        vec![NewOutboxEvent::internal(
             "attention-resolved-after-verdict",
             "delivery.attention.resolved",
             b"resolved".to_vec(),
@@ -332,7 +332,11 @@ fn verdict_commit_is_atomic_and_replay_returns_the_original_event_once() {
     assert_eq!(first.revision, fixture.delivery.revision() + 1);
     assert_eq!(replay.revision, first.revision);
     assert_eq!(replay.events, first.events);
-    assert_eq!(published.lock().expect("published events").len(), 1);
+    assert_eq!(first.events.len(), 2);
+    assert!(first.events[0].projection_cursor.is_none());
+    assert_eq!(first.events[1].topic, "delivery.changed.v1");
+    assert!(first.events[1].projection_cursor.is_some());
+    assert_eq!(published.lock().expect("published events").len(), 2);
     let state = control_plane
         .load_state(&format!("delivery:{}", fixture.delivery.id().0))
         .expect("state read")

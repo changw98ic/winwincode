@@ -26,7 +26,10 @@ use crate::delivery_execution::{
     DeliveryExecutionPortError, DeliveryExecutionTransaction, ExecutionJobDispatcher,
     PendingDeliveryExecution, commit_and_dispatch,
 };
-use crate::{StateChange, storage_commit};
+use crate::{
+    DeliveryChangeKind, StateChange, delivery_changed_event, storage_commit,
+    validate_delivery_changed_receipt,
+};
 
 const DELIVERY_AGGREGATE_TYPE: &str = "delivery";
 const EXECUTION_JOB_TOPIC: &str = "execution.job.dispatch";
@@ -56,17 +59,23 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
         validate_command(self.command, pending)?;
         let outbox_event_id = execution_job_event_id(pending.job());
         let job_payload = serde_json::to_vec(pending.job()).map_err(port_error)?;
+        let changed_event = delivery_changed_event(
+            self.command,
+            pending.delivery().id(),
+            pending.delivery().revision(),
+            DeliveryChangeKind::Advanced,
+        )
+        .map_err(port_error)?;
         let stream_id = delivery_stream_id(pending.delivery().id());
         let mut commit = storage_commit(
             self.command,
             StateChange::new(
                 &stream_id,
                 pending.delivery().encode_json().map_err(port_error)?,
-                vec![NewOutboxEvent::new(
-                    &outbox_event_id,
-                    EXECUTION_JOB_TOPIC,
-                    job_payload,
-                )],
+                vec![
+                    NewOutboxEvent::internal(&outbox_event_id, EXECUTION_JOB_TOPIC, job_payload),
+                    changed_event,
+                ],
             ),
         )
         .map_err(port_error)?;
@@ -231,6 +240,13 @@ fn committed_delivery_receipt(
             "durable execution job does not match the committed Delivery binding",
         ));
     }
+    validate_delivery_changed_receipt(
+        receipt,
+        delivery.id(),
+        delivery.revision(),
+        DeliveryChangeKind::Advanced,
+    )
+    .map_err(port_error)?;
     Ok(DeliveryExecutionCommitReceipt {
         committed_revision: receipt.revision,
         outbox_event_id: event.event_id.clone(),
@@ -434,6 +450,7 @@ fn storage_journal_error(error: &StorageError) -> JournalBackendError {
         | StorageErrorKind::RevisionConflict
         | StorageErrorKind::RequestConflict
         | StorageErrorKind::RequestReplayMissing
+        | StorageErrorKind::EventCursorExpired
         | StorageErrorKind::Adapter
         | StorageErrorKind::Closed => JournalBackendErrorCode::Io,
     };

@@ -154,6 +154,10 @@ pub enum DeliveryExecutionError {
         commit: Box<DeliveryExecutionCommitReceipt>,
         source: DeliveryExecutionPortError,
     },
+    ProjectionPublicationAfterDispatch {
+        commit: Box<DeliveryExecutionCommitReceipt>,
+        source: DeliveryExecutionPortError,
+    },
 }
 
 impl DeliveryExecutionError {
@@ -161,7 +165,8 @@ impl DeliveryExecutionError {
         match self {
             Self::CommittedPayloadInvalid { commit, .. }
             | Self::DispatchAfterCommit { commit, .. }
-            | Self::AcknowledgeAfterDispatch { commit, .. } => Some(commit.as_ref()),
+            | Self::AcknowledgeAfterDispatch { commit, .. }
+            | Self::ProjectionPublicationAfterDispatch { commit, .. } => Some(commit.as_ref()),
             Self::InvalidEffect(_) | Self::Coordination(_) | Self::Commit(_) => None,
         }
     }
@@ -184,6 +189,10 @@ impl fmt::Display for DeliveryExecutionError {
             Self::AcknowledgeAfterDispatch { source, .. } => write!(
                 formatter,
                 "ExecutionJob dispatched, but its durable outbox acknowledgement remains pending: {source}"
+            ),
+            Self::ProjectionPublicationAfterDispatch { source, .. } => write!(
+                formatter,
+                "ExecutionJob dispatched, but the Delivery change event remains pending: {source}"
             ),
         }
     }

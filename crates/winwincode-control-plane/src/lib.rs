@@ -9,6 +9,7 @@
 pub mod delivery_execution;
 mod delivery_transaction;
 mod rework_transaction;
+pub mod strongflow_projection;
 mod task_breakdown_transaction;
 mod verdict_transaction;
 
@@ -23,12 +24,17 @@ use delivery_execution::{
     ExecutionJobDispatcher, PendingDeliveryExecution,
 };
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
+use winwincode_api::generated::{
+    Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
+    ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType,
+    RepositoryScope, Scope,
+};
 use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdictFacts};
-use winwincode_domain::Sha256Digest;
+use winwincode_domain::{ControlPlaneEventId, DeliveryId, Revision, Sha256Digest};
 pub use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-    LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage, StorageError,
+    LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage,
+    ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey, StorageError,
     StorageErrorKind, StoredState,
 };
 use winwincode_storage::{
@@ -37,6 +43,22 @@ use winwincode_storage::{
 
 const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
 const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
+pub(crate) const DELIVERY_CHANGED_TOPIC: &str = "delivery.changed.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeliveryChangeKind {
+    Advanced,
+    Reworked,
+}
+
+impl DeliveryChangeKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Reworked => "reworked",
+        }
+    }
+}
 
 /// Canonical state and outbox values produced by one validated application command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -306,6 +328,7 @@ pub struct ControlPlane {
     storage: Option<Box<dyn ProductStateStorage>>,
     publisher: Option<Box<dyn EventPublisher>>,
     temporary_root: Option<OwnedTemporaryRoot>,
+    strongflow_sources: Option<strongflow_projection::StrongFlowProjectionSources>,
 }
 
 impl ControlPlane {
@@ -394,6 +417,7 @@ impl ControlPlane {
             storage: Some(storage),
             publisher: Some(publisher),
             temporary_root: Some(temporary_root),
+            strongflow_sources: None,
         };
         if let Err(error) = control_plane.flush_outbox() {
             let cleanup_failures = control_plane.close_resources();
@@ -425,6 +449,28 @@ impl ControlPlane {
             .path()
     }
 
+    /// Installs the trusted runtime-ledger and publication read adapters before
+    /// the typed `StrongFlow` query port is exposed to a transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an adapter set was already installed. Replacing a
+    /// live authority would make previously issued read cursors ambiguous.
+    pub fn install_strongflow_projection_sources(
+        &mut self,
+        sources: strongflow_projection::StrongFlowProjectionSources,
+    ) -> Result<(), strongflow_projection::StrongFlowProjectionError> {
+        if self.strongflow_sources.is_some() {
+            return Err(
+                strongflow_projection::StrongFlowProjectionError::invalid_request(
+                    "StrongFlow projection sources are already installed",
+                ),
+            );
+        }
+        self.strongflow_sources = Some(sources);
+        Ok(())
+    }
+
     /// Commits one canonical HTTP command's state and outbox first, then
     /// publishes pending events.
     ///
@@ -441,6 +487,13 @@ impl ControlPlane {
         if delivery_command(&command.command) {
             return Err(CommitError::Storage(StorageError::invalid_input(
                 "Delivery commands require the atomic Delivery command path",
+            )));
+        }
+        if change.events.iter().any(|event| {
+            event.projection_stream().is_some() || reserved_public_projection_topic(&event.topic)
+        }) {
+            return Err(CommitError::Storage(StorageError::invalid_input(
+                "public projection events require a typed Control Plane transaction",
             )));
         }
         let commit = storage_commit(command, change).map_err(CommitError::Storage)?;
@@ -473,10 +526,19 @@ impl ControlPlane {
         pending: &PendingDeliveryExecution,
         dispatcher: &mut dyn ExecutionJobDispatcher,
     ) -> Result<DeliveryExecutionDispatchReceipt, DeliveryExecutionError> {
-        let storage = self.storage_mut().map_err(|error| {
-            DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
+        let receipt = {
+            let storage = self.storage_mut().map_err(|error| {
+                DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
+            })?;
+            delivery_transaction::execute(storage, command, pending, dispatcher)?
+        };
+        self.flush_outbox().map_err(|source| {
+            DeliveryExecutionError::ProjectionPublicationAfterDispatch {
+                commit: Box::new(receipt.commit.clone()),
+                source: DeliveryExecutionPortError::new(source.to_string()),
+            }
         })?;
-        delivery_transaction::execute(storage, command, pending, dispatcher)
+        Ok(receipt)
     }
 
     /// Atomically commits a constructor-derived bounded-rework clarification
@@ -651,6 +713,13 @@ impl ControlPlane {
     }
 }
 
+fn reserved_public_projection_topic(topic: &str) -> bool {
+    serde_json::from_value::<ControlPlaneWebSocketEventType>(serde_json::Value::String(
+        topic.to_owned(),
+    ))
+    .is_ok()
+}
+
 pub(crate) fn storage_commit(
     command: &CommandEnvelope,
     change: StateChange,
@@ -668,6 +737,99 @@ pub(crate) fn storage_commit(
         change.state,
         change.events,
     ))
+}
+
+pub(crate) fn delivery_changed_event(
+    command: &CommandEnvelope,
+    delivery_id: &DeliveryId,
+    delivery_revision: u64,
+    change_kind: DeliveryChangeKind,
+) -> Result<NewOutboxEvent, StorageError> {
+    let Scope::RepositoryScope(scope) = &command.scope else {
+        return Err(StorageError::invalid_input(
+            "Delivery change events require repository scope",
+        ));
+    };
+    let revision = i64::try_from(delivery_revision)
+        .map(Revision)
+        .map_err(|_| StorageError::invalid_input("Delivery revision exceeds the public range"))?;
+    let payload = ControlPlaneWebSocketDeliveryChangedEvent {
+        change_kind: change_kind.as_str().to_owned(),
+        delivery_id: delivery_id.clone(),
+        revision,
+        type_value: ControlPlaneWebSocketDeliveryChangedEventTypeValue::DeliveryChangedV1,
+    };
+    let payload = serde_json::to_vec(&payload).map_err(|error| {
+        StorageError::adapter(format!("failed to encode Delivery change event: {error}"))
+    })?;
+    let scope_key = repository_scope_key(scope)?;
+    let event_id = delivery_changed_event_id(&scope_key, &payload);
+    Ok(NewOutboxEvent::projection(
+        event_id,
+        DELIVERY_CHANGED_TOPIC,
+        payload,
+        ProjectionEventStream::Delivery(delivery_id.clone()),
+    ))
+}
+
+pub(crate) fn validate_delivery_changed_receipt(
+    receipt: &CommitReceipt,
+    delivery_id: &DeliveryId,
+    delivery_revision: u64,
+    change_kind: DeliveryChangeKind,
+) -> Result<(), StorageError> {
+    let matching = receipt
+        .events
+        .iter()
+        .filter(|event| event.topic == DELIVERY_CHANGED_TOPIC)
+        .collect::<Vec<_>>();
+    let [event] = matching.as_slice() else {
+        return Err(StorageError::invalid_input(
+            "durable receipt must contain exactly one Delivery change event",
+        ));
+    };
+    let payload: ControlPlaneWebSocketDeliveryChangedEvent = serde_json::from_slice(&event.payload)
+        .map_err(|_| {
+            StorageError::invalid_input("durable Delivery change event is not canonical")
+        })?;
+    if serde_json::to_vec(&payload).map_err(|_| {
+        StorageError::invalid_input("durable Delivery change event is not canonical")
+    })? != event.payload
+        || payload.type_value
+            != ControlPlaneWebSocketDeliveryChangedEventTypeValue::DeliveryChangedV1
+        || payload.delivery_id != *delivery_id
+        || payload.revision.0 != i64::try_from(delivery_revision).unwrap_or(-1)
+        || payload.change_kind != change_kind.as_str()
+    {
+        return Err(StorageError::invalid_input(
+            "durable Delivery change event does not match committed Delivery facts",
+        ));
+    }
+    let cursor = event.projection_cursor.as_ref().ok_or_else(|| {
+        StorageError::invalid_input("durable Delivery change event has no stream cursor")
+    })?;
+    if cursor.sequence() == 0
+        || cursor.event_id().map(|value| value.0.as_str()) != Some(event.event_id.as_str())
+        || cursor.key().scope_key() != receipt.receipt_identity.scope_key()
+        || cursor.key().stream() != &ProjectionEventStream::Delivery(delivery_id.clone())
+        || event.event_id
+            != delivery_changed_event_id(receipt.receipt_identity.scope_key(), &event.payload).0
+    {
+        return Err(StorageError::invalid_input(
+            "durable Delivery change event cursor is not exact",
+        ));
+    }
+    Ok(())
+}
+
+fn delivery_changed_event_id(scope_key: &ReceiptScopeKey, payload: &[u8]) -> ControlPlaneEventId {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.delivery-changed-event.v1\0");
+    digest.update((scope_key.as_bytes().len() as u64).to_be_bytes());
+    digest.update(scope_key.as_bytes());
+    digest.update((payload.len() as u64).to_be_bytes());
+    digest.update(payload);
+    ControlPlaneEventId(format!("evt_{:x}", digest.finalize()))
 }
 
 pub(crate) fn command_receipt(
@@ -766,27 +928,33 @@ fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
             )
         }
         Scope::RepositoryScope(scope) => {
-            require_canonical_id(
-                &scope.organization_id.0,
-                "org_",
-                "command scope organizationId",
-            )?;
-            require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
-            require_canonical_id(&scope.project_id.0, "prj_", "command scope projectId")?;
-            require_canonical_id(&scope.repository_id.0, "rep_", "command scope repositoryId")?;
-            encode_key(
-                SCOPE_KEY_PREFIX,
-                b"repository",
-                &[
-                    scope.organization_id.0.as_str(),
-                    scope.workspace_id.0.as_str(),
-                    scope.project_id.0.as_str(),
-                    scope.repository_id.0.as_str(),
-                ],
-            )
+            return repository_scope_key(scope);
         }
     };
     ReceiptScopeKey::from_encoded(encoded)
+}
+
+pub(crate) fn repository_scope_key(
+    scope: &RepositoryScope,
+) -> Result<ReceiptScopeKey, StorageError> {
+    require_canonical_id(
+        &scope.organization_id.0,
+        "org_",
+        "command scope organizationId",
+    )?;
+    require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
+    require_canonical_id(&scope.project_id.0, "prj_", "command scope projectId")?;
+    require_canonical_id(&scope.repository_id.0, "rep_", "command scope repositoryId")?;
+    ReceiptScopeKey::from_encoded(encode_key(
+        SCOPE_KEY_PREFIX,
+        b"repository",
+        &[
+            scope.organization_id.0.as_str(),
+            scope.workspace_id.0.as_str(),
+            scope.project_id.0.as_str(),
+            scope.repository_id.0.as_str(),
+        ],
+    ))
 }
 
 fn require_canonical_id(value: &str, prefix: &str, label: &str) -> Result<(), StorageError> {

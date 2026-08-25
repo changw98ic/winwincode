@@ -23,9 +23,9 @@ use winwincode_storage::{
 };
 
 use crate::{
-    StateChange, command_receipt,
+    DeliveryChangeKind, StateChange, command_receipt, delivery_changed_event,
     delivery_transaction::{StagedDeliveryJournal, delivery_journal_key, delivery_stream_id},
-    storage_commit,
+    storage_commit, validate_delivery_changed_receipt,
 };
 
 const TASK_BREAKDOWN_APPROVED_TOPIC: &str = "delivery.task_breakdown.approved";
@@ -98,17 +98,22 @@ pub(crate) fn execute(
     })?;
     let event_payload = serde_json::to_vec(event).map_err(storage_error)?;
     let event_id = task_breakdown_event_id(event);
+    let changed_event = delivery_changed_event(
+        command,
+        &delivery_id,
+        mutation.snapshot.revision(),
+        DeliveryChangeKind::Advanced,
+    )?;
     let stream_id = delivery_stream_id(&delivery_id);
     let mut commit = storage_commit(
         command,
         StateChange::new(
             &stream_id,
             mutation.snapshot.encode_json().map_err(storage_error)?,
-            vec![NewOutboxEvent::new(
-                &event_id,
-                TASK_BREAKDOWN_APPROVED_TOPIC,
-                event_payload,
-            )],
+            vec![
+                NewOutboxEvent::internal(&event_id, TASK_BREAKDOWN_APPROVED_TOPIC, event_payload),
+                changed_event,
+            ],
         ),
     )?;
     let publication = journal
@@ -249,11 +254,21 @@ fn validate_receipt_projection(
             "durable task-breakdown receipt does not match its scoped request",
         ));
     }
-    let [stored_event] = receipt.events.as_slice() else {
+    let stored_events = receipt
+        .events
+        .iter()
+        .filter(|event| event.topic == TASK_BREAKDOWN_APPROVED_TOPIC)
+        .collect::<Vec<_>>();
+    let [stored_event] = stored_events.as_slice() else {
         return Err(StorageError::invalid_input(
             "durable task-breakdown receipt must contain exactly one event",
         ));
     };
+    if receipt.events.len() != 2 || stored_event.projection_cursor.is_some() {
+        return Err(StorageError::invalid_input(
+            "durable task-breakdown receipt must contain one internal event and one public Delivery change",
+        ));
+    }
     let event = strict_task_breakdown_event(&stored_event.payload)?;
     if stored_event.topic != TASK_BREAKDOWN_APPROVED_TOPIC
         || stored_event.event_id != task_breakdown_event_id(&event)
@@ -267,6 +282,12 @@ fn validate_receipt_projection(
         ));
     }
     validate_promoted_tasks(&event)?;
+    validate_delivery_changed_receipt(
+        receipt,
+        delivery_id,
+        receipt.revision,
+        DeliveryChangeKind::Advanced,
+    )?;
     Ok(event)
 }
 
