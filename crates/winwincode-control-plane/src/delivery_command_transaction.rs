@@ -52,6 +52,7 @@ pub struct DeliverySpecFacts {
     criterion_verification_methods: Vec<(String, String)>,
 }
 
+#[cfg(feature = "test-support")]
 pub(crate) struct TrustedDeliverySpecFacts {
     pub(crate) now_millis: u64,
     pub(crate) repository: RepositoryRef,
@@ -63,6 +64,7 @@ pub(crate) struct TrustedDeliverySpecFacts {
     pub(crate) criterion_verification_methods: Vec<(String, String)>,
 }
 
+#[cfg(feature = "test-support")]
 impl DeliverySpecFacts {
     pub(crate) fn from_trusted_adapter(facts: TrustedDeliverySpecFacts) -> Self {
         Self {
@@ -94,6 +96,13 @@ pub struct DeliveryCommandFacts {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(
+        dead_code,
+        reason = "production authority variants stay sealed until a trusted repository adapter is installed"
+    )
+)]
 enum DeliveryCommandAuthority {
     Specification(Box<DeliverySpecFacts>),
     HumanAdvance(Box<StageAdvanceResult>),
@@ -101,6 +110,7 @@ enum DeliveryCommandAuthority {
 }
 
 impl DeliveryCommandFacts {
+    #[cfg(feature = "test-support")]
     pub(crate) fn specification_from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -115,6 +125,7 @@ impl DeliveryCommandFacts {
         )
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) fn advance_from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -131,6 +142,7 @@ impl DeliveryCommandFacts {
         )
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) fn attention_from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -147,6 +159,7 @@ impl DeliveryCommandFacts {
         )
     }
 
+    #[cfg(feature = "test-support")]
     fn from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -264,8 +277,7 @@ pub(crate) fn execute(
             &receipt_identity,
             &command_digest,
             facts,
-        )
-        .map_err(Into::into),
+        ),
         ParsedCommand::Advance(payload) => advance_human_stage(
             storage,
             command,
@@ -273,8 +285,7 @@ pub(crate) fn execute(
             &receipt_identity,
             &command_digest,
             facts,
-        )
-        .map_err(Into::into),
+        ),
         ParsedCommand::ResolveAttention(payload) => resolve_business_attention(
             storage,
             command,
@@ -282,8 +293,7 @@ pub(crate) fn execute(
             &receipt_identity,
             &command_digest,
             facts,
-        )
-        .map_err(Into::into),
+        ),
     }
 }
 
@@ -439,41 +449,36 @@ fn update_spec(
     receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     facts: &DeliveryCommandFacts,
-) -> Result<CommitReceipt, StorageError> {
+) -> Result<CommitReceipt, DeliveryCommandCommitError> {
     let spec_facts = facts.specification()?;
     if payload.spec.repository_id != scope.repository_id {
         return Err(StorageError::invalid_input(
             "delivery.update_spec repositoryId does not match command repository scope",
-        ));
+        )
+        .into());
     }
     let expected_revision = expected_revision(command)?;
-    let journal_key = delivery_journal_key(&payload.delivery_id)?;
-    let loaded = storage.load_journal(&journal_key)?;
-    let journal = StagedDeliveryJournal::new(payload.delivery_id.clone(), loaded);
-    let current = DeliveryStore::borrowed(&journal)
-        .query(DeliveryQuery::Get(payload.delivery_id.clone()))
-        .map_err(|error| delivery_store_error(&error, &command.request_id))?;
+    let (journal, current) = load_current(storage, &payload.delivery_id, command)?;
     validate_repository_scope(
         &current,
         &spec_facts.repository,
         spec_facts.source_ref.as_ref(),
     )?;
     if current.revision() != expected_revision {
-        return Err(StorageError::revision_conflict(
-            expected_revision,
-            current.revision(),
-        ));
+        return Err(StorageError::revision_conflict(expected_revision, current.revision()).into());
     }
     let input_target = map_publication_target(payload.spec.publication_target.as_ref());
     if input_target != current.snapshot().spec.publication_target {
         return Err(StorageError::invalid_input(
             "delivery.update_spec cannot replace the canonical publication target",
-        ));
+        )
+        .into());
     }
     if spec_facts.source_ref != current.snapshot().spec.source_ref {
         return Err(StorageError::invalid_input(
             "trusted Delivery source binding changed before Spec replacement",
-        ));
+        )
+        .into());
     }
     let mut snapshot = current.clone().into_snapshot();
     snapshot.revision = expected_revision.saturating_add(1);
@@ -503,7 +508,7 @@ fn update_spec(
             snapshot: replacement,
         }))
         .map_err(|error| delivery_store_error(&error, &command.request_id))?;
-    commit_mutation(
+    Ok(commit_mutation(
         storage,
         command,
         receipt_identity,
@@ -511,7 +516,7 @@ fn update_spec(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-    )
+    )?)
 }
 
 fn advance_human_stage(
@@ -521,14 +526,11 @@ fn advance_human_stage(
     receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     facts: &DeliveryCommandFacts,
-) -> Result<CommitReceipt, StorageError> {
+) -> Result<CommitReceipt, DeliveryCommandCommitError> {
     let expected_revision = expected_revision(command)?;
     let (journal, current) = load_current(storage, &payload.delivery_id, command)?;
     if current.revision() != expected_revision {
-        return Err(StorageError::revision_conflict(
-            expected_revision,
-            current.revision(),
-        ));
+        return Err(StorageError::revision_conflict(expected_revision, current.revision()).into());
     }
     let transition = facts.human_advance()?;
     transition
@@ -537,7 +539,8 @@ fn advance_human_stage(
     let StageAdvanceEffect::Review(attention_item_id) = &transition.effect else {
         return Err(StorageError::invalid_input(
             "delivery.advance selected a Codex effect that requires the typed execution transaction",
-        ));
+        )
+        .into());
     };
     let result = &transition.delivery;
     validate_repository_scope(&current, &facts.repository, facts.source_ref.as_ref())?;
@@ -564,7 +567,8 @@ fn advance_human_stage(
     {
         return Err(StorageError::invalid_input(
             "sealed human stage transition does not match command actor, Delivery, or revision",
-        ));
+        )
+        .into());
     }
     let mutation = DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::StartStage(Box::new(StartDeliveryStage {
@@ -574,7 +578,7 @@ fn advance_human_stage(
             transition: transition.clone(),
         })))
         .map_err(|error| delivery_store_error(&error, &command.request_id))?;
-    commit_mutation(
+    Ok(commit_mutation(
         storage,
         command,
         receipt_identity,
@@ -582,7 +586,7 @@ fn advance_human_stage(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-    )
+    )?)
 }
 
 fn resolve_business_attention(
@@ -592,19 +596,17 @@ fn resolve_business_attention(
     receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     facts: &DeliveryCommandFacts,
-) -> Result<CommitReceipt, StorageError> {
+) -> Result<CommitReceipt, DeliveryCommandCommitError> {
     if payload.remediation.is_some() {
         return Err(StorageError::invalid_input(
             "delivery.resolve_attention remediation requires its sealed remediation transaction",
-        ));
+        )
+        .into());
     }
     let expected_revision = expected_revision(command)?;
     let (journal, current) = load_current(storage, &payload.delivery_id, command)?;
     if current.revision() != expected_revision {
-        return Err(StorageError::revision_conflict(
-            expected_revision,
-            current.revision(),
-        ));
+        return Err(StorageError::revision_conflict(expected_revision, current.revision()).into());
     }
     let source_item = current
         .snapshot()
@@ -625,7 +627,8 @@ fn resolve_business_attention(
         _ => {
             return Err(StorageError::invalid_input(
                 "delivery.resolve_attention decision is not canonical",
-            ));
+            )
+            .into());
         }
     };
     let transition = facts.attention_resolution()?;
@@ -655,7 +658,8 @@ fn resolve_business_attention(
     {
         return Err(StorageError::invalid_input(
             "sealed Attention transition does not match command target, actor, decision, resolution, or revision",
-        ));
+        )
+        .into());
     }
     let mutation = DeliveryStore::borrowed(&journal)
         .execute(DeliveryCommand::ResolveAttention(Box::new(
@@ -667,7 +671,7 @@ fn resolve_business_attention(
             },
         )))
         .map_err(|error| delivery_store_error(&error, &command.request_id))?;
-    commit_mutation(
+    Ok(commit_mutation(
         storage,
         command,
         receipt_identity,
@@ -675,17 +679,21 @@ fn resolve_business_attention(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-    )
+    )?)
 }
 
 fn load_current(
     storage: &dyn ProductStateStorage,
     delivery_id: &DeliveryId,
     command: &CommandEnvelope,
-) -> Result<(StagedDeliveryJournal, Delivery), StorageError> {
+) -> Result<(StagedDeliveryJournal, Delivery), DeliveryCommandCommitError> {
     let journal_key = delivery_journal_key(delivery_id)?;
-    let loaded = storage.load_journal(&journal_key)?;
-    let journal = StagedDeliveryJournal::new(delivery_id.clone(), loaded);
+    let Some(loaded) = storage.load_journal(&journal_key)? else {
+        return Err(DeliveryCommandCommitError::NotFound {
+            delivery_id: delivery_id.clone(),
+        });
+    };
+    let journal = StagedDeliveryJournal::new(delivery_id.clone(), Some(loaded));
     let current = DeliveryStore::borrowed(&journal)
         .query(DeliveryQuery::Get(delivery_id.clone()))
         .map_err(|error| delivery_store_error(&error, &command.request_id))?;

@@ -358,6 +358,8 @@ impl std::error::Error for CommitError {}
 pub enum DeliveryCommandCommitError {
     /// No durable member committed because command or storage validation failed.
     Storage(StorageError),
+    /// The scoped Delivery required by a mutation does not exist.
+    NotFound { delivery_id: DeliveryId },
     /// A different scoped request tried to create an existing Delivery.
     AlreadyExists { delivery_id: DeliveryId },
     /// The atomic transaction committed and only publication remains pending.
@@ -372,6 +374,7 @@ impl DeliveryCommandCommitError {
     pub fn public_code(&self) -> winwincode_api::generated::ErrorCode {
         use winwincode_api::generated::ErrorCode;
         match self {
+            Self::NotFound { .. } => ErrorCode::ResourceNotFound,
             Self::AlreadyExists { .. } => ErrorCode::WrongState,
             Self::PublicationPending { .. } => ErrorCode::ServiceUnavailable,
             Self::Storage(error) => match error.kind() {
@@ -393,7 +396,7 @@ impl DeliveryCommandCommitError {
     pub fn public_details(&self) -> winwincode_api::generated::ErrorDetails {
         use winwincode_api::generated::ErrorDetailValue;
         let mut details = winwincode_api::generated::ErrorDetails::new();
-        if let Self::AlreadyExists { delivery_id } = self {
+        if let Self::NotFound { delivery_id } | Self::AlreadyExists { delivery_id } = self {
             details.insert(
                 "field".to_owned(),
                 ErrorDetailValue::Variant4("deliveryId".to_owned()),
@@ -424,7 +427,7 @@ impl DeliveryCommandCommitError {
     pub fn committed_receipt(&self) -> Option<&CommitReceipt> {
         match self {
             Self::PublicationPending { receipt, .. } => Some(receipt),
-            Self::Storage(_) | Self::AlreadyExists { .. } => None,
+            Self::Storage(_) | Self::NotFound { .. } | Self::AlreadyExists { .. } => None,
         }
     }
 }
@@ -439,6 +442,9 @@ impl fmt::Display for DeliveryCommandCommitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Storage(error) => write!(formatter, "Delivery command failed: {error}"),
+            Self::NotFound { delivery_id } => {
+                write!(formatter, "Delivery {} was not found", delivery_id.0)
+            }
             Self::AlreadyExists { delivery_id } => {
                 write!(formatter, "Delivery {} already exists", delivery_id.0)
             }
