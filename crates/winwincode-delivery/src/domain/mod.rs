@@ -25,6 +25,7 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use winwincode_domain::is_canonical_delivery_id;
 
 pub use attention::{AttentionItem, AttentionItemStatus, AttentionItemType, AttentionOption};
 pub(crate) use candidate::assert_frozen_candidate_current;
@@ -177,22 +178,7 @@ pub(crate) fn canonical_delivery_id(
     value: &str,
     path: &str,
 ) -> Result<(), DeliveryValidationError> {
-    let Some(identifier) = value.strip_prefix("dlv_") else {
-        return Err(validation_error(
-            DeliveryValidationErrorCode::InvalidIdentifier,
-            path,
-            "must use dlv_ followed by 26 uppercase Crockford Base32 characters",
-        ));
-    };
-    let valid = identifier.len() == 26
-        && identifier.bytes().all(|byte| {
-            byte.is_ascii_digit()
-                || matches!(
-                    byte,
-                    b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'
-                )
-        });
-    if valid {
+    if is_canonical_delivery_id(value) {
         Ok(())
     } else {
         Err(validation_error(

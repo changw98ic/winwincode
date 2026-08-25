@@ -89,6 +89,17 @@ fn delivery_projection_stream(value: &str) -> ProjectionEventStream {
     ProjectionEventStream::Delivery(DeliveryId(value.into()))
 }
 
+#[test]
+fn delivery_projection_stream_rejects_a_retired_delivery_identity() {
+    let error = ProjectionEventStreamKey::new(
+        ReceiptScopeKey::from_encoded(b"scope:repository-one".to_vec()).expect("scope key"),
+        delivery_projection_stream("delivery-main"),
+    )
+    .expect_err("a Delivery event stream must use the canonical dlv_ identity");
+
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+}
+
 fn write_interleaved_projection_events(
     storage: &mut SqliteStorage,
     delivery_one: &ProjectionEventStream,
@@ -209,7 +220,7 @@ fn assert_never_issued_projection_cursors_are_invalid(
     assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
 
     let empty_key = projection_key(ProjectionEventStream::Delivery(DeliveryId(
-        "delivery-never-written".into(),
+        "dlv_01J00000000000000000000007".into(),
     )));
     let never_issued = ProjectionEventCursor::try_new(
         empty_key.clone(),

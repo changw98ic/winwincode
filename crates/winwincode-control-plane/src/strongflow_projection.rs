@@ -17,6 +17,7 @@ use winwincode_api::generated::{
     PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
     RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
 };
+use winwincode_domain::is_canonical_delivery_id;
 
 use crate::ControlPlane;
 
@@ -123,6 +124,11 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         query: &DeliveryGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
         let scope = &query.scope;
+        if !is_canonical_delivery_id(&query.parameters.delivery_id.0) {
+            return Err(StrongFlowProjectionError::invalid_request(
+                "delivery identity is not canonical",
+            ));
+        }
         if query.page.cursor.is_some() {
             return Err(StrongFlowProjectionError::invalid_request(
                 "StrongFlow exact reads use atCursor rather than page cursor",
@@ -172,6 +178,11 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
             RuntimeProjectionGetParameters::DeliveryStageRuntimeProjectionGetParameters(
                 parameters,
             ) => {
+                if !is_canonical_delivery_id(&parameters.delivery_id.0) {
+                    return Err(StrongFlowProjectionError::invalid_request(
+                        "delivery identity is not canonical",
+                    ));
+                }
                 let read = application::replay_delivery_read(
                     self,
                     &query.actor,

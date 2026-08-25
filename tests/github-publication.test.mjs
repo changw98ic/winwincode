@@ -40,6 +40,7 @@ function loadStrongFlowClient() {
   vm.runInNewContext(
     readFileSync(join(root, 'packages', 'strongflow', 'dist', 'client.js'), 'utf8'),
     {
+      crypto: globalThis.crypto,
       Symbol,
       structuredClone,
       window: {
@@ -337,7 +338,29 @@ test('TypeScript GitHub Delivery identities match fixed Node SHA-256 vectors', (
 })
 
 test('source-less creation can generate a canonical ULID identity', () => {
-  assert.match(generateDeliveryId(now), /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  const generated = generateDeliveryId(now)
+  assert.match(generated, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
+
+  const request = loadStrongFlowClient().createDeliveryRequestFromDraft({
+    deliveryId: '',
+    title: 'Source-less delivery',
+    goal: 'Create one local Delivery without an external source.',
+    scope: 'Local result',
+    outOfScope: 'External publication',
+    constraints: 'Keep one canonical identity',
+    criteria: 'Local check passes | Run local check',
+    repositoryKind: 'local-git',
+    repositoryLocator: '/workspace/example',
+    baseRevision: '1'.repeat(40),
+    maxReworkAttempts: '2',
+    githubIssue: '',
+    githubBaseBranch: '',
+    githubHeadRepository: '',
+    githubHeadBranch: '',
+  }, 'ui:create:source-less', now)
+  assert.match(request.payload.spec.deliveryId, /^dlv_[0-9A-HJKMNP-TV-Z]{26}$/u)
+  assert.equal(request.payload.spec.sourceRef, null)
+  assert.equal(request.payload.spec.publicationTarget, null)
 })
 
 test('StrongFlow create form materializes the typed GitHub source and single PR target', () => {
@@ -376,6 +399,36 @@ test('StrongFlow create form materializes the typed GitHub source and single PR 
   }, 'ui:create:github-issue:42:mismatch', now), error => (
     error?.code === 'RELATIONSHIP_MISMATCH'
   ))
+})
+
+test('different create requests for the same GitHub issue keep one Delivery identity', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'winwincode-github-create-identity-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  let clock = now + 80
+  const service = new StrongFlowService({
+    home,
+    clock: () => ++clock,
+    authenticator: { async authenticate() { return undefined } },
+  })
+  const specification = deliverySpec()
+
+  const created = await service.createDelivery({
+    requestId: 'github-create-first-request',
+    spec: specification,
+    tasks: [],
+  })
+  assert.equal(created.id, deliveryId)
+  await assert.rejects(service.createDelivery({
+    requestId: 'github-create-second-request',
+    spec: specification,
+    tasks: [],
+  }), error => (
+    error instanceof StrongFlowServiceError && error.code === 'DELIVERY_CONFLICT'
+  ))
+
+  const stored = await (await DeliveryStore.open(home, deliveryId)).read()
+  assert.equal(stored.records.length, 1)
+  assert.equal(stored.snapshot.id, deliveryId)
 })
 
 test('publication Attention freezes the exact source, target, candidate, verdict, and stable PR key', () => {

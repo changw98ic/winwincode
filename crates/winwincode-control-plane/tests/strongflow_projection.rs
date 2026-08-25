@@ -588,6 +588,21 @@ fn bounded_projection_replay_is_deterministic() {
 }
 
 #[test]
+fn delivery_get_rejects_a_retired_delivery_identity_at_the_public_seam() {
+    let f = fixture(false, false, false);
+    let mut query = delivery_query(&f, None, 20);
+    query.parameters.delivery_id = DeliveryId("delivery-main".into());
+
+    let error = StrongFlowProjectionQueryPort::delivery_get(&f.control_plane, &query)
+        .expect_err("a retired Delivery identity must not reach storage or cursor creation");
+
+    assert_eq!(
+        error.code(),
+        winwincode_api::generated::ErrorCode::InvalidRequest
+    );
+}
+
+#[test]
 fn bounded_projection_cursor_rejects_a_changed_page_limit() {
     let f = fixture(false, false, false);
     let (_, cursor) = detail_and_cursor(&f);

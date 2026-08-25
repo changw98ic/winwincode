@@ -768,6 +768,8 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     blockedByTaskIds: [],
     ownerActorId: null,
   }]
+  const retiredDeliveryQuery = structuredClone(examples.positive.deliveryGet)
+  retiredDeliveryQuery.parameters.deliveryId = 'delivery-main'
   for (const [name, value] of Object.entries({
     wrongVersion,
     missingRevision,
@@ -776,6 +778,25 @@ test('strict HTTP validation covers requests, responses, errors, and negative bo
     extraField,
     callerAuthoredTaskBreakdown,
   })) assertValidation(command, value, false, name)
+
+  assertValidation(
+    query,
+    retiredDeliveryQuery,
+    false,
+    'delivery.get rejects a retired portable Delivery identity',
+  )
+
+  const retiredDeliveryEventCursor = structuredClone(
+    examples.responses.deliveryDetailPendingReview,
+  )
+  retiredDeliveryEventCursor.result.readCursor.eventCursor.stream.deliveryId =
+    'delivery-main'
+  assertValidation(
+    validator(ajv, httpId, 'QueryResultResponse'),
+    retiredDeliveryEventCursor,
+    false,
+    'delivery.get rejects a retired Delivery identity in its event cursor',
+  )
 
   const leakedCredential = structuredClone(examples.responses.credentialReference)
   leakedCredential.vaultLocator = 'vault://internal/path'

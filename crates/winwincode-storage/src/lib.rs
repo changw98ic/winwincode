@@ -18,6 +18,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
     ControlPlaneEventId, DeliveryId, ProductSessionId, RequestId, Sha256Digest,
+    is_canonical_delivery_id,
 };
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
@@ -57,13 +58,17 @@ impl ProjectionEventStream {
     }
 
     fn validate(&self) -> Result<(), StorageError> {
-        let (prefix, value) = match self {
-            Self::Delivery(delivery_id) => ("delivery", delivery_id.0.as_str()),
+        let (prefix, valid) = match self {
+            Self::Delivery(delivery_id) => ("delivery", is_canonical_delivery_id(&delivery_id.0)),
             Self::ProductSession(product_session_id) => {
-                ("product-session", product_session_id.0.as_str())
+                let value = product_session_id.0.as_str();
+                (
+                    "product-session",
+                    !value.is_empty() && value.len() <= 200 && portable_event_key(value),
+                )
             }
         };
-        if value.is_empty() || value.len() > 200 || !portable_event_key(value) {
+        if !valid {
             return Err(StorageError::invalid(format!(
                 "{prefix} event stream identity is invalid"
             )));
