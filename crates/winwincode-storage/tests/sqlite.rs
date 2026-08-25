@@ -531,9 +531,9 @@ fn projection_event_positions_are_stream_local_durable_and_exact() {
         &storage,
         &[
             (delivery_one.clone(), 2, "evt_delivery_one_0002"),
-            (delivery_two, 1, "evt_delivery_two_0001"),
-            (session_one, 2, "evt_session_one_0002"),
-            (session_two, 1, "evt_session_two_0001"),
+            (delivery_two.clone(), 1, "evt_delivery_two_0001"),
+            (session_one.clone(), 2, "evt_session_one_0002"),
+            (session_two.clone(), 1, "evt_session_two_0001"),
         ],
     );
     let global = storage.pending_events().expect("global outbox");
@@ -559,6 +559,24 @@ fn projection_event_positions_are_stream_local_durable_and_exact() {
     );
 
     let first_delivery_key = projection_key(delivery_one);
+    let error = storage
+        .load_projection_event_cursor(&projection_key(delivery_two), Some(&first_delivery_cursor))
+        .expect_err("another Delivery stream must reject this cursor");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    let foreign_scope_key = ProjectionEventStreamKey::new(
+        ReceiptScopeKey::from_encoded(b"scope:repository-two".to_vec()).expect("scope key"),
+        session_one,
+    )
+    .expect("foreign scope stream key");
+    let error = storage
+        .load_projection_event_cursor(&foreign_scope_key, Some(&first_delivery_cursor))
+        .expect_err("another repository scope must reject this cursor");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    let different_kind_key = projection_key(session_two);
+    let error = storage
+        .load_projection_event_cursor(&different_kind_key, Some(&first_delivery_cursor))
+        .expect_err("another resource stream kind must reject this cursor");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
     assert_eq!(
         storage
             .load_projection_event_cursor(&first_delivery_key, Some(&first_delivery_cursor),)
@@ -607,6 +625,31 @@ fn projection_event_positions_are_stream_local_durable_and_exact() {
     let error = storage
         .load_projection_event_cursor(&first_delivery_key, Some(&forged))
         .expect_err("eventId mismatch is not retention loss");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+
+    let future = ProjectionEventCursor::try_new(
+        first_delivery_key.clone(),
+        3,
+        Some(ControlPlaneEventId("evt_delivery_one_future".into())),
+    )
+    .expect("shape-valid future cursor");
+    let error = storage
+        .load_projection_event_cursor(&first_delivery_key, Some(&future))
+        .expect_err("a cursor beyond the durable stream head was never retained");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+
+    let empty_key = projection_key(ProjectionEventStream::Delivery(DeliveryId(
+        "delivery-never-written".into(),
+    )));
+    let never_issued = ProjectionEventCursor::try_new(
+        empty_key.clone(),
+        1,
+        Some(ControlPlaneEventId("evt_delivery_never_written".into())),
+    )
+    .expect("shape-valid never-issued cursor");
+    let error = storage
+        .load_projection_event_cursor(&empty_key, Some(&never_issued))
+        .expect_err("a positive cursor for an empty stream was never retained");
     assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
     Box::new(storage).close().expect("storage should close");
     fs::remove_dir_all(root).expect("database directory should be released");
@@ -850,6 +893,7 @@ fn table_count(database_path: &Path, table: &str) -> i64 {
         "aggregate_journal_records" => "SELECT COUNT(*) FROM aggregate_journal_records",
         "command_receipts" => "SELECT COUNT(*) FROM command_receipts",
         "outbox" => "SELECT COUNT(*) FROM outbox",
+        "projection_event_stream_heads" => "SELECT COUNT(*) FROM projection_event_stream_heads",
         _ => panic!("unsupported inspection table"),
     };
     let count = connection
@@ -918,6 +962,78 @@ fn failure_at_each_atomic_member_rolls_back_every_member() {
         }
         fs::remove_dir_all(root).expect("database directory should be released");
     }
+}
+
+#[test]
+fn later_outbox_failure_rolls_back_the_first_projection_cursor() {
+    let root = temporary_directory("projection-cursor-rollback");
+    let storage = SqliteStorage::open(&root).expect("schema should be created");
+    let database_path = storage.database_path().to_path_buf();
+    Box::new(storage)
+        .close()
+        .expect("bootstrap storage should close");
+
+    let connection = Connection::open(&database_path).expect("failure injection database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_second_projection_event BEFORE INSERT ON outbox \
+             WHEN NEW.event_id = 'evt_projection_rollback_0002' \
+             BEGIN SELECT RAISE(ABORT, 'injected second event failure'); END;",
+        )
+        .expect("failure trigger should install");
+    connection.close().expect("failure injector should close");
+
+    let stream = ProjectionEventStream::Delivery(DeliveryId("delivery-rollback".into()));
+    let mut storage = SqliteStorage::open(&root).expect("storage with trigger should open");
+    let commit = StateCommit::new(
+        receipt_identity(
+            "actor:projection-rollback",
+            "scope:repository-one",
+            "req_projection_rollback_0001",
+        ),
+        Sha256Digest(format!("sha256:{}", "e".repeat(64))),
+        "state:projection-rollback",
+        0,
+        b"must-not-commit".to_vec(),
+        vec![
+            NewOutboxEvent::projection(
+                ControlPlaneEventId("evt_projection_rollback_0001".into()),
+                "projection.invalidated",
+                b"{}".to_vec(),
+                stream.clone(),
+            ),
+            NewOutboxEvent::projection(
+                ControlPlaneEventId("evt_projection_rollback_0002".into()),
+                "projection.invalidated",
+                b"{}".to_vec(),
+                stream.clone(),
+            ),
+        ],
+    );
+    let error = storage
+        .commit(&commit)
+        .expect_err("the second outbox insert must abort the whole transaction");
+    assert_eq!(error.kind(), StorageErrorKind::Adapter);
+    let cursor = storage
+        .load_projection_event_cursor(&projection_key(stream), None)
+        .expect("rolled-back stream remains empty");
+    assert_eq!(cursor.sequence(), 0);
+    assert_eq!(cursor.event_id(), None);
+    Box::new(storage).close().expect("storage should close");
+
+    for table in [
+        "product_state",
+        "command_receipts",
+        "outbox",
+        "projection_event_stream_heads",
+    ] {
+        assert_eq!(
+            table_count(&database_path, table),
+            0,
+            "late event failure left a partial row in {table}"
+        );
+    }
+    fs::remove_dir_all(root).expect("database directory should be released");
 }
 
 #[test]

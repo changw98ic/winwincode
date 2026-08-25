@@ -928,8 +928,8 @@ impl ProductStateStorage for SqliteStorage {
             if expected.sequence() == 0 {
                 return ProjectionEventCursor::try_new(key.clone(), 0, None);
             }
-            let stored_event_id = self
-                .connection()?
+            let connection = self.connection()?;
+            let stored_event_id = connection
                 .query_row(
                     "SELECT event_id FROM outbox \
                      WHERE receipt_scope_key = ?1 AND projection_stream_kind = ?2 \
@@ -945,8 +945,20 @@ impl ProductStateStorage for SqliteStorage {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()
-                .map_err(sql_error)?
-                .ok_or_else(StorageError::event_cursor_expired)?;
+                .map_err(sql_error)?;
+            let Some(stored_event_id) = stored_event_id else {
+                let Some((head_sequence, _)) = load_projection_stream_head(connection, key)? else {
+                    return Err(StorageError::invalid(
+                        "projection event cursor was never issued for this stream",
+                    ));
+                };
+                if expected.sequence() > head_sequence {
+                    return Err(StorageError::invalid(
+                        "projection event cursor is beyond the durable stream head",
+                    ));
+                }
+                return Err(StorageError::event_cursor_expired());
+            };
             if expected.event_id().map(|event_id| event_id.0.as_str())
                 != Some(stored_event_id.as_str())
             {
@@ -961,25 +973,10 @@ impl ProductStateStorage for SqliteStorage {
             );
         }
 
-        let head = self
-            .connection()?
-            .query_row(
-                "SELECT sequence, event_id FROM projection_event_stream_heads \
-                 WHERE scope_key = ?1 AND stream_kind = ?2 AND resource_id = ?3",
-                params![
-                    key.scope_key().as_bytes(),
-                    key.stream().kind(),
-                    key.stream().resource_id(),
-                ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?;
-        match head {
+        match load_projection_stream_head(self.connection()?, key)? {
             Some((sequence, event_id)) => ProjectionEventCursor::try_new(
                 key.clone(),
-                u64::try_from(sequence)
-                    .map_err(|_| StorageError::adapter("event sequence is negative"))?,
+                sequence,
                 Some(ControlPlaneEventId(event_id)),
             ),
             None => ProjectionEventCursor::try_new(key.clone(), 0, None),
@@ -1353,6 +1350,31 @@ fn next_projection_stream_position(
     current
         .checked_add(1)
         .ok_or_else(|| StorageError::adapter("projection event stream sequence overflow"))
+}
+
+fn load_projection_stream_head(
+    connection: &Connection,
+    key: &ProjectionEventStreamKey,
+) -> Result<Option<(u64, String)>, StorageError> {
+    connection
+        .query_row(
+            "SELECT sequence, event_id FROM projection_event_stream_heads \
+             WHERE scope_key = ?1 AND stream_kind = ?2 AND resource_id = ?3",
+            params![
+                key.scope_key().as_bytes(),
+                key.stream().kind(),
+                key.stream().resource_id(),
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|(sequence, event_id)| {
+            u64::try_from(sequence)
+                .map(|sequence| (sequence, event_id))
+                .map_err(|_| StorageError::adapter("event sequence is negative"))
+        })
+        .transpose()
 }
 
 fn append_receipt(
