@@ -62,7 +62,7 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             StateChange::new(
                 &stream_id,
                 pending.delivery().encode_json().map_err(port_error)?,
-                vec![NewOutboxEvent::new(
+                vec![NewOutboxEvent::internal(
                     &outbox_event_id,
                     EXECUTION_JOB_TOPIC,
                     job_payload,

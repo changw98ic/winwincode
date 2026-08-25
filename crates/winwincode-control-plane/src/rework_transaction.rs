@@ -52,7 +52,7 @@ pub(crate) fn execute(
         StateChange::new(
             &stream_id,
             transition.delivery.encode_json().map_err(storage_error)?,
-            vec![NewOutboxEvent::new(
+            vec![NewOutboxEvent::internal(
                 &event_id,
                 REWORK_CLARIFIED_TOPIC,
                 serde_json::to_vec(&event).map_err(storage_error)?,

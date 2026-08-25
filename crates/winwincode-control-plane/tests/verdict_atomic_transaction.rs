@@ -189,7 +189,7 @@ fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
                 format!("delivery:{}", delivery.id().0),
                 0,
                 delivery.encode_json().expect("seed Delivery JSON"),
-                vec![NewOutboxEvent::new(
+                vec![NewOutboxEvent::internal(
                     "seed-verdict-event",
                     "delivery.seeded",
                     b"seed".to_vec(),
@@ -274,7 +274,7 @@ fn advance_after_failed_verdict(root: &PathBuf, delivery_id: &DeliveryId) -> Del
         format!("delivery:{}", delivery_id.0),
         failed.revision(),
         resolved.encode_json().expect("resolved Delivery JSON"),
-        vec![NewOutboxEvent::new(
+        vec![NewOutboxEvent::internal(
             "attention-resolved-after-verdict",
             "delivery.attention.resolved",
             b"resolved".to_vec(),

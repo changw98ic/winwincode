@@ -16,10 +16,12 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
-use winwincode_domain::{RequestId, Sha256Digest};
+use winwincode_domain::{
+    ControlPlaneEventId, DeliveryId, ProductSessionId, RequestId, Sha256Digest,
+};
 
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const LEGACY_V1_ACTOR_KEY: &[u8] = b"winwincode.command-receipt.actor.legacy-v1";
 const LEGACY_V1_SCOPE_KEY: &[u8] = b"winwincode.command-receipt.scope.legacy-v1";
 
@@ -29,6 +31,139 @@ pub struct NewOutboxEvent {
     pub event_id: String,
     pub topic: String,
     pub payload: Vec<u8>,
+    projection_stream: Option<ProjectionEventStream>,
+}
+
+/// Closed resource stream used to hand an HTTP snapshot to WebSocket replay.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ProjectionEventStream {
+    Delivery(DeliveryId),
+    ProductSession(ProductSessionId),
+}
+
+impl ProjectionEventStream {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Delivery(_) => "delivery",
+            Self::ProductSession(_) => "product-session",
+        }
+    }
+
+    fn resource_id(&self) -> &str {
+        match self {
+            Self::Delivery(delivery_id) => &delivery_id.0,
+            Self::ProductSession(product_session_id) => &product_session_id.0,
+        }
+    }
+
+    fn validate(&self) -> Result<(), StorageError> {
+        let (prefix, value) = match self {
+            Self::Delivery(delivery_id) => ("delivery", delivery_id.0.as_str()),
+            Self::ProductSession(product_session_id) => {
+                ("product-session", product_session_id.0.as_str())
+            }
+        };
+        if value.is_empty() || value.len() > 200 || !portable_event_key(value) {
+            return Err(StorageError::invalid(format!(
+                "{prefix} event stream identity is invalid"
+            )));
+        }
+        Ok(())
+    }
+
+    fn from_stored(kind: &str, resource_id: String) -> Result<Self, StorageError> {
+        let stream = match kind {
+            "delivery" => Self::Delivery(DeliveryId(resource_id)),
+            "product-session" => Self::ProductSession(ProductSessionId(resource_id)),
+            _ => return Err(StorageError::adapter("stored event stream kind is invalid")),
+        };
+        stream.validate()?;
+        Ok(stream)
+    }
+}
+
+/// Exact tenant scope and resource stream key owned by durable storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionEventStreamKey {
+    scope_key: ReceiptScopeKey,
+    stream: ProjectionEventStream,
+}
+
+impl ProjectionEventStreamKey {
+    /// Creates one exact event stream key.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid resource identity.
+    pub fn new(
+        scope_key: ReceiptScopeKey,
+        stream: ProjectionEventStream,
+    ) -> Result<Self, StorageError> {
+        stream.validate()?;
+        Ok(Self { scope_key, stream })
+    }
+
+    #[must_use]
+    pub const fn scope_key(&self) -> &ReceiptScopeKey {
+        &self.scope_key
+    }
+
+    #[must_use]
+    pub const fn stream(&self) -> &ProjectionEventStream {
+        &self.stream
+    }
+}
+
+/// Last retained event included in one complete HTTP snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionEventCursor {
+    key: ProjectionEventStreamKey,
+    sequence: u64,
+    event_id: Option<ControlPlaneEventId>,
+}
+
+impl ProjectionEventCursor {
+    /// Rebuilds an exact cursor supplied by the typed application service.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a sequence/event identity mismatch or unsafe public value.
+    pub fn try_new(
+        key: ProjectionEventStreamKey,
+        sequence: u64,
+        event_id: Option<ControlPlaneEventId>,
+    ) -> Result<Self, StorageError> {
+        if sequence > 9_007_199_254_740_991
+            || (sequence == 0) != event_id.is_none()
+            || event_id
+                .as_ref()
+                .is_some_and(|event_id| !canonical_control_plane_event_id(&event_id.0))
+        {
+            return Err(StorageError::adapter(
+                "stored projection event cursor is invalid",
+            ));
+        }
+        Ok(Self {
+            key,
+            sequence,
+            event_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn key(&self) -> &ProjectionEventStreamKey {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub const fn event_id(&self) -> Option<&ControlPlaneEventId> {
+        self.event_id.as_ref()
+    }
 }
 
 /// Stable opaque identity for one append-only domain journal.
@@ -175,8 +310,9 @@ fn validate_journal_record(record: &AggregateJournalRecord) -> Result<(), Storag
 }
 
 impl NewOutboxEvent {
+    /// Creates an internal event that is never used as a public replay cursor.
     #[must_use]
-    pub fn new(
+    pub fn internal(
         event_id: impl Into<String>,
         topic: impl Into<String>,
         payload: impl Into<Vec<u8>>,
@@ -185,7 +321,29 @@ impl NewOutboxEvent {
             event_id: event_id.into(),
             topic: topic.into(),
             payload: payload.into(),
+            projection_stream: None,
         }
+    }
+
+    /// Creates a secret-safe event in one resource-local projection stream.
+    #[must_use]
+    pub fn projection(
+        event_id: ControlPlaneEventId,
+        topic: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+        stream: ProjectionEventStream,
+    ) -> Self {
+        Self {
+            event_id: event_id.0,
+            topic: topic.into(),
+            payload: payload.into(),
+            projection_stream: Some(stream),
+        }
+    }
+
+    #[must_use]
+    pub const fn projection_stream(&self) -> Option<&ProjectionEventStream> {
+        self.projection_stream.as_ref()
     }
 }
 
@@ -373,6 +531,14 @@ impl StateCommit {
                     "event ids must be unique inside one commit",
                 ));
             }
+            if let Some(stream) = event.projection_stream() {
+                stream.validate()?;
+                if !canonical_control_plane_event_id(&event.event_id) {
+                    return Err(StorageError::invalid(
+                        "projection event_id must be a canonical ControlPlaneEventId",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -393,6 +559,8 @@ pub struct OutboxEvent {
     pub event_id: String,
     pub topic: String,
     pub payload: Vec<u8>,
+    /// Present only for a secret-safe resource-stream event.
+    pub projection_cursor: Option<ProjectionEventCursor>,
 }
 
 /// The durable result of one state commit.
@@ -419,6 +587,7 @@ pub enum StorageErrorKind {
     JournalAlreadyExists,
     JournalNotFound,
     JournalConflict,
+    EventCursorExpired,
     Adapter,
     Closed,
 }
@@ -515,6 +684,13 @@ impl StorageError {
         }
     }
 
+    fn event_cursor_expired() -> Self {
+        Self {
+            kind: StorageErrorKind::EventCursorExpired,
+            message: "projection event cursor is outside the retained stream window".to_owned(),
+        }
+    }
+
     #[must_use]
     pub const fn kind(&self) -> StorageErrorKind {
         self.kind
@@ -574,6 +750,23 @@ pub trait ProductStateStorage: Send {
         &self,
         key: &AggregateJournalKey,
     ) -> Result<Option<LoadedAggregateJournal>, StorageError>;
+
+    /// Loads the latest retained position, or validates one exact historical
+    /// position, in a tenant-scoped resource event stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::EventCursorExpired`] only when a previously
+    /// persisted positive position is no longer retained.
+    fn load_projection_event_cursor(
+        &self,
+        _key: &ProjectionEventStreamKey,
+        _expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionEventCursor, StorageError> {
+        Err(StorageError::adapter(
+            "projection event stream storage is unavailable",
+        ))
+    }
 
     /// Loads all unpublished events in durable sequence order.
     ///
@@ -720,11 +913,86 @@ impl ProductStateStorage for SqliteStorage {
         load_aggregate_journal(self.connection()?, key)
     }
 
+    fn load_projection_event_cursor(
+        &self,
+        key: &ProjectionEventStreamKey,
+        expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionEventCursor, StorageError> {
+        key.stream().validate()?;
+        if let Some(expected) = expected {
+            if expected.key() != key {
+                return Err(StorageError::invalid(
+                    "projection event cursor belongs to another scope or stream",
+                ));
+            }
+            if expected.sequence() == 0 {
+                return ProjectionEventCursor::try_new(key.clone(), 0, None);
+            }
+            let stored_event_id = self
+                .connection()?
+                .query_row(
+                    "SELECT event_id FROM outbox \
+                     WHERE receipt_scope_key = ?1 AND projection_stream_kind = ?2 \
+                       AND projection_resource_id = ?3 AND projection_stream_sequence = ?4",
+                    params![
+                        key.scope_key().as_bytes(),
+                        key.stream().kind(),
+                        key.stream().resource_id(),
+                        i64::try_from(expected.sequence()).map_err(|_| {
+                            StorageError::invalid("projection event sequence is out of range")
+                        })?,
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(StorageError::event_cursor_expired)?;
+            if expected.event_id().map(|event_id| event_id.0.as_str())
+                != Some(stored_event_id.as_str())
+            {
+                return Err(StorageError::invalid(
+                    "projection event cursor eventId does not match its stored position",
+                ));
+            }
+            return ProjectionEventCursor::try_new(
+                key.clone(),
+                expected.sequence(),
+                expected.event_id().cloned(),
+            );
+        }
+
+        let head = self
+            .connection()?
+            .query_row(
+                "SELECT sequence, event_id FROM projection_event_stream_heads \
+                 WHERE scope_key = ?1 AND stream_kind = ?2 AND resource_id = ?3",
+                params![
+                    key.scope_key().as_bytes(),
+                    key.stream().kind(),
+                    key.stream().resource_id(),
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        match head {
+            Some((sequence, event_id)) => ProjectionEventCursor::try_new(
+                key.clone(),
+                u64::try_from(sequence)
+                    .map_err(|_| StorageError::adapter("event sequence is negative"))?,
+                Some(ControlPlaneEventId(event_id)),
+            ),
+            None => ProjectionEventCursor::try_new(key.clone(), 0, None),
+        }
+    }
+
     fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError> {
         let mut statement = self
             .connection()?
             .prepare(
-                "SELECT sequence, event_id, topic, payload FROM outbox \
+                "SELECT sequence, event_id, topic, payload, receipt_scope_key, \
+                        projection_stream_kind, projection_resource_id, \
+                        projection_stream_sequence FROM outbox \
                  WHERE published = 0 ORDER BY sequence ASC",
             )
             .map_err(sql_error)?;
@@ -735,14 +1003,34 @@ impl ProductStateStorage for SqliteStorage {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
                 ))
             })
             .map_err(sql_error)?;
         rows.map(|row| {
-            let (sequence, event_id, topic, payload) = row.map_err(sql_error)?;
+            let (
+                sequence,
+                event_id,
+                topic,
+                payload,
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+            ) = row.map_err(sql_error)?;
             Ok(OutboxEvent {
                 sequence: u64::try_from(sequence)
                     .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
+                projection_cursor: stored_projection_cursor(
+                    scope_key,
+                    stream_kind,
+                    resource_id,
+                    stream_sequence,
+                    &event_id,
+                )?,
                 event_id,
                 topic,
                 payload,
@@ -990,23 +1278,81 @@ fn append_outbox_events(
     commit: &StateCommit,
 ) -> Result<(), StorageError> {
     for event in &commit.events {
+        let stream_position = event
+            .projection_stream()
+            .map(|stream| next_projection_stream_position(transaction, commit, stream))
+            .transpose()?;
         transaction
             .execute(
                 "INSERT INTO outbox \
-                 (event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload, published) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                 (event_id, receipt_actor_key, receipt_scope_key, request_id, topic, payload, \
+                  published, projection_stream_kind, projection_resource_id, \
+                  projection_stream_sequence) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
                 params![
                     event.event_id,
                     commit.receipt_identity.actor_key().as_bytes(),
                     commit.receipt_identity.scope_key().as_bytes(),
                     commit.receipt_identity.request_id().0,
                     event.topic,
-                    event.payload
+                    event.payload,
+                    event.projection_stream().map(ProjectionEventStream::kind),
+                    event
+                        .projection_stream()
+                        .map(ProjectionEventStream::resource_id),
+                    stream_position,
                 ],
             )
             .map_err(sql_error)?;
+        if let (Some(stream), Some(position)) = (event.projection_stream(), stream_position) {
+            transaction
+                .execute(
+                    "INSERT INTO projection_event_stream_heads \
+                     (scope_key, stream_kind, resource_id, sequence, event_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT(scope_key, stream_kind, resource_id) DO UPDATE SET \
+                         sequence = excluded.sequence, event_id = excluded.event_id",
+                    params![
+                        commit.receipt_identity.scope_key().as_bytes(),
+                        stream.kind(),
+                        stream.resource_id(),
+                        position,
+                        event.event_id,
+                    ],
+                )
+                .map_err(sql_error)?;
+        }
     }
     Ok(())
+}
+
+fn next_projection_stream_position(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+    stream: &ProjectionEventStream,
+) -> Result<i64, StorageError> {
+    let current = transaction
+        .query_row(
+            "SELECT sequence FROM projection_event_stream_heads \
+             WHERE scope_key = ?1 AND stream_kind = ?2 AND resource_id = ?3",
+            params![
+                commit.receipt_identity.scope_key().as_bytes(),
+                stream.kind(),
+                stream.resource_id(),
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .unwrap_or(0);
+    if !(0..9_007_199_254_740_991).contains(&current) {
+        return Err(StorageError::adapter(
+            "projection event stream sequence is outside the public range",
+        ));
+    }
+    current
+        .checked_add(1)
+        .ok_or_else(|| StorageError::adapter("projection event stream sequence overflow"))
 }
 
 fn append_receipt(
@@ -1036,7 +1382,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | 1 | 2 | SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | 2 | 3 | SCHEMA_VERSION) {
         return Err(StorageError::adapter(format!(
             "unsupported schema version {version}"
         )));
@@ -1046,12 +1392,17 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
     match version {
-        0 | SCHEMA_VERSION => create_schema_v3(&transaction)?,
+        0 | SCHEMA_VERSION => create_schema_v4(&transaction)?,
         1 => {
             migrate_v1_to_v2(&transaction)?;
             create_aggregate_journal_schema(&transaction)?;
+            create_projection_event_schema(&transaction)?;
         }
-        2 => create_aggregate_journal_schema(&transaction)?,
+        2 => {
+            create_aggregate_journal_schema(&transaction)?;
+            create_projection_event_schema(&transaction)?;
+        }
+        3 => create_projection_event_schema(&transaction)?,
         unsupported => {
             return Err(StorageError::adapter(format!(
                 "unsupported schema version {unsupported}"
@@ -1059,6 +1410,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
         }
     }
     validate_journal_schema(&transaction)?;
+    validate_projection_event_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(sql_error)?;
@@ -1118,6 +1470,94 @@ fn validate_journal_schema(transaction: &rusqlite::Transaction<'_>) -> Result<()
 fn create_schema_v3(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
     create_schema_v2(transaction)?;
     create_aggregate_journal_schema(transaction)
+}
+
+fn create_schema_v4(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    create_schema_v3(transaction)?;
+    create_projection_event_schema(transaction)
+}
+
+fn create_projection_event_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StorageError> {
+    let columns = table_columns(transaction, "outbox")?;
+    if !columns.contains(&"projection_stream_kind".to_owned()) {
+        transaction
+            .execute_batch(
+                "ALTER TABLE outbox ADD COLUMN projection_stream_kind TEXT;
+                 ALTER TABLE outbox ADD COLUMN projection_resource_id TEXT;
+                 ALTER TABLE outbox ADD COLUMN projection_stream_sequence INTEGER;",
+            )
+            .map_err(sql_error)?;
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projection_event_stream_heads (
+                 scope_key BLOB NOT NULL,
+                 stream_kind TEXT NOT NULL CHECK (stream_kind IN ('delivery', 'product-session')),
+                 resource_id TEXT NOT NULL,
+                 sequence INTEGER NOT NULL CHECK (sequence > 0),
+                 event_id TEXT NOT NULL,
+                 PRIMARY KEY (scope_key, stream_kind, resource_id),
+                 UNIQUE (scope_key, stream_kind, resource_id, sequence),
+                 FOREIGN KEY (event_id) REFERENCES outbox (event_id)
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS outbox_projection_stream_sequence
+                 ON outbox (receipt_scope_key, projection_stream_kind,
+                            projection_resource_id, projection_stream_sequence)
+                 WHERE projection_stream_kind IS NOT NULL;",
+        )
+        .map_err(sql_error)
+}
+
+fn validate_projection_event_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StorageError> {
+    let columns = table_columns(transaction, "outbox")?;
+    let required = [
+        "projection_stream_kind",
+        "projection_resource_id",
+        "projection_stream_sequence",
+    ];
+    if !required
+        .iter()
+        .all(|column| columns.iter().any(|value| value == column))
+    {
+        return Err(StorageError::adapter(
+            "projection event outbox schema is not canonical",
+        ));
+    }
+    let head_columns = table_columns(transaction, "projection_event_stream_heads")?;
+    if head_columns
+        != [
+            "scope_key",
+            "stream_kind",
+            "resource_id",
+            "sequence",
+            "event_id",
+        ]
+    {
+        return Err(StorageError::adapter(
+            "projection event stream head schema is not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn table_columns(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+) -> Result<Vec<String>, StorageError> {
+    let pragma = match table {
+        "outbox" => "PRAGMA table_info(outbox)",
+        "projection_event_stream_heads" => "PRAGMA table_info(projection_event_stream_heads)",
+        _ => return Err(StorageError::adapter("unknown schema table")),
+    };
+    let mut statement = transaction.prepare(pragma).map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sql_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
 }
 
 fn create_schema_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
@@ -1254,7 +1694,9 @@ fn receipt_events(
 ) -> Result<Vec<OutboxEvent>, StorageError> {
     let mut statement = connection
         .prepare(
-            "SELECT sequence, event_id, topic, payload FROM outbox \
+            "SELECT sequence, event_id, topic, payload, receipt_scope_key, \
+                    projection_stream_kind, projection_resource_id, \
+                    projection_stream_sequence FROM outbox \
              WHERE receipt_actor_key = ?1 AND receipt_scope_key = ?2 AND request_id = ?3 \
              ORDER BY sequence",
         )
@@ -1272,21 +1714,69 @@ fn receipt_events(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
                 ))
             },
         )
         .map_err(sql_error)?;
     rows.map(|row| {
-        let (sequence, event_id, topic, payload) = row.map_err(sql_error)?;
+        let (
+            sequence,
+            event_id,
+            topic,
+            payload,
+            scope_key,
+            stream_kind,
+            resource_id,
+            stream_sequence,
+        ) = row.map_err(sql_error)?;
         Ok(OutboxEvent {
             sequence: u64::try_from(sequence)
                 .map_err(|_| StorageError::adapter("outbox sequence is negative"))?,
+            projection_cursor: stored_projection_cursor(
+                scope_key,
+                stream_kind,
+                resource_id,
+                stream_sequence,
+                &event_id,
+            )?,
             event_id,
             topic,
             payload,
         })
     })
     .collect()
+}
+
+fn stored_projection_cursor(
+    scope_key: Vec<u8>,
+    stream_kind: Option<String>,
+    resource_id: Option<String>,
+    stream_sequence: Option<i64>,
+    event_id: &str,
+) -> Result<Option<ProjectionEventCursor>, StorageError> {
+    match (stream_kind, resource_id, stream_sequence) {
+        (None, None, None) => Ok(None),
+        (Some(stream_kind), Some(resource_id), Some(stream_sequence)) => {
+            let stream = ProjectionEventStream::from_stored(&stream_kind, resource_id)?;
+            let key =
+                ProjectionEventStreamKey::new(ReceiptScopeKey::from_encoded(scope_key)?, stream)?;
+            ProjectionEventCursor::try_new(
+                key,
+                u64::try_from(stream_sequence).map_err(|_| {
+                    StorageError::adapter("stored projection event sequence is negative")
+                })?,
+                Some(ControlPlaneEventId(event_id.to_owned())),
+            )
+            .map(Some)
+        }
+        _ => Err(StorageError::adapter(
+            "stored projection event cursor columns are incomplete",
+        )),
+    }
 }
 
 fn load_aggregate_journal(
@@ -1350,6 +1840,21 @@ fn validate_sha256_digest(digest: &Sha256Digest) -> Result<(), StorageError> {
         ));
     }
     Ok(())
+}
+
+fn canonical_control_plane_event_id(value: &str) -> bool {
+    value.strip_prefix("evt_").is_some_and(|suffix| {
+        (16..=128).contains(&suffix.len())
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+fn portable_event_key(value: &str) -> bool {
+    value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
+    })
 }
 
 fn sha256_digest(bytes: &[u8]) -> Sha256Digest {

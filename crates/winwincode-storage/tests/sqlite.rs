@@ -5,11 +5,14 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use rusqlite::Connection;
-use winwincode_domain::{RequestId, Sha256Digest};
+use winwincode_domain::{
+    ControlPlaneEventId, DeliveryId, ProductSessionId, RequestId, Sha256Digest,
+};
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit, StorageErrorKind,
+    ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+    StorageErrorKind,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -45,12 +48,120 @@ fn state_commit(
         stream_id,
         expected_revision,
         state.to_vec(),
-        vec![NewOutboxEvent::new(
+        vec![NewOutboxEvent::internal(
             event_id,
             "control-plane.state.changed",
             b"event".to_vec(),
         )],
     )
+}
+
+fn projection_commit(
+    request_id: &str,
+    state_stream: &str,
+    event_id: &str,
+    stream: ProjectionEventStream,
+) -> StateCommit {
+    StateCommit::new(
+        receipt_identity("actor:projection", "scope:repository-one", request_id),
+        Sha256Digest(format!("sha256:{}", "d".repeat(64))),
+        state_stream,
+        0,
+        b"projection-state".to_vec(),
+        vec![NewOutboxEvent::projection(
+            ControlPlaneEventId(event_id.to_owned()),
+            "projection.invalidated",
+            b"{}".to_vec(),
+            stream,
+        )],
+    )
+}
+
+fn projection_key(stream: ProjectionEventStream) -> ProjectionEventStreamKey {
+    ProjectionEventStreamKey::new(
+        ReceiptScopeKey::from_encoded(b"scope:repository-one".to_vec()).expect("scope key"),
+        stream,
+    )
+    .expect("projection stream key")
+}
+
+fn write_interleaved_projection_events(
+    storage: &mut SqliteStorage,
+    delivery_one: &ProjectionEventStream,
+    delivery_two: &ProjectionEventStream,
+    session_one: &ProjectionEventStream,
+    session_two: &ProjectionEventStream,
+) -> ProjectionEventCursor {
+    let writes = [
+        (
+            "req_projection_00000001",
+            "state:d1:1",
+            "evt_delivery_one_0001",
+            delivery_one,
+        ),
+        (
+            "req_projection_00000002",
+            "state:d2:1",
+            "evt_delivery_two_0001",
+            delivery_two,
+        ),
+        (
+            "req_projection_00000003",
+            "state:s1:1",
+            "evt_session_one_0001",
+            session_one,
+        ),
+        (
+            "req_projection_00000004",
+            "state:d1:2",
+            "evt_delivery_one_0002",
+            delivery_one,
+        ),
+        (
+            "req_projection_00000005",
+            "state:s2:1",
+            "evt_session_two_0001",
+            session_two,
+        ),
+        (
+            "req_projection_00000006",
+            "state:s1:2",
+            "evt_session_one_0002",
+            session_one,
+        ),
+    ];
+    let mut first_delivery_cursor = None;
+    for (request_id, state_stream, event_id, stream) in writes {
+        let receipt = storage
+            .commit(&projection_commit(
+                request_id,
+                state_stream,
+                event_id,
+                stream.clone(),
+            ))
+            .expect("projection event should commit");
+        let cursor = receipt.events[0]
+            .projection_cursor
+            .clone()
+            .expect("projection cursor");
+        if event_id == "evt_delivery_one_0001" {
+            first_delivery_cursor = Some(cursor);
+        }
+    }
+    first_delivery_cursor.expect("first Delivery cursor")
+}
+
+fn assert_projection_stream_heads(
+    storage: &SqliteStorage,
+    expected: &[(ProjectionEventStream, u64, &str)],
+) {
+    for (stream, sequence, event_id) in expected {
+        let cursor = storage
+            .load_projection_event_cursor(&projection_key(stream.clone()), None)
+            .expect("latest stream cursor");
+        assert_eq!(cursor.sequence(), *sequence);
+        assert_eq!(cursor.event_id().expect("event id").0, *event_id);
+    }
 }
 
 fn journal_key() -> AggregateJournalKey {
@@ -182,7 +293,7 @@ fn assert_current_receipt_schema(database_path: &Path) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let receipt_columns = {
         let mut statement = connection
             .prepare("PRAGMA table_info(command_receipts)")
@@ -223,7 +334,7 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
     let database_path = root.join("control-plane.sqlite3");
     let connection = Connection::open(&database_path).expect("test database should open");
     connection
-        .pragma_update(None, "user_version", 4)
+        .pragma_update(None, "user_version", 5)
         .expect("test schema version should be written");
     connection.close().expect("test database should close");
 
@@ -231,7 +342,7 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
         panic!("a newer schema must not be silently downgraded");
     };
 
-    assert!(error.to_string().contains("unsupported schema version 4"));
+    assert!(error.to_string().contains("unsupported schema version 5"));
     fs::remove_dir_all(root).expect("rejected database should have no open connection");
 }
 
@@ -258,6 +369,7 @@ fn startup_migrates_v1_receipts_once_without_a_legacy_runtime_lookup_path() {
             event_id: "legacy-event".to_owned(),
             topic: "control-plane.state.changed".to_owned(),
             payload: b"event".to_vec(),
+            projection_cursor: None,
         }]
     );
 
@@ -288,7 +400,7 @@ fn startup_migrates_v2_to_the_single_journal_schema_before_serving() {
     let database_path = root.join("control-plane.sqlite3");
     create_v2_fixture(&database_path);
 
-    let storage = SqliteStorage::open(&root).expect("v2 storage should migrate to v3");
+    let storage = SqliteStorage::open(&root).expect("v2 storage should migrate to v4");
     assert_eq!(
         storage
             .load_state("v2-stream")
@@ -313,7 +425,7 @@ fn startup_migrates_v2_to_the_single_journal_schema_before_serving() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version");
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     for table in ["aggregate_journals", "aggregate_journal_records"] {
         let exists: i64 = connection
             .query_row(
@@ -401,6 +513,106 @@ fn sqlite_adapter_uses_no_dynamic_savepoint_or_sql_identifier_path() {
 }
 
 #[test]
+fn projection_event_positions_are_stream_local_durable_and_exact() {
+    let root = temporary_directory("projection-event-streams");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let delivery_one = ProjectionEventStream::Delivery(DeliveryId("delivery-one".into()));
+    let delivery_two = ProjectionEventStream::Delivery(DeliveryId("delivery-two".into()));
+    let session_one = ProjectionEventStream::ProductSession(ProductSessionId("session-one".into()));
+    let session_two = ProjectionEventStream::ProductSession(ProductSessionId("session-two".into()));
+    let first_delivery_cursor = write_interleaved_projection_events(
+        &mut storage,
+        &delivery_one,
+        &delivery_two,
+        &session_one,
+        &session_two,
+    );
+    assert_projection_stream_heads(
+        &storage,
+        &[
+            (delivery_one.clone(), 2, "evt_delivery_one_0002"),
+            (delivery_two, 1, "evt_delivery_two_0001"),
+            (session_one, 2, "evt_session_one_0002"),
+            (session_two, 1, "evt_session_two_0001"),
+        ],
+    );
+    let global = storage.pending_events().expect("global outbox");
+    assert_eq!(
+        global
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        global
+            .iter()
+            .map(|event| {
+                event
+                    .projection_cursor
+                    .as_ref()
+                    .expect("projection cursor")
+                    .sequence()
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 1, 1, 2, 1, 2]
+    );
+
+    let first_delivery_key = projection_key(delivery_one);
+    assert_eq!(
+        storage
+            .load_projection_event_cursor(&first_delivery_key, Some(&first_delivery_cursor),)
+            .expect("retained historical cursor"),
+        first_delivery_cursor
+    );
+    Box::new(storage).close().expect("storage should close");
+
+    let storage = SqliteStorage::open(&root).expect("storage should restart");
+    assert_eq!(
+        storage
+            .load_projection_event_cursor(&first_delivery_key, None)
+            .expect("restarted stream head")
+            .sequence(),
+        2
+    );
+    assert_eq!(
+        storage
+            .load_projection_event_cursor(&first_delivery_key, Some(&first_delivery_cursor),)
+            .expect("restarted retained cursor"),
+        first_delivery_cursor
+    );
+    Box::new(storage).close().expect("storage should close");
+
+    let connection =
+        Connection::open(root.join("control-plane.sqlite3")).expect("retention fixture database");
+    connection
+        .execute(
+            "DELETE FROM outbox WHERE event_id = 'evt_delivery_one_0001'",
+            [],
+        )
+        .expect("old retained event can be compacted");
+    connection.close().expect("fixture should close");
+    let storage = SqliteStorage::open(&root).expect("storage after compaction");
+    let error = storage
+        .load_projection_event_cursor(&first_delivery_key, Some(&first_delivery_cursor))
+        .expect_err("compacted exact cursor must expire");
+    assert_eq!(error.kind(), StorageErrorKind::EventCursorExpired);
+
+    let forged = ProjectionEventCursor::try_new(
+        first_delivery_key.clone(),
+        2,
+        Some(ControlPlaneEventId("evt_delivery_one_fake".into())),
+    )
+    .expect("shape-valid forged cursor");
+    let error = storage
+        .load_projection_event_cursor(&first_delivery_key, Some(&forged))
+        .expect_err("eventId mismatch is not retention loss");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
 fn sql_looking_business_values_remain_bound_values() {
     let root = temporary_directory("bound-values");
     let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
@@ -416,7 +628,7 @@ fn sql_looking_business_values_remain_bound_values() {
         stream_id,
         0,
         b"state".to_vec(),
-        vec![NewOutboxEvent::new(
+        vec![NewOutboxEvent::internal(
             event_id,
             "topic'); PRAGMA writable_schema=ON; --",
             b"event".to_vec(),

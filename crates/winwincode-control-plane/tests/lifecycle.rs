@@ -216,7 +216,7 @@ fn temporary_directory(name: &str) -> PathBuf {
 }
 
 fn event(event_id: &str) -> NewOutboxEvent {
-    NewOutboxEvent::new(event_id, "control-plane.state.changed", b"event".to_vec())
+    NewOutboxEvent::internal(event_id, "control-plane.state.changed", b"event".to_vec())
 }
 
 fn committed_event(sequence: u64, event_id: &str) -> OutboxEvent {

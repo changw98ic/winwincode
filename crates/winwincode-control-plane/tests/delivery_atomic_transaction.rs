@@ -262,7 +262,7 @@ fn seed_rework_history(root: &PathBuf, fixture: &ReworkJournalFixture) {
                     format!("delivery:{}", delivery_id.0),
                     u64::try_from(index).expect("small history revision"),
                     decoded.snapshot.encode_json().expect("seed snapshot JSON"),
-                    vec![NewOutboxEvent::new(
+                    vec![NewOutboxEvent::internal(
                         format!("rework-seed-event-{index}"),
                         "delivery.seeded",
                         format!("seed-{index}").into_bytes(),
@@ -346,7 +346,7 @@ fn seed_delivery(root: &PathBuf, delivery: &Delivery) {
                 format!("delivery:{}", delivery.id().0),
                 0,
                 delivery.encode_json().expect("seed Delivery JSON"),
-                vec![NewOutboxEvent::new(
+                vec![NewOutboxEvent::internal(
                     "seed-event",
                     "delivery.seeded",
                     b"seed".to_vec(),
@@ -578,7 +578,7 @@ fn generic_control_plane_commit_rejects_every_delivery_command_bypass() {
                 StateChange::new(
                     stream_id,
                     b"bypass-state".to_vec(),
-                    vec![NewOutboxEvent::new(
+                    vec![NewOutboxEvent::internal(
                         "bypass-event",
                         "execution.job.dispatch",
                         b"bypass-job".to_vec(),
