@@ -540,6 +540,51 @@ test('terminal outcome messages bind the exact final verifier fact before verdic
   )
 })
 
+test('execution-port identity joins reject missing and foreign nested facts', async () => {
+  const [rules, oracle] = await Promise.all([json(rulesPath), json(oraclePath)])
+  const expected = canonicalExpectedFixture(oracle, rules)
+  validateCanonicalExpected(rules, oracle, expected)
+
+  for (const [name, mutate, pattern] of [
+    ['missing sessionIdentity', (binding, _outcome) => {
+      delete binding.request.sessionIdentity
+    }, /message request keys differ/u],
+    ['foreign binding sessionIdentity', (binding, _outcome) => {
+      binding.request.sessionIdentity.stageRunId = 'str_00000000000000000000000001'
+    }, /binding sessionIdentity stageRunId/u],
+    ['attempt does not join lease', (binding, _outcome) => {
+      binding.request.attempt = 2
+    }, /binding attempt/u],
+    ['fencing token does not join lease', (binding, _outcome) => {
+      binding.request.fencingToken = '2'
+    }, /binding fencingToken/u],
+    ['source identity does not join payload', (binding, _outcome) => {
+      binding.request.sourceIdentity.workerId = 'wrk_00000000000000000000000001'
+    }, /binding sourceIdentity workerId/u],
+    ['job outcome uses a foreign accepted identity', (_binding, outcome) => {
+      outcome.request.sessionIdentity.stageRunId = 'str_00000000000000000000000001'
+    }, /terminal outcome sessionIdentity/u],
+  ]) {
+    const malformed = structuredClone(expected)
+    const scenario = malformed.result.scenarios.find(entry => (
+      entry.id === 'success-closed-loop'
+    ))
+    const outcome = scenario.commands.find(command => (
+      command.request.kind === 'job.outcome'
+    ))
+    const binding = scenario.commands.slice(0, scenario.commands.indexOf(outcome)).findLast(
+      command => command.request.kind === 'session.binding'
+        && command.response.outcome === 'completed',
+    )
+    mutate(binding, outcome)
+    assert.throws(
+      () => validateCanonicalExpected(rules, oracle, malformed),
+      pattern,
+      name,
+    )
+  }
+})
+
 test('runtime projection follows only the last complete Codex binding', async () => {
   const [rules, oracle] = await Promise.all([json(rulesPath), json(oraclePath)])
   const followup = rules.canonicalMigration.runtimeProjectionFollowup
@@ -1253,18 +1298,42 @@ function canonicalFixtureRequest(
         },
         schemaVersion: 'winwincode/v1',
         sentAt: terminalInstant,
+        sessionIdentity: {
+          codexThreadId: 'cdx_00000000000000000000000000',
+          productSessionId: 'psn_00000000000000000000000000',
+          stageRunId: 'str_00000000000000000000000000',
+          workerSessionId: 'wsn_00000000000000000000000000',
+        },
         workerSessionId: 'wsn_00000000000000000000000000',
       }
     }
     return {
+      attempt: lease.attempt,
       boundAt: instant,
       codexThreadId: 'cdx_00000000000000000000000000',
+      fencingToken: lease.fencingToken,
       kind: 'session.binding',
       lease,
+      leaseId: lease.leaseId,
       messageId,
       productSessionId: 'psn_00000000000000000000000000',
       schemaVersion: 'winwincode/v1',
       sentAt: instant,
+      sessionIdentity: {
+        codexThreadId: 'cdx_00000000000000000000000000',
+        productSessionId: 'psn_00000000000000000000000000',
+        stageRunId: 'str_00000000000000000000000000',
+        workerSessionId: 'wsn_00000000000000000000000000',
+      },
+      sourceIdentity: {
+        kind: 'execution-worker',
+        leaseId: lease.leaseId,
+        workerId: lease.workerId,
+        workerInstanceId: lease.workerInstanceId,
+        workerSessionId: 'wsn_00000000000000000000000000',
+      },
+      stageRunId: 'str_00000000000000000000000000',
+      workerId: lease.workerId,
       workerSessionId: 'wsn_00000000000000000000000000',
     }
   }

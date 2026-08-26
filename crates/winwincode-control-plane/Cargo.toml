@@ -12,15 +12,20 @@ include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
 [features]
 # Exposes deterministic trusted-authority fixture builders only to Rust tests.
 # The production Control Plane keeps Delivery command facts opaque by default.
-test-support = []
+test-support = ["winwincode-publication/test-support"]
 
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 winwincode-api.workspace = true
+winwincode-audit.workspace = true
 winwincode-delivery = { path = "../winwincode-delivery" }
 winwincode-domain.workspace = true
+winwincode-execution-port.workspace = true
+winwincode-publication.workspace = true
+winwincode-session.workspace = true
 winwincode-storage = { path = "../winwincode-storage" }
 
 [dev-dependencies]
@@ -33,6 +38,14 @@ required-features = ["test-support"]
 
 [[test]]
 name = "terminal_outcome_transaction"
+required-features = ["test-support"]
+
+[[test]]
+name = "publication_policy"
+required-features = ["test-support"]
+
+[[test]]
+name = "publication_cutover"
 required-features = ["test-support"]
 
 [lints]

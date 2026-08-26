@@ -1,25 +1,33 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
+
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
-    ExecutionWorkspace, RepositoryScope, SchemaVersion, Scope, SessionBindingMessage,
-    SessionBindingMessageKind, UserActor,
+    Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
 };
+use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
     PendingDeliveryExecution, prepare_delivery_advance,
 };
 use winwincode_control_plane::{
-    CommitError, ControlPlane, ControlPlaneConfig, DeliverySessionBindingCommitError,
-    EventPublishError, EventPublisher, OutboxEvent, StateChange, StorageErrorKind,
+    CandidateResolutionError, CommitError, ControlPlane, ControlPlaneConfig,
+    DeliverySessionBindingCommitError, EventPublishError, EventPublisher, OutboxEvent, StateChange,
+    StorageErrorKind,
 };
 use winwincode_delivery::application::stage::{
-    AdvanceStageInput, NewStageIdentities, advance,
-    test_support::{active_lease_identity, session_binding_authority},
+    AdvanceStageInput, NewStageIdentities, TerminalArtifactReference, TerminalOutcomeStatus,
+    advance,
+    test_support::{
+        active_lease_identity, delivery_terminal_outcome_facts, session_binding_authority,
+        terminal_outcome_metadata, terminal_worker_outcome, verify_terminal_outcome,
+    },
 };
 use winwincode_delivery::domain::{
     DELIVERY_SCHEMA_VERSION, Delivery, DeliveryStatus, DeliveryTask, DeliveryTaskStatus,
@@ -30,15 +38,22 @@ use winwincode_delivery::store::{
     DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
 };
 use winwincode_domain::{
-    AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, ExecutionMessageId,
-    FencingToken, Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
-    RequestId, Revision, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
-    WorkerSessionId, WorkspaceId,
+    ArtifactId, AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+    StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+};
+use winwincode_execution_port::generated::{
+    ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
+    ArtifactOpenMessage, ArtifactOpenMessageKind, EncodedPayload, ExecutionJob,
+    ExecutionLeaseStamp, ExecutionLimits, ExecutionPortErrorCode, ExecutionScope,
+    ExecutionWorkspace, LeaseWriteStatus, SessionBindingMessage, SessionBindingMessageKind,
 };
 use winwincode_storage::{
-    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactErrorKind,
+    CandidateSourceManifest, LocalGitSourceResolver, NewOutboxEvent, ProductStateStorage,
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -53,6 +68,73 @@ fn temporary_directory(name: &str) -> PathBuf {
 
 fn canonical_id(prefix: &str, value: u64) -> String {
     format!("{prefix}_{value:026}")
+}
+
+fn git(root: &Path, arguments: &[&str]) -> Vec<u8> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?}: {}",
+        arguments,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn git_text(value: Vec<u8>) -> String {
+    String::from_utf8(value)
+        .expect("git UTF-8")
+        .trim()
+        .to_owned()
+}
+
+fn git_commit(root: &Path, message: &str, timestamp: &str) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["commit", "-q", "-m", message])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "WinWinCode Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@winwincode.invalid")
+        .env("GIT_COMMITTER_NAME", "WinWinCode Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@winwincode.invalid")
+        .env("GIT_AUTHOR_DATE", timestamp)
+        .env("GIT_COMMITTER_DATE", timestamp)
+        .status()
+        .expect("git commit");
+    assert!(status.success());
+}
+
+fn git_candidate_repository(root: &Path) -> (String, String) {
+    fs::create_dir_all(root).expect("repository root");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "-q", "-b", "main"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .expect("git init")
+            .success()
+    );
+    fs::write(root.join("source.txt"), b"base\n").expect("base source");
+    git(root, &["add", "--", "source.txt"]);
+    git_commit(root, "base", "2026-08-25T00:00:00Z");
+    let base = git_text(git(root, &["rev-parse", "HEAD"]));
+    fs::write(root.join("source.txt"), b"base\ncandidate\n").expect("candidate source");
+    git(root, &["add", "--", "source.txt"]);
+    git_commit(root, "candidate", "2026-08-25T00:01:00Z");
+    let candidate = git_text(git(root, &["rev-parse", "HEAD"]));
+    (base, candidate)
 }
 
 fn delivery_before_advance(seed: u64) -> Delivery {
@@ -116,7 +198,8 @@ fn pending_execution(seed: u64) -> PendingDeliveryExecution {
             workspace: ExecutionWorkspace {
                 checkout_revision: "original-checkout".into(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
+                write_mode:
+                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
                 deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
@@ -149,6 +232,16 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
     }
 }
 
+fn audit_repository_scope(seed: u64) -> RepositoryScope {
+    RepositoryScope {
+        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        organization_id: OrganizationId(canonical_id("org", seed)),
+        workspace_id: WorkspaceId(canonical_id("wsp", seed)),
+        project_id: ProjectId(canonical_id("prj", seed)),
+        repository_id: RepositoryId(canonical_id("rep", seed)),
+    }
+}
+
 fn lease_and_message(
     pending: &PendingDeliveryExecution,
     seed: u64,
@@ -157,6 +250,14 @@ fn lease_and_message(
     SessionBindingMessage,
 ) {
     let worker_session_id = WorkerSessionId(canonical_id("wsn", seed));
+    let (stage_run_id, product_session_id) = match &pending.job().scope {
+        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+            (scope.stage_run_id.clone(), scope.product_session_id.clone())
+        }
+        ExecutionScope::ProductSessionExecutionScope(_) => {
+            panic!("fixture must use a Delivery stage job")
+        }
+    };
     let lease = active_lease_identity(
         pending.job().job_id.clone(),
         1,
@@ -167,8 +268,10 @@ fn lease_and_message(
         worker_session_id.clone(),
     );
     let message = SessionBindingMessage {
+        attempt: 1,
         bound_at: Instant("2027-01-15T08:00:01.000Z".into()),
         codex_thread_id: CodexThreadId(canonical_id("cdx", seed)),
+        fencing_token: FencingToken(seed.to_string()),
         kind: SessionBindingMessageKind::SessionBinding,
         lease: ExecutionLeaseStamp {
             attempt: 1,
@@ -180,10 +283,26 @@ fn lease_and_message(
             worker_id: WorkerId(canonical_id("wrk", seed)),
             worker_instance_id: WorkerInstanceId(canonical_id("wki", seed)),
         },
+        lease_id: LeaseId(canonical_id("lse", seed)),
         message_id: ExecutionMessageId(canonical_id("xmsg", seed)),
-        product_session_id: ProductSessionId(canonical_id("psn", seed)),
+        product_session_id: product_session_id.clone(),
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2027-01-15T08:00:01.100Z".into()),
+        session_identity: SessionIdentity {
+            codex_thread_id: CodexThreadId(canonical_id("cdx", seed)),
+            product_session_id: product_session_id.clone(),
+            stage_run_id: Some(stage_run_id.clone()),
+            worker_session_id: worker_session_id.clone(),
+        },
+        source_identity: SessionBindingSourceIdentity {
+            kind: SessionBindingSourceIdentityKind::ExecutionWorker,
+            lease_id: LeaseId(canonical_id("lse", seed)),
+            worker_id: WorkerId(canonical_id("wrk", seed)),
+            worker_instance_id: WorkerInstanceId(canonical_id("wki", seed)),
+            worker_session_id: worker_session_id.clone(),
+        },
+        stage_run_id,
+        worker_id: WorkerId(canonical_id("wrk", seed)),
         worker_session_id,
     };
     let authority = session_binding_authority(
@@ -276,6 +395,35 @@ fn durable_binding_counts(root: &Path, delivery_id: &DeliveryId) -> (i64, i64, i
         .expect("binding durable counts");
     connection.close().expect("inspection close");
     counts
+}
+
+fn audit_event_for_receipt(root: &Path, receipt: &winwincode_storage::CommitReceipt) -> AuditEvent {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("audit event inspection database");
+    let payload = connection
+        .query_row(
+            "SELECT payload FROM audit_outbox \
+             WHERE actor_key = ?1 AND scope_key = ?2 AND request_id = ?3",
+            rusqlite::params![
+                receipt.receipt_identity.actor_key().as_bytes(),
+                receipt.receipt_identity.scope_key().as_bytes(),
+                receipt.receipt_identity.request_id().0,
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .expect("accepted binding audit event");
+    connection.close().expect("audit event inspection close");
+    serde_json::from_slice(&payload).expect("canonical accepted binding audit event JSON")
+}
+
+fn audit_event_count(root: &Path) -> i64 {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("audit event count database");
+    let count = connection
+        .query_row("SELECT COUNT(*) FROM audit_outbox", [], |row| row.get(0))
+        .expect("audit event count");
+    connection.close().expect("audit event count close");
+    count
 }
 
 #[derive(Default)]
@@ -375,6 +523,7 @@ impl ExecutionJobDispatcher for RecordingDispatcher {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
     let seed = 1;
     let (root, mut control_plane, pending, authority, message) =
@@ -425,7 +574,66 @@ fn exact_session_binding_message_commits_two_consecutive_durable_mutations() {
         Some(&message.codex_thread_id)
     );
 
+    let audit_event = audit_event_for_receipt(&root, committed.codex_thread_receipt());
+    assert_eq!(audit_event_count(&root), 1);
+    assert_eq!(
+        audit_event.subject().execution_kind(),
+        Some(AuditExecutionSubjectKind::AcceptedBinding)
+    );
+    let identity = audit_event
+        .subject()
+        .execution()
+        .expect("accepted binding execution identity");
+    assert_eq!(identity.product_session_id(), &message.product_session_id);
+    assert_eq!(identity.worker_session_id(), &message.worker_session_id);
+    assert_eq!(identity.codex_thread_id(), &message.codex_thread_id);
+    assert_eq!(identity.stage_run_id(), &message.stage_run_id);
+    assert_eq!(identity.execution_job_id(), &pending.job().job_id);
+    assert_eq!(identity.delivery_id(), pending.delivery().id());
+    assert!(identity.source_sequence().is_none());
+    assert_eq!(
+        identity
+            .binding_source()
+            .expect("typed binding source")
+            .message_id(),
+        &message.message_id
+    );
+    let scope = audit_repository_scope(seed);
+    let audit_access = AuditScope::repository(
+        scope.organization_id,
+        scope.workspace_id,
+        scope.project_id,
+        scope.repository_id,
+    )
+    .expect("canonical execution audit scope")
+    .into_access();
+    let audit = control_plane
+        .read_audit(&audit_access, 0, 20, 2_000_000_000_000)
+        .expect("execution binding is visible through the canonical AuditStore");
+    assert!(audit.records().iter().any(|record| {
+        record.event().is_some_and(|event| {
+            event.event_id() == audit_event.event_id()
+                && event.subject().execution_kind()
+                    == Some(AuditExecutionSubjectKind::AcceptedBinding)
+        })
+    }));
+
+    let audit_event_id = audit_event.event_id().clone();
     control_plane.shutdown().expect("shutdown");
+    let restarted = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("restart Control Plane");
+    let audit_after_restart = restarted
+        .read_audit(&audit_access, 0, 20, 2_000_000_000_000)
+        .expect("binding audit remains readable after restart");
+    assert!(audit_after_restart.records().iter().any(|record| {
+        record
+            .event()
+            .is_some_and(|event| event.event_id() == &audit_event_id)
+    }));
+    restarted.shutdown().expect("restart shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
 
@@ -496,6 +704,7 @@ fn scheduler_authority_rejects_a_worker_supplied_lease_window_before_writes() {
         .expect("state read")
         .expect("state");
     assert_eq!(state.revision, 2);
+    assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("inspection database");
@@ -919,6 +1128,7 @@ fn foreign_lease_job_session_and_time_identities_are_rejected_before_writes() {
         .expect("state read")
         .expect("state");
     assert_eq!(state.revision, 2);
+    assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }
@@ -951,6 +1161,7 @@ fn every_atomic_member_rolls_back_within_each_session_binding_phase() {
                     (2, 2, 0, 0),
                     "{member}"
                 );
+                assert_eq!(audit_event_count(&root), 0, "{member}");
             } else {
                 assert_eq!(
                     error
@@ -965,6 +1176,7 @@ fn every_atomic_member_rolls_back_within_each_session_binding_phase() {
                     (3, 3, 1, 2),
                     "{member}"
                 );
+                assert_eq!(audit_event_count(&root), 0, "{member}");
             }
             control_plane.shutdown().expect("shutdown");
             fs::remove_dir_all(root).expect("database directory release");
@@ -1026,4 +1238,529 @@ fn replay_rejects_changed_receipt_digest_or_event_membership() {
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn generated_artifact_messages_use_the_exact_durable_job_and_binding_authority() {
+    let seed = 1_401;
+    let (root, mut control_plane, _pending, authority, binding_message) =
+        running_fixture(seed, "artifact-stream");
+    control_plane
+        .commit_delivery_session_binding(&binding_message, &authority)
+        .expect("complete SessionBinding");
+    let Scope::RepositoryScope(scope) = delivery_advance_command(seed).scope else {
+        panic!("fixture must use repository scope");
+    };
+    let artifact_id = ArtifactId(canonical_id("art", seed));
+    let digest = Sha256Digest(
+        "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+    );
+    let open = ArtifactOpenMessage {
+        artifact: ArtifactDescriptor {
+            artifact_id: artifact_id.clone(),
+            digest: digest.clone(),
+            file_name: Some("candidate.json".into()),
+            kind: ArtifactKind::Candidate,
+            media_type: "application/vnd.winwincode.git-candidate+json".into(),
+            size_bytes: 5,
+        },
+        kind: ArtifactOpenMessageKind::ArtifactOpen,
+        lease: binding_message.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
+        request_id: RequestId(canonical_id("req", seed + 1)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:02.000Z".into()),
+        session_identity: binding_message.session_identity.clone(),
+        worker_session_id: binding_message.worker_session_id.clone(),
+    };
+    let opened = control_plane
+        .accept_artifact_open(&scope, &open, &authority)
+        .expect("artifact.open");
+    assert_eq!(opened.status, LeaseWriteStatus::Accepted);
+    assert_eq!(opened.ack_sequence.0, 0);
+    assert_eq!(opened.artifact_id, artifact_id);
+
+    let mut expired_open = open.clone();
+    expired_open.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 20));
+    expired_open.request_id = RequestId(canonical_id("req", seed + 20));
+    expired_open.artifact.artifact_id = ArtifactId(canonical_id("art", seed + 20));
+    expired_open.sent_at = expired_open.lease.expires_at.clone();
+    let expired = control_plane
+        .accept_artifact_open(&scope, &expired_open, &authority)
+        .expect("expired Artifact write acknowledgement");
+    assert_eq!(expired.status, LeaseWriteStatus::RejectedExpiredLease);
+    assert_eq!(expired.ack_sequence.0, 0);
+    assert_eq!(
+        expired.error.expect("expired lease error").code,
+        ExecutionPortErrorCode::LeaseExpired
+    );
+    let mut after_expiry = expired_open;
+    after_expiry.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 21));
+    after_expiry.request_id = RequestId(canonical_id("req", seed + 21));
+    after_expiry.sent_at = Instant("2027-01-15T08:00:04.000Z".into());
+    let accepted_after_expiry = control_plane
+        .accept_artifact_open(&scope, &after_expiry, &authority)
+        .expect("expired Artifact message must not reserve metadata");
+    assert_eq!(accepted_after_expiry.status, LeaseWriteStatus::Accepted);
+
+    let mut crossed_open_identities = open.clone();
+    crossed_open_identities.request_id = RequestId(canonical_id("req", seed + 21));
+    crossed_open_identities.artifact.artifact_id = ArtifactId(canonical_id("art", seed + 24));
+    let crossed_open_identities = control_plane
+        .accept_artifact_open(&scope, &crossed_open_identities, &authority)
+        .expect("crossed open identities conflict acknowledgement");
+    assert_eq!(
+        crossed_open_identities.status,
+        LeaseWriteStatus::RejectedConflict
+    );
+    assert_eq!(crossed_open_identities.ack_sequence.0, 0);
+    assert_eq!(
+        crossed_open_identities
+            .error
+            .expect("crossed open identity error")
+            .code,
+        ExecutionPortErrorCode::MessageConflict
+    );
+
+    let mut stale_fence_open = open.clone();
+    stale_fence_open.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 22));
+    stale_fence_open.request_id = RequestId(canonical_id("req", seed + 22));
+    stale_fence_open.lease.fencing_token = FencingToken("1".into());
+    let stale_fence = control_plane
+        .accept_artifact_open(&scope, &stale_fence_open, &authority)
+        .expect("stale fencing token acknowledgement");
+    assert_eq!(
+        stale_fence.status,
+        LeaseWriteStatus::RejectedStaleFencingToken
+    );
+    assert_eq!(
+        stale_fence.error.expect("stale fence error").code,
+        ExecutionPortErrorCode::StaleFencingToken
+    );
+
+    let mut replaced_worker_open = open.clone();
+    replaced_worker_open.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 23));
+    replaced_worker_open.request_id = RequestId(canonical_id("req", seed + 23));
+    replaced_worker_open.lease.worker_instance_id =
+        WorkerInstanceId(canonical_id("wki", seed + 23));
+    let replaced_worker = control_plane
+        .accept_artifact_open(&scope, &replaced_worker_open, &authority)
+        .expect("replaced Worker acknowledgement");
+    assert_eq!(
+        replaced_worker.status,
+        LeaseWriteStatus::RejectedWorkerInstance
+    );
+    assert_eq!(
+        replaced_worker.error.expect("Worker instance error").code,
+        ExecutionPortErrorCode::WorkerInstanceChanged
+    );
+
+    let mut reused_message = open.clone();
+    reused_message.artifact.artifact_id = ArtifactId(canonical_id("art", seed + 88));
+    let conflict = control_plane
+        .accept_artifact_open(&scope, &reused_message, &authority)
+        .expect("changed artifact.open message conflict acknowledgement");
+    assert_eq!(conflict.status, LeaseWriteStatus::RejectedConflict);
+    assert_eq!(conflict.ack_sequence.0, 0);
+    assert_eq!(
+        conflict.error.expect("message identity conflict").code,
+        ExecutionPortErrorCode::MessageConflict
+    );
+
+    let duplicate_open = control_plane
+        .accept_artifact_open(&scope, &open, &authority)
+        .expect("exact artifact.open replay");
+    assert_eq!(duplicate_open.status, LeaseWriteStatus::Duplicate);
+    let mut conflicting_open = open.clone();
+    conflicting_open.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 5));
+    conflicting_open.request_id = RequestId(canonical_id("req", seed + 5));
+    conflicting_open.artifact.kind = ArtifactKind::Report;
+    let conflict = control_plane
+        .accept_artifact_open(&scope, &conflicting_open, &authority)
+        .expect("Artifact descriptor conflict acknowledgement");
+    assert_eq!(conflict.status, LeaseWriteStatus::RejectedConflict);
+    assert_eq!(conflict.ack_sequence.0, 0);
+    assert_eq!(
+        conflict.error.expect("descriptor conflict error").code,
+        ExecutionPortErrorCode::MessageConflict
+    );
+
+    let chunk = ArtifactChunkMessage {
+        artifact_id: artifact_id.clone(),
+        is_final: true,
+        kind: ArtifactChunkMessageKind::ArtifactChunk,
+        lease: binding_message.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 2)),
+        payload: EncodedPayload {
+            content_type: "application/octet-stream".into(),
+            data_base64: "aGVsbG8=".into(),
+            payload_digest: digest,
+        },
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:03.000Z".into()),
+        sequence: ExecutionSequence(1),
+        session_identity: binding_message.session_identity.clone(),
+        worker_session_id: binding_message.worker_session_id.clone(),
+    };
+    let mut invalid_transport_chunk = chunk.clone();
+    invalid_transport_chunk.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 6));
+    invalid_transport_chunk.payload.content_type.clear();
+    control_plane
+        .accept_artifact_chunk(&scope, &invalid_transport_chunk, &authority)
+        .expect_err("generated EncodedPayload constraints must be revalidated at the Rust seam");
+
+    let mut gap_chunk = chunk.clone();
+    gap_chunk.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 3));
+    gap_chunk.sequence = ExecutionSequence(2);
+    let gap = control_plane
+        .accept_artifact_chunk(&scope, &gap_chunk, &authority)
+        .expect("Artifact sequence gap acknowledgement");
+    assert_eq!(gap.status, LeaseWriteStatus::Gap);
+    assert_eq!(gap.ack_sequence.0, 0);
+    assert_eq!(gap.replay_from_sequence, Some(ExecutionSequence(1)));
+    let gap_error = gap.error.expect("gap error");
+    assert_eq!(gap_error.code, ExecutionPortErrorCode::SequenceGap);
+    assert!(gap_error.retryable);
+
+    let mut digest_mismatch = chunk.clone();
+    digest_mismatch.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 7));
+    digest_mismatch.payload.payload_digest = Sha256Digest(
+        "sha256:486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7".into(),
+    );
+    let digest_rejection = control_plane
+        .accept_artifact_chunk(&scope, &digest_mismatch, &authority)
+        .expect("Artifact digest mismatch acknowledgement");
+    assert_eq!(digest_rejection.status, LeaseWriteStatus::RejectedConflict);
+    assert_eq!(digest_rejection.ack_sequence.0, 0);
+    assert_eq!(
+        digest_rejection
+            .error
+            .expect("Artifact digest mismatch error")
+            .code,
+        ExecutionPortErrorCode::ArtifactDigestMismatch
+    );
+
+    let completed = control_plane
+        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .expect("artifact.chunk");
+    assert_eq!(completed.status, LeaseWriteStatus::Accepted);
+    assert_eq!(completed.ack_sequence.0, 1);
+    let duplicate_chunk = control_plane
+        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .expect("exact artifact.chunk replay");
+    assert_eq!(duplicate_chunk.status, LeaseWriteStatus::Duplicate);
+    assert_eq!(duplicate_chunk.ack_sequence.0, 1);
+
+    let mut changed_chunk_transport = chunk.clone();
+    changed_chunk_transport.payload.content_type = "application/json".into();
+    changed_chunk_transport.sent_at = Instant("2027-01-15T08:00:04.000Z".into());
+    let changed_chunk_transport = control_plane
+        .accept_artifact_chunk(&scope, &changed_chunk_transport, &authority)
+        .expect("changed artifact.chunk transport body conflict acknowledgement");
+    assert_eq!(
+        changed_chunk_transport.status,
+        LeaseWriteStatus::RejectedConflict
+    );
+    assert_eq!(changed_chunk_transport.ack_sequence.0, 1);
+    assert_eq!(
+        changed_chunk_transport
+            .error
+            .expect("changed chunk transport body error")
+            .code,
+        ExecutionPortErrorCode::MessageConflict
+    );
+
+    let mut reused_chunk_message = chunk.clone();
+    reused_chunk_message.artifact_id = ArtifactId(canonical_id("art", seed + 99));
+    let reused_chunk = control_plane
+        .accept_artifact_chunk(&scope, &reused_chunk_message, &authority)
+        .expect("changed artifact.chunk identity conflict acknowledgement");
+    assert_eq!(reused_chunk.status, LeaseWriteStatus::RejectedConflict);
+    assert_eq!(reused_chunk.ack_sequence.0, 0);
+    assert_eq!(
+        reused_chunk.error.expect("chunk identity conflict").code,
+        ExecutionPortErrorCode::MessageConflict
+    );
+
+    let mut conflict_chunk = chunk;
+    conflict_chunk.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 4));
+    conflict_chunk.payload.data_base64 = "d29ybGQ=".into();
+    conflict_chunk.payload.payload_digest = Sha256Digest(
+        "sha256:486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7".into(),
+    );
+    let conflict = control_plane
+        .accept_artifact_chunk(&scope, &conflict_chunk, &authority)
+        .expect("Artifact changed-message conflict acknowledgement");
+    assert_eq!(conflict.status, LeaseWriteStatus::RejectedConflict);
+    assert_eq!(conflict.ack_sequence.0, 1);
+    assert_eq!(conflict.replay_from_sequence, None);
+    let conflict_error = conflict.error.expect("conflict error");
+    assert_eq!(conflict_error.code, ExecutionPortErrorCode::MessageConflict);
+    assert!(!conflict_error.retryable);
+
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_outcome() {
+    let seed = 1_402;
+    let root = temporary_directory("candidate-source");
+    let repositories = root.join("repositories");
+    let repository = repositories.join("project-one");
+    let (base_commit, candidate_commit) = git_candidate_repository(&repository);
+    let mut initial_snapshot = delivery_before_advance(seed).into_snapshot();
+    initial_snapshot.spec.repository.locator = "project-one".into();
+    initial_snapshot.spec.base_revision.clone_from(&base_commit);
+    let initial = Delivery::try_from_snapshot(initial_snapshot).expect("local Git Delivery");
+    let first_transition = advance(
+        &initial,
+        AdvanceStageInput {
+            current_lease: None,
+            rework_authorization: None,
+            expected_revision: initial.revision(),
+            product_session_id: ProductSessionId(canonical_id("psn", seed)),
+            identities: NewStageIdentities {
+                stage_run_id: StageRunId(canonical_id("run", seed)),
+                execution_job_id: ExecutionJobId(canonical_id("job", seed)),
+                session_binding_id: SessionBindingId::new(format!("binding-{seed}"))
+                    .expect("binding id"),
+                attention_item_id: AttentionItemId(canonical_id("att", seed)),
+            },
+            review: None,
+            previous_outcome: None,
+            now_millis: 1_800_000_000_100,
+        },
+    )
+    .expect("executor advance");
+    let first_request_id = RequestId(canonical_id("req", seed));
+    let first_pending = prepare_delivery_advance(
+        first_request_id,
+        first_transition,
+        DeliveryExecutionConfig {
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            workspace: ExecutionWorkspace {
+                checkout_revision: base_commit.clone(),
+                repository_id: RepositoryId(canonical_id("rep", seed)),
+                write_mode:
+                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
+            },
+            limits: ExecutionLimits {
+                deadline_at: Instant("2027-01-15T09:00:00.000Z".into()),
+                max_artifact_bytes: 10_000_000,
+                max_runtime_seconds: 3_600,
+            },
+        },
+    )
+    .expect("pending executor");
+    seed_delivery(&root, &initial);
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(&root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("Control Plane start");
+    control_plane
+        .commit_delivery_execution(
+            &delivery_advance_command(seed),
+            &first_pending,
+            &mut RecordingDispatcher,
+        )
+        .expect("executor dispatch commit");
+    let (authority, binding_message) = lease_and_message(&first_pending, seed);
+    control_plane
+        .commit_delivery_session_binding(&binding_message, &authority)
+        .expect("complete SessionBinding");
+    let Scope::RepositoryScope(scope) = delivery_advance_command(seed).scope else {
+        panic!("fixture must use repository scope");
+    };
+
+    let artifact_id = ArtifactId(canonical_id("art", seed));
+    let manifest = CandidateSourceManifest::new(candidate_commit.clone())
+        .expect("candidate manifest")
+        .encode()
+        .expect("manifest encoding");
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&manifest)));
+    let open = ArtifactOpenMessage {
+        artifact: ArtifactDescriptor {
+            artifact_id: artifact_id.clone(),
+            digest: digest.clone(),
+            file_name: Some("candidate.json".into()),
+            kind: ArtifactKind::Candidate,
+            media_type: "application/vnd.winwincode.git-candidate+json".into(),
+            size_bytes: i64::try_from(manifest.len()).expect("manifest length"),
+        },
+        kind: ArtifactOpenMessageKind::ArtifactOpen,
+        lease: binding_message.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 1)),
+        request_id: RequestId(canonical_id("req", seed + 1)),
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:02.000Z".into()),
+        session_identity: binding_message.session_identity.clone(),
+        worker_session_id: binding_message.worker_session_id.clone(),
+    };
+    control_plane
+        .accept_artifact_open(&scope, &open, &authority)
+        .expect("artifact.open");
+    let chunk = ArtifactChunkMessage {
+        artifact_id: artifact_id.clone(),
+        is_final: true,
+        kind: ArtifactChunkMessageKind::ArtifactChunk,
+        lease: binding_message.lease.clone(),
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 2)),
+        payload: EncodedPayload {
+            content_type: "application/octet-stream".into(),
+            data_base64: STANDARD.encode(&manifest),
+            payload_digest: digest.clone(),
+        },
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:03.000Z".into()),
+        sequence: ExecutionSequence(1),
+        session_identity: binding_message.session_identity.clone(),
+        worker_session_id: binding_message.worker_session_id.clone(),
+    };
+    control_plane
+        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .expect("artifact.chunk");
+
+    let active = control_plane
+        .load_state(&format!("delivery:{}", initial.id().0))
+        .expect("Delivery state")
+        .map(|state| Delivery::decode_json(&state.payload).expect("active Delivery"))
+        .expect("active Delivery exists");
+    let terminal_metadata = terminal_outcome_metadata(
+        Some(binding_message.codex_thread_id.clone()),
+        1_800_000_060_000,
+        ExecutionAckSequence(12),
+        vec![TerminalArtifactReference {
+            artifact_id: artifact_id.clone(),
+            digest: digest.clone(),
+        }],
+    );
+    let terminal = terminal_worker_outcome(
+        StageRunId(canonical_id("run", seed)),
+        first_pending.job().job_id.clone(),
+        1,
+        binding_message.lease.lease_id.clone(),
+        binding_message.lease.fencing_token.clone(),
+        binding_message.lease.worker_id.clone(),
+        binding_message.lease.worker_instance_id.clone(),
+        binding_message.worker_session_id.clone(),
+        TerminalOutcomeStatus::Succeeded,
+        terminal_metadata,
+    );
+    let verified = verify_terminal_outcome(&active, authority.active_lease(), terminal.clone())
+        .expect("successful executor outcome");
+    let terminal_facts = delivery_terminal_outcome_facts(authority.clone(), terminal);
+    let next_request_id = RequestId(canonical_id("req", seed + 3));
+    let next_transition = advance(
+        &active,
+        AdvanceStageInput {
+            current_lease: Some(authority.active_lease().clone()),
+            rework_authorization: None,
+            expected_revision: active.revision(),
+            product_session_id: ProductSessionId(canonical_id("psn", seed + 3)),
+            identities: NewStageIdentities {
+                stage_run_id: StageRunId(canonical_id("run", seed + 3)),
+                execution_job_id: ExecutionJobId(canonical_id("job", seed + 3)),
+                session_binding_id: SessionBindingId::new(format!("binding-{}", seed + 3))
+                    .expect("next binding id"),
+                attention_item_id: AttentionItemId(canonical_id("att", seed + 3)),
+            },
+            review: None,
+            previous_outcome: Some(verified),
+            now_millis: 1_800_000_060_100,
+        },
+    )
+    .expect("reviewer handoff");
+    let next_pending = prepare_delivery_advance(
+        next_request_id.clone(),
+        next_transition,
+        DeliveryExecutionConfig {
+            payload_digest: Sha256Digest(format!("sha256:{}", "d".repeat(64))),
+            workspace: ExecutionWorkspace {
+                checkout_revision: candidate_commit.clone(),
+                repository_id: scope.repository_id.clone(),
+                write_mode:
+                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
+            },
+            limits: ExecutionLimits {
+                deadline_at: Instant("2027-01-15T10:00:00.000Z".into()),
+                max_artifact_bytes: 10_000_000,
+                max_runtime_seconds: 3_600,
+            },
+        },
+    )
+    .expect("pending reviewer");
+    let mut next_command = delivery_advance_command(seed);
+    next_command.expected_revision = Revision(i64::try_from(active.revision()).expect("revision"));
+    next_command.request_id = next_request_id;
+    control_plane
+        .commit_delivery_execution(&next_command, &next_pending, &mut RecordingDispatcher)
+        .expect("reviewer dispatch commit");
+    let replayed_open = control_plane
+        .accept_artifact_open(&scope, &open, &authority)
+        .expect("settled StageRun must still replay its durable artifact.open acknowledgement");
+    assert_eq!(replayed_open.status, LeaseWriteStatus::Duplicate);
+    let replayed_chunk = control_plane
+        .accept_artifact_chunk(&scope, &chunk, &authority)
+        .expect("settled StageRun must still replay its durable artifact.chunk acknowledgement");
+    assert_eq!(replayed_chunk.status, LeaseWriteStatus::Duplicate);
+    let mut new_open_after_settlement = open.clone();
+    new_open_after_settlement.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 40));
+    new_open_after_settlement.request_id = RequestId(canonical_id("req", seed + 40));
+    new_open_after_settlement.artifact.artifact_id = ArtifactId(canonical_id("art", seed + 40));
+    control_plane
+        .accept_artifact_open(&scope, &new_open_after_settlement, &authority)
+        .expect_err(
+            "settled StageRun may replay durable messages but cannot create a new Artifact",
+        );
+    control_plane
+        .install_git_source_resolver(Box::new(
+            LocalGitSourceResolver::open(&repositories).expect("Git source resolver"),
+        ))
+        .expect("install source resolver");
+    let candidate = control_plane
+        .resolve_delivery_candidate(&scope, initial.id(), &artifact_id, &digest, &terminal_facts)
+        .expect("candidate resolution");
+    assert_eq!(candidate.base_commit_id(), base_commit);
+    assert_eq!(candidate.candidate_commit_id(), candidate_commit);
+    assert_eq!(candidate.producer_artifact_ref(), artifact_id.0);
+
+    let wrong_digest = Sha256Digest(format!("sha256:{}", "f".repeat(64)));
+    let error = control_plane
+        .resolve_delivery_candidate(
+            &scope,
+            initial.id(),
+            &artifact_id,
+            &wrong_digest,
+            &terminal_facts,
+        )
+        .expect_err("candidate digest cannot be rebound");
+    assert!(matches!(
+        error,
+        CandidateResolutionError::Artifact(error)
+            if error.kind() == ArtifactErrorKind::PermissionDenied
+    ));
+
+    let mut foreign_scope = scope.clone();
+    foreign_scope.repository_id = RepositoryId(canonical_id("rep", seed + 99));
+    let error = control_plane
+        .resolve_delivery_candidate(
+            &foreign_scope,
+            initial.id(),
+            &artifact_id,
+            &digest,
+            &terminal_facts,
+        )
+        .expect_err("foreign repository scope cannot read candidate bytes");
+    assert!(matches!(
+        error,
+        CandidateResolutionError::Artifact(error)
+            if error.kind() == ArtifactErrorKind::PermissionDenied
+    ));
+
+    control_plane.shutdown().expect("shutdown");
+    fs::remove_dir_all(root).expect("database directory release");
 }

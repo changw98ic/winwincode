@@ -10,9 +10,9 @@ use winwincode_domain::{
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-    ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
-    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StorageError,
-    StorageErrorKind,
+    PendingAuditEvent, ProductStateStorage, ProjectionEventCursor, ProjectionEventStream,
+    ProjectionEventStreamKey, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
+    StateCommit, StateRevisionGuard, StorageError, StorageErrorKind,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -85,6 +85,139 @@ fn projection_key(stream: ProjectionEventStream) -> ProjectionEventStreamKey {
     .expect("projection stream key")
 }
 
+#[test]
+fn sqlite_projection_read_cut_reads_state_and_cursor_from_one_durable_cut() {
+    let root = temporary_directory("projection-read-cut");
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    let stream =
+        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into()));
+    let key = projection_key(stream);
+    let state_stream = "runtime:fixture-read-cut".to_owned();
+    storage
+        .commit(&StateCommit::new(
+            receipt_identity("actor:read-cut", "scope:repository-one", "request:read-cut"),
+            Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            &state_stream,
+            0,
+            b"runtime-state-v1".to_vec(),
+            vec![NewOutboxEvent::projection(
+                ControlPlaneEventId("evt_read_cut_00000001".into()),
+                "projection.invalidated",
+                b"{}".to_vec(),
+                key.stream().clone(),
+            )],
+        ))
+        .expect("state and event should commit");
+
+    let cut = storage
+        .load_projection_read_cut(std::slice::from_ref(&state_stream), &key, None)
+        .expect("read cut should load");
+    assert_eq!(cut.states().len(), 1);
+    assert_eq!(cut.states()[0].stream_id, state_stream);
+    assert_eq!(cut.states()[0].payload, b"runtime-state-v1");
+    assert_eq!(cut.projection_event_cursor().sequence(), 1);
+    assert_eq!(
+        cut.projection_event_cursor()
+            .event_id()
+            .expect("event id")
+            .0,
+        "evt_read_cut_00000001"
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    let storage = SqliteStorage::open(&root).expect("storage should restart");
+    let cut = storage
+        .load_projection_read_cut(&["runtime:fixture-read-cut".to_owned()], &key, None)
+        .expect("restarted read cut should load");
+    assert_eq!(cut.states()[0].payload, b"runtime-state-v1");
+    assert_eq!(cut.projection_event_cursor().sequence(), 1);
+    Box::new(storage)
+        .close()
+        .expect("restarted storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn sqlite_projection_read_cut_never_pairs_a_state_with_a_concurrent_cursor() {
+    let root = temporary_directory("projection-read-cut-race");
+    let stream =
+        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into()));
+    let key = projection_key(stream.clone());
+    let state_stream = "runtime:fixture-read-cut-race".to_owned();
+    let mut seed = SqliteStorage::open(&root).expect("storage should open");
+    seed.commit(&StateCommit::new(
+        receipt_identity(
+            "actor:read-cut-race",
+            "scope:repository-one",
+            "request:seed",
+        ),
+        Sha256Digest(format!("sha256:{}", "0".repeat(64))),
+        &state_stream,
+        0,
+        b"revision:1".to_vec(),
+        vec![NewOutboxEvent::projection(
+            ControlPlaneEventId("evt_read_cut_race_0000000000000001".into()),
+            "projection.invalidated",
+            b"{}".to_vec(),
+            stream.clone(),
+        )],
+    ))
+    .expect("seed should commit");
+    Box::new(seed).close().expect("seed storage should close");
+
+    let reader = SqliteStorage::open(&root).expect("reader storage should open");
+    let mut writer = SqliteStorage::open(&root).expect("writer storage should open");
+    let writer_state_stream = state_stream.clone();
+    let writer_handle = thread::spawn(move || {
+        for revision in 2..=101_u64 {
+            writer
+                .commit(&StateCommit::new(
+                    receipt_identity(
+                        "actor:read-cut-race",
+                        "scope:repository-one",
+                        &format!("request:revision-{revision}"),
+                    ),
+                    Sha256Digest(format!("sha256:{revision:064x}")),
+                    &writer_state_stream,
+                    revision - 1,
+                    format!("revision:{revision}").into_bytes(),
+                    vec![NewOutboxEvent::projection(
+                        ControlPlaneEventId(format!("evt_read_cut_race_{revision:016}")),
+                        "projection.invalidated",
+                        b"{}".to_vec(),
+                        stream.clone(),
+                    )],
+                ))
+                .expect("concurrent revision should commit");
+        }
+        Box::new(writer)
+            .close()
+            .expect("writer storage should close");
+    });
+
+    for _ in 0..2_000 {
+        let cut = reader
+            .load_projection_read_cut(std::slice::from_ref(&state_stream), &key, None)
+            .expect("read cut should load during concurrent commits");
+        let state = cut.states().first().expect("state should be present");
+        let revision = state.revision;
+        assert_eq!(state.payload, format!("revision:{revision}").into_bytes());
+        assert_eq!(cut.projection_event_cursor().sequence(), revision);
+        assert_eq!(
+            cut.projection_event_cursor()
+                .event_id()
+                .expect("event id")
+                .0,
+            format!("evt_read_cut_race_{revision:016}")
+        );
+    }
+    writer_handle.join().expect("writer thread should finish");
+    Box::new(reader)
+        .close()
+        .expect("reader storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
 fn delivery_projection_stream(value: &str) -> ProjectionEventStream {
     ProjectionEventStream::Delivery(DeliveryId(value.into()))
 }
@@ -141,6 +274,166 @@ fn exact_durable_event_lookup_reads_published_rows_after_restart() {
             .is_none()
     );
     Box::new(restarted).close().expect("restart close");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn pending_audit_event_is_atomic_and_replays_only_with_the_original_payload() {
+    let root = temporary_directory("audit-fact-atomic");
+    let mut storage = SqliteStorage::open(&root).expect("storage open");
+    let fact = PendingAuditEvent::new("aud_original", b"{\"kind\":\"terminal\"}".to_vec())
+        .expect("pending audit event");
+    let commit = state_commit(
+        ("audit-actor", "audit-scope", "audit-request"),
+        &format!("sha256:{}", "e".repeat(64)),
+        "audit-stream",
+        0,
+        b"audit-state",
+        "audit-event",
+    )
+    .with_pending_audit_event(fact.clone());
+    let receipt = storage.commit(&commit).expect("atomic audit commit");
+    assert_eq!(
+        storage.load_pending_audit_event(&receipt.receipt_identity),
+        Ok(Some(fact.clone()))
+    );
+    assert_eq!(storage.pending_audit_events(), Ok(vec![fact.clone()]));
+
+    let replay = storage.commit(&commit).expect("exact audit replay");
+    assert!(replay.idempotent_replay);
+    assert_eq!(
+        storage.load_pending_audit_event(&receipt.receipt_identity),
+        Ok(Some(fact.clone()))
+    );
+    storage
+        .mark_audit_event_persisted(fact.event_id())
+        .expect("mark audit event persisted");
+    assert!(
+        storage
+            .pending_audit_events()
+            .expect("pending audit events")
+            .is_empty()
+    );
+    assert_eq!(
+        storage.load_pending_audit_event(&receipt.receipt_identity),
+        Ok(Some(fact.clone()))
+    );
+
+    let changed = StateCommit::new(
+        receipt.receipt_identity.clone(),
+        receipt.command_digest.clone(),
+        "audit-stream",
+        0,
+        b"audit-state".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "audit-event",
+            "control-plane.state.changed",
+            b"event".to_vec(),
+        )],
+    )
+    .with_pending_audit_event(
+        PendingAuditEvent::new("aud_changed", b"{\"kind\":\"changed\"}".to_vec())
+            .expect("changed pending audit event"),
+    );
+    assert_eq!(
+        storage
+            .commit(&changed)
+            .expect_err("changed pending audit event must conflict")
+            .kind(),
+        StorageErrorKind::RequestConflict
+    );
+    Box::new(storage).close().expect("audit storage close");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn pending_audit_event_survives_restart_until_the_canonical_store_marks_it() {
+    let root = temporary_directory("audit-outbox-restart");
+    let fact = PendingAuditEvent::new("aud_restart", b"canonical-audit-event".to_vec())
+        .expect("pending audit event");
+    let mut storage = SqliteStorage::open(&root).expect("storage open");
+    let commit = state_commit(
+        ("restart-actor", "restart-scope", "restart-request"),
+        &format!("sha256:{}", "1".repeat(64)),
+        "restart-stream",
+        0,
+        b"restart-state",
+        "restart-event",
+    )
+    .with_pending_audit_event(fact.clone());
+    storage.commit(&commit).expect("atomic commit");
+    Box::new(storage).close().expect("first storage close");
+
+    let mut restarted = SqliteStorage::open(&root).expect("restart storage");
+    assert_eq!(
+        restarted
+            .pending_audit_events()
+            .expect("pending after restart"),
+        vec![fact.clone()]
+    );
+    restarted
+        .mark_audit_event_persisted(fact.event_id())
+        .expect("mark after restart");
+    assert!(
+        restarted
+            .pending_audit_events()
+            .expect("pending after mark")
+            .is_empty()
+    );
+    Box::new(restarted).close().expect("restart close");
+    fs::remove_dir_all(root).expect("database directory release");
+}
+
+#[test]
+fn pending_audit_event_failure_rolls_back_state_receipt_and_outbox_together() {
+    let root = temporary_directory("audit-fact-rollback");
+    let mut storage = SqliteStorage::open(&root).expect("storage open");
+    let connection = Connection::open(root.join("control-plane.sqlite3")).expect("injector open");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_pending_audit_event BEFORE INSERT ON audit_outbox
+             BEGIN SELECT RAISE(ABORT, 'injected pending audit event failure'); END;",
+        )
+        .expect("audit trigger");
+    connection.close().expect("injector close");
+    let commit = state_commit(
+        ("rollback-actor", "rollback-scope", "rollback-request"),
+        &format!("sha256:{}", "f".repeat(64)),
+        "rollback-stream",
+        0,
+        b"rollback-state",
+        "rollback-event",
+    )
+    .with_pending_audit_event(
+        PendingAuditEvent::new("aud_rollback", b"rollback-fact".to_vec()).expect("fact"),
+    );
+    assert_eq!(
+        storage
+            .commit(&commit)
+            .expect_err("audit trigger must abort commit")
+            .kind(),
+        StorageErrorKind::Adapter
+    );
+    assert!(
+        storage
+            .load_state("rollback-stream")
+            .expect("state read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .load_receipt(&commit.receipt_identity, &commit.command_digest)
+            .expect("receipt read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .load_pending_audit_event(&commit.receipt_identity)
+            .expect("audit read")
+            .is_none()
+    );
+    assert!(storage.pending_events().expect("outbox read").is_empty());
+    Box::new(storage).close().expect("rollback storage close");
     fs::remove_dir_all(root).expect("database directory release");
 }
 
@@ -935,6 +1228,286 @@ fn one_commit_makes_state_journal_receipt_and_outbox_authoritative_together() {
     fs::remove_dir_all(root).expect("database directory should be released");
 }
 
+#[test]
+fn sqlite_state_commit_accepts_matching_secondary_revision_and_missing_zero_guard() {
+    let root = temporary_directory("state-revision-guard-success");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    storage
+        .commit(&state_commit(
+            ("guard-seed-actor", "guard-seed-scope", "guard-seed-request"),
+            &format!("sha256:{}", "a".repeat(64)),
+            "secondary-stream",
+            0,
+            b"secondary-v1",
+            "guard-seed-event",
+        ))
+        .expect("secondary stream seed should commit");
+
+    let guarded = state_commit(
+        ("guarded-actor", "guarded-scope", "guarded-request"),
+        &format!("sha256:{}", "b".repeat(64)),
+        "primary-stream",
+        0,
+        b"primary-v1",
+        "guarded-event",
+    )
+    .with_state_guard(
+        StateRevisionGuard::new("secondary-stream", 1).expect("valid secondary guard"),
+    )
+    .with_state_guard(
+        StateRevisionGuard::new("missing-secondary-stream", 0).expect("valid missing-stream guard"),
+    );
+
+    let receipt = storage
+        .commit(&guarded)
+        .expect("matching secondary revisions should commit");
+    assert_eq!(receipt.revision, 1);
+    assert_eq!(
+        storage
+            .load_state("primary-stream")
+            .expect("primary state read")
+            .expect("primary state")
+            .revision,
+        1
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn sqlite_state_revision_guard_conflict_writes_none_of_the_four_commit_members() {
+    let root = temporary_directory("state-revision-guard-conflict");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    storage
+        .commit(&state_commit(
+            ("guard-conflict-seed", "guard-conflict", "seed-request"),
+            &format!("sha256:{}", "c".repeat(64)),
+            "secondary-stream",
+            0,
+            b"secondary-v1",
+            "guard-conflict-seed-event",
+        ))
+        .expect("secondary stream seed should commit");
+
+    let before_counts = [
+        table_count(&root.join("control-plane.sqlite3"), "product_state"),
+        table_count(&root.join("control-plane.sqlite3"), "command_receipts"),
+        table_count(&root.join("control-plane.sqlite3"), "outbox"),
+        table_count(&root.join("control-plane.sqlite3"), "audit_outbox"),
+    ];
+    let identity = receipt_identity(
+        "guard-conflict-actor",
+        "guard-conflict-scope",
+        "guard-conflict-request",
+    );
+    let digest = Sha256Digest(format!("sha256:{}", "d".repeat(64)));
+    let commit = StateCommit::new(
+        identity.clone(),
+        digest.clone(),
+        "primary-stream",
+        0,
+        b"primary-must-not-write".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "guard-conflict-event",
+            "control-plane.state.changed",
+            b"event".to_vec(),
+        )],
+    )
+    .with_state_guard(StateRevisionGuard::new("secondary-stream", 0).expect("valid stale guard"))
+    .with_pending_audit_event(
+        PendingAuditEvent::new("guard-conflict-audit", b"audit".to_vec())
+            .expect("pending audit event"),
+    );
+
+    let error = storage
+        .commit(&commit)
+        .expect_err("stale secondary revision must reject the commit");
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert!(error.is_state_guard_conflict());
+    assert_eq!(
+        [
+            table_count(&root.join("control-plane.sqlite3"), "product_state"),
+            table_count(&root.join("control-plane.sqlite3"), "command_receipts"),
+            table_count(&root.join("control-plane.sqlite3"), "outbox"),
+            table_count(&root.join("control-plane.sqlite3"), "audit_outbox"),
+        ],
+        before_counts,
+        "a guard conflict must not write state, receipt, outbox, or audit rows"
+    );
+    assert!(
+        storage
+            .load_state("primary-stream")
+            .expect("primary state read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .load_receipt(&identity, &digest)
+            .expect("receipt read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .load_pending_audit_event(&identity)
+            .expect("audit read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .pending_events()
+            .expect("outbox read")
+            .iter()
+            .all(|event| event.event_id != "guard-conflict-event")
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn state_revision_guard_rejects_invalid_identity_range_duplicate_and_primary_stream() {
+    assert_eq!(
+        StateRevisionGuard::new("", 0)
+            .expect_err("an empty guard stream must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+    assert_eq!(
+        StateRevisionGuard::new("out-of-range", i64::MAX as u64 + 1)
+            .expect_err("a guard revision outside SQLite's range must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let root = temporary_directory("state-revision-guard-validation");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let duplicate = state_commit(
+        ("guard-validation", "guard-validation", "duplicate-request"),
+        &format!("sha256:{}", "e".repeat(64)),
+        "primary-stream",
+        0,
+        b"must-not-write",
+        "duplicate-event",
+    )
+    .with_state_guard(StateRevisionGuard::new("secondary-stream", 0).expect("guard"))
+    .with_state_guard(StateRevisionGuard::new("secondary-stream", 0).expect("duplicate guard"));
+    assert_eq!(
+        storage
+            .commit(&duplicate)
+            .expect_err("duplicate guard streams must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let primary = state_commit(
+        ("guard-validation", "guard-validation", "primary-request"),
+        &format!("sha256:{}", "f".repeat(64)),
+        "primary-stream",
+        0,
+        b"must-not-write",
+        "primary-event",
+    )
+    .with_state_guard(StateRevisionGuard::new("primary-stream", 0).expect("primary guard"));
+    assert_eq!(
+        storage
+            .commit(&primary)
+            .expect_err("the primary stream must not also be a secondary guard")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let database_path = root.join("control-plane.sqlite3");
+    assert_eq!(table_count(&database_path, "product_state"), 0);
+    assert_eq!(table_count(&database_path, "command_receipts"), 0);
+    assert_eq!(table_count(&database_path, "outbox"), 0);
+    assert_eq!(table_count(&database_path, "audit_outbox"), 0);
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn sqlite_state_revision_guard_replay_wins_before_a_later_guard_revision_change() {
+    let root = temporary_directory("state-revision-guard-replay");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+
+    let identity = receipt_identity(
+        "guard-replay-actor",
+        "guard-replay-scope",
+        "guard-replay-request",
+    );
+    let digest = Sha256Digest(format!("sha256:{}", "2".repeat(64)));
+    let original = StateCommit::new(
+        identity.clone(),
+        digest.clone(),
+        "primary-stream",
+        0,
+        b"primary-v1".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "guard-replay-original-event",
+            "control-plane.state.changed",
+            b"original-event".to_vec(),
+        )],
+    )
+    .with_state_guard(StateRevisionGuard::new("secondary-stream", 0).expect("guard"))
+    .with_pending_audit_event(
+        PendingAuditEvent::new("guard-replay-audit", b"original-audit".to_vec())
+            .expect("pending audit event"),
+    );
+    let first_receipt = storage.commit(&original).expect("original guarded commit");
+    assert!(!first_receipt.idempotent_replay);
+
+    storage
+        .commit(&state_commit(
+            ("guard-replay-change", "guard-replay", "change-request"),
+            &format!("sha256:{}", "3".repeat(64)),
+            "secondary-stream",
+            0,
+            b"secondary-v1",
+            "guard-replay-change-event",
+        ))
+        .expect("secondary stream revision change should commit");
+    assert_eq!(
+        storage
+            .load_state("secondary-stream")
+            .expect("secondary state read")
+            .expect("secondary state")
+            .revision,
+        1
+    );
+
+    let database_path = root.join("control-plane.sqlite3");
+    let before_replay_counts = [
+        table_count(&database_path, "product_state"),
+        table_count(&database_path, "command_receipts"),
+        table_count(&database_path, "outbox"),
+        table_count(&database_path, "audit_outbox"),
+    ];
+    let replay = storage
+        .commit(&original)
+        .expect("exact receipt replay must precede guard evaluation");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.receipt_identity, first_receipt.receipt_identity);
+    assert_eq!(replay.command_digest, first_receipt.command_digest);
+    assert_eq!(replay.stream_id, "primary-stream");
+    assert_eq!(replay.revision, 1);
+    assert_eq!(replay.events, first_receipt.events);
+    assert_eq!(
+        [
+            table_count(&database_path, "product_state"),
+            table_count(&database_path, "command_receipts"),
+            table_count(&database_path, "outbox"),
+            table_count(&database_path, "audit_outbox"),
+        ],
+        before_replay_counts,
+        "receipt replay must not write after the guarded stream changes"
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
 fn install_failing_insert_trigger(database_path: &Path, table: &str) {
     let connection = Connection::open(database_path).expect("failure injection database");
     let trigger = match table {
@@ -971,6 +1544,7 @@ fn table_count(database_path: &Path, table: &str) -> i64 {
         "aggregate_journal_records" => "SELECT COUNT(*) FROM aggregate_journal_records",
         "command_receipts" => "SELECT COUNT(*) FROM command_receipts",
         "outbox" => "SELECT COUNT(*) FROM outbox",
+        "audit_outbox" => "SELECT COUNT(*) FROM audit_outbox",
         "projection_event_stream_heads" => "SELECT COUNT(*) FROM projection_event_stream_heads",
         _ => panic!("unsupported inspection table"),
     };
@@ -1342,6 +1916,7 @@ fn revision_conflict_constructor_preserves_expected_and_actual_revisions() {
     let error = StorageError::revision_conflict(7, 9);
 
     assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert!(!error.is_state_guard_conflict());
     assert_eq!(
         error.to_string(),
         "expected revision 7, but current revision is 9"

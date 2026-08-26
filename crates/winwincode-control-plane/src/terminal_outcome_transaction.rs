@@ -6,9 +6,10 @@ use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{
-    ArtifactReference, ExecutionJob, ExecutionOutcomeStatus, ExecutionScope, JobOutcomeMessage,
-    JobOutcomeMessageKind, RepositoryScope, SchemaVersion,
+use winwincode_api::generated::RepositoryScope;
+use winwincode_audit::{
+    AuditAction, AuditEvent, AuditEventId, AuditExecutionIdentity, AuditExecutionSubjectKind,
+    AuditSubject,
 };
 use winwincode_delivery::{
     application::stage::{DeliveryTerminalOutcomeFacts, TerminalOutcomeStatus},
@@ -17,11 +18,16 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionJobId, ExecutionMessageId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
+    ExecutionJobId, ExecutionMessageId, ProductSessionId, RequestId, SchemaVersion,
+    SessionIdentity, Sha256Digest, StageRunId,
+};
+use winwincode_execution_port::generated::{
+    ArtifactReference, ExecutionJob, ExecutionOutcomeStatus, ExecutionScope, JobOutcomeMessage,
+    JobOutcomeMessageKind,
 };
 use winwincode_storage::{
-    CommitReceipt, DurableOutboxEvent, NewOutboxEvent, ProductStateStorage, ReceiptIdentity,
-    ReceiptScopeKey, StateCommit, StorageError,
+    CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
+    ReceiptIdentity, ReceiptScopeKey, StateCommit, StorageError,
 };
 
 use crate::delivery_transaction::{
@@ -33,8 +39,8 @@ use crate::session_binding_transaction::{
     validate_delivery_stage_runtime_invalidation,
 };
 use crate::{
-    DeliveryChangeKind, OutboxError, delivery_changed_event_for_scope, repository_scope_key,
-    validate_delivery_changed_receipt,
+    DeliveryChangeKind, OutboxError, delivery_changed_event_for_scope, execution_audit_event,
+    repository_scope_key, validate_delivery_changed_receipt,
 };
 
 const TERMINAL_PHASE: &str = "terminal-outcome";
@@ -108,16 +114,31 @@ pub(crate) fn execute(
     let phase = TerminalPhase::new(scope, message)?;
     if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
         validate_receipt(&receipt, &phase, message, true)?;
+        validate_terminal_pending_audit_event(storage, &receipt, &phase)?;
         return Ok(DeliveryTerminalOutcomeCommitReceipt { receipt });
     }
 
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let context = TerminalContext::from_durable(scope, &durable, &job)?;
-    validate_message_authority(message, &job, &context, facts)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
-    validate_current_job_binding(&current, &job, &context)?;
-    let receipt = commit_terminal(storage, message, facts, &phase, &context, &current)
-        .or_else(|source| recover_raced_receipt(storage, &phase, message, source))?;
+    let session_identity = match validate_current_job_binding(&current, &job, &context) {
+        Ok(identity) => identity,
+        Err(source) => {
+            let receipt = recover_raced_receipt(storage, &phase, message, source)?;
+            return Ok(DeliveryTerminalOutcomeCommitReceipt { receipt });
+        }
+    };
+    validate_message_authority(message, &job, &context, facts, &session_identity)?;
+    let receipt = commit_terminal(
+        storage,
+        message,
+        facts,
+        &phase,
+        &context,
+        &current,
+        &session_identity,
+    )
+    .or_else(|source| recover_raced_receipt(storage, &phase, message, source))?;
     Ok(DeliveryTerminalOutcomeCommitReceipt { receipt })
 }
 
@@ -154,6 +175,7 @@ impl TerminalPhase {
 
 struct TerminalContext {
     scope_key: ReceiptScopeKey,
+    repository_scope: RepositoryScope,
     delivery_id: DeliveryId,
     delivery_task_id: Option<DeliveryTaskId>,
     stage_run_id: StageRunId,
@@ -186,6 +208,7 @@ impl TerminalContext {
         validate_durable_job_ref(&job_event)?;
         Ok(Self {
             scope_key,
+            repository_scope: scope.clone(),
             delivery_id: job_scope.delivery_id.clone(),
             delivery_task_id: job_scope.delivery_task_id.clone(),
             stage_run_id: job_scope.stage_run_id.clone(),
@@ -343,6 +366,7 @@ fn validate_message_authority(
     job: &ExecutionJob,
     context: &TerminalContext,
     facts: &DeliveryTerminalOutcomeFacts,
+    session_identity: &SessionIdentity,
 ) -> Result<(), StorageError> {
     let active = facts.authority().active_lease();
     let attempt = u64::try_from(message.lease.attempt)
@@ -375,6 +399,7 @@ fn validate_message_authority(
         || metadata.finished_at_millis() != message_finished_at
         || metadata.last_event_sequence() != &message.outcome.last_event_sequence
         || !exact_artifacts
+        || &message.session_identity != session_identity
     {
         return Err(StorageError::invalid_input(
             "job.outcome does not match its durable job and sealed terminal authority",
@@ -411,7 +436,7 @@ fn validate_current_job_binding(
     delivery: &Delivery,
     job: &ExecutionJob,
     context: &TerminalContext,
-) -> Result<(), StorageError> {
+) -> Result<SessionIdentity, StorageError> {
     let attempt = u64::try_from(job.attempt)
         .map_err(|_| StorageError::invalid_input("ExecutionJob attempt is out of range"))?;
     let matching_runs = delivery
@@ -447,7 +472,78 @@ fn validate_current_job_binding(
             "terminal outcome ExecutionJob does not match one current StageRun and SessionBinding",
         ));
     }
-    Ok(())
+    let binding = matching_bindings
+        .first()
+        .ok_or_else(|| StorageError::invalid_input("terminal outcome SessionBinding is missing"))?;
+    let worker_session_id = binding.worker_session_id.clone().ok_or_else(|| {
+        StorageError::invalid_input("terminal outcome SessionBinding has no WorkerSession")
+    })?;
+    let codex_thread_id = binding.codex_thread_id.clone().ok_or_else(|| {
+        StorageError::invalid_input("terminal outcome SessionBinding has no CodexThread")
+    })?;
+    Ok(SessionIdentity {
+        codex_thread_id,
+        product_session_id: binding.product_session_id.clone(),
+        stage_run_id: Some(binding.stage_run_id.clone()),
+        worker_session_id,
+    })
+}
+
+fn terminal_pending_audit_event(
+    facts: &DeliveryTerminalOutcomeFacts,
+    phase: &TerminalPhase,
+    context: &TerminalContext,
+    session_identity: &SessionIdentity,
+    before: &Delivery,
+    after: &Delivery,
+) -> Result<PendingAuditEvent, StorageError> {
+    let active = facts.authority().active_lease();
+    let codex_thread_id = facts.metadata().codex_thread_id().cloned().ok_or_else(|| {
+        StorageError::invalid_input(
+            "terminal outcome audit event requires a trusted CodexThread identity",
+        )
+    })?;
+    if session_identity.codex_thread_id != codex_thread_id {
+        return Err(StorageError::invalid_input(
+            "terminal outcome audit CodexThread differs from the accepted binding",
+        ));
+    }
+    let identity = AuditExecutionIdentity::try_new(
+        context.product_session_id.clone(),
+        active.worker_session_id().clone(),
+        codex_thread_id,
+        context.stage_run_id.clone(),
+        active.execution_job_id().clone(),
+        context.delivery_id.clone(),
+        context.delivery_task_id.clone(),
+        active.worker_id().clone(),
+        active.worker_instance_id().clone(),
+        active.lease_id().clone(),
+        active.attempt(),
+        active.fencing_token().clone(),
+        facts.metadata().last_event_sequence().clone(),
+    )
+    .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    let event_id = AuditEventId::from_digest(&phase.command_digest)
+        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    let result_code = match facts.status() {
+        TerminalOutcomeStatus::Succeeded => "execution.terminal.succeeded",
+        TerminalOutcomeStatus::Failed => "execution.terminal.failed",
+        TerminalOutcomeStatus::InfrastructureError => "execution.terminal.infrastructure_error",
+        TerminalOutcomeStatus::Cancelled => "execution.terminal.cancelled",
+    };
+    execution_audit_event(
+        event_id,
+        facts.metadata().finished_at_millis(),
+        phase.receipt_identity.request_id().clone(),
+        &context.repository_scope,
+        AuditAction::delivery_state("stage.terminal.accepted")
+            .map_err(|error| StorageError::invalid_input(error.to_string()))?,
+        before,
+        after,
+        AuditSubject::terminal(identity),
+        result_code,
+    )
 }
 
 fn commit_terminal(
@@ -457,6 +553,7 @@ fn commit_terminal(
     phase: &TerminalPhase,
     context: &TerminalContext,
     current: &Delivery,
+    session_identity: &SessionIdentity,
 ) -> Result<CommitReceipt, StorageError> {
     let journal_key = delivery_journal_key(&context.delivery_id)?;
     let loaded = storage.load_journal(&journal_key)?;
@@ -496,8 +593,17 @@ fn commit_terminal(
         &context.delivery_id,
         &context.stage_run_id,
         &context.product_session_id,
+        session_identity,
         revision,
         TERMINAL_RUNTIME_NAMESPACE,
+    )?;
+    let pending_audit_event = terminal_pending_audit_event(
+        facts,
+        phase,
+        context,
+        session_identity,
+        current,
+        &mutation.snapshot,
     )?;
     let commit = StateCommit::new(
         phase.receipt_identity.clone(),
@@ -509,10 +615,47 @@ fn commit_terminal(
         })?,
         vec![accepted, changed, invalidated],
     )
-    .with_journal_publication(publication);
+    .with_journal_publication(publication)
+    .with_pending_audit_event(pending_audit_event);
     let receipt = storage.commit(&commit)?;
     validate_receipt(&receipt, phase, message, receipt.idempotent_replay)?;
+    validate_terminal_pending_audit_event(storage, &receipt, phase)?;
     Ok(receipt)
+}
+
+fn validate_terminal_pending_audit_event(
+    storage: &dyn ProductStateStorage,
+    receipt: &CommitReceipt,
+    phase: &TerminalPhase,
+) -> Result<(), StorageError> {
+    let expected_event_id = AuditEventId::from_digest(&phase.command_digest)
+        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    let Some(stored) = storage.load_pending_audit_event(&receipt.receipt_identity)? else {
+        return Err(StorageError::invalid_input(
+            "terminal outcome receipt has no pending audit event",
+        ));
+    };
+    let event: AuditEvent = serde_json::from_slice(stored.payload()).map_err(|error| {
+        StorageError::invalid_input(format!("terminal audit event is invalid: {error}"))
+    })?;
+    let canonical = serde_json::to_vec(&event).map_err(|error| {
+        StorageError::adapter(format!("failed to encode terminal audit event: {error}"))
+    })?;
+    if stored.event_id() != expected_event_id.as_str()
+        || canonical != stored.payload()
+        || event.event_id() != &expected_event_id
+        || event.request_id() != phase.receipt_identity.request_id()
+        || event.subject().execution_kind() != Some(AuditExecutionSubjectKind::Terminal)
+        || event
+            .subject()
+            .execution()
+            .is_none_or(|identity| identity.source_sequence().is_none())
+    {
+        return Err(StorageError::invalid_input(
+            "terminal outcome audit event does not match its trusted receipt",
+        ));
+    }
+    Ok(())
 }
 
 fn recover_raced_receipt(
@@ -526,6 +669,7 @@ fn recover_raced_receipt(
         return Err(source);
     };
     validate_receipt(&receipt, phase, message, true)?;
+    validate_terminal_pending_audit_event(storage, &receipt, phase)?;
     Ok(receipt)
 }
 
@@ -632,6 +776,7 @@ fn validate_receipt(
         &payload.delivery_id,
         &payload.stage_run_id,
         &payload.product_session_id,
+        &message.session_identity,
         payload.revision,
         TERMINAL_RUNTIME_NAMESPACE,
     )

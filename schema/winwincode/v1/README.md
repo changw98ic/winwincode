@@ -42,11 +42,13 @@ HTTP schema 只通过 `$ref` 使用通用领域定义，不再声明另一份 ID
 
 ## 生成与漂移检查
 
-`pnpm contracts:generate` 离线读取本目录全部 `*.schema.json`，一次更新以下五个文件：
+`pnpm contracts:generate` 离线读取本目录全部 `*.schema.json`，一次更新以下七个文件：
 
 - `crates/winwincode-domain/src/generated.rs`：Rust 共用 ID 和基础值类型；
-- `crates/winwincode-api/src/generated.rs`：引用上述共用类型的 Rust 公共传输类型；
+- `crates/winwincode-api/src/generated.rs`：引用上述共用类型的 Rust Control Plane HTTP/WebSocket 传输类型；
+- `crates/winwincode-execution-port/src/generated.rs`：Rust ExecutionPort Worker 消息 DTO；
 - `apps/web/src/generated/contracts.ts`：Web 客户端类型；
+- `apps/web/src/generated/control-plane-client.ts`：Web Control Plane 校验客户端与内嵌运行时合同；
 - `schema-collection.generated.json`：可独立分发的 JSON Schema 集合；
 - `openapi.generated.json`：OpenAPI 3.1 文档。
 

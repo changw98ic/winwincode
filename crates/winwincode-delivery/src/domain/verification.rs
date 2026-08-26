@@ -1890,7 +1890,8 @@ mod tests {
     };
     use crate::domain::{
         Delivery, DeliveryStage, DeliveryStatus, FrozenDeliveryCandidate, SessionBinding,
-        SessionBindingId, StageRun, StageRunActorType, StageRunStatus, test_fixture,
+        SessionBindingId, SessionBindingSourceProvenance, StageRun, StageRunActorType,
+        StageRunStatus, test_fixture,
     };
     use winwincode_domain::{ArtifactId, DeliveryId, DeliveryTaskId};
 
@@ -1940,7 +1941,16 @@ mod tests {
             worker_session_id: Some(WorkerSessionId(format!("worker-{identity}"))),
             codex_thread_id: Some(CodexThreadId(format!("thread-{identity}"))),
             bound_at_millis,
+            ..Default::default()
         }
+        .with_test_authority(
+            identity,
+            if stage_run_id.contains("attempt-2") {
+                2
+            } else {
+                1
+            },
+        )
     }
 
     fn fixture(
@@ -2397,6 +2407,12 @@ mod tests {
         let mut incomplete_binding = delivery.clone().into_snapshot();
         incomplete_binding.session_bindings[1].worker_session_id = None;
         incomplete_binding.session_bindings[1].codex_thread_id = None;
+        incomplete_binding.session_bindings[1].worker_id = None;
+        incomplete_binding.session_bindings[1].worker_instance_id = None;
+        incomplete_binding.session_bindings[1].lease_id = None;
+        incomplete_binding.session_bindings[1].fencing_token = None;
+        incomplete_binding.session_bindings[1].source_provenance =
+            SessionBindingSourceProvenance::delivery_advance("delivery.advance");
         let incomplete_binding = Delivery::try_from_snapshot(incomplete_binding)
             .expect("verification binding may await Worker and Codex identities");
         let mut incomplete_facts = facts;

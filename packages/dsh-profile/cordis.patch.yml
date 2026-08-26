@@ -171,12 +171,6 @@
         home: !!js dshHomePath('winwincode')
         roleId: chat
 
-    # This adapter resolves GITHUB_TOKEN through DSH credentials for each
-    # GitHub request. StrongFlow publication remains dry-run unless its caller
-    # explicitly selects live mode after the exact human publication approval.
-    - id: winwincode-github-publication-provider
-      name: '@winwincode/dsh-profile/github-publication-provider'
-
     - id: winwincode-strongflow
       name: '@winwincode/strongflow'
       config:

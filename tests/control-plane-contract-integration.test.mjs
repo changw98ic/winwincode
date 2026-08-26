@@ -487,7 +487,7 @@ test('strict validation covers every canonical domain sample and keeps IDs disti
     [`${schemaBase}execution-port.schema.json`, 'ExecutionEventId', 'xevt_01J00000000000000000000000'],
     [`${schemaBase}execution-port.schema.json`, 'ExecutionMessageId', 'xmsg_01J00000000000000000000000'],
     [`${schemaBase}execution-port.schema.json`, 'ModelExchangeId', 'mdl_01J00000000000000000000000'],
-    [`${schemaBase}execution-port.schema.json`, 'WorkerInstanceId', 'wki_01J00000000000000000000000'],
+    [domainId, 'WorkerInstanceId', 'wki_01J00000000000000000000000'],
   ])
   for (const [schemaId, definition, ownValue] of idValues) {
     const validate = validator(ajv, schemaId, definition)

@@ -1166,6 +1166,79 @@ function validateExecutionPortMessage(command, group, rules, label) {
   requireEqual(command.request.kind, group.target, `${label} message kind`)
   requireEqual(command.request.schemaVersion, 'winwincode/v1', `${label} message schemaVersion`)
   requireExactKeys(command.request.lease, requestContract.leaseExactKeys, `${label} message lease`)
+  requireExactKeys(
+    command.request.sessionIdentity,
+    requestContract.sessionIdentityExactKeys,
+    `${label} message sessionIdentity`,
+  )
+  requireEqual(
+    command.request.sessionIdentity.workerSessionId,
+    command.request.workerSessionId,
+    `${label} message sessionIdentity workerSessionId`,
+  )
+  if (group.target === 'session.binding') {
+    requireExactKeys(
+      command.request.sourceIdentity,
+      requestContract.sessionBindingSourceIdentityExactKeys,
+      `${label} message sourceIdentity`,
+    )
+    requireEqual(
+      command.request.sessionIdentity.productSessionId,
+      command.request.productSessionId,
+      `${label} binding sessionIdentity productSessionId`,
+    )
+    requireEqual(
+      command.request.sessionIdentity.codexThreadId,
+      command.request.codexThreadId,
+      `${label} binding sessionIdentity codexThreadId`,
+    )
+    requireEqual(
+      command.request.sessionIdentity.stageRunId,
+      command.request.stageRunId,
+      `${label} binding sessionIdentity stageRunId`,
+    )
+    requireEqual(
+      command.request.attempt,
+      command.request.lease.attempt,
+      `${label} binding attempt`,
+    )
+    requireEqual(
+      command.request.fencingToken,
+      command.request.lease.fencingToken,
+      `${label} binding fencingToken`,
+    )
+    requireEqual(
+      command.request.leaseId,
+      command.request.lease.leaseId,
+      `${label} binding leaseId`,
+    )
+    requireEqual(
+      command.request.workerId,
+      command.request.lease.workerId,
+      `${label} binding workerId`,
+    )
+    requireEqual(
+      command.request.sourceIdentity.kind,
+      'execution-worker',
+      `${label} binding sourceIdentity kind`,
+    )
+    for (const [sourceField, messageField] of [
+      ['workerId', 'workerId'],
+      ['workerSessionId', 'workerSessionId'],
+      ['leaseId', 'leaseId'],
+    ]) {
+      requireEqual(
+        command.request.sourceIdentity[sourceField],
+        command.request[messageField],
+        `${label} binding sourceIdentity ${sourceField}`,
+      )
+    }
+    requireEqual(
+      command.request.sourceIdentity.workerInstanceId,
+      command.request.lease.workerInstanceId,
+      `${label} binding sourceIdentity workerInstanceId`,
+    )
+  }
   if (group.target === 'job.outcome') {
     requireExactKeys(
       command.request.outcome,
@@ -1177,6 +1250,11 @@ function validateExecutionPortMessage(command, group, rules, label) {
       || !allowedStatuses.includes(command.request.outcome.status)) {
       fail(`${label} message outcome status is not allowed`)
     }
+    requireEqual(
+      command.request.sessionIdentity.codexThreadId,
+      command.request.outcome.codexThreadId,
+      `${label} message sessionIdentity codexThreadId`,
+    )
     const artifacts = requireArray(
       command.request.outcome.artifacts,
       `${label} message outcome artifacts`,
@@ -1682,6 +1760,11 @@ function validateTerminalOutcomeCanonicalScenario(sourceScenario, mapping, scena
       outcome.request.lease,
       binding.request.lease,
       `${scenario.id} terminal outcome lease`,
+    )
+    requireDeepEqual(
+      outcome.request.sessionIdentity,
+      binding.request.sessionIdentity,
+      `${scenario.id} terminal outcome sessionIdentity`,
     )
     requireEqual(
       outcome.request.workerSessionId,

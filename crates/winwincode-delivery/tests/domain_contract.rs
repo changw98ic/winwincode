@@ -2,8 +2,6 @@ use winwincode_delivery::domain::{
     Delivery, DeliveryValidationErrorCode, delivery_id_for_github_issue_source,
 };
 
-mod support;
-
 const CANONICAL_DELIVERY_ID: &str = "dlv_7TEPT1B6JF7W5SASWZMKTCC4KT";
 
 fn github_delivery_snapshot(delivery_id: &str) -> serde_json::Value {
@@ -155,33 +153,4 @@ fn delivery_spec_requires_required_acceptance_criterion() {
     let fixture = include_bytes!("fixtures/delivery-main-no-required.json");
     let error = Delivery::decode_json(fixture).expect_err("required criterion must be enforced");
     assert_eq!(error.code(), DeliveryValidationErrorCode::InvalidValue);
-}
-
-#[test]
-fn legacy_typescript_oracle_snapshots_migrate_once_into_the_canonical_rust_domain() {
-    let oracle_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/oracles/delivery-strongflow-typescript.v1.json");
-    let oracle: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(oracle_path).expect("committed TypeScript Delivery oracle"),
-    )
-    .expect("oracle json");
-    let scenarios = oracle["scenarios"].as_array().expect("oracle scenarios");
-    assert_eq!(scenarios.len(), 10);
-
-    for scenario in scenarios {
-        let id = scenario["id"].as_str().expect("scenario id");
-        let expected = support::migrate_legacy_typescript_snapshot(
-            scenario["observation"]["snapshot"].clone(),
-        )
-        .unwrap_or_else(|error| panic!("TypeScript oracle scenario {id} did not migrate: {error}"));
-        let delivery =
-            Delivery::decode_json(&serde_json::to_vec(&expected).expect("snapshot json"))
-                .unwrap_or_else(|error| {
-                    panic!("TypeScript oracle scenario {id} was rejected: {error}")
-                });
-        let actual: serde_json::Value =
-            serde_json::from_slice(&delivery.encode_json().expect("Rust snapshot json"))
-                .expect("encoded snapshot");
-        assert_eq!(actual, expected, "scenario {id}");
-    }
 }

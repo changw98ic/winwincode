@@ -23,7 +23,10 @@ use crate::{
     application::{
         CoordinationError, CoordinationErrorCode,
         attention::ResolvedAttentionTransition,
-        session_binding::{SessionBindingIdentity, accept_worker_session, report_codex_thread},
+        session_binding::{
+            SessionBindingAuthority, SessionBindingIdentity, accept_worker_session_with_authority,
+            report_codex_thread_with_authority,
+        },
         solution_review::resolve_current_solution_review,
         stage::{
             DeliveryTerminalOutcomeFacts, StageAdvanceResult,
@@ -228,6 +231,32 @@ pub struct AppendDelivery {
     pub snapshot: Delivery,
 }
 
+/// Typed `WorkerSession` attachment. The Store derives the next snapshot from
+/// the scheduler-owned authority instead of accepting a caller-provided
+/// `SessionBinding` snapshot.
+#[derive(Debug, Clone)]
+pub struct AcceptDeliveryWorkerSession {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub identity: SessionBindingIdentity,
+    pub authority: SessionBindingAuthority,
+    pub now_millis: u64,
+}
+
+/// Typed `CodexThread` attachment. The Store derives the next snapshot from the
+/// already accepted `WorkerSession` and the same scheduler-owned authority.
+#[derive(Debug, Clone)]
+pub struct ReportDeliveryCodexThread {
+    pub request_id: RequestId,
+    pub request_digest: String,
+    pub expected_revision: u64,
+    pub identity: SessionBindingIdentity,
+    pub authority: SessionBindingAuthority,
+    pub codex_thread_id: winwincode_domain::CodexThreadId,
+    pub now_millis: u64,
+}
+
 /// Specialized task-promotion append. The command contains only durable
 /// request identity and the approved review digest; the Store rebuilds the
 /// exact task graph from the current canonical Delivery.
@@ -297,6 +326,8 @@ pub enum DeliveryCommand {
     #[cfg(any(test, feature = "test-support"))]
     SeedForTest(CreateDelivery),
     Append(AppendDelivery),
+    AcceptWorkerSession(Box<AcceptDeliveryWorkerSession>),
+    ReportCodexThread(Box<ReportDeliveryCodexThread>),
     StartStage(Box<StartDeliveryStage>),
     ApplyTerminalOutcome(Box<ApplyDeliveryTerminalOutcome>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
@@ -661,6 +692,128 @@ impl<'journal> DeliveryStore<'journal> {
         self.append_authorized(command, AppendAuthority::Generic)
     }
 
+    fn accept_worker_session(
+        &self,
+        command: AcceptDeliveryWorkerSession,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        validate_request(&command.request_id, &command.request_digest)?;
+        let stored = self.read(&command.identity.delivery_id)?;
+        if let Some(replayed) = replayed_append(
+            &stored,
+            &command.request_id,
+            &command.request_digest,
+            DeliveryMutationOperation::SessionBound,
+            command.expected_revision,
+        )? {
+            return Ok(replayed);
+        }
+        if command.expected_revision != stored.snapshot.revision() {
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
+                "delivery revision changed before WorkerSession attachment",
+            ));
+        }
+        let next = accept_worker_session_with_authority(
+            &stored.snapshot,
+            command.expected_revision,
+            &command.identity,
+            &command.authority,
+            command.now_millis,
+        )
+        .map_err(|error| {
+            map_transition_error(
+                &error,
+                &AppendDelivery {
+                    delivery_id: command.identity.delivery_id.clone(),
+                    request_id: command.request_id.clone(),
+                    request_digest: command.request_digest.clone(),
+                    operation: DeliveryMutationOperation::SessionBound,
+                    expected_revision: command.expected_revision,
+                    snapshot: stored.snapshot.clone(),
+                },
+                &stored.snapshot,
+            )
+        })?;
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.identity.delivery_id.clone(),
+                request_id: command.request_id,
+                request_digest: command.request_digest,
+                operation: DeliveryMutationOperation::SessionBound,
+                expected_revision: command.expected_revision,
+                snapshot: next,
+            },
+            AppendAuthority::WorkerSession {
+                identity: command.identity,
+                authority: command.authority,
+                now_millis: command.now_millis,
+            },
+        )
+    }
+
+    fn report_codex_thread(
+        &self,
+        command: ReportDeliveryCodexThread,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        validate_request(&command.request_id, &command.request_digest)?;
+        let stored = self.read(&command.identity.delivery_id)?;
+        if let Some(replayed) = replayed_append(
+            &stored,
+            &command.request_id,
+            &command.request_digest,
+            DeliveryMutationOperation::SessionBound,
+            command.expected_revision,
+        )? {
+            return Ok(replayed);
+        }
+        if command.expected_revision != stored.snapshot.revision() {
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
+                "delivery revision changed before CodexThread attachment",
+            ));
+        }
+        let next = report_codex_thread_with_authority(
+            &stored.snapshot,
+            command.expected_revision,
+            &command.identity,
+            &command.authority,
+            command.codex_thread_id.clone(),
+            command.now_millis,
+        )
+        .map_err(|error| {
+            map_transition_error(
+                &error,
+                &AppendDelivery {
+                    delivery_id: command.identity.delivery_id.clone(),
+                    request_id: command.request_id.clone(),
+                    request_digest: command.request_digest.clone(),
+                    operation: DeliveryMutationOperation::SessionBound,
+                    expected_revision: command.expected_revision,
+                    snapshot: stored.snapshot.clone(),
+                },
+                &stored.snapshot,
+            )
+        })?;
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.identity.delivery_id.clone(),
+                request_id: command.request_id,
+                request_digest: command.request_digest,
+                operation: DeliveryMutationOperation::SessionBound,
+                expected_revision: command.expected_revision,
+                snapshot: next,
+            },
+            AppendAuthority::CodexThread {
+                identity: command.identity,
+                authority: command.authority,
+                codex_thread_id: command.codex_thread_id,
+                now_millis: command.now_millis,
+            },
+        )
+    }
+
     fn start_stage(
         &self,
         command: StartDeliveryStage,
@@ -872,41 +1025,24 @@ impl<'journal> DeliveryStore<'journal> {
             ));
         }
         let stored = self.read(&command.delivery_id)?;
+        let task_breakdown_event = authority.clone().task_breakdown_event();
         if command.snapshot.id() != &command.delivery_id {
             return Err(store_error(
                 DeliveryStoreErrorCode::DeliveryIdMismatch,
                 "delivery mutation snapshot belongs to another delivery",
             ));
         }
-        if let Some(prior) = stored
-            .records
-            .iter()
-            .find(|record| record.request_id == command.request_id)
-        {
-            let prior_expected_revision =
-                prior.snapshot.revision().checked_sub(1).ok_or_else(|| {
-                    store_error(
-                        DeliveryStoreErrorCode::StoreCorrupt,
-                        "append record cannot have revision zero",
-                    )
-                })?;
-            if prior.request_digest != command.request_digest
-                || prior.operation != command.operation
-                || prior_expected_revision != command.expected_revision
-            {
-                return Err(store_error(
-                    DeliveryStoreErrorCode::RequestConflict,
-                    format!(
-                        "request {} was already used for another delivery mutation",
-                        command.request_id.0
-                    ),
-                ));
-            }
-            return Ok(DeliveryStoreMutationResult {
-                snapshot: prior.snapshot.clone(),
-                replayed: true,
-                task_breakdown_event: authority.task_breakdown_event(),
-            });
+        if let Some(mut replayed) = replayed_append(
+            &stored,
+            &command.request_id,
+            &command.request_digest,
+            command.operation,
+            command.expected_revision,
+        )? {
+            replayed
+                .task_breakdown_event
+                .clone_from(&task_breakdown_event);
+            return Ok(replayed);
         }
         if command.expected_revision != stored.snapshot.revision()
             || command.snapshot.revision() != stored.snapshot.revision() + 1
@@ -924,6 +1060,58 @@ impl<'journal> DeliveryStore<'journal> {
                     &stored.snapshot,
                     &command.snapshot,
                 )?;
+            }
+            AppendAuthority::WorkerSession {
+                identity,
+                authority,
+                now_millis,
+            } => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::SessionBound,
+                    "session.bound",
+                )?;
+                let expected = accept_worker_session_with_authority(
+                    &stored.snapshot,
+                    command.expected_revision,
+                    &identity,
+                    &authority,
+                    now_millis,
+                )
+                .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                if expected != command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "WorkerSession command differs from its sealed authority transition",
+                    ));
+                }
+            }
+            AppendAuthority::CodexThread {
+                identity,
+                authority,
+                codex_thread_id,
+                now_millis,
+            } => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::SessionBound,
+                    "session.bound",
+                )?;
+                let expected = report_codex_thread_with_authority(
+                    &stored.snapshot,
+                    command.expected_revision,
+                    &identity,
+                    &authority,
+                    codex_thread_id.clone(),
+                    now_millis,
+                )
+                .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                if expected != command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "CodexThread command differs from its sealed authority transition",
+                    ));
+                }
             }
             AppendAuthority::Stage(transition) => {
                 validate_authorized_operation(
@@ -1045,7 +1233,7 @@ impl<'journal> DeliveryStore<'journal> {
             Ok(()) => Ok(DeliveryStoreMutationResult {
                 snapshot: record.snapshot,
                 replayed: false,
-                task_breakdown_event: authority.task_breakdown_event(),
+                task_breakdown_event,
             }),
             Err(error) if error.code == JournalBackendErrorCode::Conflict => {
                 let raced = self.read(&command.delivery_id)?;
@@ -1059,7 +1247,7 @@ impl<'journal> DeliveryStore<'journal> {
                     return Ok(DeliveryStoreMutationResult {
                         snapshot: prior.snapshot.clone(),
                         replayed: true,
-                        task_breakdown_event: authority.task_breakdown_event(),
+                        task_breakdown_event,
                     });
                 }
                 Err(revision_conflict(
@@ -1093,9 +1281,59 @@ impl<'journal> DeliveryStore<'journal> {
     }
 }
 
-#[derive(Clone, Copy)]
+fn replayed_append(
+    stored: &StoredDelivery,
+    request_id: &RequestId,
+    request_digest: &str,
+    operation: DeliveryMutationOperation,
+    expected_revision: u64,
+) -> Result<Option<DeliveryStoreMutationResult>, DeliveryStoreError> {
+    let Some(prior) = stored
+        .records
+        .iter()
+        .find(|record| record.request_id == *request_id)
+    else {
+        return Ok(None);
+    };
+    let prior_expected_revision = prior.snapshot.revision().checked_sub(1).ok_or_else(|| {
+        store_error(
+            DeliveryStoreErrorCode::StoreCorrupt,
+            "append record cannot have revision zero",
+        )
+    })?;
+    if prior.request_digest != request_digest
+        || prior.operation != operation
+        || prior_expected_revision != expected_revision
+    {
+        return Err(store_error(
+            DeliveryStoreErrorCode::RequestConflict,
+            format!(
+                "request {} was already used for another delivery mutation",
+                request_id.0
+            ),
+        ));
+    }
+    Ok(Some(DeliveryStoreMutationResult {
+        snapshot: prior.snapshot.clone(),
+        replayed: true,
+        task_breakdown_event: None,
+    }))
+}
+
+#[derive(Clone)]
 enum AppendAuthority<'transition> {
     Generic,
+    WorkerSession {
+        identity: SessionBindingIdentity,
+        authority: SessionBindingAuthority,
+        now_millis: u64,
+    },
+    CodexThread {
+        identity: SessionBindingIdentity,
+        authority: SessionBindingAuthority,
+        codex_thread_id: winwincode_domain::CodexThreadId,
+        now_millis: u64,
+    },
     Stage(&'transition StageAdvanceResult),
     Terminal(&'transition DeliveryTerminalOutcomeFacts),
     Attention(&'transition ResolvedAttentionTransition),
@@ -1109,6 +1347,8 @@ impl AppendAuthority<'_> {
         match self {
             Self::TaskBreakdown(transition) => Some(transition.event().clone()),
             Self::Generic
+            | Self::WorkerSession { .. }
+            | Self::CodexThread { .. }
             | Self::Stage(_)
             | Self::Terminal(_)
             | Self::Attention(_)
@@ -1188,7 +1428,10 @@ fn validate_generic_append_delta(
 ) -> Result<(), DeliveryStoreError> {
     match operation {
         DeliveryMutationOperation::DeliverySpecUpdated => validate_spec_update_delta(before, after),
-        DeliveryMutationOperation::SessionBound => validate_session_binding_delta(before, after),
+        DeliveryMutationOperation::SessionBound => Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "session.bound requires its typed authority-aware Delivery command",
+        )),
         DeliveryMutationOperation::DeliveryCreated
         | DeliveryMutationOperation::StageStarted
         | DeliveryMutationOperation::StageTerminal
@@ -1260,95 +1503,6 @@ fn validate_spec_update_delta(
     }
 }
 
-fn validate_session_binding_delta(
-    before: &Delivery,
-    after: &Delivery,
-) -> Result<(), DeliveryStoreError> {
-    if before.snapshot().session_bindings.len() != after.snapshot().session_bindings.len() {
-        return Err(store_error(
-            DeliveryStoreErrorCode::InvalidStoreOptions,
-            "session.bound cannot add or remove the stage-owned SessionBinding",
-        ));
-    }
-    let changed = before
-        .snapshot()
-        .session_bindings
-        .iter()
-        .zip(&after.snapshot().session_bindings)
-        .enumerate()
-        .filter(|(_, (prior, next))| prior != next)
-        .collect::<Vec<_>>();
-    let [(index, (prior, next))] = changed.as_slice() else {
-        return Err(store_error(
-            DeliveryStoreErrorCode::InvalidStoreOptions,
-            "session.bound must change exactly one current SessionBinding",
-        ));
-    };
-    if prior.id != next.id {
-        return Err(store_error(
-            DeliveryStoreErrorCode::InvalidStoreOptions,
-            "session.bound cannot replace a SessionBinding identity",
-        ));
-    }
-    let identity = SessionBindingIdentity {
-        delivery_id: prior.delivery_id.clone(),
-        delivery_task_id: prior.delivery_task_id.clone(),
-        stage_run_id: prior.stage_run_id.clone(),
-        product_session_id: prior.product_session_id.clone(),
-        execution_job_id: prior.execution_job_id.clone(),
-    };
-    let expected = match (
-        prior.worker_session_id.as_ref(),
-        next.worker_session_id.as_ref(),
-        prior.codex_thread_id.as_ref(),
-        next.codex_thread_id.as_ref(),
-    ) {
-        (None, Some(worker_session_id), prior_thread, next_thread)
-            if prior_thread == next_thread =>
-        {
-            accept_worker_session(
-                before,
-                before.revision(),
-                &identity,
-                worker_session_id.clone(),
-                after.snapshot().updated_at_millis,
-            )
-        }
-        (Some(worker_session_id), Some(next_worker), None, Some(codex_thread_id))
-            if worker_session_id == next_worker =>
-        {
-            report_codex_thread(
-                before,
-                before.revision(),
-                &identity,
-                worker_session_id,
-                codex_thread_id.clone(),
-                after.snapshot().updated_at_millis,
-            )
-        }
-        _ => Err(CoordinationError::new(
-            CoordinationErrorCode::BindingConflict,
-            "session.bound changed an unsupported SessionBinding field",
-        )),
-    }
-    .map_err(|error| {
-        store_error(
-            DeliveryStoreErrorCode::InvalidStoreOptions,
-            error.to_string(),
-        )
-    })?;
-    if expected != *after
-        || expected.snapshot().session_bindings.get(*index)
-            != after.snapshot().session_bindings.get(*index)
-    {
-        return Err(store_error(
-            DeliveryStoreErrorCode::InvalidStoreOptions,
-            "session.bound changed facts outside its exact application delta",
-        ));
-    }
-    Ok(())
-}
-
 impl DeliveryCommandPort for DeliveryStore<'_> {
     fn execute(
         &self,
@@ -1359,6 +1513,8 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             #[cfg(any(test, feature = "test-support"))]
             DeliveryCommand::SeedForTest(seed) => self.seed_for_test(seed),
             DeliveryCommand::Append(append) => self.append(append),
+            DeliveryCommand::AcceptWorkerSession(command) => self.accept_worker_session(*command),
+            DeliveryCommand::ReportCodexThread(command) => self.report_codex_thread(*command),
             DeliveryCommand::StartStage(start) => self.start_stage(*start),
             DeliveryCommand::ApplyTerminalOutcome(outcome) => self.apply_terminal_outcome(*outcome),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
@@ -1795,6 +1951,9 @@ mod tests {
     use crate::application::attention::{
         AttentionDecision, ResolveAttentionInput, resolve_attention,
     };
+    use crate::application::session_binding::{
+        SessionBindingAuthority, SessionBindingIdentity, accept_worker_session_with_authority,
+    };
     use crate::application::stage::{AdvanceStageInput, NewStageIdentities, advance};
     use crate::application::verdict::{
         SubmitVerdictFacts, compute_verdict_transition,
@@ -1900,6 +2059,73 @@ mod tests {
                 .code(),
             DeliveryStoreErrorCode::RevisionConflict
         );
+    }
+
+    #[test]
+    fn generic_session_bound_append_cannot_self_authorize_from_after_snapshot() {
+        let mut pending = crate::domain::test_fixture();
+        pending.revision = 1;
+        pending.status = DeliveryStatus::Verifying;
+        pending.updated_at_millis = 1_800_000_000_020;
+        pending.stage_runs[0].status = crate::domain::StageRunStatus::Running;
+        pending.stage_runs[0].finished_at_millis = None;
+        pending.session_bindings[0].worker_session_id = None;
+        pending.session_bindings[0].codex_thread_id = None;
+        pending.session_bindings[0].worker_id = None;
+        pending.session_bindings[0].worker_instance_id = None;
+        pending.session_bindings[0].lease_id = None;
+        pending.session_bindings[0].fencing_token = None;
+        pending.session_bindings[0].attempt = pending.stage_runs[0].attempt;
+        pending.session_bindings[0].source_provenance =
+            crate::domain::SessionBindingSourceProvenance::delivery_advance("delivery.advance");
+        let before = Delivery::try_from_snapshot(pending).expect("pending Delivery");
+        let binding = &before.snapshot().session_bindings[0];
+        let identity = SessionBindingIdentity {
+            delivery_id: binding.delivery_id.clone(),
+            delivery_task_id: binding.delivery_task_id.clone(),
+            stage_run_id: binding.stage_run_id.clone(),
+            product_session_id: binding.product_session_id.clone(),
+            execution_job_id: binding.execution_job_id.clone(),
+        };
+        let authority = SessionBindingAuthority::from_execution_port(
+            winwincode_domain::WorkerId("wrk-test-store".into()),
+            winwincode_domain::WorkerInstanceId("wki-test-store".into()),
+            winwincode_domain::LeaseId("lse-test-store".into()),
+            1,
+            winwincode_domain::FencingToken("1".into()),
+            winwincode_domain::WorkerSessionId("wsn-test-store".into()),
+            winwincode_domain::ExecutionMessageId("msg-test-store".into()),
+        );
+        let after = accept_worker_session_with_authority(
+            &before,
+            before.revision(),
+            &identity,
+            &authority,
+            1_800_000_000_021,
+        )
+        .expect("authority transition");
+
+        let backend = Arc::new(InMemoryDeliveryJournal::new());
+        let store = DeliveryStore::new(backend);
+        store
+            .execute(DeliveryCommand::SeedForTest(CreateDelivery {
+                request_id: RequestId("seed-session-bound".into()),
+                request_digest: REQUEST_A.into(),
+                snapshot: before.clone(),
+            }))
+            .expect("seed pending Delivery");
+        let error = store
+            .execute(DeliveryCommand::Append(AppendDelivery {
+                delivery_id: before.id().clone(),
+                request_id: RequestId("generic-session-bound".into()),
+                request_digest: REQUEST_B.into(),
+                operation: DeliveryMutationOperation::SessionBound,
+                expected_revision: before.revision(),
+                snapshot: after,
+            }))
+            .expect_err("generic SessionBound append must require typed authority");
+
+        assert_eq!(error.code(), DeliveryStoreErrorCode::InvalidStoreOptions);
     }
 
     #[test]

@@ -1,0 +1,218 @@
+{
+  "schemaVersion": "winwincode.control-plane-github-publication-adapter-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.3.3",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "documentation": "docs/contracts/control-plane-github-publication-adapter.md",
+  "domainContract": "docs/contracts/control-plane-publication-domain.rules.json",
+  "adapter": {
+    "ownerCrate": "winwincode-publication",
+    "implementation": "GitHubPublicationAdapter",
+    "providerPort": "PublicationPort",
+    "coordinator": "PublicationCoordinator",
+    "ledger": "PublicationLedger",
+    "operationProtocol": "winwincode.github-provider-operation.v1",
+    "operationOrder": [
+      "branch",
+      "pull-request",
+      "issue-comment",
+      "commit-status"
+    ],
+    "sourceIssue": "PublicationSourceIssue",
+    "reviewPackageLocation": "sealed-pull-request-body",
+    "releaseOperation": "not-in-canonical-v1",
+    "secondProviderStateMachineAllowed": false
+  },
+  "dependency": {
+    "crate": "ureq",
+    "version": "=3.1.4",
+    "defaultFeatures": false,
+    "features": [
+      "rustls",
+      "json"
+    ],
+    "license": "MIT OR Apache-2.0"
+  },
+  "credential": {
+    "referenceType": "CredentialReferenceId",
+    "referencePrefix": "crd_",
+    "resolver": "GitHubCredentialResolver",
+    "resolveFrequency": "every-http-request",
+    "requiredProviderId": "github",
+    "serializableSecretType": false,
+    "cloneableSecretType": false,
+    "debugSecretOutput": "redacted",
+    "forbiddenDurableLocations": [
+      "PublicationOperation",
+      "publicationState",
+      "aggregateJournalRecord",
+      "scopedCommandReceipt",
+      "outboxEvent",
+      "PublicationResultFact",
+      "error"
+    ],
+    "failureCodes": [
+      "credential-not-configured",
+      "credential-resolution-denied",
+      "credential-resolution-unavailable",
+      "credential-provider-mismatch"
+    ],
+    "remoteDiagnosticAllowed": false
+  },
+  "http": {
+    "client": "blocking-ureq-rustls",
+    "allowedBaseUrls": [
+      "https-remote",
+      "http-loopback-only"
+    ],
+    "userinfoAllowed": false,
+    "queryInBaseUrlAllowed": false,
+    "redirects": 0,
+    "timeoutMillis": 30000,
+    "responseLimitBytes": 2097152,
+    "maxLookupPages": 100,
+    "pageSize": 100,
+    "apiVersion": "2022-11-28",
+    "failureClasses": {
+      "authentication": "github-authentication-failed",
+      "permission": "github-permission-denied",
+      "rateLimit": "github-rate-limited",
+      "service": "github-service-unavailable",
+      "transport": "github-transport-unknown"
+    },
+    "rateLimitSignals": [
+      "http-429",
+      "http-403-and-x-ratelimit-remaining-zero",
+      "http-403-and-retry-after"
+    ],
+    "remoteDiagnosticPersisted": false
+  },
+  "routes": {
+    "branch": {
+      "lookup": "GET /repos/{repository}/git/ref/heads/{branch}",
+      "apply": "POST /repos/{repository}/git/refs",
+      "exactJoin": [
+        "repository",
+        "branch",
+        "commitId"
+      ]
+    },
+    "pullRequest": {
+      "lookup": "GET /repos/{repository}/pulls?state=all&head={head}&base={base}",
+      "apply": "POST /repos/{repository}/pulls",
+      "exactJoin": [
+        "repository",
+        "baseBranch",
+        "headRepository",
+        "headBranch",
+        "title",
+        "body",
+        "operationMarker"
+      ],
+      "durableResource": [
+        "kind",
+        "repository",
+        "number"
+      ],
+      "unrelatedClosedSameRoute": "ignored",
+      "unrelatedOpenSameRoute": "conflict",
+      "sameOrganizationForkHead": "owner:branch-plus-head_repo-name"
+    },
+    "issueComment": {
+      "lookup": "GET /repos/{repository}/issues/{issueNumber}/comments",
+      "apply": "POST /repos/{repository}/issues/{issueNumber}/comments",
+      "exactJoin": [
+        "repository",
+        "issueNumber",
+        "body",
+        "operationMarker"
+      ]
+    },
+    "commitStatus": {
+      "lookup": "GET /repos/{repository}/commits/{commitId}/statuses",
+      "apply": "POST /repos/{repository}/statuses/{commitId}",
+      "exactJoin": [
+        "repository",
+        "commitId",
+        "context",
+        "state",
+        "description",
+        "targetIssueUrl"
+      ]
+    }
+  },
+  "reconciliation": {
+    "lookupBeforeApply": true,
+    "duplicateStatuses": [
+      409,
+      422
+    ],
+    "duplicatePolicy": "exact-lookup-only",
+    "lostResponsePolicy": "durable-operation-lookup-after-restart",
+    "retryableResult": "unknown",
+    "terminalResult": "rejected",
+    "terminalLookupResult": "conflict",
+    "terminalLookupClasses": [
+      "authentication",
+      "permission",
+      "other-non-rate-limited-non-5xx-http"
+    ],
+    "laterOperationsAfterRejectedStep": false,
+    "successCanBeInferredFromLaterStep": false,
+    "remoteHtmlUrlPersisted": false
+  },
+  "testEvidence": {
+    "fakeTransport": "loopback-http-github-fixture",
+    "durableStorage": "SqliteStorage",
+    "optionalLiveGate": "WINWINCODE_GITHUB_LIVE_TEST=1",
+    "optionalLiveRequiredEnvironment": [
+      "WINWINCODE_GITHUB_LIVE_TOKEN",
+      "WINWINCODE_GITHUB_LIVE_REPOSITORY",
+      "WINWINCODE_GITHUB_LIVE_COMMIT",
+      "WINWINCODE_GITHUB_LIVE_ISSUE",
+      "WINWINCODE_GITHUB_LIVE_BASE_BRANCH",
+      "WINWINCODE_GITHUB_LIVE_HEAD_BRANCH"
+    ],
+    "optionalLiveEnvironment": [
+      "WINWINCODE_GITHUB_LIVE_HEAD_REPOSITORY"
+    ]
+  },
+  "rustGate": {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "winwincode-publication",
+      "--features",
+      "test-support",
+      "--test",
+      "github_adapter",
+      "--locked",
+      "--",
+      "--test-threads=1"
+    ],
+    "requiredTests": [
+      "closed_unrelated_pull_request_on_the_same_route_does_not_own_the_operation",
+      "comment_rejection_preserves_the_pull_request_identity_and_skips_status",
+      "duplicate_pull_request_response_reconciles_the_exact_remote_identity",
+      "github_adapter_applies_and_then_reconciles_the_complete_publication_set",
+      "github_adapter_classifies_permission_and_rate_limit_without_remote_diagnostics",
+      "github_adapter_resolves_the_reference_for_each_request_and_reconciles_one_branch",
+      "github_configuration_rejects_credential_bearing_and_non_tls_remote_urls",
+      "lost_create_response_is_reconciled_from_the_durable_operation_after_restart",
+      "missing_credential_is_closed_and_makes_no_http_request",
+      "optional_live_github_lane_runs_only_with_explicit_inputs",
+      "permission_denied_during_lookup_is_terminal_and_performs_no_remote_write",
+      "pull_request_permission_failure_never_runs_comment_or_status",
+      "rate_limited_publication_resumes_from_durable_requests_without_persisting_the_secret",
+      "same_organization_fork_pull_request_preserves_both_repository_identities"
+    ]
+  },
+  "compatibility": {
+    "typescriptGitHubRuntimeRetained": false,
+    "secondCredentialShapeRetained": false,
+    "secondPublicationProtocolRetained": false,
+    "installedGitHubCliFallbackAllowed": false,
+    "programmingAgentFallbackAllowed": false
+  }
+}

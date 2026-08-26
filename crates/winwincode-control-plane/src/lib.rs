@@ -6,17 +6,36 @@
 //! durable event publication. It has no dependency on Codex Core, an HTTP
 //! server, or an Execution Worker runtime.
 
+mod artifact_transaction;
+mod candidate_source;
 mod delivery_command_transaction;
 pub mod delivery_execution;
 mod delivery_transaction;
+pub mod execution_port_service;
+mod publication_policy;
+mod publication_preparation;
 mod rework_transaction;
+mod runtime_event_transaction;
 mod session_binding_transaction;
+pub mod session_identity;
 pub mod strongflow_projection;
 mod task_breakdown_transaction;
 mod terminal_outcome_transaction;
 mod verdict_transaction;
 
+pub use artifact_transaction::ArtifactMessageError;
+pub use candidate_source::CandidateResolutionError;
 pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
+pub use execution_port_service::{
+    DEFAULT_HEARTBEAT_INTERVAL_MS, ExecutionPortService, ExecutionPortServiceError,
+    RuntimeReplayRequestCommand,
+};
+pub use publication_policy::PublicationCommandError;
+pub use publication_preparation::{PreparedPublication, PublicationPreparationError};
+pub use runtime_event_transaction::RuntimeMessageError;
+pub use session_identity::{
+    SessionBindingAcceptance, SessionIdentityAdapterError, validate_session_binding,
+};
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -38,18 +57,28 @@ pub use terminal_outcome_transaction::{
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
     ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType,
-    RepositoryScope, Scope,
+    RepositoryScope, RepositoryScopeKind, Scope,
+};
+use winwincode_audit::{
+    AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
+    AuditState, AuditStore, AuditSubject,
 };
 use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdictFacts};
-use winwincode_domain::{ControlPlaneEventId, DeliveryId, Revision, Sha256Digest};
+use winwincode_delivery::domain::Delivery;
+use winwincode_domain::{
+    ControlPlaneEventId, DeliveryId, OrganizationId, ProjectId, RepositoryId, Revision,
+    Sha256Digest, SystemActorId, WorkspaceId,
+};
+use winwincode_execution_port::generated as execution_port;
 pub use winwincode_storage::{
-    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-    DurableOutboxEvent, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage,
-    ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey, StorageError,
-    StorageErrorKind, StoredState,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactObjectStore,
+    ArtifactStore, CommitReceipt, DurableOutboxEvent, GitSourceResolver, LoadedAggregateJournal,
+    NewOutboxEvent, OutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventCursor,
+    ProjectionEventStream, ProjectionEventStreamKey, StorageError, StorageErrorKind, StoredState,
 };
 use winwincode_storage::{
-    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+    LocalArtifactObjectStore, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
+    StateCommit,
 };
 
 /// Deterministic trusted-fact fixtures for exercising the typed Control Plane
@@ -285,6 +314,7 @@ pub trait EventPublisher: Send {
 pub enum OutboxError {
     Publish(EventPublishError),
     Acknowledge(StorageError),
+    Audit(winwincode_audit::AuditError),
 }
 
 impl fmt::Display for OutboxError {
@@ -297,6 +327,7 @@ impl fmt::Display for OutboxError {
                     "event publication acknowledgement failed: {error}"
                 )
             }
+            Self::Audit(error) => write!(formatter, "audit event flush failed: {error}"),
         }
     }
 }
@@ -549,6 +580,9 @@ impl std::error::Error for ShutdownError {}
 /// background tasks, so shutdown has a finite and observable ownership chain.
 pub struct ControlPlane {
     storage: Option<Box<dyn ProductStateStorage>>,
+    audit_store: Option<AuditStore>,
+    artifact_store: Option<ArtifactStore>,
+    git_source_resolver: Option<Box<dyn GitSourceResolver>>,
     publisher: Option<Box<dyn EventPublisher>>,
     temporary_root: Option<OwnedTemporaryRoot>,
     strongflow_sources: Option<strongflow_projection::StrongFlowProjectionSources>,
@@ -562,6 +596,10 @@ impl ControlPlane {
     ///
     /// Returns [`StartError`] after closing owned resources when storage open,
     /// migration, or durable outbox replay fails.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "startup keeps each owned resource's failure cleanup explicit"
+    )]
     pub fn start_local(
         config: ControlPlaneConfig,
         mut publisher: Box<dyn EventPublisher>,
@@ -579,7 +617,7 @@ impl ControlPlane {
                 )));
             }
         };
-        let storage = match SqliteStorage::open(data_directory) {
+        let storage = match SqliteStorage::open(&data_directory) {
             Ok(storage) => storage,
             Err(error) => {
                 let mut cleanup_failures = Vec::new();
@@ -598,7 +636,88 @@ impl ControlPlane {
                 )));
             }
         };
-        Self::start_with_resources(Box::new(storage), publisher, temporary_root)
+        let audit_store = match AuditStore::open(data_directory.join("audit")) {
+            Ok(store) => store,
+            Err(error) => {
+                let mut cleanup_failures = Vec::new();
+                if let Err(close_error) = Box::new(storage).close() {
+                    cleanup_failures.push(format!("storage close also failed: {close_error}"));
+                }
+                if let Err(close_error) = publisher.close() {
+                    cleanup_failures
+                        .push(format!("event publisher close also failed: {close_error}"));
+                }
+                if let Err(release_error) = temporary_root.release() {
+                    cleanup_failures.push(format!(
+                        "temporary root release also failed: {release_error}"
+                    ));
+                }
+                return Err(StartError::new(format!(
+                    "failed to open immutable audit storage: {error}{}",
+                    cleanup_suffix(&cleanup_failures)
+                )));
+            }
+        };
+        let object_store = match LocalArtifactObjectStore::open(data_directory.join("artifacts")) {
+            Ok(store) => store,
+            Err(error) => {
+                let mut cleanup_failures = Vec::new();
+                if let Err(close_error) = Box::new(storage).close() {
+                    cleanup_failures.push(format!("storage close also failed: {close_error}"));
+                }
+                if let Err(close_error) = audit_store.close() {
+                    cleanup_failures.push(format!("audit store close also failed: {close_error}"));
+                }
+                if let Err(close_error) = publisher.close() {
+                    cleanup_failures
+                        .push(format!("event publisher close also failed: {close_error}"));
+                }
+                if let Err(release_error) = temporary_root.release() {
+                    cleanup_failures.push(format!(
+                        "temporary root release also failed: {release_error}"
+                    ));
+                }
+                return Err(StartError::new(format!(
+                    "failed to open local Artifact object storage: {error}{}",
+                    cleanup_suffix(&cleanup_failures)
+                )));
+            }
+        };
+        let artifact_store = match ArtifactStore::open(
+            data_directory.join("artifact-catalog"),
+            Box::new(object_store),
+        ) {
+            Ok(store) => store,
+            Err(error) => {
+                let mut cleanup_failures = Vec::new();
+                if let Err(close_error) = Box::new(storage).close() {
+                    cleanup_failures.push(format!("storage close also failed: {close_error}"));
+                }
+                if let Err(close_error) = audit_store.close() {
+                    cleanup_failures.push(format!("audit store close also failed: {close_error}"));
+                }
+                if let Err(close_error) = publisher.close() {
+                    cleanup_failures
+                        .push(format!("event publisher close also failed: {close_error}"));
+                }
+                if let Err(release_error) = temporary_root.release() {
+                    cleanup_failures.push(format!(
+                        "temporary root release also failed: {release_error}"
+                    ));
+                }
+                return Err(StartError::new(format!(
+                    "failed to open Artifact metadata catalog: {error}{}",
+                    cleanup_suffix(&cleanup_failures)
+                )));
+            }
+        };
+        Self::start_with_resources(
+            Box::new(storage),
+            Some(audit_store),
+            Some(artifact_store),
+            publisher,
+            temporary_root,
+        )
     }
 
     /// Composes the application with a storage adapter at the `PostgreSQL`-ready seam.
@@ -628,16 +747,61 @@ impl ControlPlane {
                 )));
             }
         };
-        Self::start_with_resources(storage, publisher, temporary_root)
+        Self::start_with_resources(storage, None, None, publisher, temporary_root)
+    }
+
+    /// Composes the application with explicit product-state and Artifact adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartError`] after closing every owned adapter when startup
+    /// outbox replay fails.
+    pub fn start_with_artifacts(
+        storage: Box<dyn ProductStateStorage>,
+        artifact_store: ArtifactStore,
+        mut publisher: Box<dyn EventPublisher>,
+    ) -> Result<Self, StartError> {
+        let temporary_parent = std::env::temp_dir().join("winwincode-control-plane");
+        let temporary_root = match OwnedTemporaryRoot::create(temporary_parent) {
+            Ok(temporary_root) => temporary_root,
+            Err(error) => {
+                let mut failures = Vec::new();
+                if let Err(close_error) = publisher.close() {
+                    failures.push(format!("event publisher close also failed: {close_error}"));
+                }
+                if let Err(close_error) = storage.close() {
+                    failures.push(format!("storage close also failed: {close_error}"));
+                }
+                if let Err(close_error) = artifact_store.close() {
+                    failures.push(format!("Artifact store close also failed: {close_error}"));
+                }
+                return Err(StartError::new(format!(
+                    "failed to create the owned temporary root: {error}{}",
+                    cleanup_suffix(&failures)
+                )));
+            }
+        };
+        Self::start_with_resources(
+            storage,
+            None,
+            Some(artifact_store),
+            publisher,
+            temporary_root,
+        )
     }
 
     fn start_with_resources(
         storage: Box<dyn ProductStateStorage>,
+        audit_store: Option<AuditStore>,
+        artifact_store: Option<ArtifactStore>,
         publisher: Box<dyn EventPublisher>,
         temporary_root: OwnedTemporaryRoot,
     ) -> Result<Self, StartError> {
         let mut control_plane = Self {
             storage: Some(storage),
+            audit_store,
+            artifact_store,
+            git_source_resolver: None,
             publisher: Some(publisher),
             temporary_root: Some(temporary_root),
             strongflow_sources: None,
@@ -694,6 +858,26 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Installs the single trusted source resolver used to reconstruct Git
+    /// candidate identities from complete Artifact bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects replacement of a live resolver so one process cannot reinterpret
+    /// an already accepted Artifact through another source authority.
+    pub fn install_git_source_resolver(
+        &mut self,
+        resolver: Box<dyn GitSourceResolver>,
+    ) -> Result<(), CandidateResolutionError> {
+        if self.git_source_resolver.is_some() {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input("Git source resolver is already installed"),
+            ));
+        }
+        self.git_source_resolver = Some(resolver);
+        Ok(())
+    }
+
     /// Commits one canonical HTTP command's state and outbox first, then
     /// publishes pending events.
     ///
@@ -707,9 +891,12 @@ impl ControlPlane {
         command: &CommandEnvelope,
         change: StateChange,
     ) -> Result<CommitReceipt, CommitError> {
-        if delivery_command(&command.command) || change.stream_id.starts_with("delivery:") {
+        if delivery_command(&command.command)
+            || change.stream_id.starts_with("delivery:")
+            || change.stream_id.starts_with("runtime:")
+        {
             return Err(CommitError::Storage(StorageError::invalid_input(
-                "Delivery commands and state streams require a typed atomic Delivery transaction",
+                "Delivery and runtime state streams require a typed atomic transaction",
             )));
         }
         if change.events.iter().any(|event| {
@@ -809,7 +996,7 @@ impl ControlPlane {
     /// durable receipt so an exact retry can continue receipt-first.
     pub fn commit_delivery_session_binding(
         &mut self,
-        message: &winwincode_api::generated::SessionBindingMessage,
+        message: &execution_port::SessionBindingMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
         let commit = {
@@ -827,6 +1014,136 @@ impl ControlPlane {
         Ok(commit)
     }
 
+    /// Accepts one generated Worker `runtime.event` only after joining its
+    /// durable Delivery-stage `ExecutionJob` to the current four-identity
+    /// `SessionBinding`. Rejected input returns a stable generated ack and
+    /// does not write Delivery state, journal, receipt, or outbox members.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the runtime ledger cannot be read or
+    /// committed, or a publication-pending error when an accepted ack was
+    /// committed but its outbox notification still needs flushing.
+    pub fn accept_runtime_event(
+        &mut self,
+        scope: &RepositoryScope,
+        message: &execution_port::RuntimeEventMessage,
+        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+    ) -> Result<execution_port::RuntimeAckMessage, RuntimeMessageError> {
+        let ack = {
+            let storage = self.storage_mut().map_err(RuntimeMessageError::Storage)?;
+            runtime_event_transaction::execute(storage, scope, message, authority)?
+        };
+        if !matches!(
+            ack.status,
+            execution_port::LeaseWriteStatus::Accepted
+                | execution_port::LeaseWriteStatus::Duplicate
+        ) {
+            return Ok(ack);
+        }
+        self.flush_outbox()
+            .map_err(|source| RuntimeMessageError::PublicationPending {
+                ack: Box::new(ack.clone()),
+                source,
+            })?;
+        Ok(ack)
+    }
+
+    /// Accepts one generated `artifact.open` after exact durable Job, scope,
+    /// `SessionBinding`, and scheduler authority validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns before metadata persistence for a foreign/stale lease, missing
+    /// durable Job, incomplete `SessionBinding`, or invalid immutable descriptor.
+    pub fn accept_artifact_open(
+        &mut self,
+        scope: &RepositoryScope,
+        message: &execution_port::ArtifactOpenMessage,
+        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+    ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
+        let storage = self.storage.as_deref().ok_or_else(|| {
+            ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
+        })?;
+        let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
+            ArtifactMessageError::Storage(StorageError::adapter(
+                "Control Plane Artifact store is not configured",
+            ))
+        })?;
+        artifact_transaction::accept_open(storage, artifacts, scope, message, authority)
+    }
+
+    /// Accepts one generated `artifact.chunk` through the same lease-scoped
+    /// authority and content-addressed Artifact interface as `artifact.open`.
+    ///
+    /// # Errors
+    ///
+    /// Returns without accepting bytes for a gap, changed chunk, invalid
+    /// digest/base64 payload, stale lease, or foreign Artifact identity.
+    pub fn accept_artifact_chunk(
+        &mut self,
+        scope: &RepositoryScope,
+        message: &execution_port::ArtifactChunkMessage,
+        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+    ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
+        let storage = self.storage.as_deref().ok_or_else(|| {
+            ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
+        })?;
+        let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
+            ArtifactMessageError::Storage(StorageError::adapter(
+                "Control Plane Artifact store is not configured",
+            ))
+        })?;
+        artifact_transaction::accept_chunk(storage, artifacts, scope, message, authority)
+    }
+
+    /// Rebuilds and freezes the current Delivery candidate from one exact,
+    /// complete Artifact and its successful fenced Worker outcome.
+    ///
+    /// This is a derived read: it does not append Delivery state or let a
+    /// caller supply commit/tree/diff/path identities.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing/foreign/corrupt Artifact bytes, mismatched scope or
+    /// provenance, stale terminal facts, and source identities that differ
+    /// from the current Delivery Spec.
+    pub fn resolve_delivery_candidate(
+        &self,
+        scope: &RepositoryScope,
+        delivery_id: &DeliveryId,
+        artifact_id: &winwincode_domain::ArtifactId,
+        artifact_digest: &Sha256Digest,
+        terminal_facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+    ) -> Result<winwincode_delivery::domain::FrozenDeliveryCandidate, CandidateResolutionError>
+    {
+        let storage = self.storage.as_deref().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane storage is closed",
+            ))
+        })?;
+        let artifacts = self.artifact_store.as_ref().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane Artifact store is not configured",
+            ))
+        })?;
+        let resolver = self.git_source_resolver.as_deref().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane Git source resolver is not configured",
+            ))
+        })?;
+        candidate_source::resolve(
+            storage,
+            artifacts,
+            resolver,
+            scope,
+            delivery_id,
+            artifact_id,
+            artifact_digest,
+            terminal_facts,
+        )
+    }
+
     /// Persists one lease-fenced Worker `job.outcome` through the only typed
     /// terminal Delivery transaction.
     ///
@@ -842,7 +1159,7 @@ impl ControlPlane {
     pub fn commit_delivery_terminal_outcome(
         &mut self,
         scope: &RepositoryScope,
-        message: &winwincode_api::generated::JobOutcomeMessage,
+        message: &execution_port::JobOutcomeMessage,
         facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
         let commit = {
@@ -973,6 +1290,7 @@ impl ControlPlane {
     }
 
     fn flush_outbox(&mut self) -> Result<usize, OutboxError> {
+        self.flush_pending_audit_events()?;
         let events = self
             .storage_ref()
             .map_err(OutboxError::Acknowledge)?
@@ -991,6 +1309,47 @@ impl ControlPlane {
             published += 1;
         }
         Ok(published)
+    }
+
+    /// Flushes the durable audit bridge into the one immutable audit hash
+    /// chain. The payload is a complete canonical `AuditEvent`; the `SQLite`
+    /// row is only a pending marker and remains for idempotent crash recovery.
+    fn flush_pending_audit_events(&mut self) -> Result<(), OutboxError> {
+        let pending = self
+            .storage_ref()
+            .map_err(OutboxError::Acknowledge)?
+            .pending_audit_events()
+            .map_err(OutboxError::Acknowledge)?;
+        for pending_event in pending {
+            let event: AuditEvent =
+                serde_json::from_slice(pending_event.payload()).map_err(|_| {
+                    OutboxError::Acknowledge(StorageError::adapter(
+                        "pending audit event payload is not canonical JSON",
+                    ))
+                })?;
+            let canonical_payload = serde_json::to_vec(&event).map_err(|_| {
+                OutboxError::Acknowledge(StorageError::adapter(
+                    "pending audit event cannot be canonically encoded",
+                ))
+            })?;
+            if canonical_payload != pending_event.payload()
+                || event.event_id().as_str() != pending_event.event_id()
+            {
+                return Err(OutboxError::Acknowledge(StorageError::invalid_input(
+                    "pending audit event does not match its canonical event identity",
+                )));
+            }
+            self.audit_store
+                .as_mut()
+                .ok_or_else(|| OutboxError::Audit(winwincode_audit::AuditError::unavailable()))?
+                .append(&event)
+                .map_err(OutboxError::Audit)?;
+            self.storage_mut()
+                .map_err(OutboxError::Acknowledge)?
+                .mark_audit_event_persisted(pending_event.event_id())
+                .map_err(OutboxError::Acknowledge)?;
+        }
+        Ok(())
     }
 
     fn storage_ref(&self) -> Result<&dyn ProductStateStorage, StorageError> {
@@ -1023,6 +1382,16 @@ impl ControlPlane {
         {
             failures.push(format!("storage close failed: {error}"));
         }
+        if let Some(audit_store) = self.audit_store.take()
+            && let Err(error) = audit_store.close()
+        {
+            failures.push(format!("audit store close failed: {error}"));
+        }
+        if let Some(artifact_store) = self.artifact_store.take()
+            && let Err(error) = artifact_store.close()
+        {
+            failures.push(format!("Artifact store close failed: {error}"));
+        }
         if let Some(temporary_root) = self.temporary_root.take()
             && let Err(error) = temporary_root.release()
         {
@@ -1040,7 +1409,7 @@ fn reserved_public_projection_topic(topic: &str) -> bool {
 }
 
 fn reserved_delivery_transaction_topic(topic: &str) -> bool {
-    topic.starts_with("delivery.")
+    topic.starts_with("delivery.") || topic.starts_with("runtime.")
 }
 
 pub(crate) fn storage_commit(
@@ -1060,6 +1429,168 @@ pub(crate) fn storage_commit(
         change.state,
         change.events,
     ))
+}
+
+const EXECUTION_AUDIT_SYSTEM_ACTOR: &str = "sys_00000000000000000000000000";
+const EXECUTION_AUDIT_ORIGIN: &str = "control-plane.execution-port";
+
+/// Encodes one complete execution audit event for the durable storage bridge.
+///
+/// The storage crate receives only the canonical event bytes and its event id;
+/// all event semantics remain owned by `winwincode-audit`, and the immutable
+/// `AuditStore` is the sole audit authority after the bridge is flushed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execution_audit_event(
+    event_id: AuditEventId,
+    occurred_at_millis: u64,
+    request_id: winwincode_domain::RequestId,
+    scope: &RepositoryScope,
+    action: AuditAction,
+    before: &Delivery,
+    after: &Delivery,
+    subject: AuditSubject,
+    result_code: &str,
+) -> Result<PendingAuditEvent, StorageError> {
+    let before = delivery_state_digest(before)?;
+    let after = delivery_state_digest(after)?;
+    let state = AuditState::changed(Some(before), after).map_err(|error| {
+        StorageError::invalid_input(format!("execution audit state is invalid: {error}"))
+    })?;
+    execution_audit_event_with_state(
+        event_id,
+        occurred_at_millis,
+        request_id,
+        scope,
+        action,
+        state,
+        subject,
+        result_code,
+    )
+}
+
+/// Encodes one execution audit event from a state transition owned by the
+/// caller. Runtime ledger transitions use this seam because they do not mutate
+/// the Delivery aggregate.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execution_audit_event_with_state(
+    event_id: AuditEventId,
+    occurred_at_millis: u64,
+    request_id: winwincode_domain::RequestId,
+    scope: &RepositoryScope,
+    action: AuditAction,
+    state: AuditState,
+    subject: AuditSubject,
+    result_code: &str,
+) -> Result<PendingAuditEvent, StorageError> {
+    let scope = AuditScope::repository(
+        scope.organization_id.clone(),
+        scope.workspace_id.clone(),
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+    )
+    .map_err(|error| {
+        StorageError::invalid_input(format!("execution audit scope is invalid: {error}"))
+    })?;
+    let origin = AuditOrigin::local(EXECUTION_AUDIT_ORIGIN).map_err(|error| {
+        StorageError::invalid_input(format!("execution audit origin is invalid: {error}"))
+    })?;
+    let event = AuditEvent::state_change(
+        event_id,
+        occurred_at_millis,
+        AuditActor::System(SystemActorId(EXECUTION_AUDIT_SYSTEM_ACTOR.to_owned())),
+        scope,
+        request_id,
+        action,
+        state,
+        origin,
+        subject,
+        result_code,
+        AuditRetention::Indefinite,
+    )
+    .map_err(|error| {
+        StorageError::invalid_input(format!("execution audit event is invalid: {error}"))
+    })?;
+    let event_id = event.event_id().as_str().to_owned();
+    let payload = serde_json::to_vec(&event).map_err(|error| {
+        StorageError::adapter(format!("failed to encode execution audit event: {error}"))
+    })?;
+    PendingAuditEvent::new(event_id, payload)
+}
+
+fn delivery_state_digest(delivery: &Delivery) -> Result<Sha256Digest, StorageError> {
+    let payload = delivery.encode_json().map_err(|error| {
+        StorageError::adapter(format!("failed to encode Delivery for audit: {error}"))
+    })?;
+    Ok(Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(payload)
+    )))
+}
+
+/// Reconstructs the repository scope encoded in a durable receipt key. This
+/// is used only where the generated Worker binding message carries no scope;
+/// malformed or non-repository keys are rejected rather than guessed.
+pub(crate) fn repository_scope_from_receipt_key(
+    key: &ReceiptScopeKey,
+) -> Result<RepositoryScope, StorageError> {
+    let mut offset = 0;
+    let prefix = decode_key_field(key.as_bytes(), &mut offset)?;
+    let tag = decode_key_field(key.as_bytes(), &mut offset)?;
+    let organization_id = decode_key_field(key.as_bytes(), &mut offset)?;
+    let workspace_id = decode_key_field(key.as_bytes(), &mut offset)?;
+    let project_id = decode_key_field(key.as_bytes(), &mut offset)?;
+    let repository_id = decode_key_field(key.as_bytes(), &mut offset)?;
+    if offset != key.as_bytes().len() || prefix != SCOPE_KEY_PREFIX || tag != b"repository" {
+        return Err(StorageError::invalid_input(
+            "receipt scope key is not a canonical repository scope",
+        ));
+    }
+    let organization_id = String::from_utf8(organization_id).map_err(|_| {
+        StorageError::invalid_input("repository scope organization id is not UTF-8")
+    })?;
+    let workspace_id = String::from_utf8(workspace_id)
+        .map_err(|_| StorageError::invalid_input("repository scope workspace id is not UTF-8"))?;
+    let project_id = String::from_utf8(project_id)
+        .map_err(|_| StorageError::invalid_input("repository scope project id is not UTF-8"))?;
+    let repository_id = String::from_utf8(repository_id)
+        .map_err(|_| StorageError::invalid_input("repository scope repository id is not UTF-8"))?;
+    require_canonical_id(&organization_id, "org_", "repository scope organizationId")?;
+    require_canonical_id(&workspace_id, "wsp_", "repository scope workspaceId")?;
+    require_canonical_id(&project_id, "prj_", "repository scope projectId")?;
+    require_canonical_id(&repository_id, "rep_", "repository scope repositoryId")?;
+    Ok(RepositoryScope {
+        kind: RepositoryScopeKind::Repository,
+        organization_id: OrganizationId(organization_id),
+        workspace_id: WorkspaceId(workspace_id),
+        project_id: ProjectId(project_id),
+        repository_id: RepositoryId(repository_id),
+    })
+}
+
+fn decode_key_field(bytes: &[u8], offset: &mut usize) -> Result<Vec<u8>, StorageError> {
+    let length_bytes = bytes
+        .get(*offset..(*offset).saturating_add(8))
+        .ok_or_else(|| {
+            StorageError::invalid_input("receipt scope key has a truncated field length")
+        })?;
+    let length = u64::from_be_bytes(
+        length_bytes
+            .try_into()
+            .expect("receipt scope key length is exactly eight bytes"),
+    );
+    *offset = (*offset)
+        .checked_add(8)
+        .ok_or_else(|| StorageError::invalid_input("receipt scope key offset overflow"))?;
+    let length = usize::try_from(length)
+        .map_err(|_| StorageError::invalid_input("receipt scope key field is too large"))?;
+    let end = (*offset)
+        .checked_add(length)
+        .ok_or_else(|| StorageError::invalid_input("receipt scope key field overflows"))?;
+    let field = bytes
+        .get(*offset..end)
+        .ok_or_else(|| StorageError::invalid_input("receipt scope key has a truncated field"))?;
+    *offset = end;
+    Ok(field.to_vec())
 }
 
 pub(crate) fn delivery_changed_event(

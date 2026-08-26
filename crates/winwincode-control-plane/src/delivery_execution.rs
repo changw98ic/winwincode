@@ -11,11 +11,6 @@
 use std::{collections::HashSet, error::Error, fmt};
 
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{
-    DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobCancelAckMessage, JobCancelAckMessageKind,
-};
 use winwincode_delivery::{
     application::{
         CoordinationError,
@@ -29,6 +24,12 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{RequestId, Sha256Digest};
+use winwincode_execution_port::generated::{
+    DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope, DeliveryStageExecutionScope,
+    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLimits, ExecutionScope,
+    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobCancelAckMessage, JobCancelAckMessageKind,
+    JobCancelAckMessageStatus,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryExecutionConfig {
@@ -812,13 +813,13 @@ fn validate_cancel_ack(
         && instant(&lease.expires_at.0)
         && canonical_identifier(&acknowledgement.worker_session_id.0, "wsn")
         && matches!(
-            acknowledgement.status.as_str(),
-            "accepted"
-                | "already_cancelling"
-                | "already_terminal"
-                | "rejected_expired_lease"
-                | "rejected_stale_fencing_token"
-                | "rejected_worker_instance"
+            &acknowledgement.status,
+            JobCancelAckMessageStatus::Accepted
+                | JobCancelAckMessageStatus::AlreadyCancelling
+                | JobCancelAckMessageStatus::AlreadyTerminal
+                | JobCancelAckMessageStatus::RejectedExpiredLease
+                | JobCancelAckMessageStatus::RejectedStaleFencingToken
+                | JobCancelAckMessageStatus::RejectedWorkerInstance
         )
         && error_valid;
     if valid {

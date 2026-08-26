@@ -44,7 +44,7 @@ Attempt 或 Fencing 校验。
 | Control Plane → Worker | `job.dispatch`、`lease.renew`、`runtime.replay_request`、`job.cancel` |
 | Worker → Control Plane | `job.dispatch_result`、`session.binding`、`runtime.event`、`job.cancel_ack`、`job.outcome` |
 | Worker → Control Plane | `artifact.open`、`artifact.chunk`、`model.open`、`model.ack` |
-| Control Plane → Worker | `artifact.ack`、`model.chunk` |
+| Control Plane → Worker | `runtime.ack`、`artifact.ack`、`model.chunk` |
 | Worker → Control Plane | `input.request`、`approval.request` |
 | Control Plane → Worker | `input.response`、`approval.decision`、`job.outcome_ack` |
 
@@ -87,6 +87,25 @@ Job/Lease 改成另一条 Session 或 CodexThread 是冲突。`runtime.event.cod
 `ackSequence` 表示 Control Plane 已连续接受的最大 sequence，而不是“见过的最大值”。
 状态为 `gap` 时必须返回 `replayFromSequence`；其他状态不得附带该字段。运行事件、产物
 块和模型流都使用这一规则。
+
+Worker 可以在持久化 `ackSequence` 后压缩其确认过的原始 frame。压缩后的 durable replay
+快照可以从 `ackSequence + 1` 开始保留未确认 frame，但不得缺失任何未确认的连续 frame；
+缺失未确认 frame 必须按损坏状态拒绝恢复。
+
+### Typed replay mapping
+
+运行时、产物和模型流都映射到同一个 transport-neutral replay seam：
+
+- `runtime.event` 使用 `event.eventId` 和 `event.sequence`；
+- `artifact.chunk` 和 `model.chunk` 使用稳定的 `messageId` 作为 frame identity，使用各自
+  的 `sequence` 作为顺序；
+- 三种 `*.ack` 都映射为同一个 `ackSequence`、status 和可选 `replayFromSequence` 结构；
+- `artifact.open` 和 `model.open` 只有流声明，没有 sequence，因此只生成 stream key，不作为
+  replay frame 持久化。
+
+生成消息到 replay frame 的映射只做 schema、身份、sequence 和 canonical JSON 校验，不读取
+lease authority、ProductSession、Provider 或 Credential。authority 与 durable store 由调用方
+注入；三种流共享 duplicate、conflict、gap、ordered resume 和 acknowledgement 规则。
 
 ## Worker 注册与重启
 

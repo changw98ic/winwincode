@@ -22,9 +22,16 @@
 
 每次正式变更把当前状态、追加式 journal、同请求回执和待发布事件作为一个 SQLite 事务提交。runner 里唯一的直接 SQLite seed 只用于把旧 task-DAG 测试样本一次性转换成新身份；它不是产品写入口。重启、损坏、恢复、请求重放、修订冲突、旧候选失效、Attention、Inconclusive、InfraError 和返工都由同一真实 Control Plane 路径验证。
 
+阶段 3 增加了 ADR-0028 已批准的 `winwincode-delivery -> winwincode-storage`
+单向引用。Delivery 只消费 Storage 签发且调用方不能构造的 Git 源码事实；它不读取
+SQLite、不选择对象存储，也不接收调用方自报的 commit、tree、diff 或 path 哈希。源码
+与 Artifact adapter 仍由 Control Plane 组合，Delivery 只负责把已验证的源码事实与精确
+成功 Worker 结果合成候选。原来把 `winwincode-storage` 列为禁止依赖的阶段 2 临时规则已
+删除，不保留第二条候选路径。
+
 ## 精确结果
 
-唯一结果文件是 `tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json`，SHA-256 为 `4aaab65259218df5df814b9d9743d71e779aad81a552c0540df63ad8490f1c71`。十场景最终修订号依次为：
+唯一结果文件是 `tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json`，SHA-256 为 `198c61015ff49885d1640c074f3927b4b5dbc98bf858fbb0cc5541b7ed5495d7`。十场景最终修订号依次为：
 
 | 场景 | 最终修订号 | 关键结果 |
 | --- | ---: | --- |

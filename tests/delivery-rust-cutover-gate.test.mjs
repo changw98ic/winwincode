@@ -132,7 +132,7 @@ test('phase 2.7 freezes the canonical Rust Delivery backend and exact result', a
   )
   assert.equal(
     rules.migration.expected.sha256,
-    '4aaab65259218df5df814b9d9743d71e779aad81a552c0540df63ad8490f1c71',
+    '198c61015ff49885d1640c074f3927b4b5dbc98bf858fbb0cc5541b7ed5495d7',
   )
   assert.equal(
     createHash('sha256').update(await readFile(expectedPath)).digest('hex'),
@@ -216,6 +216,15 @@ test('the differential executor reaches only typed Control Plane and SQLite seam
   for (const denied of rules.dependencyBoundaries.delivery.deniedDependencies) {
     assert.doesNotMatch(deliveryManifest, new RegExp(`(?:^|["'])${denied}(?:["'.]|$)`, 'mu'))
   }
+  assert.equal(
+    rules.dependencyBoundaries.delivery.deniedDependencies.includes('winwincode-storage'),
+    false,
+    'Phase 3 source facts use the ADR-0028-approved Delivery -> Storage edge',
+  )
+  assert.match(
+    deliveryManifest,
+    /^winwincode-storage\s*=\s*\{[^\n]+path\s*=\s*"\.\.\/winwincode-storage"[^\n]+\}$/mu,
+  )
 })
 
 test('the remaining TypeScript writer is a closed Phase 6 handoff, not a new backend path', async () => {

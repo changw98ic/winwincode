@@ -1162,30 +1162,38 @@ mod tests {
             started_at_millis: 1_800_000_000_030,
             finished_at_millis: Some(1_800_000_000_050),
         });
-        snapshot.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-verifier-1".into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: producer_task_id.clone(),
-            stage_run_id: StageRunId("stage-verifier-1".into()),
-            product_session_id: ProductSessionId("product-verifier".into()),
-            execution_job_id: ExecutionJobId("job-verifier".into()),
-            worker_session_id: Some(WorkerSessionId("worker-verifier".into())),
-            codex_thread_id: Some(CodexThreadId("thread-verifier".into())),
-            bound_at_millis: 1_800_000_000_031,
-        });
-        snapshot.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-reviewer-1".into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: producer_task_id,
-            stage_run_id: StageRunId("stage-reviewer-1".into()),
-            product_session_id: ProductSessionId("product-reviewer".into()),
-            execution_job_id: ExecutionJobId("job-reviewer".into()),
-            worker_session_id: Some(WorkerSessionId("worker-reviewer".into())),
-            codex_thread_id: Some(CodexThreadId("thread-reviewer".into())),
-            bound_at_millis: 1_800_000_000_031,
-        });
+        snapshot.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-verifier-1".into()),
+                delivery_id: snapshot.id.clone(),
+                delivery_task_id: producer_task_id.clone(),
+                stage_run_id: StageRunId("stage-verifier-1".into()),
+                product_session_id: ProductSessionId("product-verifier".into()),
+                execution_job_id: ExecutionJobId("job-verifier".into()),
+                worker_session_id: Some(WorkerSessionId("worker-verifier".into())),
+                codex_thread_id: Some(CodexThreadId("thread-verifier".into())),
+                bound_at_millis: 1_800_000_000_031,
+                ..Default::default()
+            }
+            .with_test_authority("binding-verifier-1", 1),
+        );
+        snapshot.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-reviewer-1".into()),
+                delivery_id: snapshot.id.clone(),
+                delivery_task_id: producer_task_id,
+                stage_run_id: StageRunId("stage-reviewer-1".into()),
+                product_session_id: ProductSessionId("product-reviewer".into()),
+                execution_job_id: ExecutionJobId("job-reviewer".into()),
+                worker_session_id: Some(WorkerSessionId("worker-reviewer".into())),
+                codex_thread_id: Some(CodexThreadId("thread-reviewer".into())),
+                bound_at_millis: 1_800_000_000_031,
+                ..Default::default()
+            }
+            .with_test_authority("binding-reviewer-1", 1),
+        );
         snapshot.updated_at_millis = 1_800_000_000_050;
         Delivery::try_from_snapshot(snapshot).expect("evidence Delivery")
     }

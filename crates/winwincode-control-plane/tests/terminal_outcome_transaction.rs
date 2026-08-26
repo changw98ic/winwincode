@@ -9,12 +9,9 @@ use std::{
 };
 
 use winwincode_api::generated::{
-    Actor, ArtifactReference, CommandEnvelope, CommandName, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
-    ExecutionOutcome, ExecutionOutcomeStatus, ExecutionPortError, ExecutionPortErrorCode,
-    ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobOutcomeMessage,
-    JobOutcomeMessageKind, RepositoryScope, SchemaVersion, Scope, UserActor,
+    Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
 };
+use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::{
     CommitError, ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
     StateChange,
@@ -39,8 +36,14 @@ use winwincode_delivery::{
 use winwincode_domain::{
     ArtifactId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
     ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProductSessionId,
-    ProjectId, RepositoryId, RequestId, Revision, Sha256Digest, StageRunId, UserId, WorkerId,
-    WorkerInstanceId, WorkerSessionId, WorkspaceId,
+    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest,
+    StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
+};
+use winwincode_execution_port::generated::{
+    ArtifactReference, DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob,
+    ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcome, ExecutionOutcomeStatus,
+    ExecutionPortError, ExecutionPortErrorCode, ExecutionScope, ExecutionWorkspace,
+    ExecutionWorkspaceWriteMode, JobOutcomeMessage, JobOutcomeMessageKind,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
@@ -351,6 +354,35 @@ fn durable_terminal_counts(root: &Path, delivery_id: &DeliveryId) -> (i64, i64, 
     (revision, journal, receipts, outbox)
 }
 
+fn audit_event_for_receipt(root: &Path, receipt: &winwincode_storage::CommitReceipt) -> AuditEvent {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("audit event inspection database");
+    let payload = connection
+        .query_row(
+            "SELECT payload FROM audit_outbox \
+             WHERE actor_key = ?1 AND scope_key = ?2 AND request_id = ?3",
+            rusqlite::params![
+                receipt.receipt_identity.actor_key().as_bytes(),
+                receipt.receipt_identity.scope_key().as_bytes(),
+                receipt.receipt_identity.request_id().0,
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .expect("terminal audit event");
+    connection.close().expect("audit event inspection close");
+    serde_json::from_slice(&payload).expect("canonical terminal audit event JSON")
+}
+
+fn audit_event_count(root: &Path) -> i64 {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("audit event count database");
+    let count = connection
+        .query_row("SELECT COUNT(*) FROM audit_outbox", [], |row| row.get(0))
+        .expect("audit event count");
+    connection.close().expect("audit event count close");
+    count
+}
+
 fn terminal_receipt_count(root: &Path, delivery_id: &DeliveryId) -> i64 {
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("terminal receipt count connection");
@@ -410,6 +442,18 @@ fn terminal_message(
         },
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2027-01-15T08:01:00.100Z".into()),
+        session_identity: SessionIdentity {
+            codex_thread_id: binding
+                .codex_thread_id
+                .clone()
+                .expect("CodexThread identity"),
+            product_session_id: binding.product_session_id.clone(),
+            stage_run_id: Some(run.id.clone()),
+            worker_session_id: binding
+                .worker_session_id
+                .clone()
+                .expect("WorkerSession identity"),
+        },
         worker_session_id: binding.worker_session_id.clone().expect("WorkerSession"),
     }
 }
@@ -515,6 +559,7 @@ fn verdict_command(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn final_verifier_outcome_is_durable_before_verdict() {
     let seed = 1;
     let root = temporary_directory("final-verifier");
@@ -550,6 +595,54 @@ fn final_verifier_outcome_is_durable_before_verdict() {
     assert!(!commit.receipt().idempotent_replay);
     assert_eq!(commit.receipt().revision, 2);
     assert_eq!(commit.receipt().events.len(), 3);
+
+    let audit_event = audit_event_for_receipt(&root, commit.receipt());
+    assert_eq!(audit_event_count(&root), 1);
+    assert_eq!(
+        audit_event.subject().execution_kind(),
+        Some(AuditExecutionSubjectKind::Terminal)
+    );
+    let identity = audit_event
+        .subject()
+        .execution()
+        .expect("terminal execution identity");
+    assert_eq!(
+        identity.product_session_id(),
+        &message.session_identity.product_session_id
+    );
+    assert_eq!(identity.worker_session_id(), &message.worker_session_id);
+    assert_eq!(
+        identity.codex_thread_id(),
+        message
+            .outcome
+            .codex_thread_id
+            .as_ref()
+            .expect("CodexThread")
+    );
+    assert_eq!(
+        Some(identity.stage_run_id()),
+        message.session_identity.stage_run_id.as_ref()
+    );
+    assert_eq!(identity.execution_job_id(), &message.lease.job_id);
+    assert_eq!(identity.delivery_id(), delivery.id());
+    assert_eq!(identity.source_sequence().expect("terminal sequence").0, 12);
+    let audit_access = AuditScope::repository(
+        scope.organization_id.clone(),
+        scope.workspace_id.clone(),
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+    )
+    .expect("canonical terminal audit scope")
+    .into_access();
+    let audit = control_plane
+        .read_audit(&audit_access, 0, 20, 2_000_000_000_000)
+        .expect("terminal outcome is visible through the canonical AuditStore");
+    assert!(audit.records().iter().any(|record| {
+        record.event().is_some_and(|event| {
+            event.event_id() == audit_event.event_id()
+                && event.subject().execution_kind() == Some(AuditExecutionSubjectKind::Terminal)
+        })
+    }));
 
     let stored = control_plane
         .load_state(&format!("delivery:{}", delivery.id().0))
@@ -774,12 +867,12 @@ fn concurrent_exact_message_returns_one_commit_and_only_durable_replays() {
             let message = message.clone();
             let facts = facts.clone();
             thread::spawn(move || {
+                barrier.wait();
                 let mut control_plane = ControlPlane::start_local(
                     ControlPlaneConfig::local(root.as_path()),
                     Box::new(RecordingPublisher),
                 )
                 .expect("Control Plane start");
-                barrier.wait();
                 let receipt = control_plane
                     .commit_delivery_terminal_outcome(&scope, &message, &facts)
                     .expect("concurrent terminal outcome");
@@ -929,6 +1022,7 @@ fn failure_at_each_atomic_member_rolls_back_terminal_outcome() {
             (1, 1, 1, 1),
             "{member}"
         );
+        assert_eq!(audit_event_count(&root), 0, "{member}");
         control_plane.shutdown().expect("shutdown");
         fs::remove_dir_all(root).expect("database directory release");
     }
@@ -956,6 +1050,7 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .expect("publication error carries committed terminal receipt");
     assert_eq!(committed.receipt().revision, 2);
     assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(audit_event_count(&root), 1);
     failing
         .shutdown()
         .expect_err("failing publisher leaves durable events pending");
@@ -970,6 +1065,24 @@ fn publication_failure_keeps_terminal_commit_for_restart_and_receipt_replay() {
         .expect("receipt replay after restart");
     assert!(replay.receipt().idempotent_replay);
     assert_eq!(durable_terminal_counts(&root, delivery.id()), (2, 2, 2, 4));
+    assert_eq!(audit_event_count(&root), 1);
+    let audit_event = audit_event_for_receipt(&root, replay.receipt());
+    let audit_access = AuditScope::repository(
+        scope.organization_id.clone(),
+        scope.workspace_id.clone(),
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+    )
+    .expect("canonical restarted terminal audit scope")
+    .into_access();
+    let audit = restarted
+        .read_audit(&audit_access, 0, 20, 2_000_000_000_000)
+        .expect("terminal audit remains readable after restart");
+    assert!(audit.records().iter().any(|record| {
+        record
+            .event()
+            .is_some_and(|event| event.event_id() == audit_event.event_id())
+    }));
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("published event count connection");
     let pending: i64 = connection
@@ -1061,6 +1174,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
             (1, 1, 1, 1),
             "{name}"
         );
+        assert_eq!(audit_event_count(&root), 0, "{name}");
     }
 
     let foreign_stage_facts = outcome_facts_for_stage(
@@ -1072,6 +1186,7 @@ fn stale_or_foreign_lease_binding_metadata_and_artifacts_fail_closed() {
         .commit_delivery_terminal_outcome(&scope, &message, &foreign_stage_facts)
         .expect_err("foreign stage authority must fail closed");
     assert_eq!(durable_terminal_counts(&root, delivery.id()), (1, 1, 1, 1));
+    assert_eq!(audit_event_count(&root), 0);
     control_plane.shutdown().expect("shutdown");
     fs::remove_dir_all(root).expect("database directory release");
 }

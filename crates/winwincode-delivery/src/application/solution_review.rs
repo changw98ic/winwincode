@@ -2309,18 +2309,22 @@ mod tests {
             started_at_millis: 1_800_000_000_040,
             finished_at_millis: Some(1_800_000_000_050),
         });
-        snapshot.session_bindings.push(SessionBinding {
-            schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-            id: planning_session_binding_id.clone(),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: None,
-            stage_run_id: planning_stage_run_id.clone(),
-            product_session_id: ProductSessionId("product:planning-2".into()),
-            execution_job_id: ExecutionJobId("job:planning-2".into()),
-            worker_session_id: Some(WorkerSessionId("worker-session:planning-2".into())),
-            codex_thread_id: Some(CodexThreadId("codex-thread:planning-2".into())),
-            bound_at_millis: 1_800_000_000_041,
-        });
+        snapshot.session_bindings.push(
+            SessionBinding {
+                schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+                id: planning_session_binding_id.clone(),
+                delivery_id: snapshot.id.clone(),
+                delivery_task_id: None,
+                stage_run_id: planning_stage_run_id.clone(),
+                product_session_id: ProductSessionId("product:planning-2".into()),
+                execution_job_id: ExecutionJobId("job:planning-2".into()),
+                worker_session_id: Some(WorkerSessionId("worker-session:planning-2".into())),
+                codex_thread_id: Some(CodexThreadId("codex-thread:planning-2".into())),
+                bound_at_millis: 1_800_000_000_041,
+                ..Default::default()
+            }
+            .with_test_authority("planning-session-binding-2", 2),
+        );
         let (review_status, finished_at_millis) = match current {
             ReviewFixtureState::Pending => (StageRunStatus::Waiting, None),
             ReviewFixtureState::Approved => (StageRunStatus::Succeeded, Some(1_800_000_000_060)),
@@ -2701,18 +2705,22 @@ mod tests {
     #[test]
     fn human_solution_review_rejects_execution_session_binding() {
         let mut snapshot = review_delivery(ReviewFixtureState::Pending).into_snapshot();
-        snapshot.session_bindings.push(SessionBinding {
-            schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding:forged-human-review".into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: None,
-            stage_run_id: StageRunId("stage:plan-review".into()),
-            product_session_id: ProductSessionId("product:forged-human-review".into()),
-            execution_job_id: ExecutionJobId("job:forged-human-review".into()),
-            worker_session_id: Some(WorkerSessionId("worker:forged-human-review".into())),
-            codex_thread_id: Some(CodexThreadId("thread:forged-human-review".into())),
-            bound_at_millis: 1_800_000_000_022,
-        });
+        snapshot.session_bindings.push(
+            SessionBinding {
+                schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding:forged-human-review".into()),
+                delivery_id: snapshot.id.clone(),
+                delivery_task_id: None,
+                stage_run_id: StageRunId("stage:plan-review".into()),
+                product_session_id: ProductSessionId("product:forged-human-review".into()),
+                execution_job_id: ExecutionJobId("job:forged-human-review".into()),
+                worker_session_id: Some(WorkerSessionId("worker:forged-human-review".into())),
+                codex_thread_id: Some(CodexThreadId("thread:forged-human-review".into())),
+                bound_at_millis: 1_800_000_000_022,
+                ..Default::default()
+            }
+            .with_test_authority("forged-human-review", 1),
+        );
         assert!(Delivery::try_from_snapshot(snapshot).is_err());
     }
 

@@ -26,11 +26,11 @@ use winwincode_domain::{DeliveryId, EventReadPosition, OpaqueCursor, Revision, S
 use super::{
     DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, PublicationFactBinding,
     StrongFlowProjectionError, TrustedProjectionReadError, TrustedPublicationProjectionRead,
-    TrustedRuntimeProjectionRead,
+    TrustedRuntimeFoldSnapshot, TrustedRuntimeProjectionRead,
 };
 use crate::{
     AggregateJournalKey, ControlPlane, ProjectionEventCursor, ProjectionEventStream,
-    ProjectionEventStreamKey, StorageErrorKind, repository_scope_key,
+    ProjectionEventStreamKey, repository_scope_key,
 };
 
 const MAX_QUERY_LIMIT: usize = 200;
@@ -108,7 +108,7 @@ struct RuntimeContentSeal<'cut> {
     ledger_revision: &'cut Revision,
     accepted_sequence: u64,
     rebuilt_at: &'cut winwincode_domain::Instant,
-    snapshot: &'cut winwincode_delivery::projection::runtime::RuntimeFoldSnapshot,
+    snapshot: &'cut TrustedRuntimeFoldSnapshot,
     source_seal: &'cut Sha256Digest,
 }
 
@@ -144,13 +144,13 @@ struct ApprovalSeal<'value> {
     target_sha256: &'value str,
 }
 
-struct CurrentPublicationApproval<'delivery> {
-    run: &'delivery winwincode_delivery::domain::StageRun,
-    attention: &'delivery winwincode_delivery::domain::AttentionItem,
-    resolution: &'delivery str,
-    assigned_to: &'delivery str,
-    resolved_by: &'delivery str,
-    resolved_at: u64,
+pub(crate) struct CurrentPublicationApproval<'delivery> {
+    pub(crate) run: &'delivery winwincode_delivery::domain::StageRun,
+    pub(crate) attention: &'delivery winwincode_delivery::domain::AttentionItem,
+    pub(crate) resolution: &'delivery str,
+    pub(crate) assigned_to: &'delivery str,
+    pub(crate) resolved_by: &'delivery str,
+    pub(crate) resolved_at: u64,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -170,11 +170,6 @@ pub(super) fn establish_delivery_read(
         )
     })?;
     let event_key = delivery_event_stream_key(scope, delivery_id)?;
-    let event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, None)
-        .map_err(current_event_storage_error)?;
 
     let first = load_current(control_plane, delivery_id)?;
     let publication = sources
@@ -196,11 +191,24 @@ pub(super) fn establish_delivery_read(
         None,
         source_limit,
     );
+    let storage = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?;
     let runtime = sources
         .runtime
-        .read_delivery(&runtime_request)
+        .read_delivery_with_storage(storage, &runtime_request, &first)
         .map_err(current_source_error)?;
     validate_runtime_read(scope, &detail, &runtime)?;
+    let event_cursor = runtime.event_cursor().cloned().ok_or_else(|| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "the trusted runtime adapter did not return its durable event cut".to_owned(),
+        )
+    })?;
+    if event_cursor.key() != &event_key {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "runtime facts and the public event cursor name different resource streams".to_owned(),
+        ));
+    }
 
     let second = load_current(control_plane, delivery_id)?;
     if second != first {
@@ -222,32 +230,30 @@ pub(super) fn establish_delivery_read(
             "publication facts changed while the read cut was established".to_owned(),
         ));
     }
+    let exact_runtime_request = DeliveryRuntimeReadRequest::new(
+        scope.clone(),
+        delivery_id.clone(),
+        first.revision(),
+        Some(super::RuntimeCutExpectation::new(
+            runtime.ledger_revision().clone(),
+            runtime.accepted_sequence(),
+        )),
+        source_limit,
+    )
+    .with_event_cursor(event_cursor.clone());
     let exact_runtime = sources
         .runtime
-        .read_delivery(&DeliveryRuntimeReadRequest::new(
-            scope.clone(),
-            delivery_id.clone(),
-            first.revision(),
-            Some(super::RuntimeCutExpectation::new(
-                runtime.ledger_revision().clone(),
-                runtime.accepted_sequence(),
-            )),
-            source_limit,
-        ))
+        .read_delivery_with_storage(storage, &exact_runtime_request, &first)
         .map_err(current_source_error)?;
     if !same_runtime_cut(&runtime, &exact_runtime) {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "runtime facts changed while the read cut was established".to_owned(),
         ));
     }
-    let exact_event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, Some(&event_cursor))
-        .map_err(current_event_storage_error)?;
-    if exact_event_cursor != event_cursor {
+    if exact_runtime.event_cursor() != Some(&event_cursor) {
         return Err(StrongFlowProjectionError::RevisionConflict(
-            "the Delivery event stream changed while the read cut was established".to_owned(),
+            "runtime facts and the public event cursor changed at different durable cuts"
+                .to_owned(),
         ));
     }
 
@@ -302,12 +308,7 @@ pub(super) fn replay_delivery_read(
     }
     let expected_event_cursor =
         parse_delivery_event_cursor(scope, delivery_id, &cursor.event_cursor)?;
-    let event_key = expected_event_cursor.key().clone();
-    let event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, Some(&expected_event_cursor))
-        .map_err(cursor_event_storage_error)?;
+    let event_cursor_for_replay = expected_event_cursor;
     let delivery_revision = u64::try_from(cursor.delivery_revision.0).map_err(|_| {
         StrongFlowProjectionError::InvalidRequest("read cursor revision is invalid".to_owned())
     })?;
@@ -322,6 +323,9 @@ pub(super) fn replay_delivery_read(
             "trusted runtime and publication facts are unavailable".to_owned(),
         )
     })?;
+    let storage = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?;
     let first = load_revision(control_plane, delivery_id, delivery_revision)?;
     let publication = sources
         .publication
@@ -339,20 +343,32 @@ pub(super) fn replay_delivery_read(
     ))?;
     let binding = derive_publication_binding(&first, &detail)?;
     validate_publication_result(&publication, binding.as_ref())?;
+    let runtime_request = DeliveryRuntimeReadRequest::new(
+        scope.clone(),
+        delivery_id.clone(),
+        delivery_revision,
+        Some(super::RuntimeCutExpectation::new(
+            cursor.runtime_ledger_revision.clone(),
+            runtime_sequence,
+        )),
+        source_limit,
+    )
+    .with_event_cursor(event_cursor_for_replay.clone());
     let runtime = sources
         .runtime
-        .read_delivery(&DeliveryRuntimeReadRequest::new(
-            scope.clone(),
-            delivery_id.clone(),
-            delivery_revision,
-            Some(super::RuntimeCutExpectation::new(
-                cursor.runtime_ledger_revision.clone(),
-                runtime_sequence,
-            )),
-            source_limit,
-        ))
+        .read_delivery_with_storage(storage, &runtime_request, &first)
         .map_err(cursor_source_error)?;
     validate_runtime_read(scope, &detail, &runtime)?;
+    let event_cursor = runtime.event_cursor().cloned().ok_or_else(|| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "the trusted runtime adapter did not return its durable event cut".to_owned(),
+        )
+    })?;
+    if event_cursor != event_cursor_for_replay {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "runtime facts do not belong to the requested public event cursor".to_owned(),
+        ));
+    }
 
     let second = load_revision(control_plane, delivery_id, delivery_revision)?;
     let exact_publication = sources
@@ -366,26 +382,16 @@ pub(super) fn replay_delivery_read(
         .map_err(cursor_source_error)?;
     let exact_runtime = sources
         .runtime
-        .read_delivery(&DeliveryRuntimeReadRequest::new(
-            scope.clone(),
-            delivery_id.clone(),
-            delivery_revision,
-            Some(super::RuntimeCutExpectation::new(
-                cursor.runtime_ledger_revision.clone(),
-                runtime_sequence,
-            )),
-            source_limit,
-        ))
+        .read_delivery_with_storage(storage, &runtime_request, &first)
         .map_err(cursor_source_error)?;
-    let exact_event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, Some(&event_cursor))
-        .map_err(cursor_event_storage_error)?;
+    if exact_runtime.event_cursor() != Some(&event_cursor_for_replay) {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "runtime facts do not belong to the requested public event cursor".to_owned(),
+        ));
+    }
     if second != first
         || exact_publication != publication
         || !same_runtime_cut(&runtime, &exact_runtime)
-        || exact_event_cursor != event_cursor
     {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "trusted facts changed while the exact read cut was replayed".to_owned(),
@@ -436,10 +442,8 @@ pub(super) fn establish_product_session_read(
         )
     })?;
     let event_key = product_session_event_stream_key(scope, product_session_id)?;
-    let event_cursor = control_plane
+    let storage = control_plane
         .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, None)
         .map_err(current_event_storage_error)?;
     let request = ProductSessionRuntimeReadRequest::new(
         scope.clone(),
@@ -449,29 +453,42 @@ pub(super) fn establish_product_session_read(
     );
     let runtime = sources
         .runtime
-        .read_product_session(&request)
+        .read_product_session_with_storage(storage, &request)
         .map_err(current_source_error)?;
     validate_product_session_runtime(scope, product_session_id, &runtime)?;
+    let event_cursor = runtime.event_cursor().cloned().ok_or_else(|| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "the trusted runtime adapter did not return its durable event cut".to_owned(),
+        )
+    })?;
+    if event_cursor.key() != &event_key {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "runtime facts and the public event cursor name different resource streams".to_owned(),
+        ));
+    }
+    let exact_runtime_request = ProductSessionRuntimeReadRequest::new(
+        scope.clone(),
+        product_session_id.clone(),
+        Some(super::RuntimeCutExpectation::new(
+            runtime.ledger_revision().clone(),
+            runtime.accepted_sequence(),
+        )),
+        limit,
+    )
+    .with_event_cursor(event_cursor.clone());
     let exact_runtime = sources
         .runtime
-        .read_product_session(&ProductSessionRuntimeReadRequest::new(
-            scope.clone(),
-            product_session_id.clone(),
-            Some(super::RuntimeCutExpectation::new(
-                runtime.ledger_revision().clone(),
-                runtime.accepted_sequence(),
-            )),
-            limit,
-        ))
+        .read_product_session_with_storage(storage, &exact_runtime_request)
         .map_err(current_source_error)?;
-    let exact_event_cursor = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?
-        .load_projection_event_cursor(&event_key, Some(&event_cursor))
-        .map_err(current_event_storage_error)?;
-    if !same_runtime_cut(&runtime, &exact_runtime) || exact_event_cursor != event_cursor {
+    if !same_runtime_cut(&runtime, &exact_runtime) {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "ProductSession runtime facts changed while the read cut was established".to_owned(),
+        ));
+    }
+    if exact_runtime.event_cursor() != Some(&event_cursor) {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "ProductSession runtime facts and its public cursor changed at different durable cuts"
+                .to_owned(),
         ));
     }
     Ok(EstablishedProductSessionRead {
@@ -484,7 +501,7 @@ pub(super) fn establish_product_session_read(
     })
 }
 
-fn load_current(
+pub(crate) fn load_current(
     control_plane: &ControlPlane,
     delivery_id: &DeliveryId,
 ) -> Result<Delivery, StrongFlowProjectionError> {
@@ -639,7 +656,8 @@ fn validate_runtime_read(
 ) -> Result<(), StrongFlowProjectionError> {
     validate_runtime_scope(scope, runtime)?;
     if runtime.delivery_revision() != detail.delivery_revision()
-        || runtime.snapshot().delivery_id != *detail.delivery_id()
+        || runtime.snapshot().delivery_id.as_ref() != Some(detail.delivery_id())
+        || runtime.snapshot().product_session_id.is_some()
     {
         return Err(StrongFlowProjectionError::RevisionConflict(
             "runtime facts belong to another aggregate revision".to_owned(),
@@ -695,7 +713,13 @@ fn validate_product_session_runtime(
     runtime: &TrustedRuntimeProjectionRead,
 ) -> Result<(), StrongFlowProjectionError> {
     validate_runtime_scope(scope, runtime)?;
-    if runtime.snapshot().sessions.is_empty()
+    if runtime
+        .snapshot()
+        .product_session_id
+        .as_ref()
+        .is_some_and(|id| id != product_session_id)
+        || (runtime.snapshot().product_session_id.is_some()
+            && runtime.snapshot().delivery_id.is_some())
         || runtime
             .snapshot()
             .sessions
@@ -710,7 +734,7 @@ fn validate_product_session_runtime(
 }
 
 #[allow(clippy::too_many_lines)]
-fn derive_publication_binding(
+pub(crate) fn derive_publication_binding(
     delivery: &Delivery,
     detail: &DeliveryProjection,
 ) -> Result<Option<PublicationFactBinding>, StrongFlowProjectionError> {
@@ -760,20 +784,20 @@ fn derive_publication_binding(
     PublicationFactBinding::try_new(
         detail.delivery_id().clone(),
         detail.delivery_revision(),
-        candidate.delivery_spec_id().clone(),
+        candidate.delivery_spec_id().0.clone(),
         candidate.delivery_spec_revision(),
         candidate.candidate_ref(),
         candidate.diff_sha256(),
-        verdict.id().clone(),
+        verdict.id().0.clone(),
         approval.attention.id.clone(),
         approval_review_set_sha256,
         target_sha256,
     )
     .map(Some)
-    .map_err(current_source_error)
+    .map_err(|_| current_source_error(TrustedProjectionReadError::Invalid))
 }
 
-fn current_publication_approval(
+pub(crate) fn current_publication_approval(
     delivery: &Delivery,
 ) -> Result<Option<CurrentPublicationApproval<'_>>, StrongFlowProjectionError> {
     let snapshot = delivery.snapshot();
@@ -891,7 +915,7 @@ fn validate_publication_read(
     }
 }
 
-pub(super) fn delivery_event_stream_key(
+pub(crate) fn delivery_event_stream_key(
     scope: &RepositoryScope,
     delivery_id: &DeliveryId,
 ) -> Result<ProjectionEventStreamKey, StrongFlowProjectionError> {
@@ -911,7 +935,7 @@ pub(super) fn delivery_event_stream_key(
     })
 }
 
-pub(super) fn product_session_event_stream_key(
+pub(crate) fn product_session_event_stream_key(
     scope: &RepositoryScope,
     product_session_id: &winwincode_domain::ProductSessionId,
 ) -> Result<ProjectionEventStreamKey, StrongFlowProjectionError> {
@@ -1017,18 +1041,6 @@ fn current_event_storage_error(_source: crate::StorageError) -> StrongFlowProjec
     )
 }
 
-fn cursor_event_storage_error(source: crate::StorageError) -> StrongFlowProjectionError {
-    match source.kind() {
-        StorageErrorKind::EventCursorExpired => StrongFlowProjectionError::ReadCursorExpired(
-            "the Delivery event cursor is outside the retained stream window".to_owned(),
-        ),
-        StorageErrorKind::InvalidInput => StrongFlowProjectionError::RevisionConflict(
-            "the Delivery event cursor does not match durable stream history".to_owned(),
-        ),
-        _ => current_event_storage_error(source),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn bounded_cursor(
     actor_sha256: &str,
@@ -1097,6 +1109,7 @@ fn same_runtime_cut(
         && first.accepted_sequence() == second.accepted_sequence()
         && first.rebuilt_at() == second.rebuilt_at()
         && first.source_seal() == second.source_seal()
+        && first.event_cursor() == second.event_cursor()
         && first.snapshot() == second.snapshot()
 }
 
@@ -1209,8 +1222,13 @@ fn canonical_cursor_token(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winwincode_delivery::domain::{AttentionItem, StageRun, StageRunActorType, StageRunStatus};
-    use winwincode_domain::{AttentionItemId, StageRunId};
+    use winwincode_delivery::domain::{
+        AttentionItem, DeliveryPublicationTarget, StageRun, StageRunActorType, StageRunStatus,
+    };
+    use winwincode_domain::{AttentionItemId, Sha256Digest, StageRunId};
+    use winwincode_publication::{
+        PublicationAuthorization, PublicationSourceIssue, PublicationTarget,
+    };
 
     fn delivered_with_exact_approval() -> Delivery {
         let parsed = Delivery::decode_json(include_bytes!(
@@ -1314,5 +1332,51 @@ mod tests {
             current_publication_approval(&duplicate),
             Err(StrongFlowProjectionError::RevisionConflict(_))
         ));
+    }
+
+    #[test]
+    fn publication_authorization_accepts_the_exact_delivery_target_digest() {
+        let delivery_target = DeliveryPublicationTarget {
+            schema_version: 3,
+            provider: "github".into(),
+            kind: "pull-request".into(),
+            repository: "example/widget".into(),
+            base_branch: "main".into(),
+            head_repository: "example/widget".into(),
+            head_branch: "winwincode/delivery".into(),
+        };
+        let target = PublicationTarget::try_github(
+            "example/widget",
+            "main",
+            "example/widget",
+            "winwincode/delivery",
+        )
+        .expect("canonical publication target");
+        let binding = PublicationFactBinding::try_new(
+            DeliveryId("dlv_00000000000000000000000001".into()),
+            21,
+            "spec_00000000000000000000000001",
+            1,
+            format!("git-candidate:sha256:{}", "a".repeat(64)),
+            "c".repeat(64),
+            "verdict:fixture:pass",
+            AttentionItemId("att_00000000000000000000000001".into()),
+            "d".repeat(64),
+            sha256_json(&delivery_target).expect("Delivery target digest"),
+        )
+        .expect("publication binding");
+
+        PublicationAuthorization::try_from_current_facts(
+            binding,
+            PublicationSourceIssue::try_github("example/widget", 7).expect("source issue"),
+            target,
+            "a".repeat(40),
+            "art_00000000000000000000000001",
+            Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            "usr_00000000000000000000000001",
+            1_000,
+            Sha256Digest(format!("sha256:{}", "f".repeat(64))),
+        )
+        .expect("Control Plane and Publication must share one target fact shape");
     }
 }

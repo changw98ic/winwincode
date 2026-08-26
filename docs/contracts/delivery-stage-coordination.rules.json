@@ -841,7 +841,7 @@
       }
     ],
     "requiredGeneratedExecutionSymbols": [
-      "winwincode_api::generated",
+      "winwincode_execution_port::generated",
       "ExecutionJob",
       "DeliveryStageExecutionScope"
     ],

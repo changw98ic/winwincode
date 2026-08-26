@@ -2,10 +2,10 @@
 
 //! Deterministic candidate identity derived from sealed Control Plane facts.
 //!
-//! This module does not read Git, Worker messages, or API payloads. The future
-//! Git/Artifact adapter owns construction of [`ValidatedGitSnapshotFact`].
-//! Until that adapter exists, only crate-private unit-test support can create a
-//! sealed snapshot, so production candidate freezing remains fail closed.
+//! This module does not read Git, Worker messages, or API payloads. The
+//! storage-owned Git/Artifact adapter returns an opaque
+//! [`ValidatedGitSourceArtifact`]; this module revalidates its exact successful
+//! Worker outcome and converts it into the private candidate snapshot seal.
 //!
 //! ```compile_fail
 //! use winwincode_delivery::domain::candidate::ValidatedGitSnapshotFact;
@@ -36,7 +36,9 @@ use std::collections::HashSet;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::application::stage::{TerminalOutcomeStatus, VerifiedTerminalOutcome};
+use crate::application::stage::{
+    DeliveryTerminalOutcomeFacts, TerminalOutcomeStatus, VerifiedTerminalOutcome,
+};
 
 use super::{
     Delivery, DeliveryStage, DeliveryValidationError, DeliveryValidationErrorCode, RepositoryRef,
@@ -47,6 +49,7 @@ use winwincode_domain::{
     CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, FencingToken, LeaseId,
     ProductSessionId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
+use winwincode_storage::{GitSourcePathState, ValidatedGitSourceArtifact};
 
 const MAX_CHANGED_PATHS: usize = 100_000;
 const MAX_PATH_LENGTH: usize = 4_096;
@@ -485,6 +488,133 @@ pub fn freeze_delivery_candidate(
     facts: &FreezeCandidateFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
     freeze_candidate_for_stage(delivery, facts, DeliveryStage::Executing)
+}
+
+/// Freezes a candidate only after the storage-owned source adapter rebuilt all
+/// Git identities and the Delivery-owned terminal authority revalidated the
+/// exact successful producer.
+///
+/// # Errors
+///
+/// Rejects a foreign repository/base revision, Artifact provenance that does
+/// not match the successful Worker outcome, a changed Git source fact, or a
+/// stale/non-successful producer.
+pub fn freeze_delivery_candidate_from_source(
+    delivery: &Delivery,
+    source: &ValidatedGitSourceArtifact,
+    terminal_facts: &DeliveryTerminalOutcomeFacts,
+) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
+    if delivery.snapshot().spec.repository.kind != super::RepositoryKind::LocalGit
+        || delivery.snapshot().spec.repository.locator != source.repository_locator()
+        || delivery.snapshot().spec.base_revision != source.requested_base_revision()
+    {
+        return Err(invalid_candidate(
+            "rebuilt candidate source does not match the current local Git repository and base revision",
+        ));
+    }
+    let terminal_outcome = terminal_facts
+        .verify_settled_success(delivery)
+        .map_err(|error| stale_candidate(&error.to_string()))?;
+    let producer = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == *terminal_outcome.stage_run_id())
+        .ok_or_else(|| stale_candidate("candidate producer StageRun is missing"))?;
+    let bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.stage_run_id == producer.id)
+        .collect::<Vec<_>>();
+    let [binding] = bindings.as_slice() else {
+        return Err(stale_candidate(
+            "candidate producer must have one exact SessionBinding",
+        ));
+    };
+    let codex_thread_id = terminal_outcome
+        .codex_thread_id()
+        .cloned()
+        .ok_or_else(|| stale_candidate("candidate producer CodexThread is missing"))?;
+    let last_event_sequence = u64::try_from(terminal_outcome.last_event_sequence().0)
+        .map_err(|_| invalid_candidate("candidate terminal event sequence is invalid"))?;
+    let artifact = source.artifact();
+    let provenance = artifact.provenance();
+    let exact_provenance = provenance.execution_job_id() == terminal_outcome.execution_job_id()
+        && provenance.attempt() == terminal_outcome.attempt()
+        && provenance.lease_id() == terminal_outcome.lease_id()
+        && provenance.fencing_token() == terminal_outcome.fencing_token()
+        && provenance.worker_id() == terminal_outcome.worker_id()
+        && provenance.worker_instance_id() == terminal_outcome.worker_instance_id()
+        && provenance.worker_session_id() == terminal_outcome.worker_session_id();
+    if !artifact.is_complete() || artifact.deleted_at_millis().is_some() || !exact_provenance {
+        return Err(stale_candidate(
+            "candidate Artifact is incomplete, deleted, or belongs to another Worker outcome",
+        ));
+    }
+    let changed_paths = source_path_facts(source);
+    let changed_hunks = source_hunk_facts(source);
+    let mut git_snapshot = ValidatedGitSnapshotFact {
+        stage_run_id: producer.id.clone(),
+        session_binding_id: binding.id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: producer.attempt,
+        lease_id: terminal_outcome.lease_id().clone(),
+        fencing_token: terminal_outcome.fencing_token().clone(),
+        worker_id: terminal_outcome.worker_id().clone(),
+        worker_instance_id: terminal_outcome.worker_instance_id().clone(),
+        worker_session_id: terminal_outcome.worker_session_id().clone(),
+        codex_thread_id,
+        repository: delivery.snapshot().spec.repository.clone(),
+        base_commit_id: source.base_commit_id().to_owned(),
+        base_tree_id: source.base_tree_id().to_owned(),
+        candidate_commit_id: source.candidate_commit_id().to_owned(),
+        candidate_tree_id: source.candidate_tree_id().to_owned(),
+        diff_sha256: source.diff_sha256().to_owned(),
+        changed_paths,
+        changed_hunks,
+        artifact_ref: artifact.artifact_id().0.clone(),
+        artifact_digest: artifact.digest().clone(),
+        last_event_sequence,
+        finished_at_millis: terminal_outcome.finished_at_millis(),
+        validation_seal: [0; 32],
+    };
+    git_snapshot.validation_seal = seal_git_snapshot(&git_snapshot)?;
+    freeze_delivery_candidate(
+        delivery,
+        &FreezeCandidateFacts {
+            git_snapshot,
+            terminal_outcome,
+        },
+    )
+}
+
+fn source_path_facts(source: &ValidatedGitSourceArtifact) -> Vec<CandidatePathFact> {
+    source
+        .changed_paths()
+        .iter()
+        .map(|path| CandidatePathFact {
+            path: path.path().to_owned(),
+            state: match path.state() {
+                GitSourcePathState::Present => CandidatePathState::Present,
+                GitSourcePathState::Deleted => CandidatePathState::Deleted,
+            },
+            object_id: path.object_id().map(str::to_owned),
+        })
+        .collect()
+}
+
+fn source_hunk_facts(source: &ValidatedGitSourceArtifact) -> Vec<CandidateHunkFact> {
+    source
+        .changed_hunks()
+        .iter()
+        .map(|hunk| CandidateHunkFact {
+            file_path: hunk.file_path().to_owned(),
+            hunk_sha256: hunk.hunk_sha256().to_owned(),
+            source_hunk_sha256: None,
+        })
+        .collect()
 }
 
 pub(crate) fn freeze_authorized_rework_candidate(
@@ -1016,6 +1146,57 @@ pub mod test_support {
             .expect("candidate fixture must match the current executor and sealed observations")
     }
 
+    /// Freezes the same high-level candidate fixture with canonical storage
+    /// provenance identities. This is used when an integration test must pass
+    /// the sealed candidate through the real Artifact catalog rather than only
+    /// through the Delivery domain.
+    ///
+    /// The caller still supplies only observable Git and Artifact values. The
+    /// lease, fence, Worker, and instance identities remain fixture-owned and
+    /// are deterministically derived from the current Delivery authority.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the producer IDs are missing, foreign, stale, incomplete,
+    /// the observable Git/Artifact input is invalid, or the derived storage
+    /// provenance cannot be sealed through the production candidate seam.
+    #[must_use]
+    pub fn freeze_storage_candidate_fixture(
+        delivery: &Delivery,
+        producer_stage_run_id: &StageRunId,
+        producer_session_binding_id: &SessionBindingId,
+        input: CandidateFixtureInput,
+    ) -> FrozenDeliveryCandidate {
+        let mut snapshot = sealed_snapshot_from_input(
+            delivery,
+            producer_stage_run_id,
+            producer_session_binding_id,
+            input,
+        );
+        let identity = |prefix: &str, purpose: &str| {
+            let digest = Sha256::digest(
+                format!(
+                    "winwincode.storage-candidate-fixture.v1\0{purpose}\0{}\0{}\0{}",
+                    delivery.id().0,
+                    producer_stage_run_id.0,
+                    producer_session_binding_id.0,
+                )
+                .as_bytes(),
+            );
+            let suffix = format!("{digest:X}");
+            format!("{prefix}_{}", &suffix[..26])
+        };
+        snapshot.lease_id = LeaseId(identity("lse", "lease"));
+        snapshot.fencing_token = FencingToken("1".into());
+        snapshot.worker_id = WorkerId(identity("wrk", "worker"));
+        snapshot.worker_instance_id = WorkerInstanceId(identity("wki", "worker-instance"));
+        snapshot.validation_seal =
+            seal_git_snapshot(&snapshot).expect("storage candidate fixture snapshot seal");
+        freeze_delivery_candidate(delivery, &freeze_facts(delivery, snapshot)).expect(
+            "storage candidate fixture must match the current executor and sealed observations",
+        )
+    }
+
     pub(crate) fn sealed_snapshot_from_input(
         delivery: &Delivery,
         stage_run_id: &StageRunId,
@@ -1434,18 +1615,22 @@ mod tests {
     fn freeze_candidate_fixture_rejects_foreign_binding() {
         let delivery = writer_delivery();
         let mut foreign = delivery.clone().into_snapshot();
-        foreign.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-foreign".into()),
-            delivery_id: foreign.id.clone(),
-            delivery_task_id: foreign.stage_runs[0].delivery_task_id.clone(),
-            stage_run_id: foreign.stage_runs[0].id.clone(),
-            product_session_id: ProductSessionId("product-foreign".into()),
-            execution_job_id: ExecutionJobId("job-foreign".into()),
-            worker_session_id: Some(WorkerSessionId("worker-foreign".into())),
-            codex_thread_id: Some(CodexThreadId("thread-foreign".into())),
-            bound_at_millis: 1_800_000_000_012,
-        });
+        foreign.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-foreign".into()),
+                delivery_id: foreign.id.clone(),
+                delivery_task_id: foreign.stage_runs[0].delivery_task_id.clone(),
+                stage_run_id: foreign.stage_runs[0].id.clone(),
+                product_session_id: ProductSessionId("product-foreign".into()),
+                execution_job_id: ExecutionJobId("job-foreign".into()),
+                worker_session_id: Some(WorkerSessionId("worker-foreign".into())),
+                codex_thread_id: Some(CodexThreadId("thread-foreign".into())),
+                bound_at_millis: 1_800_000_000_012,
+                ..Default::default()
+            }
+            .with_test_authority("binding-foreign", 1),
+        );
         let foreign = Delivery::try_from_snapshot(foreign).expect("foreign fixture binding");
 
         let rejected = std::panic::catch_unwind(|| {
@@ -1476,18 +1661,22 @@ mod tests {
             started_at_millis: 1_800_000_000_030,
             finished_at_millis: Some(1_800_000_000_040),
         });
-        stale.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-executor-2".into()),
-            delivery_id: stale.id.clone(),
-            delivery_task_id: stale.stage_runs[0].delivery_task_id.clone(),
-            stage_run_id: StageRunId("stage-executor-2".into()),
-            product_session_id: ProductSessionId("product-executor-2".into()),
-            execution_job_id: ExecutionJobId("job-executor-2".into()),
-            worker_session_id: Some(WorkerSessionId("worker-executor-2".into())),
-            codex_thread_id: Some(CodexThreadId("thread-executor-2".into())),
-            bound_at_millis: 1_800_000_000_031,
-        });
+        stale.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-executor-2".into()),
+                delivery_id: stale.id.clone(),
+                delivery_task_id: stale.stage_runs[0].delivery_task_id.clone(),
+                stage_run_id: StageRunId("stage-executor-2".into()),
+                product_session_id: ProductSessionId("product-executor-2".into()),
+                execution_job_id: ExecutionJobId("job-executor-2".into()),
+                worker_session_id: Some(WorkerSessionId("worker-executor-2".into())),
+                codex_thread_id: Some(CodexThreadId("thread-executor-2".into())),
+                bound_at_millis: 1_800_000_000_031,
+                ..Default::default()
+            }
+            .with_test_authority("binding-executor-2", 2),
+        );
         stale.updated_at_millis = 1_800_000_000_040;
         let stale = Delivery::try_from_snapshot(stale).expect("newer writer fixture");
 
@@ -1629,18 +1818,22 @@ mod tests {
         let delivery = writer_delivery();
         let facts = freeze_facts(&delivery, snapshot(&delivery));
         let mut ambiguous = delivery.into_snapshot();
-        ambiguous.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-executor-duplicate".into()),
-            delivery_id: ambiguous.id.clone(),
-            delivery_task_id: ambiguous.stage_runs[0].delivery_task_id.clone(),
-            stage_run_id: StageRunId("stage-executor-1".into()),
-            product_session_id: ProductSessionId("product-executor-duplicate".into()),
-            execution_job_id: ExecutionJobId("job-executor-duplicate".into()),
-            worker_session_id: Some(WorkerSessionId("worker-executor-duplicate".into())),
-            codex_thread_id: Some(CodexThreadId("thread-executor-duplicate".into())),
-            bound_at_millis: 1_800_000_000_012,
-        });
+        ambiguous.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-executor-duplicate".into()),
+                delivery_id: ambiguous.id.clone(),
+                delivery_task_id: ambiguous.stage_runs[0].delivery_task_id.clone(),
+                stage_run_id: StageRunId("stage-executor-1".into()),
+                product_session_id: ProductSessionId("product-executor-duplicate".into()),
+                execution_job_id: ExecutionJobId("job-executor-duplicate".into()),
+                worker_session_id: Some(WorkerSessionId("worker-executor-duplicate".into())),
+                codex_thread_id: Some(CodexThreadId("thread-executor-duplicate".into())),
+                bound_at_millis: 1_800_000_000_012,
+                ..Default::default()
+            }
+            .with_test_authority("binding-executor-duplicate", 1),
+        );
         let ambiguous = Delivery::try_from_snapshot(ambiguous)
             .expect("aggregate permits verification of writer binding cardinality here");
 
@@ -1701,18 +1894,22 @@ mod tests {
                 finished_at_millis: Some(1_800_000_000_020),
             },
         );
-        ambiguous.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-executor-concurrent".into()),
-            delivery_id: ambiguous.id.clone(),
-            delivery_task_id: task_id,
-            stage_run_id: StageRunId("stage-executor-concurrent".into()),
-            product_session_id: ProductSessionId("product-executor-concurrent".into()),
-            execution_job_id: ExecutionJobId("job-executor-concurrent".into()),
-            worker_session_id: Some(WorkerSessionId("worker-executor-concurrent".into())),
-            codex_thread_id: Some(CodexThreadId("thread-executor-concurrent".into())),
-            bound_at_millis: 1_800_000_000_011,
-        });
+        ambiguous.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-executor-concurrent".into()),
+                delivery_id: ambiguous.id.clone(),
+                delivery_task_id: task_id,
+                stage_run_id: StageRunId("stage-executor-concurrent".into()),
+                product_session_id: ProductSessionId("product-executor-concurrent".into()),
+                execution_job_id: ExecutionJobId("job-executor-concurrent".into()),
+                worker_session_id: Some(WorkerSessionId("worker-executor-concurrent".into())),
+                codex_thread_id: Some(CodexThreadId("thread-executor-concurrent".into())),
+                bound_at_millis: 1_800_000_000_011,
+                ..Default::default()
+            }
+            .with_test_authority("binding-executor-concurrent", 1),
+        );
         let ambiguous = Delivery::try_from_snapshot(ambiguous)
             .expect("aggregate permits candidate writer ambiguity check here");
 
@@ -1773,18 +1970,22 @@ mod tests {
             started_at_millis: 1_800_000_000_030,
             finished_at_millis: None,
         });
-        later.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-remediator-1".into()),
-            delivery_id: later.id.clone(),
-            delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
-            stage_run_id: StageRunId("stage-remediator-1".into()),
-            product_session_id: ProductSessionId("product-remediator".into()),
-            execution_job_id: ExecutionJobId("job-remediator".into()),
-            worker_session_id: Some(WorkerSessionId("worker-remediator".into())),
-            codex_thread_id: Some(CodexThreadId("thread-remediator".into())),
-            bound_at_millis: 1_800_000_000_031,
-        });
+        later.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-remediator-1".into()),
+                delivery_id: later.id.clone(),
+                delivery_task_id: later.stage_runs[0].delivery_task_id.clone(),
+                stage_run_id: StageRunId("stage-remediator-1".into()),
+                product_session_id: ProductSessionId("product-remediator".into()),
+                execution_job_id: ExecutionJobId("job-remediator".into()),
+                worker_session_id: Some(WorkerSessionId("worker-remediator".into())),
+                codex_thread_id: Some(CodexThreadId("thread-remediator".into())),
+                bound_at_millis: 1_800_000_000_031,
+                ..Default::default()
+            }
+            .with_test_authority("binding-remediator-1", 1),
+        );
         later.updated_at_millis = 1_800_000_000_031;
         later.revision += 1;
         let later = Delivery::try_from_snapshot(later).expect("later writer");

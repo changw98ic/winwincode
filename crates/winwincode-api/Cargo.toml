@@ -1,6 +1,6 @@
 [package]
 name = "winwincode-api"
-description = "Generated public transport types for the WinWinCode Control Plane and Execution Port"
+description = "Generated public HTTP/WebSocket transport types for the WinWinCode Control Plane"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

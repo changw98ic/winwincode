@@ -5,10 +5,7 @@
 use std::sync::Mutex;
 
 use serde_json::Value;
-use winwincode_api::generated::{
-    CommandEnvelope, CommandName, DeliveryAdvancePayload, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionScope,
-};
+use winwincode_api::generated::{CommandEnvelope, CommandName, DeliveryAdvancePayload};
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
     AtomicPublication, DeliveryCommand, DeliveryCommandPort, DeliveryJournalPort, DeliveryStore,
@@ -16,6 +13,9 @@ use winwincode_delivery::store::{
     LoadedDeliveryJournal, StartDeliveryStage,
 };
 use winwincode_domain::{DeliveryId, ExecutionJobId};
+use winwincode_execution_port::generated::{
+    DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionScope,
+};
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, DurableOutboxEvent,
     LoadedAggregateJournal, NewOutboxEvent, ProductStateStorage, StorageError, StorageErrorKind,

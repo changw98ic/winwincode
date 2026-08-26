@@ -4,7 +4,8 @@ use winwincode_delivery::{
     application::CoordinationErrorCode,
     application::attention::{AttentionDecision, ResolveAttentionInput, resolve_attention},
     application::session_binding::{
-        SessionBindingIdentity, accept_worker_session, report_codex_thread,
+        SessionBindingAuthority, SessionBindingIdentity, accept_worker_session_with_authority,
+        report_codex_thread_with_authority,
     },
     application::stage::{
         ActiveLeaseIdentity, AdvanceStageInput, CancelAcknowledgement, NewStageIdentities,
@@ -33,9 +34,25 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     ArtifactId, AttentionItemId, CodexThreadId, DeliveryTaskId, ExecutionAckSequence,
-    ExecutionJobId, FencingToken, LeaseId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
-    WorkerId, WorkerInstanceId, WorkerSessionId,
+    ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId, ProductSessionId, RequestId,
+    Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
+
+fn session_binding_authority(
+    worker_session_id: WorkerSessionId,
+    seed: &str,
+    attempt: u64,
+) -> SessionBindingAuthority {
+    SessionBindingAuthority::from_execution_port(
+        WorkerId(format!("worker-{seed}")),
+        WorkerInstanceId(format!("instance-{seed}")),
+        LeaseId(format!("lease-{seed}")),
+        attempt,
+        FencingToken("1".into()),
+        worker_session_id,
+        ExecutionMessageId(format!("message-{seed}")),
+    )
+}
 
 fn delivery_with_status(status: DeliveryStatus) -> Delivery {
     let mut snapshot = Delivery::decode_json(include_bytes!("fixtures/delivery-main.json"))
@@ -82,6 +99,7 @@ fn completed_active_binding(delivery: Delivery, suffix: &str) -> Delivery {
         .expect("active binding");
     binding.worker_session_id = Some(WorkerSessionId(format!("worker-session-{suffix}")));
     binding.codex_thread_id = Some(CodexThreadId(format!("codex-thread-{suffix}")));
+    *binding = binding.clone().with_test_authority(suffix, binding.attempt);
     Delivery::try_from_snapshot(snapshot).expect("completed binding")
 }
 
@@ -832,20 +850,21 @@ fn session_binding_matches_exact_delivery_task_stage_job_and_session_identities(
         execution_job_id: binding.execution_job_id.clone(),
     };
     let worker_session_id = WorkerSessionId("worker-session-exact".into());
-    let worker_bound = accept_worker_session(
+    let authority = session_binding_authority(worker_session_id.clone(), "exact", 1);
+    let worker_bound = accept_worker_session_with_authority(
         &started,
         started.revision(),
         &identity,
-        worker_session_id.clone(),
+        &authority,
         1_800_000_000_120,
     )
     .expect("Worker accepts exact dispatch");
     let codex_thread_id = CodexThreadId("codex-thread-exact".into());
-    let complete = report_codex_thread(
+    let complete = report_codex_thread_with_authority(
         &worker_bound,
         worker_bound.revision(),
         &identity,
-        &worker_session_id,
+        &authority,
         codex_thread_id.clone(),
         1_800_000_000_130,
     )
@@ -886,11 +905,16 @@ fn conflicting_session_binding_stops_recovery() {
         product_session_id: ProductSessionId("product-session-foreign".into()),
         execution_job_id: binding.execution_job_id.clone(),
     };
-    let error = accept_worker_session(
+    let authority = session_binding_authority(
+        WorkerSessionId("worker-session-foreign".into()),
+        "foreign",
+        1,
+    );
+    let error = accept_worker_session_with_authority(
         &started,
         started.revision(),
         &wrong_identity,
-        WorkerSessionId("worker-session-foreign".into()),
+        &authority,
         1_800_000_000_120,
     )
     .expect_err("foreign ProductSession must stop recovery");
@@ -1502,11 +1526,12 @@ fn worker_can_cancel_and_finish_before_reporting_a_codex_thread() {
         execution_job_id: binding.execution_job_id.clone(),
     };
     let worker_session_id = WorkerSessionId("worker-session-before-thread".into());
-    let worker_bound = accept_worker_session(
+    let authority = session_binding_authority(worker_session_id.clone(), "before-thread", 1);
+    let worker_bound = accept_worker_session_with_authority(
         &started,
         started.revision(),
         &identity,
-        worker_session_id.clone(),
+        &authority,
         1_800_000_000_120,
     )
     .expect("WorkerSession is accepted");

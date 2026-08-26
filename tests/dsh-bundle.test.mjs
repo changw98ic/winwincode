@@ -139,10 +139,7 @@ test('WinWinCode composes as the final layer of a fresh DSH Web profile', () => 
         roleId: 'chat',
       },
     })
-    assert.deepEqual(byId.get('winwincode-github-publication-provider'), {
-      id: 'winwincode-github-publication-provider',
-      name: '@winwincode/dsh-profile/github-publication-provider',
-    })
+    assert.equal(byId.has('winwincode-github-publication-provider'), false)
     assert.deepEqual(byId.get('winwincode-strongflow'), {
       id: 'winwincode-strongflow',
       name: '@winwincode/strongflow',

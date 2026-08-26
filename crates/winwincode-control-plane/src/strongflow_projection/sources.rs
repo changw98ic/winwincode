@@ -5,16 +5,57 @@
 use std::{error::Error, fmt};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
-    domain::{DeliverySpecId, DeliveryVerdictId, FrozenDeliveryCandidate},
-    projection::runtime::{RuntimeFoldSnapshot, RuntimeProjection},
+    domain::{Delivery, FrozenDeliveryCandidate},
+    projection::runtime::{RuntimeFoldSnapshot, RuntimeProjection, RuntimeSessionProjection},
 };
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, Instant, ProductSessionId, Revision, Sha256Digest,
+    DeliveryId, ExecutionEventId, Instant, ProductSessionId, Revision, Sha256Digest,
+};
+use winwincode_storage::{
+    ProductStateStorage, ProjectionEventCursor, ProjectionReadCut, StorageError, StorageErrorKind,
+};
+
+use crate::runtime_event_transaction::{
+    decode_runtime_ledger_state, product_session_runtime_stream_id_for_projection,
+    runtime_stream_id_for_projection,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Runtime facts exposed by the trusted source seam.
+///
+/// A Delivery read contains the Delivery-owned runtime sessions. A standalone
+/// `ProductSession` read has no Delivery aggregate and therefore deliberately
+/// contains no `SessionBinding` rows. Keeping the aggregate identity optional
+/// prevents a `ProductSession` read from being represented as a fabricated
+/// Delivery or a generic session binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustedRuntimeFoldSnapshot {
+    pub delivery_id: Option<DeliveryId>,
+    pub product_session_id: Option<ProductSessionId>,
+    pub sessions: Vec<RuntimeSessionProjection>,
+}
+
+impl TrustedRuntimeFoldSnapshot {
+    fn from_delivery(snapshot: &RuntimeFoldSnapshot) -> Self {
+        Self {
+            delivery_id: Some(snapshot.delivery_id.clone()),
+            product_session_id: None,
+            sessions: snapshot.sessions.clone(),
+        }
+    }
+
+    fn product_session(product_session_id: ProductSessionId) -> Self {
+        Self {
+            delivery_id: None,
+            product_session_id: Some(product_session_id),
+            sessions: Vec::new(),
+        }
+    }
+}
 
 /// Expected accepted-ledger coordinates when replaying a server-issued cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +90,7 @@ pub struct DeliveryRuntimeReadRequest {
     delivery_id: DeliveryId,
     delivery_revision: u64,
     expected: Option<RuntimeCutExpectation>,
+    event_cursor: Option<ProjectionEventCursor>,
     limit: usize,
 }
 
@@ -58,6 +100,7 @@ pub struct ProductSessionRuntimeReadRequest {
     scope: RepositoryScope,
     product_session_id: ProductSessionId,
     expected: Option<RuntimeCutExpectation>,
+    event_cursor: Option<ProjectionEventCursor>,
     limit: usize,
 }
 
@@ -77,6 +120,10 @@ impl ProductSessionRuntimeReadRequest {
         self.expected.as_ref()
     }
 
+    pub(crate) const fn event_cursor(&self) -> Option<&ProjectionEventCursor> {
+        self.event_cursor.as_ref()
+    }
+
     #[must_use]
     pub const fn limit(&self) -> usize {
         self.limit
@@ -92,8 +139,14 @@ impl ProductSessionRuntimeReadRequest {
             scope,
             product_session_id,
             expected,
+            event_cursor: None,
             limit,
         }
+    }
+
+    pub(crate) fn with_event_cursor(mut self, event_cursor: ProjectionEventCursor) -> Self {
+        self.event_cursor = Some(event_cursor);
+        self
     }
 }
 
@@ -118,6 +171,10 @@ impl DeliveryRuntimeReadRequest {
         self.expected.as_ref()
     }
 
+    pub(crate) const fn event_cursor(&self) -> Option<&ProjectionEventCursor> {
+        self.event_cursor.as_ref()
+    }
+
     #[must_use]
     pub const fn limit(&self) -> usize {
         self.limit
@@ -135,8 +192,14 @@ impl DeliveryRuntimeReadRequest {
             delivery_id,
             delivery_revision,
             expected,
+            event_cursor: None,
             limit,
         }
+    }
+
+    pub(crate) fn with_event_cursor(mut self, event_cursor: ProjectionEventCursor) -> Self {
+        self.event_cursor = Some(event_cursor);
+        self
     }
 }
 
@@ -174,8 +237,15 @@ pub struct TrustedRuntimeProjectionRead {
     ledger_revision: Revision,
     accepted_sequence: u64,
     rebuilt_at: Instant,
-    projection: RuntimeProjection,
+    snapshot: TrustedRuntimeFoldSnapshot,
     source_seal: Sha256Digest,
+    /// Cursor captured by the same durable read as this runtime fact.
+    ///
+    /// The field is optional for the original in-memory test adapters. A
+    /// production adapter must populate it through [`Self::with_event_cursor`]
+    /// so the application cannot pair a source read with a cursor obtained by a
+    /// later independent read.
+    event_cursor: Option<ProjectionEventCursor>,
 }
 
 impl TrustedRuntimeProjectionRead {
@@ -191,10 +261,10 @@ impl TrustedRuntimeProjectionRead {
         ledger_revision: Revision,
         accepted_sequence: u64,
         rebuilt_at: Instant,
-        projection: RuntimeProjection,
+        projection: &RuntimeProjection,
         source_seal: Sha256Digest,
     ) -> Result<Self, TrustedProjectionReadError> {
-        let snapshot = projection.snapshot();
+        let snapshot = TrustedRuntimeFoldSnapshot::from_delivery(projection.snapshot());
         let max_session_sequence = snapshot
             .sessions
             .iter()
@@ -204,7 +274,11 @@ impl TrustedRuntimeProjectionRead {
         if delivery_revision == 0
             || delivery_revision > MAX_SAFE_INTEGER
             || !canonical_repository_scope(&scope)
-            || !portable(&snapshot.delivery_id.0, 200)
+            || snapshot.delivery_id.is_none()
+            || !snapshot
+                .delivery_id
+                .as_ref()
+                .is_some_and(|delivery_id| portable(&delivery_id.0, 200))
             || ledger_revision.0 < 0
             || accepted_sequence > MAX_SAFE_INTEGER
             || accepted_sequence < max_session_sequence
@@ -220,9 +294,55 @@ impl TrustedRuntimeProjectionRead {
             ledger_revision,
             accepted_sequence,
             rebuilt_at,
-            projection,
+            snapshot,
             source_seal,
+            event_cursor: None,
         })
+    }
+
+    /// Validates one `ProductSession` runtime ledger read. `ProductSession`
+    /// execution is not a Delivery stage and therefore cannot be promoted to
+    /// a Delivery `SessionBinding` projection.
+    pub(crate) fn try_new_product_session(
+        scope: RepositoryScope,
+        product_session_id: ProductSessionId,
+        ledger_revision: Revision,
+        accepted_sequence: u64,
+        rebuilt_at: Instant,
+        source_seal: Sha256Digest,
+    ) -> Result<Self, TrustedProjectionReadError> {
+        if !canonical_repository_scope(&scope)
+            || !portable(&product_session_id.0, 200)
+            || ledger_revision.0 < 0
+            || accepted_sequence > MAX_SAFE_INTEGER
+            || !canonical_instant(&rebuilt_at)
+            || !canonical_sha256(&source_seal)
+        {
+            return Err(TrustedProjectionReadError::Invalid);
+        }
+        Ok(Self {
+            scope,
+            delivery_revision: 0,
+            ledger_revision,
+            accepted_sequence,
+            rebuilt_at,
+            snapshot: TrustedRuntimeFoldSnapshot::product_session(product_session_id),
+            source_seal,
+            event_cursor: None,
+        })
+    }
+
+    /// Associates the exact resource-local event cursor captured with this
+    /// runtime fact.
+    ///
+    /// The cursor is deliberately attached after the trusted runtime owner has
+    /// completed its one storage read. It is not a second runtime cursor: it is
+    /// the existing public `ProjectionEventCursor` emitted by the same
+    /// `StateCommit` that made the accepted ledger state visible.
+    #[must_use]
+    pub fn with_event_cursor(mut self, event_cursor: ProjectionEventCursor) -> Self {
+        self.event_cursor = Some(event_cursor);
+        self
     }
 
     #[must_use]
@@ -251,8 +371,15 @@ impl TrustedRuntimeProjectionRead {
     }
 
     #[must_use]
-    pub fn snapshot(&self) -> &RuntimeFoldSnapshot {
-        self.projection.snapshot()
+    pub fn snapshot(&self) -> &TrustedRuntimeFoldSnapshot {
+        &self.snapshot
+    }
+
+    /// Returns the resource-local public cursor captured with this read, when
+    /// the source owner provides the atomic read-cut seam.
+    #[must_use]
+    pub const fn event_cursor(&self) -> Option<&ProjectionEventCursor> {
+        self.event_cursor.as_ref()
     }
 
     pub(crate) const fn source_seal(&self) -> &Sha256Digest {
@@ -262,6 +389,44 @@ impl TrustedRuntimeProjectionRead {
 
 /// Trusted append-only runtime-ledger reader.
 pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
+    /// Reports whether this adapter returns the runtime fact and its public
+    /// resource cursor from one storage-owned durable read.
+    ///
+    /// The default is `false` for the small in-memory adapters used by older
+    /// tests. Production adapters must override this and attach the cursor to
+    /// every successful read; the application then never performs a separate
+    /// cursor-baseline read.
+    fn provides_atomic_read_cut(&self) -> bool {
+        false
+    }
+
+    /// Reads a Delivery runtime fact and its public event cursor through the
+    /// storage-owned atomic read-cut seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable source failure without substituting an independent
+    /// latest cursor read.
+    fn read_delivery_with_storage(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError>;
+
+    /// Reads a `ProductSession` runtime fact and its public event cursor through
+    /// the storage-owned atomic read-cut seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable source failure without substituting an independent
+    /// latest cursor read.
+    fn read_product_session_with_storage(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError>;
+
     /// Reads latest or exact accepted facts for one current aggregate scope.
     ///
     /// # Errors
@@ -285,258 +450,505 @@ pub trait TrustedRuntimeProjectionAdapter: Send + Sync {
     }
 }
 
-/// Immutable identity stored with one trusted publication intent/result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicationFactBinding {
-    delivery_id: DeliveryId,
-    delivery_revision: u64,
-    delivery_spec_id: DeliverySpecId,
-    delivery_spec_revision: u64,
-    candidate_ref: String,
-    diff_sha256: String,
-    verdict_id: DeliveryVerdictId,
-    approval_id: AttentionItemId,
-    approval_review_set_sha256: String,
-    target_sha256: String,
+/// One trusted runtime fact and the resource-local event cursor captured by
+/// the same durable read.
+#[derive(Debug, Clone)]
+pub struct TrustedRuntimeProjectionReadCut {
+    runtime: TrustedRuntimeProjectionRead,
 }
 
-/// Closed remote resource identity accepted from the trusted publication owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PublicationResourceKind {
-    GitHubIssue,
-    GitHubPullRequest,
-}
-
-/// Secret-safe remote publication identity. It never contains a URL or payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicationResourceFact {
-    kind: PublicationResourceKind,
-    repository: String,
-    number: u64,
-}
-
-impl PublicationResourceFact {
-    /// Builds a closed GitHub resource identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a malformed repository slug or unsafe issue/PR number.
-    pub fn try_new(
-        kind: PublicationResourceKind,
-        repository: impl Into<String>,
-        number: u64,
-    ) -> Result<Self, TrustedProjectionReadError> {
-        let fact = Self {
-            kind,
-            repository: repository.into(),
-            number,
-        };
-        let mut segments = fact.repository.split('/');
-        let canonical_repository = segments.next().is_some_and(|value| portable(value, 100))
-            && segments.next().is_some_and(|value| portable(value, 100))
-            && segments.next().is_none();
-        if !canonical_repository || number == 0 || number > MAX_SAFE_INTEGER {
-            return Err(TrustedProjectionReadError::Invalid);
+impl TrustedRuntimeProjectionReadCut {
+    /// Builds a read cut and attaches its existing storage cursor to the
+    /// runtime fact. No cursor is generated or advanced here.
+    #[must_use]
+    pub fn new(runtime: TrustedRuntimeProjectionRead, event_cursor: ProjectionEventCursor) -> Self {
+        Self {
+            runtime: runtime.with_event_cursor(event_cursor),
         }
-        Ok(fact)
     }
 
     #[must_use]
-    pub const fn kind(&self) -> PublicationResourceKind {
-        self.kind
+    pub const fn runtime(&self) -> &TrustedRuntimeProjectionRead {
+        &self.runtime
     }
 
+    /// Returns the resource cursor captured with the runtime fact.
+    ///
+    /// # Panics
+    ///
+    /// This invariant cannot be violated because the inner value is private
+    /// and [`Self::new`] always attaches the cursor.
     #[must_use]
-    pub fn repository(&self) -> &str {
-        &self.repository
+    pub fn event_cursor(&self) -> &ProjectionEventCursor {
+        // `runtime` is private and can only be initialized by `new`, which
+        // attaches this cursor before the cut is handed to an adapter.
+        self.runtime
+            .event_cursor()
+            .expect("a read cut always contains its durable event cursor")
     }
 
-    #[must_use]
-    pub const fn number(&self) -> u64 {
-        self.number
+    fn into_runtime(self) -> TrustedRuntimeProjectionRead {
+        self.runtime
     }
 }
 
-impl PublicationFactBinding {
-    /// Builds the complete immutable publication fact binding.
+/// Storage-owned seam for one atomic runtime fact/cursor read.
+///
+/// `SqliteStorage` owns the transaction and implements this seam at the
+/// composition boundary. The projection module only receives already
+/// validated trusted facts and the existing `ProjectionEventCursor`; it never
+/// opens a second database connection or invents a parallel cursor table.
+pub trait TrustedRuntimeProjectionReadCutReader: Send + Sync {
+    /// Reads one Delivery runtime fact and its resource-local cursor at one
+    /// durable cut.
     ///
     /// # Errors
     ///
-    /// Rejects incomplete identities, revisions, references, or digests.
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
-        delivery_id: DeliveryId,
-        delivery_revision: u64,
-        delivery_spec_id: DeliverySpecId,
-        delivery_spec_revision: u64,
-        candidate_ref: impl Into<String>,
-        diff_sha256: impl Into<String>,
-        verdict_id: DeliveryVerdictId,
-        approval_id: AttentionItemId,
-        approval_review_set_sha256: impl Into<String>,
-        target_sha256: impl Into<String>,
-    ) -> Result<Self, TrustedProjectionReadError> {
-        let fact = Self {
-            delivery_id,
-            delivery_revision,
-            delivery_spec_id,
-            delivery_spec_revision,
-            candidate_ref: candidate_ref.into(),
-            diff_sha256: diff_sha256.into(),
-            verdict_id,
-            approval_id,
-            approval_review_set_sha256: approval_review_set_sha256.into(),
-            target_sha256: target_sha256.into(),
-        };
-        if fact.delivery_revision == 0
-            || fact.delivery_revision > MAX_SAFE_INTEGER
-            || fact.delivery_spec_revision == 0
-            || fact.delivery_spec_revision > MAX_SAFE_INTEGER
-            || !portable(&fact.delivery_id.0, 200)
-            || !portable(&fact.delivery_spec_id.0, 200)
-            || !portable(&fact.verdict_id.0, 200)
-            || !portable(&fact.approval_id.0, 200)
-            || !portable(&fact.candidate_ref, 4_096)
-            || !lowercase_sha256(&fact.diff_sha256)
-            || !lowercase_sha256(&fact.approval_review_set_sha256)
-            || !lowercase_sha256(&fact.target_sha256)
+    /// Returns a trusted-source error when the durable cut cannot be read or
+    /// fails validation.
+    fn read_delivery_cut(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError>;
+
+    /// Reads one `ProductSession` runtime fact and its resource-local cursor at
+    /// one durable cut.
+    ///
+    /// # Errors
+    ///
+    /// Returns a trusted-source error when the durable cut cannot be read or
+    /// fails validation.
+    fn read_product_session_cut(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError>;
+}
+
+/// Production adapter for a storage-owned `SQLite` read-cut implementation.
+///
+/// The reader is intentionally injected at the deep storage seam: the
+/// adapter cannot fall back to a second connection or independently query a
+/// latest cursor. This keeps runtime state and its public event baseline
+/// inseparable while allowing the storage crate to retain its private `SQLite`
+/// transaction handle.
+pub struct SqliteTrustedRuntimeProjectionAdapter {
+    reader: Box<dyn TrustedRuntimeProjectionReadCutReader>,
+}
+
+impl SqliteTrustedRuntimeProjectionAdapter {
+    /// Creates the adapter over the storage-owned `SQLite` read-cut seam.
+    #[must_use]
+    pub fn new(reader: Box<dyn TrustedRuntimeProjectionReadCutReader>) -> Self {
+        Self { reader }
+    }
+
+    /// Creates the production adapter backed by the `SqliteStorage` read-cut
+    /// implementation supplied by the owning `ControlPlane`.
+    #[must_use]
+    pub fn from_sqlite_storage() -> Self {
+        Self::new(Box::new(SqliteStorageRuntimeProjectionReadCutReader))
+    }
+}
+
+impl TrustedRuntimeProjectionAdapter for SqliteTrustedRuntimeProjectionAdapter {
+    fn provides_atomic_read_cut(&self) -> bool {
+        true
+    }
+
+    fn read_delivery(
+        &self,
+        request: &DeliveryRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        let _ = request;
+        Err(TrustedProjectionReadError::Unavailable)
+    }
+
+    fn read_product_session(
+        &self,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        let _ = request;
+        Err(TrustedProjectionReadError::Unavailable)
+    }
+
+    fn read_delivery_with_storage(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        Ok(self
+            .reader
+            .read_delivery_cut(storage, request, delivery)?
+            .into_runtime())
+    }
+
+    fn read_product_session_with_storage(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        Ok(self
+            .reader
+            .read_product_session_cut(storage, request)?
+            .into_runtime())
+    }
+}
+
+/// Production runtime read-cut reader composed with `SqliteStorage`.
+///
+/// The reader receives the owning storage adapter for each read instead of
+/// opening a second cursor source. `ProductStateStorage::load_projection_read_cut`
+/// owns the `SQLite` transaction and returns the runtime state streams together
+/// with the existing resource-local public event cursor.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SqliteStorageRuntimeProjectionReadCutReader;
+
+impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionReadCutReader {
+    fn read_delivery_cut(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError> {
+        if request.scope().repository_id.0.is_empty()
+            || request.delivery_id() != delivery.id()
+            || request.delivery_revision() != delivery.revision()
         {
+            return Err(TrustedProjectionReadError::Stale);
+        }
+        let scope_key = crate::repository_scope_key(request.scope())
+            .map_err(|_| TrustedProjectionReadError::Invalid)?;
+        let bindings = delivery
+            .snapshot()
+            .session_bindings
+            .iter()
+            .filter(|binding| binding.worker_session_id.is_some())
+            .collect::<Vec<_>>();
+        if bindings.iter().any(|binding| {
+            binding.codex_thread_id.is_none()
+                || binding.worker_id.is_none()
+                || binding.worker_instance_id.is_none()
+                || binding.lease_id.is_none()
+                || binding.fencing_token.is_none()
+        }) {
             return Err(TrustedProjectionReadError::Invalid);
         }
-        Ok(fact)
+        let state_stream_ids = bindings
+            .iter()
+            .map(|binding| runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id))
+            .collect::<Vec<_>>();
+        let event_key =
+            super::application::delivery_event_stream_key(request.scope(), request.delivery_id())
+                .map_err(|_| TrustedProjectionReadError::Invalid)?;
+        let cut = storage
+            .load_projection_read_cut(&state_stream_ids, &event_key, request.event_cursor())
+            .map_err(|error| map_storage_read_error(&error))?;
+        let runtime = delivery_runtime_read(request, delivery, &scope_key, &cut, &bindings)?;
+        if runtime.accepted_sequence() > 0 && cut.projection_event_cursor().sequence() == 0 {
+            return Err(TrustedProjectionReadError::Invalid);
+        }
+        Ok(TrustedRuntimeProjectionReadCut::new(
+            runtime,
+            cut.projection_event_cursor().clone(),
+        ))
     }
 
-    #[must_use]
-    pub const fn delivery_id(&self) -> &DeliveryId {
-        &self.delivery_id
-    }
-
-    #[must_use]
-    pub const fn delivery_revision(&self) -> u64 {
-        self.delivery_revision
-    }
-
-    #[must_use]
-    pub const fn delivery_spec_id(&self) -> &DeliverySpecId {
-        &self.delivery_spec_id
-    }
-
-    #[must_use]
-    pub const fn delivery_spec_revision(&self) -> u64 {
-        self.delivery_spec_revision
-    }
-
-    #[must_use]
-    pub fn candidate_ref(&self) -> &str {
-        &self.candidate_ref
-    }
-
-    #[must_use]
-    pub fn diff_sha256(&self) -> &str {
-        &self.diff_sha256
-    }
-
-    #[must_use]
-    pub const fn verdict_id(&self) -> &DeliveryVerdictId {
-        &self.verdict_id
-    }
-
-    #[must_use]
-    pub const fn approval_id(&self) -> &AttentionItemId {
-        &self.approval_id
-    }
-
-    #[must_use]
-    pub fn approval_review_set_sha256(&self) -> &str {
-        &self.approval_review_set_sha256
-    }
-
-    #[must_use]
-    pub fn target_sha256(&self) -> &str {
-        &self.target_sha256
-    }
-}
-
-/// Safe publication result fields supplied by the publication owner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicationResultFact {
-    publication_id: winwincode_domain::PublicationId,
-    revision: Revision,
-    state: String,
-    updated_at: Instant,
-    binding: PublicationFactBinding,
-    resource: Option<PublicationResourceFact>,
-}
-
-impl PublicationResultFact {
-    /// Builds one safe publication result bound to an authorized fact set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects malformed identity, state, time, or resource facts.
-    pub fn try_new(
-        publication_id: winwincode_domain::PublicationId,
-        revision: Revision,
-        state: impl Into<String>,
-        updated_at: Instant,
-        binding: PublicationFactBinding,
-        resource: Option<PublicationResourceFact>,
-    ) -> Result<Self, TrustedProjectionReadError> {
-        let fact = Self {
-            publication_id,
-            revision,
-            state: state.into(),
-            updated_at,
-            binding,
-            resource,
-        };
-        if !portable(&fact.publication_id.0, 200)
-            || fact.revision.0 < 1
-            || !matches!(
-                fact.state.as_str(),
-                "pending" | "publishing" | "published" | "failed" | "cancelled"
+    fn read_product_session_cut(
+        &self,
+        storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError> {
+        let state_stream_id =
+            product_session_runtime_stream_id_for_projection(request.product_session_id());
+        let event_key = super::application::product_session_event_stream_key(
+            request.scope(),
+            request.product_session_id(),
+        )
+        .map_err(|_| TrustedProjectionReadError::Invalid)?;
+        let cut = storage
+            .load_projection_read_cut(
+                std::slice::from_ref(&state_stream_id),
+                &event_key,
+                request.event_cursor(),
             )
-            || !canonical_instant(&fact.updated_at)
+            .map_err(|error| map_storage_read_error(&error))?;
+        if cut.projection_event_cursor().sequence() == 0 {
+            return Err(TrustedProjectionReadError::Invalid);
+        }
+        let Some(state) = cut.states().first() else {
+            return Err(TrustedProjectionReadError::Unavailable);
+        };
+        let ledger = decode_runtime_ledger_state(state, &state_stream_id)
+            .map_err(|error| map_storage_read_error(&error))?;
+        if ledger.product_session_id != *request.product_session_id()
+            || ledger.delivery_id.is_some()
+            || ledger.delivery_task_id.is_some()
+            || ledger.stage_run_id.is_some()
         {
             return Err(TrustedProjectionReadError::Invalid);
         }
-        Ok(fact)
-    }
-
-    #[must_use]
-    pub const fn publication_id(&self) -> &winwincode_domain::PublicationId {
-        &self.publication_id
-    }
-
-    #[must_use]
-    pub const fn revision(&self) -> &Revision {
-        &self.revision
-    }
-
-    #[must_use]
-    pub fn state(&self) -> &str {
-        &self.state
-    }
-
-    #[must_use]
-    pub const fn updated_at(&self) -> &Instant {
-        &self.updated_at
-    }
-
-    #[must_use]
-    pub const fn binding(&self) -> &PublicationFactBinding {
-        &self.binding
-    }
-
-    #[must_use]
-    pub const fn resource(&self) -> Option<&PublicationResourceFact> {
-        self.resource.as_ref()
+        let rebuilt_at = ledger
+            .events
+            .last()
+            .map(|entry| entry.event.occurred_at.clone())
+            .ok_or(TrustedProjectionReadError::Invalid)?;
+        let ledger_revision = Revision(
+            i64::try_from(ledger.highest_sequence)
+                .map_err(|_| TrustedProjectionReadError::Invalid)?,
+        );
+        let accepted_sequence = ledger.highest_sequence;
+        let source_seal = runtime_source_seal(&cut);
+        let expected_mismatch = request.expected().is_some_and(|expected| {
+            expected.ledger_revision() != &ledger_revision
+                || expected.accepted_sequence() != accepted_sequence
+        });
+        let read = TrustedRuntimeProjectionRead::try_new_product_session(
+            request.scope().clone(),
+            request.product_session_id().clone(),
+            ledger_revision,
+            accepted_sequence,
+            rebuilt_at,
+            source_seal,
+        )?;
+        if expected_mismatch {
+            return Err(TrustedProjectionReadError::Stale);
+        }
+        Ok(TrustedRuntimeProjectionReadCut::new(
+            read,
+            cut.projection_event_cursor().clone(),
+        ))
     }
 }
+
+fn delivery_runtime_read(
+    request: &DeliveryRuntimeReadRequest,
+    delivery: &Delivery,
+    scope_key: &winwincode_storage::ReceiptScopeKey,
+    cut: &ProjectionReadCut,
+    bindings: &[&winwincode_delivery::domain::SessionBinding],
+) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+    let Some(binding) = bindings.first() else {
+        let projection = RuntimeProjection::new(delivery, Vec::new())
+            .map_err(|_| TrustedProjectionReadError::Invalid)?;
+        return trusted_runtime_read(
+            request,
+            &projection,
+            Revision(0),
+            0,
+            Instant("1970-01-01T00:00:00Z".to_owned()),
+            cut,
+        );
+    };
+    if bindings.len() != 1 {
+        return Err(TrustedProjectionReadError::Invalid);
+    }
+    let LoadedDeliveryRuntimeState {
+        events,
+        ledger_revision,
+        accepted_sequence,
+        rebuilt_at,
+    } = load_delivery_runtime_state(delivery, binding, scope_key, cut)?;
+    let stage_run_settled = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == binding.stage_run_id)
+        .ok_or(TrustedProjectionReadError::Invalid)?
+        .finished_at_millis
+        .is_some();
+    let settled_last_sequence = if stage_run_settled {
+        if accepted_sequence == 0 {
+            return Err(TrustedProjectionReadError::Invalid);
+        }
+        Some(accepted_sequence)
+    } else {
+        None
+    };
+    let projection = RuntimeProjection::from_persisted_checkpoints(
+        delivery,
+        &binding.id,
+        binding
+            .lease_id
+            .clone()
+            .ok_or(TrustedProjectionReadError::Invalid)?,
+        binding
+            .fencing_token
+            .clone()
+            .ok_or(TrustedProjectionReadError::Invalid)?,
+        binding
+            .worker_id
+            .clone()
+            .ok_or(TrustedProjectionReadError::Invalid)?,
+        binding
+            .worker_instance_id
+            .clone()
+            .ok_or(TrustedProjectionReadError::Invalid)?,
+        settled_last_sequence,
+        &events,
+    )
+    .map_err(|_| TrustedProjectionReadError::Invalid)?;
+    trusted_runtime_read(
+        request,
+        &projection,
+        ledger_revision,
+        accepted_sequence,
+        rebuilt_at,
+        cut,
+    )
+}
+
+struct LoadedDeliveryRuntimeState {
+    events: Vec<(u64, ExecutionEventId)>,
+    ledger_revision: Revision,
+    accepted_sequence: u64,
+    rebuilt_at: Instant,
+}
+
+fn load_delivery_runtime_state(
+    delivery: &Delivery,
+    binding: &winwincode_delivery::domain::SessionBinding,
+    scope_key: &winwincode_storage::ReceiptScopeKey,
+    cut: &ProjectionReadCut,
+) -> Result<LoadedDeliveryRuntimeState, TrustedProjectionReadError> {
+    let stream_id = runtime_stream_id_for_projection(scope_key, &binding.execution_job_id);
+    let ledger = cut
+        .states()
+        .iter()
+        .find(|state| state.stream_id == stream_id)
+        .map(|state| decode_runtime_ledger_state(state, &stream_id))
+        .transpose()
+        .map_err(|error| map_storage_read_error(&error))?;
+    let Some(ledger) = ledger else {
+        return Ok(LoadedDeliveryRuntimeState {
+            events: Vec::new(),
+            ledger_revision: Revision(0),
+            accepted_sequence: 0,
+            rebuilt_at: Instant("1970-01-01T00:00:00Z".to_owned()),
+        });
+    };
+    let (
+        Some(worker_session_id),
+        Some(codex_thread_id),
+        Some(lease_id),
+        Some(fencing_token),
+        Some(worker_id),
+        Some(worker_instance_id),
+    ) = (
+        binding.worker_session_id.as_ref(),
+        binding.codex_thread_id.as_ref(),
+        binding.lease_id.as_ref(),
+        binding.fencing_token.as_ref(),
+        binding.worker_id.as_ref(),
+        binding.worker_instance_id.as_ref(),
+    )
+    else {
+        return Err(TrustedProjectionReadError::Invalid);
+    };
+    if ledger.delivery_id.as_ref() != Some(delivery.id())
+        || ledger.delivery_task_id.as_ref() != binding.delivery_task_id.as_ref()
+        || ledger.stage_run_id.as_ref() != Some(&binding.stage_run_id)
+        || ledger.product_session_id != binding.product_session_id
+        || ledger.execution_job_id != binding.execution_job_id
+        || &ledger.worker_session_id != worker_session_id
+        || &ledger.codex_thread_id != codex_thread_id
+        || &ledger.lease_id != lease_id
+        || ledger.attempt != binding.attempt
+        || &ledger.fencing_token != fencing_token
+        || &ledger.worker_id != worker_id
+        || &ledger.worker_instance_id != worker_instance_id
+    {
+        return Err(TrustedProjectionReadError::Invalid);
+    }
+    let rebuilt_at = ledger
+        .events
+        .last()
+        .map(|entry| entry.event.occurred_at.clone())
+        .ok_or(TrustedProjectionReadError::Invalid)?;
+    let events = ledger
+        .events
+        .iter()
+        .map(|entry| {
+            Ok::<_, TrustedProjectionReadError>((
+                u64::try_from(entry.event.sequence.0)
+                    .map_err(|_| TrustedProjectionReadError::Invalid)?,
+                entry.event.event_id.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ledger_revision = Revision(
+        i64::try_from(ledger.highest_sequence).map_err(|_| TrustedProjectionReadError::Invalid)?,
+    );
+    Ok(LoadedDeliveryRuntimeState {
+        events,
+        ledger_revision,
+        accepted_sequence: ledger.highest_sequence,
+        rebuilt_at,
+    })
+}
+
+fn trusted_runtime_read(
+    request: &DeliveryRuntimeReadRequest,
+    projection: &RuntimeProjection,
+    ledger_revision: Revision,
+    accepted_sequence: u64,
+    rebuilt_at: Instant,
+    cut: &ProjectionReadCut,
+) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+    let source_seal = runtime_source_seal(cut);
+    let read = TrustedRuntimeProjectionRead::try_new(
+        request.scope().clone(),
+        request.delivery_revision(),
+        ledger_revision,
+        accepted_sequence,
+        rebuilt_at,
+        projection,
+        source_seal,
+    )?;
+    if request.expected().is_some_and(|expected| {
+        expected.ledger_revision() != read.ledger_revision()
+            || expected.accepted_sequence() != accepted_sequence
+    }) {
+        return Err(TrustedProjectionReadError::Stale);
+    }
+    Ok(read.with_event_cursor(cut.projection_event_cursor().clone()))
+}
+
+fn runtime_source_seal(cut: &ProjectionReadCut) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.runtime-projection-source.v1\0");
+    for state in cut.states() {
+        digest.update((state.stream_id.len() as u64).to_be_bytes());
+        digest.update(state.stream_id.as_bytes());
+        digest.update(state.revision.to_be_bytes());
+        digest.update((state.payload.len() as u64).to_be_bytes());
+        digest.update(&state.payload);
+    }
+    digest.update(cut.projection_event_cursor().sequence().to_be_bytes());
+    if let Some(event_id) = cut.projection_event_cursor().event_id() {
+        digest.update((event_id.0.len() as u64).to_be_bytes());
+        digest.update(event_id.0.as_bytes());
+    }
+    Sha256Digest(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn map_storage_read_error(error: &StorageError) -> TrustedProjectionReadError {
+    match error.kind() {
+        StorageErrorKind::EventCursorExpired => TrustedProjectionReadError::ExactCutNotRetained,
+        StorageErrorKind::InvalidInput | StorageErrorKind::RevisionConflict => {
+            TrustedProjectionReadError::Invalid
+        }
+        StorageErrorKind::Adapter => TrustedProjectionReadError::Unavailable,
+        _ => TrustedProjectionReadError::TemporarilyUnavailable,
+    }
+}
+
+pub use winwincode_publication::{
+    PublicationFactBinding, PublicationResourceFact, PublicationResourceKind, PublicationResultFact,
+};
 
 /// Candidate and publication facts read from one durable publication cut.
 #[derive(Debug, Clone, PartialEq)]
@@ -716,6 +1128,7 @@ fn portable_scope_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_event_transaction::{RuntimeLedgerEvent, RuntimeLedgerState};
     use winwincode_delivery::{
         domain::{Delivery, SessionBindingId},
         projection::runtime::{
@@ -724,6 +1137,17 @@ mod tests {
                 RuntimeAuthorityFixture, RuntimeFactFixture, accepted_binding, accepted_event,
             },
         },
+    };
+    use winwincode_domain::{
+        ControlPlaneEventId, ExecutionEventId, ExecutionJobId, ExecutionSequence, FencingToken,
+        Instant as DomainInstant, LeaseId, RequestId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    };
+    use winwincode_execution_port::generated::{
+        ExecutionEventCategory, ExecutionEventRecord, ExecutionLeaseStamp,
+    };
+    use winwincode_storage::{
+        NewOutboxEvent, ProductStateStorage, ProjectionEventStream, ProjectionEventStreamKey,
+        ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
     };
 
     fn scope() -> RepositoryScope {
@@ -734,6 +1158,76 @@ mod tests {
             project_id: winwincode_domain::ProjectId("prj_fixture".into()),
             repository_id: winwincode_domain::RepositoryId("rep_fixture".into()),
         }
+    }
+
+    fn canonical_source_scope() -> RepositoryScope {
+        RepositoryScope {
+            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            organization_id: winwincode_domain::OrganizationId(
+                "org_01J00000000000000000000000".into(),
+            ),
+            workspace_id: winwincode_domain::WorkspaceId("wsp_01J00000000000000000000000".into()),
+            project_id: winwincode_domain::ProjectId("prj_01J00000000000000000000000".into()),
+            repository_id: winwincode_domain::RepositoryId("rep_01J00000000000000000000000".into()),
+        }
+    }
+
+    fn source_runtime_event(event_id: &str) -> (ExecutionEventRecord, Sha256Digest) {
+        let event = ExecutionEventRecord {
+            category: ExecutionEventCategory::Lifecycle,
+            event_id: ExecutionEventId(event_id.into()),
+            occurred_at: DomainInstant("2026-08-25T00:00:00Z".into()),
+            payload: None,
+            sequence: ExecutionSequence(1),
+            summary: "runtime accepted".into(),
+        };
+        let digest = Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&event).expect("event JSON")),
+        ));
+        (event, digest)
+    }
+
+    struct RuntimeFixtureCommit<'fixture> {
+        actor_key: &'fixture [u8],
+        request_id: &'fixture str,
+        command_digest: char,
+        stream_id: String,
+        ledger: &'fixture RuntimeLedgerState,
+        event_id: &'fixture str,
+        stream: ProjectionEventStream,
+    }
+
+    fn commit_runtime_fixture(
+        storage: &mut winwincode_storage::SqliteStorage,
+        scope: &RepositoryScope,
+        fixture: RuntimeFixtureCommit<'_>,
+    ) {
+        let scope_key = crate::repository_scope_key(scope).expect("scope key");
+        let receipt_identity = ReceiptIdentity::new(
+            ReceiptActorKey::from_encoded(fixture.actor_key.to_vec()).expect("actor key"),
+            scope_key,
+            RequestId(fixture.request_id.into()),
+        )
+        .expect("receipt identity");
+        storage
+            .commit(&StateCommit::new(
+                receipt_identity,
+                Sha256Digest(format!(
+                    "sha256:{}",
+                    fixture.command_digest.to_string().repeat(64)
+                )),
+                fixture.stream_id,
+                0,
+                serde_json::to_vec(fixture.ledger).expect("ledger JSON"),
+                vec![NewOutboxEvent::projection(
+                    ControlPlaneEventId(fixture.event_id.into()),
+                    "runtime-projection.invalidated.v1",
+                    b"{}".to_vec(),
+                    fixture.stream,
+                )],
+            ))
+            .expect("runtime state and invalidation");
     }
 
     fn runtime_projection() -> RuntimeProjection {
@@ -771,11 +1265,15 @@ mod tests {
             Revision(1),
             1,
             Instant("2026-08-25T00:00:00Z".into()),
-            projection.clone(),
+            &projection,
             Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         )
         .expect("bounded read");
-        assert_eq!(read.snapshot(), projection.snapshot());
+        assert_eq!(
+            read.snapshot().delivery_id.as_ref(),
+            Some(&projection.snapshot().delivery_id)
+        );
+        assert_eq!(read.snapshot().sessions, projection.snapshot().sessions);
 
         assert_eq!(
             TrustedRuntimeProjectionRead::try_new(
@@ -784,11 +1282,276 @@ mod tests {
                 Revision(1),
                 0,
                 Instant("2026-08-25T00:00:00Z".into()),
-                projection,
+                &projection,
                 Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             )
             .expect_err("accepted cursor cannot trail its fold"),
             TrustedProjectionReadError::Invalid
         );
+    }
+
+    struct FixedReadCut {
+        cut: TrustedRuntimeProjectionReadCut,
+    }
+
+    impl TrustedRuntimeProjectionReadCutReader for FixedReadCut {
+        fn read_delivery_cut(
+            &self,
+            _storage: &dyn ProductStateStorage,
+            _request: &DeliveryRuntimeReadRequest,
+            _delivery: &Delivery,
+        ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError> {
+            Ok(self.cut.clone())
+        }
+
+        fn read_product_session_cut(
+            &self,
+            _storage: &dyn ProductStateStorage,
+            _request: &ProductSessionRuntimeReadRequest,
+        ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError> {
+            Ok(self.cut.clone())
+        }
+    }
+
+    #[test]
+    fn sqlite_storage_product_session_read_cut_rebuilds_runtime_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-control-plane-product-source-test-{}",
+            std::process::id()
+        ));
+        let mut storage = winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage");
+        let scope = canonical_source_scope();
+        let product_session_id = ProductSessionId("psn_01J00000000000000000000000".into());
+        let stream_id = product_session_runtime_stream_id_for_projection(&product_session_id);
+        let (event, event_digest) = source_runtime_event("xevt_01J00000000000000000000000");
+        let lease = ExecutionLeaseStamp {
+            attempt: 1,
+            expires_at: DomainInstant("2026-08-25T01:00:00Z".into()),
+            fencing_token: FencingToken("1".into()),
+            issued_at: DomainInstant("2026-08-25T00:00:00Z".into()),
+            job_id: ExecutionJobId("job_01J00000000000000000000000".into()),
+            lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+            worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+            worker_instance_id: WorkerInstanceId("wki_01J00000000000000000000000".into()),
+        };
+        let ledger = RuntimeLedgerState {
+            schema_version: 1,
+            delivery_id: None,
+            delivery_task_id: None,
+            stage_run_id: None,
+            product_session_id: product_session_id.clone(),
+            execution_job_id: lease.job_id.clone(),
+            worker_session_id: WorkerSessionId("wsn_01J00000000000000000000000".into()),
+            codex_thread_id: winwincode_domain::CodexThreadId(
+                "cdx_01J00000000000000000000000".into(),
+            ),
+            lease_id: lease.lease_id.clone(),
+            attempt: 1,
+            fencing_token: lease.fencing_token.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            highest_sequence: 1,
+            events: vec![RuntimeLedgerEvent {
+                event,
+                event_digest,
+            }],
+        };
+        commit_runtime_fixture(
+            &mut storage,
+            &scope,
+            RuntimeFixtureCommit {
+                actor_key: b"source-product-fixture",
+                request_id: "req_source_product_fixture_0001",
+                command_digest: 'b',
+                stream_id,
+                ledger: &ledger,
+                event_id: "evt_product_session_fixture_0001",
+                stream: ProjectionEventStream::ProductSession(product_session_id.clone()),
+            },
+        );
+
+        let request = ProductSessionRuntimeReadRequest::new(scope, product_session_id, None, 20);
+        let read = SqliteStorageRuntimeProjectionReadCutReader
+            .read_product_session_cut(&storage, &request)
+            .expect("ProductSession runtime cut");
+        assert_eq!(read.event_cursor().sequence(), 1);
+        assert_eq!(read.runtime().delivery_revision(), 0);
+        assert_eq!(read.runtime().ledger_revision(), &Revision(1));
+        assert_eq!(read.runtime().accepted_sequence(), 1);
+        assert!(read.runtime().snapshot().delivery_id.is_none());
+        assert!(
+            read.runtime()
+                .snapshot()
+                .product_session_id
+                .as_ref()
+                .is_some_and(|id| id == request.product_session_id())
+        );
+        assert!(read.runtime().snapshot().sessions.is_empty());
+        Box::new(storage).close().expect("SQLite close");
+        std::fs::remove_dir_all(root).expect("temporary source directory");
+    }
+
+    #[test]
+    fn sqlite_storage_delivery_read_cut_rebuilds_runtime_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-control-plane-delivery-source-test-{}",
+            std::process::id()
+        ));
+        let mut storage = winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage");
+        let scope = canonical_source_scope();
+        let scope_key = crate::repository_scope_key(&scope).expect("scope key");
+        let delivery = Delivery::decode_json(include_bytes!(
+            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
+        ))
+        .expect("canonical fixture");
+        let binding = &delivery.snapshot().session_bindings[0];
+        let worker_session_id = binding
+            .worker_session_id
+            .clone()
+            .expect("fixture WorkerSession");
+        let codex_thread_id = binding
+            .codex_thread_id
+            .clone()
+            .expect("fixture CodexThread");
+        let lease_id = binding.lease_id.clone().expect("fixture lease");
+        let fencing_token = binding
+            .fencing_token
+            .clone()
+            .expect("fixture fencing token");
+        let worker_id = binding.worker_id.clone().expect("fixture Worker");
+        let worker_instance_id = binding
+            .worker_instance_id
+            .clone()
+            .expect("fixture Worker instance");
+        let stream_id = runtime_stream_id_for_projection(&scope_key, &binding.execution_job_id);
+        let (event, event_digest) =
+            source_runtime_event("xevt_delivery_01J00000000000000000000000");
+        let ledger = RuntimeLedgerState {
+            schema_version: 1,
+            delivery_id: Some(delivery.id().clone()),
+            delivery_task_id: binding.delivery_task_id.clone(),
+            stage_run_id: Some(binding.stage_run_id.clone()),
+            product_session_id: binding.product_session_id.clone(),
+            execution_job_id: binding.execution_job_id.clone(),
+            worker_session_id,
+            codex_thread_id,
+            lease_id,
+            attempt: binding.attempt,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            highest_sequence: 1,
+            events: vec![RuntimeLedgerEvent {
+                event,
+                event_digest,
+            }],
+        };
+        commit_runtime_fixture(
+            &mut storage,
+            &scope,
+            RuntimeFixtureCommit {
+                actor_key: b"source-delivery-fixture",
+                request_id: "req_source_delivery_fixture_0001",
+                command_digest: 'c',
+                stream_id,
+                ledger: &ledger,
+                event_id: "evt_delivery_fixture_0001",
+                stream: ProjectionEventStream::Delivery(delivery.id().clone()),
+            },
+        );
+
+        let request = DeliveryRuntimeReadRequest::new(
+            scope,
+            delivery.id().clone(),
+            delivery.revision(),
+            None,
+            20,
+        );
+        let read = SqliteStorageRuntimeProjectionReadCutReader
+            .read_delivery_cut(&storage, &request, &delivery)
+            .expect("Delivery runtime cut");
+        assert_eq!(read.event_cursor().sequence(), 1);
+        assert_eq!(read.runtime().delivery_revision(), delivery.revision());
+        assert_eq!(read.runtime().ledger_revision(), &Revision(1));
+        assert_eq!(read.runtime().accepted_sequence(), 1);
+        assert_eq!(
+            read.runtime().snapshot().delivery_id.as_ref(),
+            Some(delivery.id())
+        );
+        assert!(read.runtime().snapshot().product_session_id.is_none());
+        assert_eq!(read.runtime().snapshot().sessions.len(), 1);
+        assert_eq!(read.runtime().snapshot().sessions[0].as_of_sequence, 1);
+        Box::new(storage).close().expect("SQLite close");
+        std::fs::remove_dir_all(root).expect("temporary source directory");
+    }
+
+    #[test]
+    fn sqlite_adapter_returns_runtime_and_cursor_from_one_read_cut() {
+        let runtime = TrustedRuntimeProjectionRead::try_new(
+            scope(),
+            7,
+            Revision(1),
+            1,
+            Instant("2026-08-25T00:00:00Z".into()),
+            &runtime_projection(),
+            Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        )
+        .expect("trusted runtime");
+        let stream =
+            ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into()));
+        let key = ProjectionEventStreamKey::new(
+            ReceiptScopeKey::from_encoded(b"fixture-scope".to_vec()).expect("scope key"),
+            stream,
+        )
+        .expect("stream key");
+        let cursor = ProjectionEventCursor::try_new(
+            key,
+            1,
+            Some(ControlPlaneEventId("evt_01J00000000000000000000000".into())),
+        )
+        .expect("event cursor");
+        let cut = TrustedRuntimeProjectionReadCut::new(runtime, cursor);
+        let adapter =
+            SqliteTrustedRuntimeProjectionAdapter::new(Box::new(FixedReadCut { cut: cut.clone() }));
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-control-plane-source-test-{}",
+            std::process::id()
+        ));
+        let storage = winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage");
+        let delivery = Delivery::decode_json(include_bytes!(
+            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
+        ))
+        .expect("canonical fixture");
+
+        assert!(adapter.provides_atomic_read_cut());
+        let delivery_read = adapter
+            .read_delivery_with_storage(
+                &storage,
+                &DeliveryRuntimeReadRequest::new(
+                    scope(),
+                    DeliveryId("dlv_01J00000000000000000000000".into()),
+                    7,
+                    None,
+                    20,
+                ),
+                &delivery,
+            )
+            .expect("Delivery cut");
+        assert_eq!(delivery_read.event_cursor(), Some(cut.event_cursor()));
+
+        let product_read = adapter
+            .read_product_session_with_storage(
+                &storage,
+                &ProductSessionRuntimeReadRequest::new(
+                    scope(),
+                    ProductSessionId("product:fixture".into()),
+                    None,
+                    20,
+                ),
+            )
+            .expect("ProductSession cut");
+        assert_eq!(product_read.event_cursor(), Some(cut.event_cursor()));
+        Box::new(storage).close().expect("SQLite close");
+        std::fs::remove_dir_all(root).expect("temporary source directory");
     }
 }

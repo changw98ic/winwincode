@@ -8,7 +8,7 @@ use std::{
 };
 
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, RepositoryScope, SchemaVersion, Scope, UserActor,
+    Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DeliveryVerdictCommitError, EventPublishError,
@@ -30,8 +30,8 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest, UserId,
-    WorkspaceId,
+    DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,

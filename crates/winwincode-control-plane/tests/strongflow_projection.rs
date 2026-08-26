@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, ControlPlaneWebSocketSubscribeStartAt, DeliveryGetParameters, DeliveryGetQuery,
     DeliveryGetQueryQuery, DeliveryStageRuntimeProjectionGetParameters,
@@ -9,17 +10,20 @@ use winwincode_api::generated::{
     ProductSessionRuntimeProjectionGetParameters, ProductSessionRuntimeProjectionGetParametersKind,
     QueryResultResponse, RepositoryScope, RepositoryScopeKind, RuntimeProjectionEventCursor,
     RuntimeProjectionGetParameters, RuntimeProjectionGetQuery, RuntimeProjectionGetQueryQuery,
-    SchemaVersion, StrongFlowReadCursor, UserActor, UserActorKind,
+    StrongFlowReadCursor, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, AggregateJournalRecord, CommitReceipt, ControlPlane, EventPublishError,
-    EventPublisher, LoadedAggregateJournal, OutboxEvent, ProductStateStorage,
-    ProjectionEventCursor, ProjectionEventStream, StorageError, StoredState,
+    EventPublisher, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent, ProductStateStorage,
+    ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey, StorageError,
+    StoredState,
     strongflow_projection::{
-        DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, StrongFlowProjectionError,
+        DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest,
+        SqliteTrustedRuntimeProjectionAdapter, StrongFlowProjectionError,
         StrongFlowProjectionQueryPort, StrongFlowProjectionSources, TrustedProjectionReadError,
         TrustedPublicationProjectionAdapter, TrustedPublicationProjectionRead,
         TrustedRuntimeProjectionAdapter, TrustedRuntimeProjectionRead,
+        TrustedRuntimeProjectionReadCut, TrustedRuntimeProjectionReadCutReader,
     },
 };
 use winwincode_delivery::{
@@ -50,10 +54,15 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     AttentionItemId, CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId,
-    ExecutionJobId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
-    Revision, Sha256Digest, StageRunId, UserId, WorkerSessionId, WorkspaceId,
+    ExecutionEventId, ExecutionJobId, ExecutionSequence, Instant, OrganizationId, ProductSessionId,
+    ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, StageRunId, UserId,
+    WorkerSessionId, WorkspaceId,
 };
-use winwincode_storage::{ReceiptIdentity, StateCommit};
+use winwincode_execution_port::generated::{ExecutionEventCategory, ExecutionEventRecord};
+use winwincode_storage::{
+    ProjectionReadCut, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
+    StateCommit,
+};
 
 // PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
 // Missing sources return TRUSTED_FACTS_UNAVAILABLE.
@@ -80,6 +89,16 @@ impl ProductStateStorage for JournalStorage {
     fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         Ok(None)
     }
+    fn load_projection_read_cut(
+        &self,
+        _state_stream_ids: &[String],
+        _key: &ProjectionEventStreamKey,
+        _expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionReadCut, StorageError> {
+        Err(StorageError::adapter(
+            "read-only test storage has no SQLite read cut",
+        ))
+    }
     fn load_journal(
         &self,
         _key: &AggregateJournalKey,
@@ -88,7 +107,7 @@ impl ProductStateStorage for JournalStorage {
     }
     fn load_projection_event_cursor(
         &self,
-        key: &winwincode_control_plane::ProjectionEventStreamKey,
+        key: &ProjectionEventStreamKey,
         expected: Option<&ProjectionEventCursor>,
     ) -> Result<ProjectionEventCursor, StorageError> {
         let sequence = if self.advance_event_after_runtime_read
@@ -151,6 +170,19 @@ impl EventPublisher for NoopPublisher {
     }
 }
 
+struct UnavailablePublicationAdapter;
+impl TrustedPublicationProjectionAdapter for UnavailablePublicationAdapter {
+    fn read_current(
+        &self,
+        _scope: &RepositoryScope,
+        _delivery_id: &DeliveryId,
+        _delivery_revision: u64,
+        _expected_publication_revision: Option<&Revision>,
+    ) -> Result<TrustedPublicationProjectionRead, TrustedProjectionReadError> {
+        Err(TrustedProjectionReadError::Unavailable)
+    }
+}
+
 #[derive(Clone)]
 struct RuntimeAdapter {
     read: Arc<Mutex<TrustedRuntimeProjectionRead>>,
@@ -158,8 +190,32 @@ struct RuntimeAdapter {
     read_count: Arc<Mutex<usize>>,
     expire_after_reads: Option<usize>,
     unavailable: bool,
+    atomic_read_cut: bool,
+    delivery_event_cursor: Option<ProjectionEventCursor>,
+    product_session_event_cursor: Option<ProjectionEventCursor>,
 }
 impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
+    fn provides_atomic_read_cut(&self) -> bool {
+        self.atomic_read_cut
+    }
+
+    fn read_delivery_with_storage(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        _delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        self.read_delivery(request)
+    }
+
+    fn read_product_session_with_storage(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        self.read_product_session(request)
+    }
+
     fn read_delivery(
         &self,
         request: &DeliveryRuntimeReadRequest,
@@ -177,7 +233,7 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
             return Err(TrustedProjectionReadError::Unavailable);
         }
         let read = self.read.lock().expect("runtime read");
-        if request.delivery_id() != &read.snapshot().delivery_id
+        if read.snapshot().delivery_id.as_ref() != Some(request.delivery_id())
             || request.delivery_revision() != read.delivery_revision()
         {
             return Err(TrustedProjectionReadError::Stale);
@@ -197,7 +253,11 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
         {
             *raced = true;
         }
-        Ok(read.clone())
+        let mut read = read.clone();
+        if let Some(cursor) = &self.delivery_event_cursor {
+            read = read.with_event_cursor(cursor.clone());
+        }
+        Ok(read)
     }
     fn read_product_session(
         &self,
@@ -226,8 +286,47 @@ impl TrustedRuntimeProjectionAdapter for RuntimeAdapter {
             {
                 return Err(TrustedProjectionReadError::Stale);
             }
-            Ok(read.clone())
+            let mut read = read.clone();
+            if let Some(cursor) = &self.product_session_event_cursor {
+                read = read.with_event_cursor(cursor.clone());
+            }
+            Ok(read)
         }
+    }
+}
+
+struct RuntimeCutReader {
+    adapter: RuntimeAdapter,
+}
+
+impl TrustedRuntimeProjectionReadCutReader for RuntimeCutReader {
+    fn read_delivery_cut(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        _delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError> {
+        let runtime = self.adapter.read_delivery(request)?;
+        let cursor = self
+            .adapter
+            .delivery_event_cursor
+            .clone()
+            .ok_or(TrustedProjectionReadError::Invalid)?;
+        Ok(TrustedRuntimeProjectionReadCut::new(runtime, cursor))
+    }
+
+    fn read_product_session_cut(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionReadCut, TrustedProjectionReadError> {
+        let runtime = self.adapter.read_product_session(request)?;
+        let cursor = self
+            .adapter
+            .product_session_event_cursor
+            .clone()
+            .ok_or(TrustedProjectionReadError::Invalid)?;
+        Ok(TrustedRuntimeProjectionReadCut::new(runtime, cursor))
     }
 }
 
@@ -342,6 +441,32 @@ fn fixture_with_delivery_and_candidate(
     )
 }
 
+fn fixture_projection_cursor(
+    scope: &RepositoryScope,
+    stream: ProjectionEventStream,
+    event_id: &str,
+) -> ProjectionEventCursor {
+    let mut encoded_scope = Vec::new();
+    for value in [
+        "winwincode.command-receipt.scope.v1",
+        "repository",
+        scope.organization_id.0.as_str(),
+        scope.workspace_id.0.as_str(),
+        scope.project_id.0.as_str(),
+        scope.repository_id.0.as_str(),
+    ] {
+        encoded_scope.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        encoded_scope.extend_from_slice(value.as_bytes());
+    }
+    let key = ProjectionEventStreamKey::new(
+        ReceiptScopeKey::from_encoded(encoded_scope).expect("fixture scope key"),
+        stream,
+    )
+    .expect("fixture event stream key");
+    ProjectionEventCursor::try_new(key, 1, Some(ControlPlaneEventId(event_id.to_owned())))
+        .expect("fixture event cursor")
+}
+
 #[allow(clippy::too_many_lines)]
 fn fixture_with_delivery_and_event_behavior(
     delivery: Delivery,
@@ -392,7 +517,7 @@ fn fixture_with_delivery_and_event_behavior(
             Revision(4),
             accepted_sequence,
             Instant("2026-08-25T00:00:00Z".into()),
-            projection,
+            &projection,
             Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         )
         .expect("trusted runtime"),
@@ -409,6 +534,19 @@ fn fixture_with_delivery_and_event_behavior(
     .expect("trusted publication");
     let journal = Arc::new(Mutex::new(aggregate));
     let runtime_read_count = Arc::new(Mutex::new(0));
+    let delivery_event_cursor = fixture_projection_cursor(
+        &scope,
+        ProjectionEventStream::Delivery(delivery.id().clone()),
+        "evt_delivery_fixture_0001",
+    );
+    let product_session_event_cursor =
+        delivery.snapshot().session_bindings.first().map(|binding| {
+            fixture_projection_cursor(
+                &scope,
+                ProjectionEventStream::ProductSession(binding.product_session_id.clone()),
+                "evt_product_session_fixture_0001",
+            )
+        });
     let mut control_plane = ControlPlane::start(
         Box::new(JournalStorage {
             journal: Arc::clone(&journal),
@@ -423,13 +561,20 @@ fn fixture_with_delivery_and_event_behavior(
     .expect("control plane");
     control_plane
         .install_strongflow_projection_sources(StrongFlowProjectionSources::new(
-            Box::new(RuntimeAdapter {
-                read: Arc::clone(&runtime),
-                race: Arc::new(Mutex::new(false)),
-                read_count: runtime_read_count,
-                expire_after_reads,
-                unavailable: runtime_unavailable,
-            }),
+            Box::new(SqliteTrustedRuntimeProjectionAdapter::new(Box::new(
+                RuntimeCutReader {
+                    adapter: RuntimeAdapter {
+                        read: Arc::clone(&runtime),
+                        race: Arc::new(Mutex::new(false)),
+                        read_count: runtime_read_count,
+                        expire_after_reads,
+                        unavailable: runtime_unavailable,
+                        atomic_read_cut: true,
+                        delivery_event_cursor: Some(delivery_event_cursor),
+                        product_session_event_cursor,
+                    },
+                },
+            ))),
             Box::new(PublicationAdapter {
                 read: publication,
                 unavailable: publication_unavailable,
@@ -466,7 +611,9 @@ fn delivery_fixture(draft: bool) -> Delivery {
         snapshot.session_bindings.clear();
         snapshot.attention_items.clear();
     }
-    Delivery::try_from_snapshot(snapshot).expect("projection fixture")
+    projection_delivery_with_worker_authority(
+        Delivery::try_from_snapshot(snapshot).expect("projection fixture"),
+    )
 }
 
 fn approved_solution_review_fixture(status: DeliveryStatus) -> Delivery {
@@ -483,9 +630,32 @@ fn approved_solution_review_fixture(status: DeliveryStatus) -> Delivery {
     review_attention.assigned_to = Some("usr_reviewer".into());
     review_attention.resolved_by = Some("usr_reviewer".into());
     snapshot.updated_at_millis += 1;
-    Delivery::try_from_snapshot(snapshot).expect("approved solution-review lifecycle fixture")
+    projection_delivery_with_worker_authority(
+        Delivery::try_from_snapshot(snapshot).expect("approved solution-review lifecycle fixture"),
+    )
 }
 
+fn projection_delivery_with_worker_authority(delivery: Delivery) -> Delivery {
+    let mut snapshot = delivery.into_snapshot();
+    for binding in &mut snapshot.session_bindings {
+        if binding.worker_session_id.is_none() {
+            continue;
+        }
+        let attempt = snapshot
+            .stage_runs
+            .iter()
+            .find(|run| run.id == binding.stage_run_id)
+            .expect("SessionBinding StageRun")
+            .attempt;
+        let authority_seed = binding.id.0.clone();
+        *binding = binding
+            .clone()
+            .with_test_authority(&authority_seed, attempt);
+    }
+    Delivery::try_from_snapshot(snapshot).expect("projection fixture with Worker authority")
+}
+
+#[allow(clippy::too_many_lines)]
 fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
     let approved = approved_solution_review_fixture(DeliveryStatus::Executing).into_snapshot();
     let mut snapshot = Delivery::decode_json(include_bytes!(
@@ -530,18 +700,22 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
         started_at_millis: 1_800_000_000_040,
         finished_at_millis: Some(1_800_000_000_050),
     });
-    snapshot.session_bindings.push(SessionBinding {
-        schema_version: 3,
-        id: executor_binding_id.clone(),
-        delivery_id: snapshot.id.clone(),
-        delivery_task_id: Some(delivery_task_id),
-        stage_run_id: executor_stage_run_id.clone(),
-        product_session_id: ProductSessionId("product:executor".into()),
-        execution_job_id: ExecutionJobId("job:executor".into()),
-        worker_session_id: Some(WorkerSessionId("worker-session:executor".into())),
-        codex_thread_id: Some(CodexThreadId("codex-thread:executor".into())),
-        bound_at_millis: 1_800_000_000_041,
-    });
+    snapshot.session_bindings.push(
+        SessionBinding {
+            schema_version: 3,
+            id: executor_binding_id.clone(),
+            delivery_id: snapshot.id.clone(),
+            delivery_task_id: Some(delivery_task_id),
+            stage_run_id: executor_stage_run_id.clone(),
+            product_session_id: ProductSessionId("product:executor".into()),
+            execution_job_id: ExecutionJobId("job:executor".into()),
+            worker_session_id: Some(WorkerSessionId("worker-session:executor".into())),
+            codex_thread_id: Some(CodexThreadId("codex-thread:executor".into())),
+            bound_at_millis: 1_800_000_000_041,
+            ..Default::default()
+        }
+        .with_test_authority("executor", 1),
+    );
     snapshot.stage_runs.push(verifier);
     snapshot.session_bindings.push(verifier_binding);
     snapshot.evidence[0].created_at_millis = 1_800_000_000_069;
@@ -553,7 +727,9 @@ fn approved_ready_to_deliver_fixture() -> (Delivery, FrozenDeliveryCandidate) {
     snapshot.revision = 1;
     snapshot.updated_at_millis = 1_800_000_000_073;
 
-    let pre_candidate = Delivery::try_from_snapshot(snapshot).expect("candidate lifecycle facts");
+    let pre_candidate = projection_delivery_with_worker_authority(
+        Delivery::try_from_snapshot(snapshot).expect("candidate lifecycle facts"),
+    );
     let candidate = freeze_candidate_fixture(
         &pre_candidate,
         &executor_stage_run_id,
@@ -691,6 +867,151 @@ fn product_session_runtime_query(f: &Fixture, scope: RepositoryScope) -> Runtime
         schema_version: SchemaVersion::WinwincodeV1,
         scope,
     }
+}
+
+fn canonical_product_scope() -> RepositoryScope {
+    RepositoryScope {
+        kind: RepositoryScopeKind::Repository,
+        organization_id: OrganizationId("org_01J00000000000000000000000".into()),
+        workspace_id: WorkspaceId("wsp_01J00000000000000000000000".into()),
+        project_id: ProjectId("prj_01J00000000000000000000000".into()),
+        repository_id: RepositoryId("rep_01J00000000000000000000000".into()),
+    }
+}
+
+fn product_scope_key(scope: &RepositoryScope) -> ReceiptScopeKey {
+    let mut encoded = Vec::new();
+    for value in [
+        "winwincode.command-receipt.scope.v1",
+        "repository",
+        scope.organization_id.0.as_str(),
+        scope.workspace_id.0.as_str(),
+        scope.project_id.0.as_str(),
+        scope.repository_id.0.as_str(),
+    ] {
+        encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        encoded.extend_from_slice(value.as_bytes());
+    }
+    ReceiptScopeKey::from_encoded(encoded).expect("canonical product scope key")
+}
+
+fn product_runtime_state(
+    product_session_id: &ProductSessionId,
+    label: &str,
+    event_count: u64,
+) -> Vec<u8> {
+    let events = (1..=event_count)
+        .map(|sequence| {
+            let event = ExecutionEventRecord {
+                category: ExecutionEventCategory::Lifecycle,
+                event_id: ExecutionEventId(format!("xevt_product_{label}_{sequence}")),
+                occurred_at: Instant(format!("2026-08-25T00:00:{sequence:02}Z")),
+                payload: None,
+                sequence: ExecutionSequence(
+                    i64::try_from(sequence).expect("fixture sequence fits in i64"),
+                ),
+                summary: format!("accepted product runtime event {sequence}"),
+            };
+            let event_digest = Sha256Digest(format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&event).expect("runtime event JSON"))
+            ));
+            serde_json::json!({
+                "event": event,
+                "eventDigest": event_digest,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "deliveryId": null,
+        "deliveryTaskId": null,
+        "stageRunId": null,
+        "productSessionId": product_session_id,
+        "executionJobId": format!("job_product_{label}"),
+        "workerSessionId": format!("wsn_product_{label}"),
+        "codexThreadId": format!("cdx_product_{label}"),
+        "leaseId": format!("lse_product_{label}"),
+        "attempt": 1,
+        "fencingToken": "1",
+        "workerId": format!("wrk_product_{label}"),
+        "workerInstanceId": format!("wki_product_{label}"),
+        "highestSequence": event_count,
+        "events": events,
+    }))
+    .expect("runtime ledger JSON")
+}
+
+fn commit_product_runtime_state(
+    storage: &mut SqliteStorage,
+    scope: &RepositoryScope,
+    product_session_id: &ProductSessionId,
+    label: &str,
+    event_count: u64,
+) {
+    let stream_id = format!("product-session:{}", product_session_id.0);
+    let actor_key = ReceiptActorKey::from_encoded(
+        format!("product-runtime-actor-{label}-{event_count}").into_bytes(),
+    )
+    .expect("receipt actor key");
+    let receipt_identity = ReceiptIdentity::new(
+        actor_key,
+        product_scope_key(scope),
+        RequestId(format!("req_product_runtime_{label}_{event_count}")),
+    )
+    .expect("receipt identity");
+    let command_digest = Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("product-runtime-{label}-{event_count}").as_bytes())
+    ));
+    storage
+        .commit(&StateCommit::new(
+            receipt_identity,
+            command_digest,
+            stream_id,
+            event_count.saturating_sub(1),
+            product_runtime_state(product_session_id, label, event_count),
+            vec![NewOutboxEvent::projection(
+                ControlPlaneEventId(format!("evt_product_runtime_{label}_{event_count}")),
+                "runtime-projection.invalidated.v1",
+                b"{}".to_vec(),
+                ProjectionEventStream::ProductSession(product_session_id.clone()),
+            )],
+        ))
+        .expect("commit product runtime state");
+}
+
+fn product_runtime_snapshot(
+    control_plane: &ControlPlane,
+    scope: RepositoryScope,
+    product_session_id: ProductSessionId,
+) -> winwincode_api::generated::RuntimeProjectionSnapshot {
+    let response = StrongFlowProjectionQueryPort::runtime_projection_get(
+        control_plane,
+        &RuntimeProjectionGetQuery {
+            actor: actor(),
+            page: PageRequest {
+                cursor: None,
+                limit: 20,
+            },
+            parameters:
+                RuntimeProjectionGetParameters::ProductSessionRuntimeProjectionGetParameters(
+                    ProductSessionRuntimeProjectionGetParameters {
+                        kind: ProductSessionRuntimeProjectionGetParametersKind::ProductSession,
+                        product_session_id,
+                    },
+                ),
+            query: RuntimeProjectionGetQueryQuery::RuntimeProjectionGet,
+            request_id: RequestId("req_product_runtime_public".into()),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope,
+        },
+    )
+    .expect("product-session runtime projection");
+    let QueryResultResponse::RuntimeProjectionGetResultResponse(response) = response else {
+        panic!("runtime projection response")
+    };
+    response.result
 }
 
 #[test]
@@ -905,6 +1226,99 @@ fn product_session_snapshot_does_not_skip_an_event_committed_after_its_source_re
         "evt_product_session_fixture_0001"
     );
 }
+
+#[test]
+fn public_sqlite_product_session_read_cut_isolated_and_restartable() {
+    let root = std::env::temp_dir().join(format!(
+        "winwincode-control-plane-product-public-test-{}",
+        std::process::id()
+    ));
+    let scope = canonical_product_scope();
+    let first_id = ProductSessionId("psn_01J00000000000000000000000".into());
+    let second_id = ProductSessionId("psn_01J00000000000000000000001".into());
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage");
+    commit_product_runtime_state(&mut storage, &scope, &first_id, "first", 1);
+    commit_product_runtime_state(&mut storage, &scope, &second_id, "second", 1);
+    commit_product_runtime_state(&mut storage, &scope, &second_id, "second", 2);
+
+    let mut control_plane =
+        ControlPlane::start(Box::new(storage), Box::new(NoopPublisher)).expect("Control Plane");
+    control_plane
+        .install_strongflow_projection_sources(StrongFlowProjectionSources::new(
+            Box::new(SqliteTrustedRuntimeProjectionAdapter::from_sqlite_storage()),
+            Box::new(UnavailablePublicationAdapter),
+        ))
+        .expect("projection sources");
+
+    let first = product_runtime_snapshot(&control_plane, scope.clone(), first_id.clone());
+    let second = product_runtime_snapshot(&control_plane, scope.clone(), second_id.clone());
+    assert_eq!(first.product_session_id, first_id);
+    assert_eq!(first.revision, Revision(1));
+    assert_eq!(first.last_projection_sequence, 1);
+    assert!(first.delivery_id.is_none());
+    assert!(first.stage_run_id.is_none());
+    assert!(first.read_cursor.is_none());
+    assert!(first.sessions.is_empty());
+    assert_eq!(second.product_session_id, second_id);
+    assert_eq!(second.revision, Revision(2));
+    assert_eq!(second.last_projection_sequence, 2);
+    assert!(second.delivery_id.is_none());
+    assert!(second.stage_run_id.is_none());
+    assert!(second.read_cursor.is_none());
+    assert!(second.sessions.is_empty());
+    let _: winwincode_api::generated::RuntimeProjectionSnapshot = serde_json::from_value(
+        serde_json::to_value(&first).expect("first ProductSession snapshot JSON"),
+    )
+    .expect("first ProductSession snapshot matches the generated public union");
+    let _: winwincode_api::generated::RuntimeProjectionSnapshot = serde_json::from_value(
+        serde_json::to_value(&second).expect("second ProductSession snapshot JSON"),
+    )
+    .expect("second ProductSession snapshot matches the generated public union");
+    let (
+        RuntimeProjectionEventCursor::ProductSessionEventReadCursor(first_cursor),
+        RuntimeProjectionEventCursor::ProductSessionEventReadCursor(second_cursor),
+    ) = (first.event_cursor, second.event_cursor)
+    else {
+        panic!("ProductSession event cursors");
+    };
+    assert_eq!(first_cursor.stream.product_session_id, first_id);
+    assert_eq!(second_cursor.stream.product_session_id, second_id);
+    assert_eq!(first_cursor.sequence.0, 1);
+    assert_eq!(second_cursor.sequence.0, 2);
+    assert_ne!(
+        first_cursor.event_id.expect("first event id"),
+        second_cursor.event_id.expect("second event id")
+    );
+
+    control_plane.shutdown().expect("Control Plane shutdown");
+    let mut restarted = ControlPlane::start(
+        Box::new(SqliteStorage::open(&root).expect("reopened SQLite storage")),
+        Box::new(NoopPublisher),
+    )
+    .expect("restarted Control Plane");
+    restarted
+        .install_strongflow_projection_sources(StrongFlowProjectionSources::new(
+            Box::new(SqliteTrustedRuntimeProjectionAdapter::from_sqlite_storage()),
+            Box::new(UnavailablePublicationAdapter),
+        ))
+        .expect("restarted projection sources");
+    let first_after_restart = product_runtime_snapshot(&restarted, scope, first_id.clone());
+    let second_after_restart =
+        product_runtime_snapshot(&restarted, canonical_product_scope(), second_id.clone());
+    assert_eq!(first_after_restart.product_session_id, first_id);
+    assert_eq!(first_after_restart.revision, Revision(1));
+    assert_eq!(first_after_restart.last_projection_sequence, 1);
+    assert!(first_after_restart.sessions.is_empty());
+    assert_eq!(second_after_restart.product_session_id, second_id);
+    assert_eq!(second_after_restart.revision, Revision(2));
+    assert_eq!(second_after_restart.last_projection_sequence, 2);
+    assert!(second_after_restart.sessions.is_empty());
+    restarted
+        .shutdown()
+        .expect("restarted Control Plane shutdown");
+    std::fs::remove_dir_all(root).expect("temporary product runtime directory");
+}
+
 #[test]
 fn delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto() {
     let f = fixture(false, false, false);
@@ -1400,7 +1814,7 @@ fn cursor_rejects_changed_runtime_content_behind_reused_source_seal() {
         current.ledger_revision().clone(),
         current.accepted_sequence(),
         Instant("2026-08-25T00:00:01Z".into()),
-        runtime_projection_for(&f.delivery),
+        &runtime_projection_for(&f.delivery),
         Sha256Digest(format!("sha256:{}", "a".repeat(64))),
     )
     .expect("replacement runtime read");

@@ -223,6 +223,7 @@ test('HTTP input responses are bound and cannot inject an ExecutionPort message'
     'inputRequestId',
     'status',
     'value',
+    'sessionIdentity',
   ])
   assert.equal(
     input.properties.productSessionId.$ref,
@@ -253,9 +254,11 @@ test('HTTP input responses are bound and cannot inject an ExecutionPort message'
       'workerSessionId',
       'executionJobId',
       'inputRequestId',
+      'sessionIdentity',
     ],
     mapsAfterValidationTo: 'execution-port:input.response',
     rejectsArbitraryExecutionMessages: true,
+    identityJoin: 'payload.sessionIdentity must equal the accepted SessionBinding identity',
   })
   assert.equal(JSON.stringify(input).includes('messageId'), false)
   assert.equal(JSON.stringify(input).includes('lease'), false)

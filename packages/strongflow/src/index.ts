@@ -136,10 +136,6 @@ export * from './local-git-delivery-workspace.js'
 export * from './delivery-stage-coordinator.js'
 export * from './dsh-stage-runtime.js'
 export * from './github-publication.js'
-export * from './github-review-package.js'
-export * from './github-publication-provider.js'
-export * from './github-publication-journal.js'
-export * from './github-publication-runner.js'
 
 export const strongFlowSurface: SurfaceDescriptor = Object.freeze({
   id: 'strongflow',

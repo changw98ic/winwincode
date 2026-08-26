@@ -94,6 +94,26 @@ fn generated_rust_dtos_preserve_object_level_one_of_constraints() {
         serde_json::from_value::<DeliveryStageSessionBindingProjection>(invalid_binding).is_err()
     );
 
+    let pending_binding = json!({
+        "bindingId": "binding:runtime:pending",
+        "productSessionId": "psn_00000000000000000000000000",
+        "executionJobId": "job_00000000000000000000000000",
+        "workerSessionId": null,
+        "codexThreadId": null,
+        "boundAt": "2026-08-24T10:00:00.000Z",
+        "sessionIdentity": null,
+        "stageRunId": null,
+        "workerId": null,
+        "leaseId": null,
+        "attempt": null,
+        "fencingToken": null,
+        "sourceIdentity": null
+    });
+    assert!(
+        serde_json::from_value::<DeliveryStageSessionBindingProjection>(pending_binding).is_ok(),
+        "pending DeliveryStageSessionBindingProjection must be decodable"
+    );
+
     let stages = &examples["responses"]["deliveryDetailPendingReview"]["result"]["stages"];
     assert!(serde_json::from_value::<DeliveryStageProjection>(stages[0].clone()).is_ok());
     assert!(serde_json::from_value::<DeliveryStageProjection>(stages[1].clone()).is_ok());

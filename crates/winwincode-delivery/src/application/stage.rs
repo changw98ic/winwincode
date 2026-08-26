@@ -222,6 +222,60 @@ impl DeliveryTerminalOutcomeFacts {
             self.outcome.clone(),
         )
     }
+
+    /// Revalidates one already-settled successful Worker outcome for derived
+    /// candidate/source reads. This does not mutate or re-settle Delivery.
+    pub(crate) fn verify_settled_success(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+        let mut runs = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .filter(|run| run.id == self.outcome.stage_run_id);
+        let run = runs.next().ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "settled terminal outcome StageRun is missing",
+            )
+        })?;
+        if runs.next().is_some()
+            || run.status != StageRunStatus::Succeeded
+            || run.finished_at_millis != Some(self.outcome.metadata.finished_at_millis)
+            || self.outcome.status != TerminalOutcomeStatus::Succeeded
+        {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "candidate source requires one exact successful terminal StageRun",
+            ));
+        }
+        let binding = exact_binding(delivery, run, true)?;
+        validate_terminal_metadata(run, binding, &self.outcome.metadata)?;
+        let lease = self.authority.active_lease();
+        let exact = self.outcome.execution_job_id == binding.execution_job_id
+            && self.outcome.execution_job_id == lease.execution_job_id
+            && self.outcome.attempt == run.attempt
+            && self.outcome.attempt == lease.attempt
+            && binding.worker_session_id.as_ref() == Some(&self.outcome.worker_session_id)
+            && self.outcome.worker_session_id == lease.worker_session_id
+            && self.outcome.lease_id == lease.lease_id
+            && self.outcome.fencing_token == lease.fencing_token
+            && self.outcome.worker_id == lease.worker_id
+            && self.outcome.worker_instance_id == lease.worker_instance_id;
+        if !exact {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::BindingConflict,
+                "settled Worker outcome does not match its StageRun lease and SessionBinding",
+            ));
+        }
+        Ok(VerifiedTerminalOutcome {
+            stage_run_id: self.outcome.stage_run_id.clone(),
+            lease_identity: lease.clone(),
+            status: self.outcome.status,
+            metadata: self.outcome.metadata.clone(),
+        })
+    }
 }
 
 impl SessionBindingAuthority {
@@ -1307,6 +1361,8 @@ fn append_execution_effect(
         worker_session_id: None,
         codex_thread_id: None,
         bound_at_millis: input.now_millis,
+        attempt: next.attempt,
+        ..Default::default()
     });
     let mut intent = ExecutionIntent {
         execution_job_id: input.identities.execution_job_id,

@@ -6,20 +6,23 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, OrganizationScope, ProjectScope, RepositoryScope,
-    SchemaVersion, Scope, ServiceAccountActor, UserActor, WorkspaceScope,
+    Actor, CommandEnvelope, CommandName, OrganizationScope, ProjectScope, RepositoryScope, Scope,
+    ServiceAccountActor, UserActor, WorkspaceScope,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig,
     EventPublishError, EventPublisher, LoadedAggregateJournal, NewOutboxEvent, OutboxEvent,
-    ProductStateStorage, ProjectionEventStream, ShutdownError, ShutdownReport, StartError,
-    StateChange, StorageError, StorageErrorKind, StoredState,
+    ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
+    ShutdownError, ShutdownReport, StartError, StateChange, StorageError, StorageErrorKind,
+    StoredState,
 };
 use winwincode_domain::{
     ControlPlaneEventId, DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId,
-    ServiceAccountId, UserId, WorkspaceId,
+    SchemaVersion, ServiceAccountId, UserId, WorkspaceId,
 };
-use winwincode_storage::{ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit};
+use winwincode_storage::{
+    ProjectionReadCut, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -159,6 +162,17 @@ impl ProductStateStorage for TraceStorage {
 
     fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
         Ok(self.state.lock().expect("state lock").clone())
+    }
+
+    fn load_projection_read_cut(
+        &self,
+        _state_stream_ids: &[String],
+        _key: &ProjectionEventStreamKey,
+        _expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionReadCut, StorageError> {
+        Err(StorageError::adapter(
+            "trace storage has no SQLite read cut",
+        ))
     }
 
     fn load_journal(

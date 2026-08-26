@@ -1,0 +1,166 @@
+{
+  "schemaVersion": "winwincode.control-plane-audit-store-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.3.4",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "documentation": "docs/contracts/control-plane-audit-store.md",
+  "implementationCompletionSource": "rust-black-box-tests-and-beads",
+  "authorityChain": [
+    "authenticated-actor-and-policy-authorized-scope",
+    "closed-typed-audit-event",
+    "canonical-json-payload-digest",
+    "organization-local-sequence-and-chain-digest",
+    "sqlite-immutable-event-header",
+    "scope-filtered-read-or-retention-tombstone"
+  ],
+  "event": {
+    "identity": "aud_ plus 26 Crockford characters",
+    "actors": [
+      "user",
+      "service_account",
+      "system"
+    ],
+    "scopeLevels": [
+      "organization",
+      "workspace",
+      "project",
+      "repository"
+    ],
+    "actionCategories": [
+      "command",
+      "approval",
+      "policy",
+      "worker_lease",
+      "model_invocation",
+      "delivery_state",
+      "publication"
+    ],
+    "stateKinds": [
+      "changed",
+      "unchanged"
+    ],
+    "outcomes": [
+      "succeeded",
+      "rejected",
+      "failed"
+    ],
+    "origins": [
+      "local-component",
+      "source-ip"
+    ],
+    "subjectReferences": [
+      "deliveryId",
+      "productSessionId",
+      "leaseId",
+      "publicationId"
+    ],
+    "successfulStateChangeRequiresDistinctDigests": true,
+    "rejectedOrFailedStateChangeAllowed": false,
+    "exactEventIdReplay": "original-record-without-new-sequence",
+    "changedEventIdReuse": "request-conflict",
+    "arbitraryPayloadFieldAllowed": false
+  },
+  "modelInvocation": {
+    "retainedFields": [
+      "providerId",
+      "modelId",
+      "inputSha256",
+      "outputSha256",
+      "inputTokens",
+      "outputTokens"
+    ],
+    "rawPromptAllowed": false,
+    "rawResponseAllowed": false,
+    "credentialAllowed": false,
+    "providerDiagnosticAllowed": false
+  },
+  "storage": {
+    "adapter": "sqlite",
+    "database": "audit.sqlite3",
+    "journalMode": "WAL",
+    "synchronous": "FULL",
+    "chainScope": "organization",
+    "chainAlgorithm": "sha256-framed-v1",
+    "sequenceStartsAt": 1,
+    "eventHeadersMutable": false,
+    "eventHeadersDeletable": false,
+    "retentionTombstonesMutable": false,
+    "retentionTombstonesDeletable": false,
+    "integrityChecks": [
+      "gapless-sequence",
+      "previous-event-digest",
+      "header-event-digest",
+      "canonical-payload-digest",
+      "payload-header-identity",
+      "retention-tombstone",
+      "organization-chain-head"
+    ]
+  },
+  "readAuthority": {
+    "authorityOwner": "policy-layer",
+    "storeTreatsScopeAsAuthenticationProof": false,
+    "filters": [
+      "organizationId",
+      "workspaceId",
+      "projectId",
+      "repositoryId"
+    ],
+    "maximumPageSize": 200,
+    "cursor": "organization-local-sequence",
+    "crossOrganizationPayloadAllowed": false
+  },
+  "retention": {
+    "modes": [
+      "until-millis",
+      "indefinite"
+    ],
+    "beforeDeadlineDeletionAllowed": false,
+    "indefinitePayloadDeletionAllowed": false,
+    "expiredPayloadBytesDeleted": true,
+    "immutableHeaderRetained": true,
+    "payloadDigestRetained": true,
+    "immutableTombstoneRetained": true,
+    "exactReplayAfterPrune": "original-header-without-payload"
+  },
+  "integrationBoundary": {
+    "typedEventAndStoreImplemented": true,
+    "httpAuditQueryAdded": false,
+    "policyAuthorizationImplementedHere": false,
+    "productCommandCutoverTasks": [
+      "winwincode-9c4.16.3.5",
+      "winwincode-9c4.16.3.6",
+      "winwincode-9c4.16.3.7"
+    ],
+    "secondProductCommandPathAdded": false
+  },
+  "rustGate": {
+    "package": "winwincode-audit",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "winwincode-audit",
+      "--locked",
+      "--",
+      "--test-threads=1"
+    ],
+    "requiredTests": [
+      "state_change_survives_restart_with_one_verified_sequence",
+      "rejected_and_failed_results_are_ordered_without_raw_sensitive_text",
+      "retention_removes_only_expired_payloads_and_keeps_immutable_chain_headers",
+      "read_authority_filters_every_scope_level_without_cross_tenant_payloads",
+      "concurrent_exact_replay_has_one_sequence_and_changed_reuse_conflicts",
+      "payload_or_chain_head_tampering_fails_closed",
+      "model_invocation_keeps_only_bounded_identity_usage_and_digests",
+      "payload_deletion_without_an_immutable_retention_tombstone_is_corruption",
+      "concurrent_distinct_events_form_one_gapless_organization_chain",
+      "every_audit_category_and_actor_shape_uses_closed_structured_values",
+      "deserialized_unsafe_event_is_rejected_before_any_write"
+    ]
+  },
+  "compatibility": {
+    "legacyAuditShapeRetained": false,
+    "secondAuditStorePathRetained": false,
+    "rawSensitiveTextFallbackRetained": false
+  }
+}

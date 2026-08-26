@@ -1176,18 +1176,22 @@ mod tests {
                 started_at_millis: 1_800_000_000_030 + offset,
                 finished_at_millis: Some(1_800_000_000_040 + offset),
             });
-            snapshot.session_bindings.push(SessionBinding {
-                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-                id: SessionBindingId(format!("binding-{role}-1")),
-                delivery_id: snapshot.id.clone(),
-                delivery_task_id: task_id.clone(),
-                stage_run_id,
-                product_session_id: ProductSessionId(format!("product-{role}")),
-                execution_job_id: ExecutionJobId(format!("job-{role}")),
-                worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
-                codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
-                bound_at_millis: 1_800_000_000_031 + offset,
-            });
+            snapshot.session_bindings.push(
+                SessionBinding {
+                    schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                    id: SessionBindingId(format!("binding-{role}-1")),
+                    delivery_id: snapshot.id.clone(),
+                    delivery_task_id: task_id.clone(),
+                    stage_run_id,
+                    product_session_id: ProductSessionId(format!("product-{role}")),
+                    execution_job_id: ExecutionJobId(format!("job-{role}")),
+                    worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
+                    codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
+                    bound_at_millis: 1_800_000_000_031 + offset,
+                    ..Default::default()
+                }
+                .with_test_authority(&format!("verdict-{role}"), 1),
+            );
         }
         snapshot.updated_at_millis = 1_800_000_000_060;
         Delivery::try_from_snapshot(snapshot).expect("verdict Delivery")
@@ -1407,18 +1411,22 @@ mod tests {
             started_at_millis: 1_800_000_000_070,
             finished_at_millis: Some(1_800_000_000_080),
         });
-        snapshot.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId("binding-reviewer-2".into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: task_id,
-            stage_run_id,
-            product_session_id: ProductSessionId("product-reviewer-2".into()),
-            execution_job_id: ExecutionJobId("job-reviewer-2".into()),
-            worker_session_id: Some(WorkerSessionId("worker-reviewer-2".into())),
-            codex_thread_id: Some(CodexThreadId("thread-reviewer-2".into())),
-            bound_at_millis: 1_800_000_000_071,
-        });
+        snapshot.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId("binding-reviewer-2".into()),
+                delivery_id: snapshot.id.clone(),
+                delivery_task_id: task_id,
+                stage_run_id,
+                product_session_id: ProductSessionId("product-reviewer-2".into()),
+                execution_job_id: ExecutionJobId("job-reviewer-2".into()),
+                worker_session_id: Some(WorkerSessionId("worker-reviewer-2".into())),
+                codex_thread_id: Some(CodexThreadId("thread-reviewer-2".into())),
+                bound_at_millis: 1_800_000_000_071,
+                ..Default::default()
+            }
+            .with_test_authority("binding-reviewer-2", 2),
+        );
         snapshot.updated_at_millis = 1_800_000_000_080;
         let retried = Delivery::try_from_snapshot(snapshot).expect("retried verification Delivery");
 
@@ -1478,7 +1486,16 @@ mod tests {
                 .expect("reviewer StageRun");
             match mutation {
                 "status" => reviewer.status = StageRunStatus::Failed,
-                "attempt" => reviewer.attempt += 1,
+                "attempt" => {
+                    reviewer.attempt += 1;
+                    let attempt = reviewer.attempt;
+                    let binding = snapshot
+                        .session_bindings
+                        .iter_mut()
+                        .find(|binding| binding.stage_run_id == reviewer.id)
+                        .expect("reviewer SessionBinding");
+                    binding.attempt = attempt;
+                }
                 "finished-at" => {
                     reviewer.finished_at_millis = reviewer
                         .finished_at_millis

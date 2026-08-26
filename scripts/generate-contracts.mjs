@@ -24,9 +24,10 @@ function usage() {
     'Options:',
     '  --check                         Verify generated files without writing them',
     '  --schema-dir PATH               Read canonical *.schema.json files from PATH',
-    '  --out-dir PATH                  Write the five fixture-style outputs below PATH',
+    '  --out-dir PATH                  Write the six fixture-style outputs below PATH',
     '  --rust-out PATH                 Override the generated Rust API module path',
     '  --rust-domain-out PATH          Override the generated shared Rust domain module path',
+    '  --rust-execution-port-out PATH  Override the generated Rust ExecutionPort module path',
     '  --typescript-out PATH           Override the generated TypeScript path',
     '  --typescript-client-out PATH    Override the generated TypeScript Web client path',
     '  --schema-collection-out PATH    Override the JSON Schema collection path',
@@ -42,6 +43,13 @@ function parseArguments(arguments_) {
     schemaDirectory: join(root, 'schema', 'winwincode', 'v1'),
     rustOutput: join(root, 'crates', 'winwincode-api', 'src', 'generated.rs'),
     rustDomainOutput: join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs'),
+    rustExecutionPortOutput: join(
+      root,
+      'crates',
+      'winwincode-execution-port',
+      'src',
+      'generated.rs',
+    ),
     typescriptOutput: join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts'),
     typescriptClientOutput: join(
       root,
@@ -76,6 +84,7 @@ function parseArguments(arguments_) {
       ['--schema-dir', 'schemaDirectory'],
       ['--rust-out', 'rustOutput'],
       ['--rust-domain-out', 'rustDomainOutput'],
+      ['--rust-execution-port-out', 'rustExecutionPortOutput'],
       ['--typescript-out', 'typescriptOutput'],
       ['--typescript-client-out', 'typescriptClientOutput'],
       ['--schema-collection-out', 'schemaCollectionOutput'],
@@ -102,6 +111,7 @@ function parseArguments(arguments_) {
     const directory = resolve(outputDirectory)
     options.rustOutput = join(directory, 'rust', 'generated.rs')
     options.rustDomainOutput = join(directory, 'rust-domain', 'generated.rs')
+    options.rustExecutionPortOutput = join(directory, 'rust-execution-port', 'generated.rs')
     options.typescriptOutput = join(directory, 'typescript', 'generated.ts')
     options.typescriptClientOutput = undefined
     options.schemaCollectionOutput = join(directory, 'schema-collection.generated.json')
@@ -2474,6 +2484,32 @@ function rustVariantName(value, used = new Set()) {
   return RUST_RESERVED_WORDS.has(base.toLowerCase()) ? `${base}Value` : base
 }
 
+function isRustInlineStringEnum(schema) {
+  return isObject(schema)
+    && schema.type === 'string'
+    && Array.isArray(schema.enum)
+    && schema.enum.length > 0
+    && schema.enum.every(value => typeof value === 'string')
+}
+
+function rustInlineEnumTypeName(entryName, jsonName) {
+  return `${entryName}${rustVariantName(jsonName)}`
+}
+
+function renderRustInlineStringEnum(typeName, schema) {
+  const lines = [
+    '#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]',
+    `pub enum ${typeName} {`,
+  ]
+  const used = new Set()
+  for (const value of schema.enum) {
+    lines.push(`    #[serde(rename = ${JSON.stringify(value)})]`)
+    lines.push(`    ${rustVariantName(value, used)},`)
+  }
+  lines.push('}')
+  return lines.join('\n')
+}
+
 function rustPrimitiveType(type) {
   if (type === 'string') return 'String'
   if (type === 'integer') return 'i64'
@@ -2494,6 +2530,37 @@ function isRustSharedScalarDefinition(entry) {
   ) return false
   const types = schemaTypes(schema)
   return types.length === 1 && ['boolean', 'integer', 'number', 'string'].includes(types[0])
+}
+
+function isExecutionPortDefinition(entry) {
+  return entry.document.fileName === 'execution-port.schema.json'
+}
+
+function rustSharedDefinitionNamesForExecutionPort(context) {
+  const names = new Set(
+    [...context.registry.values()]
+      .filter(isRustSharedScalarDefinition)
+      .map(entry => entry.name),
+  )
+  const pending = [...context.registry.values()].filter(isExecutionPortDefinition)
+  const visited = new Set()
+
+  while (pending.length > 0) {
+    const entry = pending.pop()
+    const key = `${entry.document.id}#/$defs/${entry.name}`
+    if (visited.has(key)) continue
+    visited.add(key)
+    visitSchema(entry.schema, schema => {
+      if (typeof schema.$ref !== 'string') return
+      const name = referencedDefinitionName(schema.$ref, entry.document, context)
+      const target = context.registry.get(name)
+      if (target?.document.fileName !== 'domain.schema.json') return
+      names.add(name)
+      const targetKey = `${target.document.id}#/$defs/${target.name}`
+      if (!visited.has(targetKey)) pending.push(target)
+    })
+  }
+  return names
 }
 
 function rustNamedType(name, context, qualifyShared) {
@@ -2830,14 +2897,22 @@ function renderRustObject(entry, context, qualifyShared) {
   const lines = [...rustDocumentation(entry.schema.description)]
   const constTypes = new Map()
   for (const [jsonName, property] of Object.entries(entry.schema.properties ?? {})) {
-    if (!isObject(property) || typeof property.const !== 'string') continue
-    const typeName = `${entry.name}${rustVariantName(jsonName)}`
+    if (!isObject(property)) continue
+    if (typeof property.const === 'string') {
+      const typeName = `${entry.name}${rustVariantName(jsonName)}`
+      constTypes.set(jsonName, typeName)
+      lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+      lines.push(`pub enum ${typeName} {`)
+      lines.push(`    #[serde(rename = ${JSON.stringify(property.const)})]`)
+      lines.push(`    ${rustVariantName(property.const)},`)
+      lines.push('}')
+      lines.push('')
+      continue
+    }
+    if (!isExecutionPortDefinition(entry) || !isRustInlineStringEnum(property)) continue
+    const typeName = rustInlineEnumTypeName(entry.name, jsonName)
     constTypes.set(jsonName, typeName)
-    lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
-    lines.push(`pub enum ${typeName} {`)
-    lines.push(`    #[serde(rename = ${JSON.stringify(property.const)})]`)
-    lines.push(`    ${rustVariantName(property.const)},`)
-    lines.push('}')
+    lines.push(renderRustInlineStringEnum(typeName, property))
     lines.push('')
   }
   if (Array.isArray(entry.schema.oneOf)) {
@@ -2871,14 +2946,21 @@ function renderRustAllOf(entry, context, qualifyShared) {
   }
   const constTypes = new Map()
   for (const [jsonName, property] of shape.properties) {
-    if (typeof property.schema.const !== 'string') continue
-    const typeName = `${entry.name}${rustVariantName(jsonName)}`
+    if (typeof property.schema.const === 'string') {
+      const typeName = `${entry.name}${rustVariantName(jsonName)}`
+      constTypes.set(jsonName, typeName)
+      lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
+      lines.push(`pub enum ${typeName} {`)
+      lines.push(`    #[serde(rename = ${JSON.stringify(property.schema.const)})]`)
+      lines.push(`    ${rustVariantName(property.schema.const)},`)
+      lines.push('}')
+      lines.push('')
+      continue
+    }
+    if (!isExecutionPortDefinition(entry) || !isRustInlineStringEnum(property.schema)) continue
+    const typeName = rustInlineEnumTypeName(entry.name, jsonName)
     constTypes.set(jsonName, typeName)
-    lines.push('#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]')
-    lines.push(`pub enum ${typeName} {`)
-    lines.push(`    #[serde(rename = ${JSON.stringify(property.schema.const)})]`)
-    lines.push(`    ${rustVariantName(property.schema.const)},`)
-    lines.push('}')
+    lines.push(renderRustInlineStringEnum(typeName, property.schema))
     lines.push('')
   }
   lines.push('#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]')
@@ -2970,7 +3052,8 @@ function renderRustDefinition(entry, context, qualifyShared) {
   ].join('\n')
 }
 
-function renderRustSharedDefinition(entry) {
+function renderRustSharedDefinition(entry, context) {
+  if (!isRustSharedScalarDefinition(entry)) return renderRustDefinition(entry, context, false)
   const primitive = rustPrimitiveType(schemaTypes(entry.schema)[0])
   const derives = primitive === 'f64'
     ? 'Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize'
@@ -2985,7 +3068,10 @@ function renderRustSharedDefinition(entry) {
 
 function renderRustApi(context, digest) {
   const entries = [...context.registry.values()]
-    .filter(entry => !context.rustSharedDefinitionNames.has(entry.name))
+    .filter(entry => (
+      !context.rustSharedDefinitionNames.has(entry.name)
+      && !isExecutionPortDefinition(entry)
+    ))
     .sort((left, right) => left.name.localeCompare(right.name))
   const declarations = entries.map(entry => renderRustDefinition(entry, context, true))
   return [
@@ -2995,8 +3081,8 @@ function renderRustApi(context, digest) {
     '',
     '#![allow(clippy::doc_markdown, clippy::large_enum_variant)]',
     '',
-    '//! Public transport types generated from the canonical `WinWinCode` schemas.',
-    '//! Shared scalar value objects are defined once in `winwincode-domain`.',
+    '//! Public Control Plane HTTP/WebSocket transport types generated from the canonical `WinWinCode` schemas.',
+    '//! Shared identifiers and value objects are defined once in `winwincode-domain`.',
     '',
     '#[allow(clippy::missing_errors_doc)]',
     "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",
@@ -3014,11 +3100,39 @@ function renderRustApi(context, digest) {
   ].join('\n')
 }
 
+function renderRustExecutionPort(context, digest) {
+  const entries = [...context.registry.values()]
+    .filter(entry => isExecutionPortDefinition(entry) && !context.rustSharedDefinitionNames.has(entry.name))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  const declarations = entries.map(entry => renderRustDefinition(entry, context, true))
+  return [
+    '// SPDX-License-Identifier: Apache-2.0',
+    `// ${GENERATED_MARKER}`,
+    `// Source digest: sha256:${digest}`,
+    '',
+    '#![allow(clippy::doc_markdown, clippy::large_enum_variant)]',
+    '',
+    '//! Canonical ExecutionPort DTOs generated from the `WinWinCode` schemas.',
+    '//! Shared scalar and domain value objects are defined once in `winwincode-domain`.',
+    '',
+    '#[allow(clippy::missing_errors_doc)]',
+    "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",
+    'where',
+    "    D: serde::Deserializer<'de>,",
+    "    T: serde::Deserialize<'de>,",
+    '{',
+    '    <Option<T> as serde::Deserialize>::deserialize(deserializer)',
+    '}',
+    '',
+    ...declarations.flatMap(declaration => [declaration, '']),
+  ].join('\n')
+}
+
 function renderRustDomain(context, digest) {
   const entries = [...context.registry.values()]
     .filter(entry => context.rustSharedDefinitionNames.has(entry.name))
     .sort((left, right) => left.name.localeCompare(right.name))
-  const declarations = entries.map(renderRustSharedDefinition)
+  const declarations = entries.map(entry => renderRustSharedDefinition(entry, context))
   return [
     '// SPDX-License-Identifier: Apache-2.0',
     `// ${GENERATED_MARKER}`,
@@ -3026,7 +3140,7 @@ function renderRustDomain(context, digest) {
     '',
     '#![allow(clippy::doc_markdown)]',
     '',
-    '//! Shared identifiers and scalar value objects generated from the canonical schemas.',
+    '//! Shared identifiers and value objects generated from the canonical schemas.',
     '',
     ...declarations.flatMap(declaration => [declaration, '']),
   ].join('\n')
@@ -3195,16 +3309,13 @@ function generate(options) {
   const documents = loadDocuments(options.schemaDirectory)
   const context = definitionRegistry(documents)
   context.clientMetadata = generatedClientMetadata(documents)
-  context.rustSharedDefinitionNames = new Set(
-    [...context.registry.values()]
-      .filter(isRustSharedScalarDefinition)
-      .map(entry => entry.name),
-  )
+  context.rustSharedDefinitionNames = rustSharedDefinitionNamesForExecutionPort(context)
   validateDocuments(documents, context)
   const digest = sourceDigest(documents)
   const outputs = new Map([
     [options.rustDomainOutput, renderRustDomain(context, digest)],
     [options.rustOutput, renderRustApi(context, digest)],
+    [options.rustExecutionPortOutput, renderRustExecutionPort(context, digest)],
     [options.typescriptOutput, renderTypescript(context, digest)],
     [options.schemaCollectionOutput, renderSchemaCollection(documents, context, digest)],
     [options.openapiOutput, renderOpenApi(documents, context, digest)],

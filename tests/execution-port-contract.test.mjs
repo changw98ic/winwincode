@@ -57,9 +57,12 @@ const domainDefinitions = [
   'RepositoryId',
   'RequestId',
   'SchemaVersion',
+  'SessionBindingSourceIdentity',
+  'SessionIdentity',
   'Sha256Digest',
   'StageRunId',
   'WorkerId',
+  'WorkerInstanceId',
   'WorkerSessionId',
 ]
 
@@ -278,6 +281,23 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
   }
 })
 
+test('ProductSession runtime messages carry no fabricated StageRun identity', () => {
+  const schema = json(schemaPath)
+  const validate = validator(schema)
+  const fixture = json(validFixturePath)
+  const runtime = structuredClone(
+    fixture.messages.find(message => message.kind === 'runtime.event'),
+  )
+
+  assert.ok(runtime)
+  delete runtime.sessionIdentity.stageRunId
+  assert.equal(
+    validate(runtime),
+    true,
+    `ProductSession runtime event must omit StageRun: ${JSON.stringify(validate.errors)}`,
+  )
+})
+
 test('ExecutionPort input response maps provided and empty terminal values exactly', () => {
   const schema = json(schemaPath)
   const fixture = json(validFixturePath)
@@ -343,14 +363,19 @@ test('ExecutionPort freezes retry, replay, restart, and fencing outcomes', () =>
         'productSessionId',
         'workerSessionId',
         'codexThreadId',
+        'stageRunId',
         'executionJobId',
         'attempt',
+        'workerId',
         'leaseId',
         'fencingToken',
+        'sourceIdentity',
       ],
       duplicate: 'same_identity_is_idempotent_changed_identity_is_conflict',
       runtimeBeforeBinding: 'reject_before_persist_and_projection',
       runtimeThreadMismatch: 'reject_before_persist_and_projection',
+      sessionIdentityBlock: 'sessionIdentity',
+      sourceIdentity: 'SessionBindingSourceIdentity',
     },
     transportParity: {
       condition: 'local_or_remote_adapter',

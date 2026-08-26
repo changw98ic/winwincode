@@ -187,7 +187,7 @@ test('Control Plane StrongFlow rules freeze ownership, one read cut, and closed 
     'implemented',
     'boundary-implemented-production-adapter-phase-4',
     'implemented',
-    'boundary-implemented-production-owner-phase-3',
+    'implemented',
     'implemented',
     'planned',
   ])

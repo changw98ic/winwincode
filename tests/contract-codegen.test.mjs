@@ -39,12 +39,28 @@ function generatedPaths(outputRoot) {
     join(outputRoot, 'schema-collection.generated.json'),
     join(outputRoot, 'openapi.generated.json'),
     join(outputRoot, 'rust-domain', 'generated.rs'),
+    join(outputRoot, 'rust-execution-port', 'generated.rs'),
   ]
 }
 
 function commandFailure(result) {
   return [result.stdout, result.stderr, result.error?.stack].filter(Boolean).join('\n')
 }
+
+test('fixture generation inventory includes the Rust ExecutionPort artifact', t => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-codegen-inventory-'))
+  t.after(() => rmSync(temporaryRoot, { force: true, recursive: true }))
+
+  const generated = runGenerator(temporaryRoot)
+  assert.equal(generated.status, 0, commandFailure(generated))
+
+  const paths = generatedPaths(temporaryRoot)
+  assert.equal(paths.length, 6)
+  assert.ok(
+    paths.some(path => path.endsWith(join('rust-execution-port', 'generated.rs'))),
+    'the generated output inventory must include Rust ExecutionPort',
+  )
+})
 
 test('one canonical schema generation is deterministic and compiles for Rust and TypeScript', async t => {
   const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-codegen-'))
@@ -210,12 +226,18 @@ test('contract verification rejects a hand-edited generated artifact', t => {
 
   const generated = runGenerator(temporaryRoot)
   assert.equal(generated.status, 0, commandFailure(generated))
-  const typescriptPath = generatedPaths(temporaryRoot)[1]
+  const paths = generatedPaths(temporaryRoot)
+  const typescriptPath = paths.find(path => path.endsWith(join('typescript', 'generated.ts')))
+  const executionPortPath = paths.find(path => path.endsWith(join('rust-execution-port', 'generated.rs')))
+  assert.ok(typescriptPath)
+  assert.ok(executionPortPath)
   writeFileSync(typescriptPath, `${readFileSync(typescriptPath, 'utf8')}export type HandEdit = true\n`)
+  writeFileSync(executionPortPath, `${readFileSync(executionPortPath, 'utf8')}// hand edit\n`)
 
   const checked = runGenerator(temporaryRoot, '--check')
   assert.equal(checked.status, 1, commandFailure(checked))
   assert.match(checked.stderr, /generated contract drift: .*generated\.ts differs/u)
+  assert.match(checked.stderr, /rust-execution-port\/generated\.rs differs/u)
 
   const repaired = runGenerator(temporaryRoot)
   assert.equal(repaired.status, 0, commandFailure(repaired))
@@ -233,6 +255,13 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
   const rustPath = join(root, 'crates', 'winwincode-api', 'src', 'generated.rs')
   const typescriptPath = join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts')
   const domainRustPath = join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs')
+  const executionPortRustPath = join(
+    root,
+    'crates',
+    'winwincode-execution-port',
+    'src',
+    'generated.rs',
+  )
   const schemaCollectionPath = join(
     root,
     'schema',
@@ -241,9 +270,9 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
     'schema-collection.generated.json',
   )
   const openapiPath = join(root, 'schema', 'winwincode', 'v1', 'openapi.generated.json')
-  assert.match(readFileSync(rustPath, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
-  assert.match(readFileSync(domainRustPath, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
-  assert.match(readFileSync(typescriptPath, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
+  for (const path of [rustPath, domainRustPath, executionPortRustPath, typescriptPath]) {
+    assert.match(readFileSync(path, 'utf8'), /^\/\/ SPDX-License-Identifier: Apache-2\.0/u)
+  }
 
   const schemaCollection = JSON.parse(readFileSync(schemaCollectionPath, 'utf8'))
   const openapi = JSON.parse(readFileSync(openapiPath, 'utf8'))

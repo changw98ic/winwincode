@@ -1021,18 +1021,22 @@ pub mod test_support {
                 started_at_millis: 1_800_000_000_030 + offset,
                 finished_at_millis: Some(1_800_000_000_040 + offset),
             });
-            snapshot.session_bindings.push(SessionBinding {
-                schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-                id: SessionBindingId(format!("binding-{role_id}-1")),
-                delivery_id: delivery_id.clone(),
-                delivery_task_id: task_id.clone(),
-                stage_run_id,
-                product_session_id: ProductSessionId(format!("product-{role_id}")),
-                execution_job_id: ExecutionJobId(format!("job-{role_id}")),
-                worker_session_id: Some(WorkerSessionId(format!("worker-{role_id}"))),
-                codex_thread_id: Some(CodexThreadId(format!("thread-{role_id}"))),
-                bound_at_millis: 1_800_000_000_031 + offset,
-            });
+            snapshot.session_bindings.push(
+                SessionBinding {
+                    schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+                    id: SessionBindingId(format!("binding-{role_id}-1")),
+                    delivery_id: delivery_id.clone(),
+                    delivery_task_id: task_id.clone(),
+                    stage_run_id,
+                    product_session_id: ProductSessionId(format!("product-{role_id}")),
+                    execution_job_id: ExecutionJobId(format!("job-{role_id}")),
+                    worker_session_id: Some(WorkerSessionId(format!("worker-{role_id}"))),
+                    codex_thread_id: Some(CodexThreadId(format!("thread-{role_id}"))),
+                    bound_at_millis: 1_800_000_000_031 + offset,
+                    ..Default::default()
+                }
+                .with_test_authority(&format!("verdict-transition-{role:?}"), 1),
+            );
         }
         snapshot.updated_at_millis = 1_800_000_000_060;
         Delivery::try_from_snapshot(snapshot).expect("verdict transaction fixture")
@@ -1482,18 +1486,22 @@ mod tests {
                 started_at_millis: 1_800_000_000_030 + offset,
                 finished_at_millis: Some(1_800_000_000_040 + offset),
             });
-            snapshot.session_bindings.push(SessionBinding {
-                schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
-                id: SessionBindingId(format!("binding-{role}-1")),
-                delivery_id: snapshot.id.clone(),
-                delivery_task_id: task_id.clone(),
-                stage_run_id,
-                product_session_id: ProductSessionId(format!("product-{role}")),
-                execution_job_id: ExecutionJobId(format!("job-{role}")),
-                worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
-                codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
-                bound_at_millis: 1_800_000_000_031 + offset,
-            });
+            snapshot.session_bindings.push(
+                SessionBinding {
+                    schema_version: crate::domain::DELIVERY_SCHEMA_VERSION,
+                    id: SessionBindingId(format!("binding-{role}-1")),
+                    delivery_id: snapshot.id.clone(),
+                    delivery_task_id: task_id.clone(),
+                    stage_run_id,
+                    product_session_id: ProductSessionId(format!("product-{role}")),
+                    execution_job_id: ExecutionJobId(format!("job-{role}")),
+                    worker_session_id: Some(WorkerSessionId(format!("worker-{role}"))),
+                    codex_thread_id: Some(CodexThreadId(format!("thread-{role}"))),
+                    bound_at_millis: 1_800_000_000_031 + offset,
+                    ..Default::default()
+                }
+                .with_test_authority(&format!("verdict-facts-{role}"), 1),
+            );
         }
         snapshot.updated_at_millis = 1_800_000_000_060;
         Delivery::try_from_snapshot(snapshot).expect("verifying Delivery")

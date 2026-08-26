@@ -1,0 +1,252 @@
+{
+  "schemaVersion": "winwincode.control-plane-publication-cutover-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.3.7",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "documentation": "docs/contracts/control-plane-publication-differential.md",
+  "cutoverBoundary": {
+    "canonicalWriter": "rust-control-plane",
+    "canonicalRuntime": [
+      "control-plane-publication-preparation",
+      "artifact-store-review-package",
+      "generated-publication.publish",
+      "control-plane-policy-and-immutable-audit",
+      "sqlite-publication-intent",
+      "policy-guarded-resume",
+      "github-publication-port"
+    ],
+    "typescriptWriterAllowed": false,
+    "typescriptReviewPackageWriterAllowed": false,
+    "compatibilityNormalizerAllowed": false,
+    "productionFallbackAllowed": false
+  },
+  "scenarioOrder": [
+    "success",
+    "authentication-failure",
+    "rate-limit",
+    "pull-request-conflict",
+    "comment-failure",
+    "artifact-object-corruption",
+    "policy-denied",
+    "duplicate-command"
+  ],
+  "scenarios": [
+    {
+      "id": "success",
+      "canonicalEvidence": [
+        "approved_delivery_recovers_one_partial_github_publication_and_audits_each_result",
+        "delivered_github_candidate_prepares_one_exact_secret_safe_review_package_artifact",
+        "github_adapter_applies_and_then_reconciles_the_complete_publication_set"
+      ],
+      "externalOrder": [
+        "branch.lookup",
+        "branch.apply",
+        "pull-request.lookup",
+        "pull-request.apply",
+        "issue-comment.lookup",
+        "issue-comment.apply",
+        "issue-comment.lookup",
+        "commit-status.lookup",
+        "commit-status.apply"
+      ],
+      "canonicalOutcome": "one approved, secret-safe Artifact is reused across restart; the partial comment response is reconciled without a duplicate and the exact GitHub pull-request resource is published at revision 12"
+    },
+    {
+      "id": "authentication-failure",
+      "canonicalEvidence": [
+        "github_adapter_classifies_permission_and_rate_limit_without_remote_diagnostics",
+        "permission_and_rate_limit_keep_terminal_and_retryable_outcomes_distinct"
+      ],
+      "externalOrder": [
+        "branch.lookup",
+        "branch.apply"
+      ],
+      "canonicalOutcome": "failed revision 4 with github-permission-denied; no later lookup, apply, or remote write"
+    },
+    {
+      "id": "rate-limit",
+      "canonicalEvidence": [
+        "rate_limited_publication_resumes_from_durable_requests_without_persisting_the_secret",
+        "permission_and_rate_limit_keep_terminal_and_retryable_outcomes_distinct"
+      ],
+      "externalOrder": [
+        "branch.lookup",
+        "branch.lookup",
+        "branch.apply",
+        "pull-request.lookup",
+        "pull-request.apply",
+        "issue-comment.lookup",
+        "issue-comment.apply",
+        "commit-status.lookup",
+        "commit-status.apply"
+      ],
+      "canonicalOutcome": "publishing revision 3 with github-rate-limited, then published revision 12 after a fresh lookup; four remote writes total"
+    },
+    {
+      "id": "pull-request-conflict",
+      "canonicalEvidence": [
+        "duplicate_pull_request_response_reconciles_the_exact_remote_identity",
+        "pull_request_race_reconciles_and_comment_rejection_stops_status"
+      ],
+      "externalOrder": [
+        "branch.lookup",
+        "branch.apply",
+        "pull-request.lookup",
+        "pull-request.apply",
+        "issue-comment.lookup",
+        "issue-comment.apply",
+        "commit-status.lookup",
+        "commit-status.apply"
+      ],
+      "canonicalOutcome": "published revision 11 with the exact existing pull request and no second local PR write"
+    },
+    {
+      "id": "comment-failure",
+      "canonicalEvidence": [
+        "comment_rejection_preserves_the_pull_request_identity_and_skips_status",
+        "pull_request_race_reconciles_and_comment_rejection_stops_status"
+      ],
+      "externalOrder": [
+        "branch.lookup",
+        "branch.apply",
+        "pull-request.lookup",
+        "pull-request.apply",
+        "issue-comment.lookup",
+        "issue-comment.apply"
+      ],
+      "canonicalOutcome": "failed revision 8 with the exact pull-request resource retained and no commit-status call"
+    },
+    {
+      "id": "artifact-object-corruption",
+      "canonicalEvidence": [
+        "object_corruption_is_detected_before_bytes_are_returned",
+        "publication_preparation_rejects_an_unapproved_delivery_before_creating_an_artifact"
+      ],
+      "externalOrder": [],
+      "canonicalOutcome": "ArtifactErrorKind::Corrupt before any candidate bytes or provider operation are returned"
+    },
+    {
+      "id": "policy-denied",
+      "canonicalEvidence": [
+        "explicit_requester_deny_wins_and_records_the_rule_without_intent_or_provider_call",
+        "publication_preparation_rejects_an_unapproved_delivery_before_creating_an_artifact"
+      ],
+      "externalOrder": [],
+      "canonicalOutcome": "PERMISSION_DENIED with ruleId, repositoryId, and publicationId after one immutable rejection audit; zero intent and provider call"
+    },
+    {
+      "id": "duplicate-command",
+      "canonicalEvidence": [
+        "policy_guarded_success_preserves_provider_order_and_command_replay",
+        "delivered_github_candidate_prepares_one_exact_secret_safe_review_package_artifact"
+      ],
+      "externalOrder": [],
+      "canonicalOutcome": "exact command receipt replays pending revision 1 with no new policy audit, intent, lookup, apply, or remote write"
+    }
+  ],
+  "gates": {
+    "cutover": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-control-plane",
+        "--features",
+        "test-support",
+        "--test",
+        "publication_cutover",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "delivered_github_candidate_prepares_one_exact_secret_safe_review_package_artifact",
+        "publication_preparation_rejects_an_unapproved_delivery_before_creating_an_artifact",
+        "approved_delivery_recovers_one_partial_github_publication_and_audits_each_result"
+      ]
+    },
+    "controlPlane": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-control-plane",
+        "--features",
+        "test-support",
+        "--test",
+        "publication_policy",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "policy_guarded_success_preserves_provider_order_and_command_replay",
+        "permission_and_rate_limit_keep_terminal_and_retryable_outcomes_distinct",
+        "pull_request_race_reconciles_and_comment_rejection_stops_status",
+        "explicit_requester_deny_wins_and_records_the_rule_without_intent_or_provider_call"
+      ]
+    },
+    "githubAdapter": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-publication",
+        "--features",
+        "test-support",
+        "--test",
+        "github_adapter",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "github_adapter_applies_and_then_reconciles_the_complete_publication_set",
+        "github_adapter_classifies_permission_and_rate_limit_without_remote_diagnostics",
+        "duplicate_pull_request_response_reconciles_the_exact_remote_identity",
+        "comment_rejection_preserves_the_pull_request_identity_and_skips_status",
+        "rate_limited_publication_resumes_from_durable_requests_without_persisting_the_secret"
+      ]
+    },
+    "artifactStore": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-storage",
+        "--test",
+        "artifact_store",
+        "--locked",
+        "object_corruption_is_detected_before_bytes_are_returned",
+        "--",
+        "--exact"
+      ],
+      "requiredTests": [
+        "object_corruption_is_detected_before_bytes_are_returned"
+      ]
+    }
+  },
+  "removal": {
+    "typescriptWriterSources": [
+      "packages/contracts/src/strongflow-github-review-package.ts",
+      "packages/dsh-profile/src/github-publication-provider.ts",
+      "packages/strongflow/src/github-review-package.ts",
+      "packages/strongflow/src/github-publication-provider.ts",
+      "packages/strongflow/src/github-publication-journal.ts",
+      "packages/strongflow/src/github-publication-runner.ts"
+    ],
+    "typescriptWriterTests": [
+      "tests/github-review-package.test.mjs",
+      "tests/dsh-github-publication-provider.test.mjs"
+    ],
+    "generatedExtensions": [
+      ".js",
+      ".js.map",
+      ".d.ts",
+      ".d.ts.map"
+    ],
+    "dshPackageExport": "./github-publication-provider",
+    "dshPatchRow": "winwincode-github-publication-provider",
+    "remainingPresentationModule": "packages/strongflow/src/github-publication.ts"
+  }
+}

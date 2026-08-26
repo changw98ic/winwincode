@@ -4,8 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, ExecutionJob, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, RepositoryScope, SchemaVersion, Scope, UserActor,
+    Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
 };
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionConfig, DeliveryExecutionPortError, ExecutionJobDispatcher,
@@ -35,8 +34,11 @@ use winwincode_delivery::store::{
 };
 use winwincode_domain::{
     AttentionItemId, DeliveryId, DeliveryTaskId, ExecutionJobId, Instant, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, Sha256Digest, StageRunId,
-    UserId, WorkspaceId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest,
+    StageRunId, UserId, WorkspaceId,
+};
+use winwincode_execution_port::generated::{
+    ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
@@ -119,7 +121,8 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
             workspace: ExecutionWorkspace {
                 checkout_revision: checkout_revision.into(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
+                write_mode:
+                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
                 deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
@@ -174,7 +177,8 @@ fn pending_rework(
             workspace: ExecutionWorkspace {
                 checkout_revision: fixture.source_candidate_commit_id.clone(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
-                write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
+                write_mode:
+                    winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
             },
             limits: ExecutionLimits {
                 deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),

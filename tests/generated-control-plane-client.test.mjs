@@ -265,7 +265,18 @@ function runtimeEvent(sequence, event, stream = { kind: 'delivery', deliveryId }
       actor,
       component: 'test',
     },
-    event,
+    event: event.type === 'runtime-projection.invalidated.v1'
+      && event.scopeKind === 'delivery-stage'
+      ? {
+          ...event,
+          sessionIdentity: {
+            productSessionId,
+            workerSessionId: 'wsn_00000000000000000000000001',
+            codexThreadId: 'cdx_00000000000000000000000001',
+            stageRunId,
+          },
+        }
+      : event,
   }
 }
 

@@ -1,0 +1,336 @@
+{
+  "attentionItems": [
+    {
+      "assignedTo": "fixture-ui-reviewer",
+      "blocking": true,
+      "context": "{\"schemaVersion\":2,\"protocol\":\"winwincode.plan-review-context.v2\",\"deliveryId\":\"dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G\",\"deliverySpecId\":\"spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved\",\"deliverySpecRevision\":2,\"planningStageRunId\":\"stage-fixture-planning\",\"planningSessionBindingId\":\"binding-fixture-planning\",\"reviewStageRunId\":\"stage-fixture-plan-review\",\"attentionItemId\":\"attention-fixture-plan-review\",\"solution\":{\"id\":\"solution-approved\",\"summary\":\"Use the approved DeliverySpec to change one local module and verify it.\",\"approach\":[\"Keep DSH as the interaction and model-provider shell.\",\"Use the embedded Codex kernel as the only execution authority.\",\"Bind direct evidence to the exact frozen candidate.\"],\"components\":[{\"id\":\"component-approved\",\"label\":\"Fixture value module\",\"responsibility\":\"Produce the observable value required by the acceptance criterion.\",\"kind\":\"component\",\"trustBoundary\":\"Local fixture repository\",\"unresolved\":false,\"repositoryPathPrefixes\":[\"src\"]}],\"connections\":[{\"id\":\"connection-approved\",\"from\":\"platform:codex-core\",\"to\":\"component-approved\",\"label\":\"Implements the approved local change\"}]},\"architectureDiagram\":{\"id\":\"architecture:90e2e2f87ff823eba45aca1539dd9fc5\",\"kind\":\"system-architecture\",\"title\":\"系统架构图\",\"nodes\":[{\"id\":\"platform:dsh\",\"label\":\"DSH\",\"description\":\"承载聊天、Session、模型设置、审批交互和工作台展示。\",\"kind\":\"interaction\",\"trustBoundary\":\"DSH product shell\",\"unresolved\":false},{\"id\":\"platform:strongflow\",\"label\":\"WinWinCode\",\"description\":\"保存交付目标、阶段、人工决定、验收依据和交付结论。\",\"kind\":\"delivery-control\",\"trustBoundary\":\"Delivery control plane\",\"unresolved\":false},{\"id\":\"platform:codex-core\",\"label\":\"Codex Core\",\"description\":\"独占计划、Agent、工具、Shell、沙箱、权限和代码执行。\",\"kind\":\"execution\",\"trustBoundary\":\"Execution authority\",\"unresolved\":false},{\"id\":\"platform:repository\",\"label\":\"Repository\",\"description\":\"保存基线代码和执行后形成的候选变更。\",\"kind\":\"repository\",\"trustBoundary\":\"Candidate boundary\",\"unresolved\":false},{\"id\":\"component-approved\",\"label\":\"Fixture value module\",\"description\":\"Produce the observable value required by the acceptance criterion.\",\"kind\":\"component\",\"trustBoundary\":\"Local fixture repository\",\"unresolved\":false}],\"edges\":[{\"id\":\"platform-edge:dsh-to-strongflow\",\"from\":\"platform:dsh\",\"to\":\"platform:strongflow\",\"label\":\"交付定义、展示和人工决定\"},{\"id\":\"platform-edge:strongflow-to-codex\",\"from\":\"platform:strongflow\",\"to\":\"platform:codex-core\",\"label\":\"批准后的目标与阶段边界\"},{\"id\":\"platform-edge:codex-to-repository\",\"from\":\"platform:codex-core\",\"to\":\"platform:repository\",\"label\":\"工具和沙箱内的代码变更\"},{\"id\":\"platform-edge:codex-to-dsh\",\"from\":\"platform:codex-core\",\"to\":\"platform:dsh\",\"label\":\"Session 事件与执行活动\"},{\"id\":\"solution-edge:bf428047b134de344e524571b0084b2e\",\"from\":\"platform:codex-core\",\"to\":\"component-approved\",\"label\":\"Implements the approved local change\"}]},\"processDiagram\":{\"id\":\"process:9cf53aa4b2a57d8f21d98f76b46c26bf\",\"kind\":\"process-flow\",\"title\":\"交付流程图\",\"nodes\":[{\"id\":\"process:delivery-spec\",\"label\":\"交付定义\",\"description\":\"固定目标、范围、约束和验收条件。\",\"kind\":\"stage\",\"trustBoundary\":null,\"unresolved\":false},{\"id\":\"process:solution\",\"label\":\"方案设计\",\"description\":\"Planner 形成与当前 DeliverySpec 对应的方案。\",\"kind\":\"stage\",\"trustBoundary\":null,\"unresolved\":false},{\"id\":\"process:plan-review\",\"label\":\"人工方案审核\",\"description\":\"人检查方案、风险、未决项和两张图。\",\"kind\":\"decision\",\"trustBoundary\":\"Human decision boundary\",\"unresolved\":false},{\"id\":\"process:clarifying\",\"label\":\"重新澄清\",\"description\":\"拒绝当前方案后重新检查交付定义。\",\"kind\":\"stage\",\"trustBoundary\":null,\"unresolved\":false},{\"id\":\"process:solution-revision\",\"label\":\"修改方案\",\"description\":\"按人工意见重新运行方案阶段。\",\"kind\":\"stage\",\"trustBoundary\":null,\"unresolved\":false},{\"id\":\"process:executing\",\"label\":\"执行\",\"description\":\"只有当前审核集合获批后，Codex 才进入代码执行。\",\"kind\":\"stage\",\"trustBoundary\":\"Execution authority\",\"unresolved\":false},{\"id\":\"process:verifying\",\"label\":\"独立验证\",\"description\":\"独立 Session 根据验收条件检查候选结果。\",\"kind\":\"stage\",\"trustBoundary\":\"Verification boundary\",\"unresolved\":false},{\"id\":\"process:attention\",\"label\":\"需要人工处理\",\"description\":\"证据不足或运行环境错误时暂停并等待决定。\",\"kind\":\"decision\",\"trustBoundary\":\"Human decision boundary\",\"unresolved\":false},{\"id\":\"process:reworking\",\"label\":\"返工\",\"description\":\"验证失败或审核标注触发有上限的候选修改。\",\"kind\":\"stage\",\"trustBoundary\":\"Execution authority\",\"unresolved\":false},{\"id\":\"process:delivery-review\",\"label\":\"交付审核\",\"description\":\"人检查冻结候选、变更和验收结论。\",\"kind\":\"decision\",\"trustBoundary\":\"Human decision boundary\",\"unresolved\":false},{\"id\":\"process:delivered\",\"label\":\"已交付\",\"description\":\"当前候选和证据集合完成最终批准。\",\"kind\":\"stage\",\"trustBoundary\":null,\"unresolved\":false}],\"edges\":[{\"id\":\"process-edge:spec-solution\",\"from\":\"process:delivery-spec\",\"to\":\"process:solution\",\"label\":\"需求已确认\"},{\"id\":\"process-edge:solution-review\",\"from\":\"process:solution\",\"to\":\"process:plan-review\",\"label\":\"冻结审核集合\"},{\"id\":\"process-edge:review-execute\",\"from\":\"process:plan-review\",\"to\":\"process:executing\",\"label\":\"批准\"},{\"id\":\"process-edge:review-revise\",\"from\":\"process:plan-review\",\"to\":\"process:solution-revision\",\"label\":\"要求修改\"},{\"id\":\"process-edge:revise-solution\",\"from\":\"process:solution-revision\",\"to\":\"process:solution\",\"label\":\"重新设计\"},{\"id\":\"process-edge:review-clarify\",\"from\":\"process:plan-review\",\"to\":\"process:clarifying\",\"label\":\"拒绝\"},{\"id\":\"process-edge:clarify-spec\",\"from\":\"process:clarifying\",\"to\":\"process:delivery-spec\",\"label\":\"更新定义\"},{\"id\":\"process-edge:execute-verify\",\"from\":\"process:executing\",\"to\":\"process:verifying\",\"label\":\"候选完成\"},{\"id\":\"process-edge:verify-rework\",\"from\":\"process:verifying\",\"to\":\"process:reworking\",\"label\":\"失败\"},{\"id\":\"process-edge:rework-verify\",\"from\":\"process:reworking\",\"to\":\"process:verifying\",\"label\":\"再次验证\"},{\"id\":\"process-edge:verify-attention\",\"from\":\"process:verifying\",\"to\":\"process:attention\",\"label\":\"证据不足 / 环境错误\"},{\"id\":\"process-edge:attention-verify\",\"from\":\"process:attention\",\"to\":\"process:verifying\",\"label\":\"继续验证\"},{\"id\":\"process-edge:verify-delivery-review\",\"from\":\"process:verifying\",\"to\":\"process:delivery-review\",\"label\":\"全部通过\"},{\"id\":\"process-edge:delivery-review-delivered\",\"from\":\"process:delivery-review\",\"to\":\"process:delivered\",\"label\":\"批准交付\"},{\"id\":\"process-edge:delivery-review-rework\",\"from\":\"process:delivery-review\",\"to\":\"process:reworking\",\"label\":\"标注返工\"}]},\"risks\":[\"A stale approval must not unlock execution.\"],\"unresolvedItems\":[],\"reviewSetSha256\":\"d3b4f53fd761d1e7555e9eefd4389c008b4548e60c0e71e622e4e5e48efb2c11\",\"preparedAtMillis\":2900000000105}",
+      "createdAtMillis": 2900000000105,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+      "id": "attention-fixture-plan-review",
+      "options": [
+        {
+          "description": "批准当前交付定义、方案和两张图，允许进入执行阶段。",
+          "id": "approve",
+          "label": "批准执行",
+          "schemaVersion": 3
+        },
+        {
+          "description": "保持当前 DeliverySpec，返回方案阶段处理逐项意见。",
+          "id": "request_changes",
+          "label": "要求修改",
+          "schemaVersion": 3
+        },
+        {
+          "description": "拒绝当前方案并返回需求澄清阶段。",
+          "id": "reject",
+          "label": "拒绝方案",
+          "schemaVersion": 3
+        }
+      ],
+      "resolution": "{\"schemaVersion\":2,\"protocol\":\"winwincode.plan-review-decision.v2\",\"action\":\"approve\",\"deliveryId\":\"dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G\",\"deliverySpecId\":\"spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved\",\"deliverySpecRevision\":2,\"reviewStageRunId\":\"stage-fixture-plan-review\",\"attentionItemId\":\"attention-fixture-plan-review\",\"reviewSetSha256\":\"d3b4f53fd761d1e7555e9eefd4389c008b4548e60c0e71e622e4e5e48efb2c11\",\"comments\":\"Approve the exact current fixture review set.\",\"requestedChanges\":[]}",
+      "resolvedAtMillis": 2900000000108,
+      "resolvedBy": "fixture-ui-reviewer",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-plan-review",
+      "status": "resolved",
+      "title": "审核交付方案和执行边界",
+      "type": "decision_required"
+    },
+    {
+      "assignedTo": "fixture-ui-reviewer",
+      "blocking": true,
+      "context": "Review the current passing Verdict and its direct evidence.",
+      "createdAtMillis": 2900000000115,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+      "id": "attention-fixture-success-delivery-review",
+      "options": [
+        {
+          "description": "Deliver the exact current candidate and Verdict.",
+          "id": "approve-delivery",
+          "label": "Approve delivery",
+          "schemaVersion": 3
+        },
+        {
+          "description": "Return the exact current candidate to bounded rework.",
+          "id": "annotate-rework",
+          "label": "Request annotated rework",
+          "schemaVersion": 3
+        }
+      ],
+      "resolution": "Approve the exact current candidate and passing Verdict.",
+      "resolvedAtMillis": 2900000000118,
+      "resolvedBy": "fixture-ui-reviewer",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-success-delivery-review",
+      "status": "resolved",
+      "title": "Approve the current verified fixture candidate",
+      "type": "delivery_approval"
+    }
+  ],
+  "createdAtMillis": 2900000000101,
+  "evidence": [
+    {
+      "candidateRef": "git-candidate:sha256:d69ddb149e0893446548a0b385eddff9d3cba4df9ab9f30e13a8a98b36f78268",
+      "createdAtMillis": 2900000000115,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+      "deliverySpecRevision": 2,
+      "id": "evidence:027d5865b3c6bfe1bcc64d95ab568a102a41de47ea4d20da089a63ccf8c1089c",
+      "schemaVersion": 3,
+      "sessionBindingId": "binding-fixture-success-verifier",
+      "sourceRef": "runtime_event:dsh-fixture-success-verifier@4",
+      "stageRunId": "stage-fixture-success-verifier",
+      "type": "review_finding"
+    },
+    {
+      "candidateRef": "git-candidate:sha256:d69ddb149e0893446548a0b385eddff9d3cba4df9ab9f30e13a8a98b36f78268",
+      "createdAtMillis": 2900000000115,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+      "deliverySpecRevision": 2,
+      "id": "evidence:5c7e1badffcf9b3b757b6634c8feb682fc24267be164ef2b243ebf84d4eb014b",
+      "schemaVersion": 3,
+      "sessionBindingId": "binding-fixture-success-reviewer",
+      "sourceRef": "runtime_event:dsh-fixture-success-reviewer@4",
+      "stageRunId": "stage-fixture-success-reviewer",
+      "type": "review_finding"
+    },
+    {
+      "candidateRef": "git-candidate:sha256:d69ddb149e0893446548a0b385eddff9d3cba4df9ab9f30e13a8a98b36f78268",
+      "createdAtMillis": 2900000000115,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+      "deliverySpecRevision": 2,
+      "id": "evidence:a826efbb2d547f901e8a10e64eb1a74dd2a829f1f0ccaf22c3d85b99b6dffc6d",
+      "schemaVersion": 3,
+      "sessionBindingId": "binding-fixture-success-verifier",
+      "sourceRef": "runtime_event:dsh-fixture-success-verifier@3",
+      "stageRunId": "stage-fixture-success-verifier",
+      "type": "test"
+    },
+    {
+      "candidateRef": "git-candidate:sha256:d69ddb149e0893446548a0b385eddff9d3cba4df9ab9f30e13a8a98b36f78268",
+      "createdAtMillis": 2900000000115,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+      "deliverySpecRevision": 2,
+      "id": "evidence:ad8a378e23eea7379aab64bfec6fc8557ae3d90911e084c6dfb1c2fa10d6eb06",
+      "schemaVersion": 3,
+      "sessionBindingId": "binding-fixture-success-reviewer",
+      "sourceRef": "runtime_event:dsh-fixture-success-reviewer@3",
+      "stageRunId": "stage-fixture-success-reviewer",
+      "type": "command"
+    }
+  ],
+  "id": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+  "revision": 17,
+  "schemaVersion": 3,
+  "sessionBindings": [
+    {
+      "boundAtMillis": 2900000000105,
+      "codexSessionId": "codex-fixture-planner",
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "dshSessionId": "dsh-fixture-planner",
+      "id": "binding-fixture-planning",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-planning"
+    },
+    {
+      "boundAtMillis": 2900000000107,
+      "codexSessionId": null,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "dshSessionId": "dsh-fixture-plan-review",
+      "id": "binding-fixture-plan-review",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-plan-review"
+    },
+    {
+      "boundAtMillis": 2900000000110,
+      "codexSessionId": "codex-fixture-success-executor",
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "dshSessionId": "dsh-fixture-success-executor",
+      "id": "binding-fixture-success-executor",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-success-executor"
+    },
+    {
+      "boundAtMillis": 2900000000112,
+      "codexSessionId": "codex-fixture-success-reviewer",
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "dshSessionId": "dsh-fixture-success-reviewer",
+      "id": "binding-fixture-success-reviewer",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-success-reviewer"
+    },
+    {
+      "boundAtMillis": 2900000000114,
+      "codexSessionId": "codex-fixture-success-verifier",
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "dshSessionId": "dsh-fixture-success-verifier",
+      "id": "binding-fixture-success-verifier",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-success-verifier"
+    },
+    {
+      "boundAtMillis": 2900000000117,
+      "codexSessionId": null,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "dshSessionId": "dsh-fixture-success-delivery-review",
+      "id": "binding-fixture-success-delivery-review",
+      "schemaVersion": 3,
+      "stageRunId": "stage-fixture-success-delivery-review"
+    }
+  ],
+  "spec": {
+    "acceptanceCriteria": [
+      {
+        "description": "The local fixture exports the reviewed value.",
+        "id": "criterion-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+        "required": true,
+        "schemaVersion": 3,
+        "verificationMethod": "Run the local Node test against the frozen candidate."
+      }
+    ],
+    "baseRevision": "697b264db0d6398c9d7519f970c3e06605bdd299",
+    "constraints": [
+      "Codex remains the execution authority",
+      "DSH remains the interaction and model-provider shell"
+    ],
+    "createdAtMillis": 2900000000002,
+    "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+    "goal": "Prove the canonical Delivery path from reviewed goal to direct evidence.",
+    "id": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+    "maxReworkAttempts": 2,
+    "outOfScope": [
+      "A second Agent scheduler",
+      "A generic task tracker"
+    ],
+    "publicationTarget": null,
+    "repository": {
+      "kind": "local-git",
+      "locator": "/workspace/oracle/success-closed-loop",
+      "schemaVersion": 3
+    },
+    "revision": 2,
+    "schemaVersion": 3,
+    "scope": [
+      "One local repository value change"
+    ],
+    "sourceRef": null,
+    "title": "Deterministic Delivery approved"
+  },
+  "stageRuns": [
+    {
+      "actorType": "codex",
+      "attempt": 1,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliveryTaskId": null,
+      "finishedAtMillis": 2900000000106,
+      "id": "stage-fixture-planning",
+      "role": "planner",
+      "schemaVersion": 3,
+      "stage": "planning",
+      "startedAtMillis": 2900000000104,
+      "status": "succeeded"
+    },
+    {
+      "actorType": "human",
+      "attempt": 1,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliveryTaskId": null,
+      "finishedAtMillis": 2900000000108,
+      "id": "stage-fixture-plan-review",
+      "role": "reviewer",
+      "schemaVersion": 3,
+      "stage": "plan-review",
+      "startedAtMillis": 2900000000106,
+      "status": "succeeded"
+    },
+    {
+      "actorType": "codex",
+      "attempt": 1,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliveryTaskId": null,
+      "finishedAtMillis": 2900000000111,
+      "id": "stage-fixture-success-executor",
+      "role": "executor",
+      "schemaVersion": 3,
+      "stage": "executing",
+      "startedAtMillis": 2900000000109,
+      "status": "succeeded"
+    },
+    {
+      "actorType": "codex",
+      "attempt": 1,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliveryTaskId": null,
+      "finishedAtMillis": 2900000000113,
+      "id": "stage-fixture-success-reviewer",
+      "role": "reviewer",
+      "schemaVersion": 3,
+      "stage": "verifying",
+      "startedAtMillis": 2900000000111,
+      "status": "succeeded"
+    },
+    {
+      "actorType": "codex",
+      "attempt": 1,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliveryTaskId": null,
+      "finishedAtMillis": 2900000000115,
+      "id": "stage-fixture-success-verifier",
+      "role": "verifier",
+      "schemaVersion": 3,
+      "stage": "verifying",
+      "startedAtMillis": 2900000000113,
+      "status": "succeeded"
+    },
+    {
+      "actorType": "human",
+      "attempt": 1,
+      "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+      "deliveryTaskId": null,
+      "finishedAtMillis": 2900000000118,
+      "id": "stage-fixture-success-delivery-review",
+      "role": "approver",
+      "schemaVersion": 3,
+      "stage": "delivery-review",
+      "startedAtMillis": 2900000000116,
+      "status": "succeeded"
+    }
+  ],
+  "status": "delivered",
+  "tasks": [],
+  "updatedAtMillis": 2900000000118,
+  "verdict": {
+    "candidateRef": "git-candidate:sha256:d69ddb149e0893446548a0b385eddff9d3cba4df9ab9f30e13a8a98b36f78268",
+    "criteria": [
+      {
+        "candidateRef": "git-candidate:sha256:d69ddb149e0893446548a0b385eddff9d3cba4df9ab9f30e13a8a98b36f78268",
+        "criterionId": "criterion-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+        "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+        "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+        "evaluatedAtMillis": 2900000000115,
+        "evidenceRefs": [
+          "evidence:027d5865b3c6bfe1bcc64d95ab568a102a41de47ea4d20da089a63ccf8c1089c",
+          "evidence:5c7e1badffcf9b3b757b6634c8feb682fc24267be164ef2b243ebf84d4eb014b",
+          "evidence:a826efbb2d547f901e8a10e64eb1a74dd2a829f1f0ccaf22c3d85b99b6dffc6d",
+          "evidence:ad8a378e23eea7379aab64bfec6fc8557ae3d90911e084c6dfb1c2fa10d6eb06"
+        ],
+        "explanation": "reviewer/finding-reviewer-pass-1 (pass): reviewer produced the controlled pass fixture result. | verifier/finding-verifier-pass-1 (pass): verifier produced the controlled pass fixture result.",
+        "id": "criterion-result:3dd074f2408a51bd96b08b156d134f4bf81ad8a9f9e6c195bed69c69de1f134d",
+        "schemaVersion": 3,
+        "verdict": "pass"
+      }
+    ],
+    "deliveryId": "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G",
+    "deliverySpecId": "spec-dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G-approved",
+    "id": "delivery-verdict:1e27d805cd29ae9e6d307c2dcdf8598ec4c14e8b394d6bdf0c61af47864c64f0",
+    "producedAtMillis": 2900000000115,
+    "schemaVersion": 3,
+    "status": "pass",
+    "unresolvedFindings": []
+  }
+}

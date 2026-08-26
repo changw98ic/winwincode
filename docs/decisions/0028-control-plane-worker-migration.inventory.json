@@ -312,7 +312,6 @@
         "packages/contracts/src/strongflow-delivery-api.ts",
         "packages/contracts/src/strongflow-diagram-execution.ts",
         "packages/contracts/src/strongflow-github-publication.ts",
-        "packages/contracts/src/strongflow-github-review-package.ts",
         "packages/contracts/src/strongflow-plan-review.ts",
         "packages/contracts/src/strongflow-role.ts",
         "packages/contracts/src/strongflow-runtime-execution.ts"
@@ -420,34 +419,6 @@
       ]
     },
     {
-      "id": "dsh-github-provider",
-      "sourcePaths": [
-        "packages/dsh-profile/src/github-publication-provider.ts"
-      ],
-      "entrySymbols": [
-        "DshGitHubPublicationProvider"
-      ],
-      "targetOwners": [
-        "control-plane"
-      ],
-      "targetModules": [
-        "crates/winwincode-publication",
-        "crates/winwincode-github",
-        "crates/winwincode-credential"
-      ],
-      "phase": "3",
-      "disposition": "translate",
-      "observableContracts": [
-        "credential reference resolution",
-        "lookup-before-apply idempotency",
-        "bounded GitHub failures without response-body persistence"
-      ],
-      "behaviorBaselineIds": [
-        "model-failure",
-        "approval-block"
-      ]
-    },
-    {
       "id": "dsh-profile-composition",
       "sourcePaths": [
         "packages/dsh-profile/src/index.ts"
@@ -548,33 +519,24 @@
     {
       "id": "strongflow-publication",
       "sourcePaths": [
-        "packages/strongflow/src/github-publication-journal.ts",
-        "packages/strongflow/src/github-publication-provider.ts",
-        "packages/strongflow/src/github-publication-runner.ts",
-        "packages/strongflow/src/github-publication.ts",
-        "packages/strongflow/src/github-review-package.ts"
+        "packages/strongflow/src/github-publication.ts"
       ],
       "entrySymbols": [
-        "StrongFlowGitHubPublicationJournal",
-        "StrongFlowGitHubPublicationProvider",
-        "runStrongFlowGitHubPublication",
         "createStrongFlowGitHubPublicationAttention",
-        "generateStrongFlowGitHubReviewPackage"
+        "assertStrongFlowGitHubPublicationCurrent"
       ],
       "targetOwners": [
-        "control-plane"
+        "typescript-web"
       ],
       "targetModules": [
-        "crates/winwincode-publication",
-        "crates/winwincode-github",
-        "crates/winwincode-audit"
+        "apps/web"
       ],
-      "phase": "3",
-      "disposition": "translate",
+      "phase": "6",
+      "disposition": "presentation",
       "observableContracts": [
         "candidate- and verdict-bound publication approval",
-        "deterministic review package",
-        "durable external-effect intent and reconciliation"
+        "deterministic publication approval context",
+        "presentation-only decision handoff"
       ],
       "behaviorBaselineIds": [
         "model-failure",

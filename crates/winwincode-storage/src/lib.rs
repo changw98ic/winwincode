@@ -8,10 +8,32 @@
 //! events. The interface deliberately does not expose transaction handles, so
 //! callers cannot publish an event before every durable fact commits.
 
+mod artifact;
+mod execution_registry;
+mod git_source;
+
+pub use artifact::{
+    ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactObject,
+    ArtifactObjectStore, ArtifactOpen, ArtifactProvenance, ArtifactRecord, ArtifactRetention,
+    ArtifactStore, ArtifactWriteReceipt, FakeArtifactObjectStore, LocalArtifactObjectStore,
+};
+pub use execution_registry::{
+    ActiveLeaseSummary, DispatchResultError, DispatchResultErrorCode, DispatchResultReceipt,
+    DispatchResultRequest, DispatchResultStatus, ExecutionLeaseClaim, ExecutionLeaseReceipt,
+    ExecutionLeaseRecord, ExecutionLeaseRenewal, ExecutionRegistry, LeaseRecovery,
+    LeaseWriteStatus, WorkerHeartbeatReceipt, WorkerHeartbeatRequest, WorkerRecord,
+    WorkerRegistrationReceipt, WorkerRegistrationRequest, WorkerRegistrationStatus,
+};
+pub use git_source::{
+    CandidateSourceManifest, GitSourceHunk, GitSourcePath, GitSourcePathState, GitSourceResolver,
+    LocalGitSourceResolver, ValidatedGitSourceArtifact,
+};
+
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -446,6 +468,110 @@ impl ReceiptIdentity {
     }
 }
 
+/// One opaque, canonical `AuditEvent` waiting for the Control Plane audit
+/// store. Storage owns only the atomic receipt bridge; the audit crate owns
+/// the payload schema and hash chain.
+///
+/// Storage owns the atomicity and idempotency boundary, while the Control
+/// Plane owns the payload's audit schema. Keeping the payload opaque avoids a
+/// dependency from storage back into the audit or application crates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAuditEvent {
+    event_id: String,
+    payload: Vec<u8>,
+}
+
+impl PendingAuditEvent {
+    /// Builds one opaque pending event for the same scoped receipt transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::InvalidInput`] for an empty event identity
+    /// or empty encoded event.
+    pub fn new(
+        event_id: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Result<Self, StorageError> {
+        let event = Self {
+            event_id: event_id.into(),
+            payload: payload.into(),
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
+    #[must_use]
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    fn validate(&self) -> Result<(), StorageError> {
+        if self.event_id.is_empty() {
+            return Err(StorageError::invalid(
+                "pending audit event_id must not be empty",
+            ));
+        }
+        if self.payload.is_empty() {
+            return Err(StorageError::invalid(
+                "pending audit event payload must not be empty",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One secondary canonical-state revision that must still be current when a
+/// [`StateCommit`] is written.
+///
+/// A guard is evaluated in the same `SQLite` `IMMEDIATE` transaction as the
+/// guarded commit. A stream that has not been persisted yet has revision zero.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateRevisionGuard {
+    stream_id: String,
+    expected_revision: u64,
+}
+
+impl StateRevisionGuard {
+    /// Creates one exact secondary-stream revision guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageErrorKind::InvalidInput`] when the stream identity is
+    /// empty or the revision cannot be represented by `SQLite`.
+    pub fn new(stream_id: impl Into<String>, expected_revision: u64) -> Result<Self, StorageError> {
+        let stream_id = stream_id.into();
+        if stream_id.is_empty() {
+            return Err(StorageError::invalid(
+                "state revision guard stream_id must not be empty",
+            ));
+        }
+        if expected_revision > i64::MAX as u64 {
+            return Err(StorageError::invalid(
+                "state revision guard expected_revision exceeds the SQLite integer range",
+            ));
+        }
+        Ok(Self {
+            stream_id,
+            expected_revision,
+        })
+    }
+
+    #[must_use]
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    #[must_use]
+    pub const fn expected_revision(&self) -> u64 {
+        self.expected_revision
+    }
+}
+
 /// One atomic canonical-state and outbox commit at the storage port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateCommit {
@@ -455,7 +581,9 @@ pub struct StateCommit {
     pub expected_revision: u64,
     pub state: Vec<u8>,
     pub events: Vec<NewOutboxEvent>,
+    state_guards: Vec<StateRevisionGuard>,
     journal_publication: Option<AggregateJournalPublication>,
+    pending_audit_event: Option<PendingAuditEvent>,
     receipt_replay_required: bool,
 }
 
@@ -476,7 +604,9 @@ impl StateCommit {
             expected_revision,
             state: state.into(),
             events,
+            state_guards: Vec::new(),
             journal_publication: None,
+            pending_audit_event: None,
             receipt_replay_required: false,
         }
     }
@@ -491,6 +621,31 @@ impl StateCommit {
     #[must_use]
     pub const fn journal_publication(&self) -> Option<&AggregateJournalPublication> {
         self.journal_publication.as_ref()
+    }
+
+    /// Adds one canonical audit event to this same state/receipt/outbox
+    /// transaction.
+    #[must_use]
+    pub fn with_pending_audit_event(mut self, pending_audit_event: PendingAuditEvent) -> Self {
+        self.pending_audit_event = Some(pending_audit_event);
+        self
+    }
+
+    #[must_use]
+    pub const fn pending_audit_event(&self) -> Option<&PendingAuditEvent> {
+        self.pending_audit_event.as_ref()
+    }
+
+    /// Adds one secondary canonical-state revision guard to this commit.
+    #[must_use]
+    pub fn with_state_guard(mut self, guard: StateRevisionGuard) -> Self {
+        self.state_guards.push(guard);
+        self
+    }
+
+    #[must_use]
+    pub fn state_guards(&self) -> &[StateRevisionGuard] {
+        &self.state_guards
     }
 
     /// Requires this call to resolve an already durable scoped receipt.
@@ -519,8 +674,34 @@ impl StateCommit {
                 "expected_revision exceeds the SQLite integer range",
             ));
         }
+        let mut guard_streams = HashSet::with_capacity(self.state_guards.len());
+        for guard in &self.state_guards {
+            if guard.stream_id.is_empty() {
+                return Err(StorageError::invalid(
+                    "state revision guard stream_id must not be empty",
+                ));
+            }
+            if guard.expected_revision > i64::MAX as u64 {
+                return Err(StorageError::invalid(
+                    "state revision guard expected_revision exceeds the SQLite integer range",
+                ));
+            }
+            if guard.stream_id == self.stream_id {
+                return Err(StorageError::invalid(
+                    "state revision guard must not target the primary stream",
+                ));
+            }
+            if !guard_streams.insert(guard.stream_id.as_str()) {
+                return Err(StorageError::invalid(
+                    "state revision guard stream ids must be unique",
+                ));
+            }
+        }
         if let Some(publication) = &self.journal_publication {
             publication.validate()?;
+        }
+        if let Some(pending_audit_event) = &self.pending_audit_event {
+            pending_audit_event.validate()?;
         }
 
         let mut event_ids = HashSet::with_capacity(self.events.len());
@@ -555,6 +736,40 @@ pub struct StoredState {
     pub stream_id: String,
     pub revision: u64,
     pub payload: Vec<u8>,
+}
+
+/// One consistent read of canonical state streams and a resource-local public
+/// event cursor.
+///
+/// A `SQLite` implementation obtains every value in this structure through one
+/// read transaction. The Control Plane uses it to prevent a runtime snapshot
+/// from being paired with a cursor observed after a concurrent commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionReadCut {
+    states: Vec<StoredState>,
+    projection_event_cursor: ProjectionEventCursor,
+}
+
+impl ProjectionReadCut {
+    #[must_use]
+    pub fn states(&self) -> &[StoredState] {
+        &self.states
+    }
+
+    #[must_use]
+    pub const fn projection_event_cursor(&self) -> &ProjectionEventCursor {
+        &self.projection_event_cursor
+    }
+
+    pub(crate) fn new(
+        states: Vec<StoredState>,
+        projection_event_cursor: ProjectionEventCursor,
+    ) -> Self {
+        Self {
+            states,
+            projection_event_cursor,
+        }
+    }
 }
 
 /// A durable event waiting to be published.
@@ -646,6 +861,7 @@ pub enum StorageErrorKind {
 pub struct StorageError {
     kind: StorageErrorKind,
     message: String,
+    state_guard_conflict: bool,
 }
 
 impl StorageError {
@@ -654,6 +870,7 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::Adapter,
             message: message.into(),
+            state_guard_conflict: false,
         }
     }
 
@@ -662,6 +879,7 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::InvalidInput,
             message: message.into(),
+            state_guard_conflict: false,
         }
     }
 
@@ -673,6 +891,7 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::Closed,
             message: "storage is already closed".to_owned(),
+            state_guard_conflict: false,
         }
     }
 
@@ -683,6 +902,19 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::RevisionConflict,
             message: format!("expected revision {expected}, but current revision is {actual}"),
+            state_guard_conflict: false,
+        }
+    }
+
+    /// Builds a revision conflict for a secondary [`StateRevisionGuard`].
+    #[must_use]
+    pub fn state_revision_guard_conflict(stream_id: &str, expected: u64, actual: u64) -> Self {
+        Self {
+            kind: StorageErrorKind::RevisionConflict,
+            message: format!(
+                "state revision guard {stream_id} expected revision {expected}, but current revision is {actual}"
+            ),
+            state_guard_conflict: true,
         }
     }
 
@@ -696,6 +928,7 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::RevisionConflict,
             message: "reviewSetSha256 no longer identifies the current solution review".to_owned(),
+            state_guard_conflict: false,
         }
     }
 
@@ -709,6 +942,7 @@ impl StorageError {
                 "request id {} was already used for another command in this actor and scope",
                 request_id.0
             ),
+            state_guard_conflict: false,
         }
     }
 
@@ -719,6 +953,7 @@ impl StorageError {
                 "request id {} exists in the aggregate journal without its scoped command receipt",
                 request_id.0
             ),
+            state_guard_conflict: false,
         }
     }
 
@@ -729,6 +964,7 @@ impl StorageError {
                 "{} aggregate journal {} already exists",
                 key.aggregate_type, key.aggregate_id
             ),
+            state_guard_conflict: false,
         }
     }
 
@@ -739,6 +975,7 @@ impl StorageError {
                 "{} aggregate journal {} does not exist",
                 key.aggregate_type, key.aggregate_id
             ),
+            state_guard_conflict: false,
         }
     }
 
@@ -749,6 +986,7 @@ impl StorageError {
                 "{} aggregate journal {} tail changed",
                 key.aggregate_type, key.aggregate_id
             ),
+            state_guard_conflict: false,
         }
     }
 
@@ -756,12 +994,20 @@ impl StorageError {
         Self {
             kind: StorageErrorKind::EventCursorExpired,
             message: "projection event cursor is outside the retained stream window".to_owned(),
+            state_guard_conflict: false,
         }
     }
 
     #[must_use]
     pub const fn kind(&self) -> StorageErrorKind {
         self.kind
+    }
+
+    /// Returns whether this revision conflict came from a secondary
+    /// [`StateRevisionGuard`] rather than the primary commit stream.
+    #[must_use]
+    pub const fn is_state_guard_conflict(&self) -> bool {
+        self.state_guard_conflict
     }
 }
 
@@ -778,7 +1024,9 @@ impl std::error::Error for StorageError {}
 /// `commit` owns the full transaction. `pending_events` and `mark_published`
 /// implement an at-least-once outbox with stable event ids.
 pub trait ProductStateStorage: Send {
-    /// Atomically writes canonical state, its request receipt, and outbox events.
+    /// Atomically writes canonical state, its request receipt, and outbox
+    /// events. Any [`StateRevisionGuard`] on `commit` is checked after the
+    /// receipt lookup and before the first write in that same transaction.
     ///
     /// # Errors
     ///
@@ -802,6 +1050,71 @@ pub trait ProductStateStorage: Send {
         command_digest: &Sha256Digest,
     ) -> Result<Option<CommitReceipt>, StorageError>;
 
+    /// Loads the durable result for an exact scoped request without comparing
+    /// a supplied command body. This is used only to report the committed
+    /// cursor after a changed-body idempotency conflict; it does not authorize
+    /// replay or reinterpret any current aggregate state.
+    ///
+    /// Adapters that do not provide this lookup fail closed with an adapter
+    /// error, and callers must return a zero acknowledgement cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the lookup is unavailable or the
+    /// storage adapter cannot read the receipt.
+    fn load_receipt_for_identity(
+        &self,
+        _identity: &ReceiptIdentity,
+    ) -> Result<Option<CommitReceipt>, StorageError> {
+        Err(StorageError::adapter(
+            "receipt lookup without a command digest is unavailable",
+        ))
+    }
+
+    /// Loads the pending canonical audit event attached to one scoped receipt,
+    /// whether or not the Control Plane has flushed it to `AuditStore`.
+    ///
+    /// Adapters that do not yet persist pending audit events fail closed rather
+    /// than manufacturing a value from a receipt or outbox event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when pending audit-event lookup is
+    /// unavailable or the storage adapter cannot read the event.
+    fn load_pending_audit_event(
+        &self,
+        _identity: &ReceiptIdentity,
+    ) -> Result<Option<PendingAuditEvent>, StorageError> {
+        Err(StorageError::adapter(
+            "pending audit event storage is unavailable",
+        ))
+    }
+
+    /// Loads canonical audit events that have committed with state but have
+    /// not yet been appended to the immutable `AuditStore`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the storage adapter cannot read
+    /// the pending audit-event outbox.
+    fn pending_audit_events(&self) -> Result<Vec<PendingAuditEvent>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Marks one pending canonical audit event as durably appended to the
+    /// immutable `AuditStore`. The marker is idempotent so a crash between
+    /// append and marker update is recovered by retrying the same event id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the event id is invalid, the
+    /// event is missing, or the storage adapter cannot update the marker.
+    fn mark_audit_event_persisted(&mut self, _event_id: &str) -> Result<(), StorageError> {
+        Err(StorageError::adapter(
+            "pending audit event acknowledgement is unavailable",
+        ))
+    }
+
     /// Loads one exact durable event by stable event id, whether or not it was
     /// already acknowledged as published.
     ///
@@ -824,6 +1137,20 @@ pub trait ProductStateStorage: Send {
     ///
     /// Returns an adapter-neutral error when the read fails or storage is closed.
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError>;
+
+    /// Loads canonical state streams and the resource-local public event
+    /// cursor from one durable read cut.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when either state or cursor loading
+    /// fails.
+    fn load_projection_read_cut(
+        &self,
+        state_stream_ids: &[String],
+        key: &ProjectionEventStreamKey,
+        expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionReadCut, StorageError>;
 
     /// Loads one fully committed opaque aggregate journal.
     ///
@@ -878,6 +1205,7 @@ pub trait ProductStateStorage: Send {
 /// Local `SQLite` implementation of [`ProductStateStorage`].
 pub struct SqliteStorage {
     connection: Option<Connection>,
+    read_connection: Mutex<Connection>,
     database_path: PathBuf,
 }
 
@@ -913,8 +1241,24 @@ impl SqliteStorage {
             .map_err(sql_error)?;
         apply_migrations(&mut connection)?;
 
+        let read_connection =
+            Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
+        read_connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(sql_error)?;
+        read_connection
+            .pragma_update(None, "foreign_keys", true)
+            .map_err(sql_error)?;
+        read_connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(sql_error)?;
+        read_connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(sql_error)?;
+
         Ok(Self {
             connection: Some(connection),
+            read_connection: Mutex::new(read_connection),
             database_path,
         })
     }
@@ -952,6 +1296,7 @@ impl ProductStateStorage for SqliteStorage {
             ));
         }
 
+        check_state_revision_guards(&transaction, commit)?;
         let receipt = append_state_commit(&transaction, commit)?;
         transaction.commit().map_err(sql_error)?;
         Ok(receipt)
@@ -968,6 +1313,50 @@ impl ProductStateStorage for SqliteStorage {
             return Ok(None);
         };
         replay_stored_receipt(connection, identity, command_digest, prior).map(Some)
+    }
+
+    fn load_receipt_for_identity(
+        &self,
+        identity: &ReceiptIdentity,
+    ) -> Result<Option<CommitReceipt>, StorageError> {
+        let connection = self.connection()?;
+        let Some(prior) = prior_receipt(connection, identity)? else {
+            return Ok(None);
+        };
+        let command_digest = Sha256Digest(prior.command_digest.clone());
+        replay_stored_receipt(connection, identity, &command_digest, prior).map(Some)
+    }
+
+    fn load_pending_audit_event(
+        &self,
+        identity: &ReceiptIdentity,
+    ) -> Result<Option<PendingAuditEvent>, StorageError> {
+        load_pending_audit_event(self.connection()?, identity)
+    }
+
+    fn pending_audit_events(&self) -> Result<Vec<PendingAuditEvent>, StorageError> {
+        pending_audit_events(self.connection()?)
+    }
+
+    fn mark_audit_event_persisted(&mut self, event_id: &str) -> Result<(), StorageError> {
+        if event_id.is_empty() {
+            return Err(StorageError::invalid_input(
+                "pending audit event id must not be empty",
+            ));
+        }
+        let changed = self
+            .connection_mut()?
+            .execute(
+                "UPDATE audit_outbox SET persisted = 1 WHERE event_id = ?1",
+                [event_id],
+            )
+            .map_err(sql_error)?;
+        if changed != 1 {
+            return Err(StorageError::adapter(
+                "pending audit event acknowledgement has no durable row",
+            ));
+        }
+        Ok(())
     }
 
     fn load_outbox_event(
@@ -1076,23 +1465,30 @@ impl ProductStateStorage for SqliteStorage {
     }
 
     fn load_state(&self, stream_id: &str) -> Result<Option<StoredState>, StorageError> {
-        self.connection()?
-            .query_row(
-                "SELECT revision, payload FROM product_state WHERE stream_id = ?1",
-                [stream_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?
-            .map(|(revision, payload)| {
-                Ok(StoredState {
-                    stream_id: stream_id.to_owned(),
-                    revision: u64::try_from(revision)
-                        .map_err(|_| StorageError::adapter("stored revision is negative"))?,
-                    payload,
-                })
-            })
-            .transpose()
+        load_state_from_connection(self.connection()?, stream_id)
+    }
+
+    fn load_projection_read_cut(
+        &self,
+        state_stream_ids: &[String],
+        key: &ProjectionEventStreamKey,
+        expected: Option<&ProjectionEventCursor>,
+    ) -> Result<ProjectionReadCut, StorageError> {
+        let mut connection = self.read_connection.lock().map_err(|_| {
+            StorageError::adapter("SQLite projection read connection lock is poisoned")
+        })?;
+        let transaction = connection.transaction().map_err(sql_error)?;
+        let states = state_stream_ids
+            .iter()
+            .map(|stream_id| load_state_from_connection(&transaction, stream_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let projection_event_cursor =
+            load_projection_event_cursor_from_connection(&transaction, key, expected)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(ProjectionReadCut::new(states, projection_event_cursor))
     }
 
     fn load_journal(
@@ -1107,69 +1503,7 @@ impl ProductStateStorage for SqliteStorage {
         key: &ProjectionEventStreamKey,
         expected: Option<&ProjectionEventCursor>,
     ) -> Result<ProjectionEventCursor, StorageError> {
-        key.stream().validate()?;
-        if let Some(expected) = expected {
-            if expected.key() != key {
-                return Err(StorageError::invalid(
-                    "projection event cursor belongs to another scope or stream",
-                ));
-            }
-            if expected.sequence() == 0 {
-                return ProjectionEventCursor::try_new(key.clone(), 0, None);
-            }
-            let connection = self.connection()?;
-            let stored_event_id = connection
-                .query_row(
-                    "SELECT event_id FROM outbox \
-                     WHERE receipt_scope_key = ?1 AND projection_stream_kind = ?2 \
-                       AND projection_resource_id = ?3 AND projection_stream_sequence = ?4",
-                    params![
-                        key.scope_key().as_bytes(),
-                        key.stream().kind(),
-                        key.stream().resource_id(),
-                        i64::try_from(expected.sequence()).map_err(|_| {
-                            StorageError::invalid("projection event sequence is out of range")
-                        })?,
-                    ],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(sql_error)?;
-            let Some(stored_event_id) = stored_event_id else {
-                let Some((head_sequence, _)) = load_projection_stream_head(connection, key)? else {
-                    return Err(StorageError::invalid(
-                        "projection event cursor was never issued for this stream",
-                    ));
-                };
-                if expected.sequence() > head_sequence {
-                    return Err(StorageError::invalid(
-                        "projection event cursor is beyond the durable stream head",
-                    ));
-                }
-                return Err(StorageError::event_cursor_expired());
-            };
-            if expected.event_id().map(|event_id| event_id.0.as_str())
-                != Some(stored_event_id.as_str())
-            {
-                return Err(StorageError::invalid(
-                    "projection event cursor eventId does not match its stored position",
-                ));
-            }
-            return ProjectionEventCursor::try_new(
-                key.clone(),
-                expected.sequence(),
-                expected.event_id().cloned(),
-            );
-        }
-
-        match load_projection_stream_head(self.connection()?, key)? {
-            Some((sequence, event_id)) => ProjectionEventCursor::try_new(
-                key.clone(),
-                sequence,
-                Some(ControlPlaneEventId(event_id)),
-            ),
-            None => ProjectionEventCursor::try_new(key.clone(), 0, None),
-        }
+        load_projection_event_cursor_from_connection(self.connection()?, key, expected)
     }
 
     fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError> {
@@ -1241,13 +1575,115 @@ impl ProductStateStorage for SqliteStorage {
         Ok(())
     }
 
-    fn close(mut self: Box<Self>) -> Result<(), StorageError> {
-        let connection = self.connection.take().ok_or_else(StorageError::closed)?;
+    fn close(self: Box<Self>) -> Result<(), StorageError> {
+        let SqliteStorage {
+            mut connection,
+            read_connection,
+            database_path: _,
+        } = *self;
+        let read_connection = read_connection.into_inner().map_err(|_| {
+            StorageError::adapter("SQLite projection read connection lock is poisoned")
+        })?;
+        read_connection
+            .close()
+            .map_err(|(_, error)| sql_error(error))?;
+        let connection = connection.take().ok_or_else(StorageError::closed)?;
         connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(sql_error)?;
         connection.close().map_err(|(_, error)| sql_error(error))?;
         Ok(())
+    }
+}
+
+fn load_state_from_connection(
+    connection: &Connection,
+    stream_id: &str,
+) -> Result<Option<StoredState>, StorageError> {
+    connection
+        .query_row(
+            "SELECT revision, payload FROM product_state WHERE stream_id = ?1",
+            [stream_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|(revision, payload)| {
+            Ok(StoredState {
+                stream_id: stream_id.to_owned(),
+                revision: u64::try_from(revision)
+                    .map_err(|_| StorageError::adapter("stored revision is negative"))?,
+                payload,
+            })
+        })
+        .transpose()
+}
+
+fn load_projection_event_cursor_from_connection(
+    connection: &Connection,
+    key: &ProjectionEventStreamKey,
+    expected: Option<&ProjectionEventCursor>,
+) -> Result<ProjectionEventCursor, StorageError> {
+    key.stream().validate()?;
+    if let Some(expected) = expected {
+        if expected.key() != key {
+            return Err(StorageError::invalid(
+                "projection event cursor belongs to another scope or stream",
+            ));
+        }
+        if expected.sequence() == 0 {
+            return ProjectionEventCursor::try_new(key.clone(), 0, None);
+        }
+        let stored_event_id = connection
+            .query_row(
+                "SELECT event_id FROM outbox \
+                 WHERE receipt_scope_key = ?1 AND projection_stream_kind = ?2 \
+                   AND projection_resource_id = ?3 AND projection_stream_sequence = ?4",
+                params![
+                    key.scope_key().as_bytes(),
+                    key.stream().kind(),
+                    key.stream().resource_id(),
+                    i64::try_from(expected.sequence()).map_err(|_| {
+                        StorageError::invalid("projection event sequence is out of range")
+                    })?,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let Some(stored_event_id) = stored_event_id else {
+            let Some((head_sequence, _)) = load_projection_stream_head(connection, key)? else {
+                return Err(StorageError::invalid(
+                    "projection event cursor was never issued for this stream",
+                ));
+            };
+            if expected.sequence() > head_sequence {
+                return Err(StorageError::invalid(
+                    "projection event cursor is beyond the durable stream head",
+                ));
+            }
+            return Err(StorageError::event_cursor_expired());
+        };
+        if expected.event_id().map(|event_id| event_id.0.as_str()) != Some(stored_event_id.as_str())
+        {
+            return Err(StorageError::invalid(
+                "projection event cursor eventId does not match its stored position",
+            ));
+        }
+        return ProjectionEventCursor::try_new(
+            key.clone(),
+            expected.sequence(),
+            expected.event_id().cloned(),
+        );
+    }
+
+    match load_projection_stream_head(connection, key)? {
+        Some((sequence, event_id)) => ProjectionEventCursor::try_new(
+            key.clone(),
+            sequence,
+            Some(ControlPlaneEventId(event_id)),
+        ),
+        None => ProjectionEventCursor::try_new(key.clone(), 0, None),
     }
 }
 
@@ -1282,11 +1718,62 @@ fn prior_receipt(
         .map_err(sql_error)
 }
 
+fn load_pending_audit_event(
+    connection: &Connection,
+    identity: &ReceiptIdentity,
+) -> Result<Option<PendingAuditEvent>, StorageError> {
+    connection
+        .query_row(
+            "SELECT event_id, payload FROM audit_outbox \
+             WHERE actor_key = ?1 AND scope_key = ?2 AND request_id = ?3",
+            params![
+                identity.actor_key().as_bytes(),
+                identity.scope_key().as_bytes(),
+                identity.request_id().0,
+            ],
+            |row| {
+                let event_id = row.get::<_, String>(0)?;
+                let payload = row.get::<_, Vec<u8>>(1)?;
+                Ok((event_id, payload))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|(event_id, payload)| PendingAuditEvent::new(event_id, payload))
+        .transpose()
+}
+
+fn pending_audit_events(connection: &Connection) -> Result<Vec<PendingAuditEvent>, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT event_id, payload FROM audit_outbox \
+             WHERE persisted = 0 ORDER BY event_id",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(sql_error)?;
+    rows.map(|row| {
+        let (event_id, payload) = row.map_err(sql_error)?;
+        PendingAuditEvent::new(event_id, payload)
+    })
+    .collect()
+}
+
 fn replay_receipt(
     transaction: &rusqlite::Transaction<'_>,
     commit: &StateCommit,
     prior: StoredReceipt,
 ) -> Result<CommitReceipt, StorageError> {
+    if load_pending_audit_event(transaction, &commit.receipt_identity)?
+        != commit.pending_audit_event.clone()
+    {
+        return Err(StorageError::request_conflict(
+            commit.receipt_identity.request_id(),
+        ));
+    }
     replay_stored_receipt(
         transaction,
         &commit.receipt_identity,
@@ -1313,6 +1800,33 @@ fn replay_stored_receipt(
         events: receipt_events(connection, identity)?,
         idempotent_replay: true,
     })
+}
+
+fn check_state_revision_guards(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+) -> Result<(), StorageError> {
+    for guard in &commit.state_guards {
+        let actual_revision = transaction
+            .query_row(
+                "SELECT revision FROM product_state WHERE stream_id = ?1",
+                [&guard.stream_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(sql_error)?
+            .unwrap_or(0);
+        let actual_revision = u64::try_from(actual_revision)
+            .map_err(|_| StorageError::adapter("stored revision is negative"))?;
+        if actual_revision != guard.expected_revision {
+            return Err(StorageError::state_revision_guard_conflict(
+                &guard.stream_id,
+                guard.expected_revision,
+                actual_revision,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn append_state_commit(
@@ -1347,6 +1861,9 @@ fn append_state_commit(
         append_journal_publication(transaction, publication)?;
     }
     append_receipt(transaction, commit, revision)?;
+    if let Some(pending_audit_event) = commit.pending_audit_event() {
+        append_pending_audit_event(transaction, commit, pending_audit_event)?;
+    }
     append_outbox_events(transaction, commit)?;
 
     Ok(CommitReceipt {
@@ -1358,6 +1875,28 @@ fn append_state_commit(
         events: receipt_events(transaction, &commit.receipt_identity)?,
         idempotent_replay: false,
     })
+}
+
+fn append_pending_audit_event(
+    transaction: &rusqlite::Transaction<'_>,
+    commit: &StateCommit,
+    pending_audit_event: &PendingAuditEvent,
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO audit_outbox \
+             (actor_key, scope_key, request_id, event_id, payload, persisted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![
+                commit.receipt_identity.actor_key().as_bytes(),
+                commit.receipt_identity.scope_key().as_bytes(),
+                commit.receipt_identity.request_id().0,
+                pending_audit_event.event_id(),
+                pending_audit_event.payload(),
+            ],
+        )
+        .map_err(sql_error)?;
+    Ok(())
 }
 
 fn append_journal_publication(
@@ -1622,8 +2161,10 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
             )));
         }
     }
+    create_pending_audit_event_schema(&transaction)?;
     validate_journal_schema(&transaction)?;
     validate_projection_event_schema(&transaction)?;
+    validate_pending_audit_event_schema(&transaction)?;
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(sql_error)?;
@@ -1757,6 +2298,48 @@ fn validate_projection_event_schema(
     Ok(())
 }
 
+fn create_pending_audit_event_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StorageError> {
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit_outbox (
+                 actor_key BLOB NOT NULL,
+                 scope_key BLOB NOT NULL,
+                 request_id TEXT NOT NULL,
+                 event_id TEXT UNIQUE NOT NULL,
+                 payload BLOB NOT NULL,
+                 persisted INTEGER NOT NULL DEFAULT 0 CHECK (persisted IN (0, 1)),
+                 PRIMARY KEY (actor_key, scope_key, request_id),
+                 FOREIGN KEY (actor_key, scope_key, request_id)
+                     REFERENCES command_receipts (actor_key, scope_key, request_id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );",
+        )
+        .map_err(sql_error)
+}
+
+fn validate_pending_audit_event_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StorageError> {
+    let columns = table_columns(transaction, "audit_outbox")?;
+    if columns
+        != [
+            "actor_key",
+            "scope_key",
+            "request_id",
+            "event_id",
+            "payload",
+            "persisted",
+        ]
+    {
+        return Err(StorageError::adapter(
+            "pending audit event schema is not canonical",
+        ));
+    }
+    Ok(())
+}
+
 fn table_columns(
     transaction: &rusqlite::Transaction<'_>,
     table: &str,
@@ -1764,6 +2347,7 @@ fn table_columns(
     let pragma = match table {
         "outbox" => "PRAGMA table_info(outbox)",
         "projection_event_stream_heads" => "PRAGMA table_info(projection_event_stream_heads)",
+        "audit_outbox" => "PRAGMA table_info(audit_outbox)",
         _ => return Err(StorageError::adapter("unknown schema table")),
     };
     let mut statement = transaction.prepare(pragma).map_err(sql_error)?;

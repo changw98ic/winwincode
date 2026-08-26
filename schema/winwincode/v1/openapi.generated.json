@@ -226,6 +226,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -240,7 +243,8 @@
           "approvalId",
           "decision",
           "scope",
-          "decidedAt"
+          "decidedAt",
+          "sessionIdentity"
         ],
         "title": "approval.decision",
         "type": "object",
@@ -444,6 +448,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -458,7 +465,8 @@
           "workerSessionId",
           "approvalId",
           "action",
-          "expiresAt"
+          "expiresAt",
+          "sessionIdentity"
         ],
         "title": "approval.request",
         "type": "object",
@@ -542,6 +550,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "$ref": "#/components/schemas/LeaseWriteStatus"
           },
@@ -558,7 +569,8 @@
           "workerSessionId",
           "artifactId",
           "status",
-          "ackSequence"
+          "ackSequence",
+          "sessionIdentity"
         ],
         "title": "artifact.ack",
         "type": "object",
@@ -596,6 +608,9 @@
           "sequence": {
             "$ref": "#/components/schemas/ExecutionSequence"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -610,7 +625,8 @@
           "artifactId",
           "sequence",
           "payload",
-          "isFinal"
+          "isFinal",
+          "sessionIdentity"
         ],
         "title": "artifact.chunk",
         "type": "object",
@@ -696,6 +712,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -708,7 +727,8 @@
           "requestId",
           "lease",
           "workerSessionId",
-          "artifact"
+          "artifact",
+          "sessionIdentity"
         ],
         "title": "artifact.open",
         "type": "object",
@@ -1506,6 +1526,9 @@
           "scopeKind": {
             "const": "delivery-stage"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "stageRunId": {
             "$ref": "#/components/schemas/StageRunId"
           },
@@ -1521,7 +1544,8 @@
           "stageRunId",
           "projectionRevision",
           "lastProjectionSequence",
-          "reloadQueries"
+          "reloadQueries",
+          "sessionIdentity"
         ],
         "type": "object"
       },
@@ -1655,6 +1679,9 @@
           },
           {
             "$ref": "#/components/schemas/ControlPlaneWebSocketExecutionWorkerSource"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketSessionExecutionWorkerSource"
           }
         ]
       },
@@ -2017,6 +2044,39 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketProtocolErrorFrame"
           }
         ]
+      },
+      "ControlPlaneWebSocketSessionExecutionWorkerSource": {
+        "additionalProperties": false,
+        "description": "Execution-worker source for a session-scoped event. The block must exactly join the event payload.",
+        "properties": {
+          "codexThreadId": {
+            "$ref": "#/components/schemas/CodexThreadId"
+          },
+          "kind": {
+            "const": "execution-worker"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "workerId",
+          "workerSessionId",
+          "leaseId",
+          "codexThreadId",
+          "sessionIdentity"
+        ],
+        "type": "object"
       },
       "ControlPlaneWebSocketSubscribeFrame": {
         "additionalProperties": false,
@@ -3919,15 +3979,65 @@
         "oneOf": [
           {
             "properties": {
+              "attempt": {
+                "type": "null"
+              },
               "codexThreadId": {
+                "type": "null"
+              },
+              "fencingToken": {
+                "type": "null"
+              },
+              "leaseId": {
+                "type": "null"
+              },
+              "sessionIdentity": {
+                "type": "null"
+              },
+              "sourceIdentity": {
+                "type": "null"
+              },
+              "stageRunId": {
+                "type": "null"
+              },
+              "workerId": {
+                "type": "null"
+              },
+              "workerSessionId": {
                 "type": "null"
               }
             }
           },
           {
             "properties": {
+              "attempt": {
+                "maximum": 1000,
+                "minimum": 1,
+                "type": "integer"
+              },
               "codexThreadId": {
                 "$ref": "#/components/schemas/CodexThreadId"
+              },
+              "fencingToken": {
+                "maxLength": 20,
+                "minLength": 1,
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "type": "string"
+              },
+              "leaseId": {
+                "$ref": "#/components/schemas/LeaseId"
+              },
+              "sessionIdentity": {
+                "$ref": "#/components/schemas/SessionIdentity"
+              },
+              "sourceIdentity": {
+                "$ref": "#/components/schemas/SessionBindingSourceIdentity"
+              },
+              "stageRunId": {
+                "$ref": "#/components/schemas/StageRunId"
+              },
+              "workerId": {
+                "$ref": "#/components/schemas/WorkerId"
               },
               "workerSessionId": {
                 "$ref": "#/components/schemas/WorkerSessionId"
@@ -3936,6 +4046,18 @@
           }
         ],
         "properties": {
+          "attempt": {
+            "oneOf": [
+              {
+                "maximum": 1000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "bindingId": {
             "maxLength": 200,
             "minLength": 1,
@@ -3958,8 +4080,71 @@
           "executionJobId": {
             "$ref": "#/components/schemas/ExecutionJobId"
           },
+          "fencingToken": {
+            "oneOf": [
+              {
+                "maxLength": 20,
+                "minLength": 1,
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "leaseId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LeaseId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "productSessionId": {
             "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "sessionIdentity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceIdentity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionBindingSourceIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stageRunId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StageRunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workerId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkerId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "workerSessionId": {
             "oneOf": [
@@ -3978,7 +4163,14 @@
           "executionJobId",
           "workerSessionId",
           "codexThreadId",
-          "boundAt"
+          "boundAt",
+          "sessionIdentity",
+          "stageRunId",
+          "workerId",
+          "leaseId",
+          "attempt",
+          "fencingToken",
+          "sourceIdentity"
         ],
         "type": "object"
       },
@@ -5102,6 +5294,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -5118,7 +5313,8 @@
           "mode",
           "prompt",
           "allowEmpty",
-          "expiresAt"
+          "expiresAt",
+          "sessionIdentity"
         ],
         "title": "input.request",
         "type": "object",
@@ -5202,6 +5398,9 @@
           "productSessionId": {
             "$ref": "#/components/schemas/ProductSessionId"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "enum": [
               "cancelled",
@@ -5230,7 +5429,8 @@
           "executionJobId",
           "inputRequestId",
           "status",
-          "value"
+          "value",
+          "sessionIdentity"
         ],
         "type": "object"
       },
@@ -5284,6 +5484,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "enum": [
               "cancelled",
@@ -5316,7 +5519,8 @@
           "inputRequestId",
           "status",
           "value",
-          "respondedAt"
+          "respondedAt",
+          "sessionIdentity"
         ],
         "title": "input.response",
         "type": "object",
@@ -5399,6 +5603,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "enum": [
               "accepted",
@@ -5422,7 +5629,8 @@
           "requestId",
           "lease",
           "workerSessionId",
-          "status"
+          "status",
+          "sessionIdentity"
         ],
         "title": "job.cancel_ack",
         "type": "object",
@@ -5464,6 +5672,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -5477,7 +5688,8 @@
           "lease",
           "workerSessionId",
           "reason",
-          "requestedAt"
+          "requestedAt",
+          "sessionIdentity"
         ],
         "title": "job.cancel",
         "type": "object",
@@ -5610,6 +5822,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "enum": [
               "accepted",
@@ -5632,7 +5847,8 @@
           "sentAt",
           "lease",
           "workerSessionId",
-          "status"
+          "status",
+          "sessionIdentity"
         ],
         "title": "job.outcome_ack",
         "type": "object",
@@ -5661,6 +5877,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -5672,7 +5891,8 @@
           "sentAt",
           "lease",
           "workerSessionId",
-          "outcome"
+          "outcome",
+          "sessionIdentity"
         ],
         "title": "job.outcome",
         "type": "object",
@@ -5914,6 +6134,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "$ref": "#/components/schemas/LeaseWriteStatus"
           },
@@ -5930,7 +6153,8 @@
           "workerSessionId",
           "modelExchangeId",
           "status",
-          "ackSequence"
+          "ackSequence",
+          "sessionIdentity"
         ],
         "title": "model.ack",
         "type": "object",
@@ -5971,6 +6195,9 @@
           "sequence": {
             "$ref": "#/components/schemas/ExecutionSequence"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -5984,7 +6211,8 @@
           "workerSessionId",
           "modelExchangeId",
           "sequence",
-          "isFinal"
+          "isFinal",
+          "sessionIdentity"
         ],
         "title": "model.chunk",
         "type": "object",
@@ -6047,6 +6275,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -6061,7 +6292,8 @@
           "workerSessionId",
           "modelExchangeId",
           "route",
-          "request"
+          "request",
+          "sessionIdentity"
         ],
         "title": "model.open",
         "type": "object",
@@ -7182,6 +7414,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "status": {
             "$ref": "#/components/schemas/LeaseWriteStatus"
           },
@@ -7197,7 +7432,8 @@
           "lease",
           "workerSessionId",
           "status",
-          "ackSequence"
+          "ackSequence",
+          "sessionIdentity"
         ],
         "title": "runtime.ack",
         "type": "object",
@@ -7449,6 +7685,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -7461,7 +7700,8 @@
           "lease",
           "workerSessionId",
           "codexThreadId",
-          "event"
+          "event",
+          "sessionIdentity"
         ],
         "title": "runtime.event",
         "type": "object",
@@ -7816,6 +8056,9 @@
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
           },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
           }
@@ -7829,7 +8072,8 @@
           "lease",
           "workerSessionId",
           "afterSequence",
-          "maxEvents"
+          "maxEvents",
+          "sessionIdentity"
         ],
         "title": "runtime.replay_request",
         "type": "object",
@@ -8151,17 +8395,28 @@
         "additionalProperties": false,
         "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease.",
         "properties": {
+          "attempt": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "boundAt": {
             "$ref": "#/components/schemas/Instant"
           },
           "codexThreadId": {
             "$ref": "#/components/schemas/CodexThreadId"
           },
+          "fencingToken": {
+            "$ref": "#/components/schemas/FencingToken"
+          },
           "kind": {
             "const": "session.binding"
           },
           "lease": {
             "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
           },
           "messageId": {
             "$ref": "#/components/schemas/ExecutionMessageId"
@@ -8174,6 +8429,18 @@
           },
           "sentAt": {
             "$ref": "#/components/schemas/Instant"
+          },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "sourceIdentity": {
+            "$ref": "#/components/schemas/SessionBindingSourceIdentity"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
           },
           "workerSessionId": {
             "$ref": "#/components/schemas/WorkerSessionId"
@@ -8188,12 +8455,48 @@
           "productSessionId",
           "workerSessionId",
           "codexThreadId",
-          "boundAt"
+          "boundAt",
+          "sessionIdentity",
+          "sourceIdentity",
+          "stageRunId",
+          "workerId",
+          "leaseId",
+          "attempt",
+          "fencingToken"
         ],
         "title": "session.binding",
         "type": "object",
         "x-authority": "lease-write",
         "x-direction": "worker-to-control-plane"
+      },
+      "SessionBindingSourceIdentity": {
+        "additionalProperties": false,
+        "description": "Stable source identity that produced a SessionBinding.",
+        "properties": {
+          "kind": {
+            "const": "execution-worker"
+          },
+          "leaseId": {
+            "$ref": "#/components/schemas/LeaseId"
+          },
+          "workerId": {
+            "$ref": "#/components/schemas/WorkerId"
+          },
+          "workerInstanceId": {
+            "$ref": "#/components/schemas/WorkerInstanceId"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "workerId",
+          "workerSessionId",
+          "leaseId",
+          "workerInstanceId"
+        ],
+        "type": "object"
       },
       "SessionCancelCommand": {
         "allOf": [
@@ -8422,6 +8725,30 @@
             "type": "object"
           }
         ]
+      },
+      "SessionIdentity": {
+        "additionalProperties": false,
+        "description": "Identity of one executable session. Delivery-stage sessions carry StageRun; ProductSession Chat sessions omit it.",
+        "properties": {
+          "codexThreadId": {
+            "$ref": "#/components/schemas/CodexThreadId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "workerSessionId",
+          "codexThreadId"
+        ],
+        "type": "object"
       },
       "SessionListParameters": {
         "additionalProperties": false,
@@ -10289,7 +10616,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:2a64a4a5139b9335fc7a666cd4d81c837ba2d033e7895afa4a09de49d23c661c",
+  "x-source-digest": "sha256:2993a4eabebf6ea387dba96cac36f18cdd90107565ff4a8e792efce904bb303f",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

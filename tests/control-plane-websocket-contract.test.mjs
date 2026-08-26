@@ -272,6 +272,37 @@ function validateFrameShape(frame) {
   return null
 }
 
+function validateSessionIdentityJoin(frame) {
+  if (
+    frame.event.type !== 'runtime-projection.invalidated.v1'
+    || frame.event.scopeKind !== 'delivery-stage'
+  ) return null
+  const identity = frame.event.sessionIdentity
+  if (identity === undefined) return 'session event is missing sessionIdentity'
+  for (const field of [
+    'productSessionId',
+    'stageRunId',
+  ]) {
+    if (identity[field] !== frame.event[field]) {
+      return `session identity does not join event ${field}`
+    }
+  }
+  if (frame.source.kind === 'execution-worker') {
+    if (frame.source.sessionIdentity === undefined) {
+      return 'session event worker source is missing sessionIdentity'
+    }
+    if (JSON.stringify(frame.source.sessionIdentity) !== JSON.stringify(identity)) {
+      return 'session event source and payload identities differ'
+    }
+    for (const field of ['workerSessionId', 'codexThreadId']) {
+      if (frame.source[field] !== identity[field]) {
+        return `session event source does not join identity ${field}`
+      }
+    }
+  }
+  return null
+}
+
 function validateTranscript(transcript) {
   const shapeFailure = transcript.frames
     .map(validateFrameShape)
@@ -317,6 +348,8 @@ function validateTranscript(transcript) {
     if (frame.authorizationEpoch < authorizationEpochBaseline) {
       return 'event authorization epoch predates the accepted baseline'
     }
+    const identityFailure = validateSessionIdentityJoin(frame)
+    if (identityFailure) return identityFailure
     if (revokedEpoch !== null && frame.authorizationEpoch <= revokedEpoch) {
       return 'event was sent after authorization was revoked'
     }
@@ -594,4 +627,33 @@ test('negative transcripts reject commands, missing metadata, and crossed stream
       transcript.name,
     )
   }
+})
+
+test('session-scoped frames reject unknown identity fields and source/payload joins', () => {
+  const transcript = validFixture.transcripts.find(item => (
+    item.name === 'product-session-resume'
+  ))
+  assert.ok(transcript)
+  const frame = transcript.frames.find(item => (
+    item.type === 'event.v1'
+      && item.event.type === 'runtime-projection.invalidated.v1'
+      && item.event.scopeKind === 'delivery-stage'
+  ))
+  assert.ok(frame)
+  assert.deepEqual(validateSchemaNode(frame, schema), [])
+
+  const unknown = structuredClone(frame)
+  unknown.event.sessionIdentity.unexpected = true
+  assert.notDeepEqual(validateSchemaNode(unknown, schema), [])
+
+  const crossed = structuredClone(frame)
+  crossed.event.sessionIdentity.stageRunId = 'run_01J00000000000000000000001'
+  assert.equal(validateSessionIdentityJoin(crossed), 'session identity does not join event stageRunId')
+
+  const sourceCrossed = structuredClone(frame)
+  sourceCrossed.source.sessionIdentity.productSessionId = 'psn_01J00000000000000000000001'
+  assert.equal(
+    validateSessionIdentityJoin(sourceCrossed),
+    'session event source and payload identities differ',
+  )
 })

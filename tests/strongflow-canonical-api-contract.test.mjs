@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 
+import Ajv2020 from 'ajv/dist/2020.js'
+import addFormats from 'ajv-formats'
+
 const root = resolve(import.meta.dirname, '..')
 const schemaRoot = join(root, 'schema', 'winwincode', 'v1')
 
@@ -106,7 +109,19 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
   assert.deepEqual(binding.properties.workerSessionId.oneOf.at(-1), { type: 'null' })
   assert.deepEqual(binding.properties.codexThreadId.oneOf.at(-1), { type: 'null' })
   assert.deepEqual(binding.oneOf, [
-    { properties: { codexThreadId: { type: 'null' } } },
+    {
+      properties: {
+        codexThreadId: { type: 'null' },
+        workerSessionId: { type: 'null' },
+        sessionIdentity: { type: 'null' },
+        stageRunId: { type: 'null' },
+        workerId: { type: 'null' },
+        leaseId: { type: 'null' },
+        attempt: { type: 'null' },
+        fencingToken: { type: 'null' },
+        sourceIdentity: { type: 'null' },
+      },
+    },
     {
       properties: {
         workerSessionId: {
@@ -114,6 +129,32 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
         },
         codexThreadId: {
           $ref: './domain.schema.json#/$defs/CodexThreadId',
+        },
+        sessionIdentity: {
+          $ref: './domain.schema.json#/$defs/SessionIdentity',
+        },
+        stageRunId: {
+          $ref: './domain.schema.json#/$defs/StageRunId',
+        },
+        workerId: {
+          $ref: './domain.schema.json#/$defs/WorkerId',
+        },
+        leaseId: {
+          $ref: './domain.schema.json#/$defs/LeaseId',
+        },
+        attempt: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+        },
+        fencingToken: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 20,
+          pattern: '^[1-9][0-9]{0,19}$',
+        },
+        sourceIdentity: {
+          $ref: './domain.schema.json#/$defs/SessionBindingSourceIdentity',
         },
       },
     },
@@ -136,11 +177,87 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
       'productSessionId',
       'executionJobId',
       'boundAt',
+      'workerSessionId',
+      'codexThreadId',
+      'sessionIdentity',
+      'stageRunId',
+      'workerId',
+      'leaseId',
+      'attempt',
+      'fencingToken',
+      'sourceIdentity',
     ],
+    completeIdentityBlock: 'sessionIdentity',
+    completeSourceIdentity: 'sourceIdentity',
     codexThreadRequiresWorkerSession: true,
     humanStageBinding: 'must_be_null',
     runtimeSessionBinding: 'worker_and_codex_required',
   })
+})
+
+test('DeliveryStageSessionBindingProjection decodes both pending and complete branches', () => {
+  const domain = json('domain.schema.json')
+  const http = json('control-plane-http.schema.json')
+  const ajv = new Ajv2020({ allErrors: true, strict: true })
+  addFormats(ajv)
+  for (const [keyword, schemaType] of [
+    ['x-winwincode-semantics', 'object'],
+    ['x-winwincode-openapi', 'object'],
+    ['x-winwincode-transports', 'object'],
+  ]) ajv.addKeyword({ keyword, schemaType, valid: true })
+  ajv.addSchema(domain)
+  ajv.addSchema(http)
+  const validate = ajv.getSchema(
+    `${http.$id}#/$defs/DeliveryStageSessionBindingProjection`,
+  )
+  assert.ok(validate)
+
+  const pending = {
+    bindingId: 'binding:runtime:pending',
+    productSessionId: 'psn_00000000000000000000000000',
+    executionJobId: 'job_00000000000000000000000000',
+    workerSessionId: null,
+    codexThreadId: null,
+    boundAt: '2026-08-24T10:00:00.000Z',
+    sessionIdentity: null,
+    stageRunId: null,
+    workerId: null,
+    leaseId: null,
+    attempt: null,
+    fencingToken: null,
+    sourceIdentity: null,
+  }
+  assert.equal(validate(pending), true, JSON.stringify(validate.errors))
+
+  const complete = {
+    ...pending,
+    workerSessionId: 'wsn_00000000000000000000000000',
+    codexThreadId: 'cdx_00000000000000000000000000',
+    sessionIdentity: {
+      productSessionId: pending.productSessionId,
+      workerSessionId: 'wsn_00000000000000000000000000',
+      codexThreadId: 'cdx_00000000000000000000000000',
+      stageRunId: 'run_00000000000000000000000000',
+    },
+    stageRunId: 'run_00000000000000000000000000',
+    workerId: 'wrk_00000000000000000000000000',
+    leaseId: 'lse_00000000000000000000000000',
+    attempt: 1,
+    fencingToken: '1',
+    sourceIdentity: {
+      kind: 'execution-worker',
+      workerId: 'wrk_00000000000000000000000000',
+      workerSessionId: 'wsn_00000000000000000000000000',
+      leaseId: 'lse_00000000000000000000000000',
+      workerInstanceId: 'wki_00000000000000000000000000',
+    },
+  }
+  assert.equal(validate(complete), true, JSON.stringify(validate.errors))
+
+  const partial = { ...pending, stageRunId: complete.stageRunId }
+  assert.equal(validate(partial), false)
+  const unknown = { ...pending, legacySessionId: 'legacy' }
+  assert.equal(validate(unknown), false)
 })
 
 test('current solution review and publication expose exact authority joins', () => {
@@ -555,6 +672,7 @@ test('WebSocket uses invalidation and reset names both canonical reload queries'
     'projectionRevision',
     'lastProjectionSequence',
     'reloadQueries',
+    'sessionIdentity',
   ])
   assert.equal(deliveryInvalidated.properties.scopeKind.const, 'delivery-stage')
   assert.deepEqual(deliveryInvalidated.properties.reloadQueries.prefixItems, [
@@ -603,14 +721,19 @@ test('ExecutionPort binds one CodexThread before accepting runtime events', () =
       'productSessionId',
       'workerSessionId',
       'codexThreadId',
+      'stageRunId',
       'executionJobId',
       'attempt',
+      'workerId',
       'leaseId',
       'fencingToken',
+      'sourceIdentity',
     ],
     duplicate: 'same_identity_is_idempotent_changed_identity_is_conflict',
     runtimeBeforeBinding: 'reject_before_persist_and_projection',
     runtimeThreadMismatch: 'reject_before_persist_and_projection',
+    sessionIdentityBlock: 'sessionIdentity',
+    sourceIdentity: 'SessionBindingSourceIdentity',
   })
 })
 

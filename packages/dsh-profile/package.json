@@ -20,10 +20,6 @@
       "types": "./dist/delivery-recovery.d.ts",
       "import": "./dist/delivery-recovery.js"
     },
-    "./github-publication-provider": {
-      "types": "./dist/github-publication-provider.d.ts",
-      "import": "./dist/github-publication-provider.js"
-    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

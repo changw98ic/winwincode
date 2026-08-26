@@ -6,16 +6,16 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 use winwincode_domain::{
-    AttentionItemId, CodexThreadId, DeliveryTaskId, EvidenceId, ExecutionJobId, ProductSessionId,
-    StageRunId, WorkerSessionId,
+    AttentionItemId, CodexThreadId, DeliveryTaskId, EvidenceId, ExecutionJobId, FencingToken,
+    LeaseId, ProductSessionId, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 
 use crate::domain::{
     AcceptanceCriterionId, AttentionItemStatus, AttentionItemType, CriterionResultId,
     CriterionVerdict, Delivery, DeliveryPublicationTarget, DeliverySourceRef, DeliverySpecId,
     DeliveryStage, DeliveryTaskStatus, DeliveryVerdictId, DeliveryVerdictStatus, EvidenceRefType,
-    FrozenDeliveryCandidate, RepositoryRef, SessionBindingId, StageRunActorType, StageRunStatus,
-    assert_frozen_candidate_current,
+    FrozenDeliveryCandidate, RepositoryRef, SessionBindingId, SessionBindingSourceProvenance,
+    StageRunActorType, StageRunStatus, assert_frozen_candidate_current,
 };
 
 use super::{ProjectionError, ProjectionErrorCode};
@@ -139,6 +139,12 @@ pub struct SessionBindingProjection {
     execution_job_id: ExecutionJobId,
     worker_session_id: Option<WorkerSessionId>,
     codex_thread_id: Option<CodexThreadId>,
+    worker_id: Option<WorkerId>,
+    worker_instance_id: Option<WorkerInstanceId>,
+    lease_id: Option<LeaseId>,
+    attempt: u64,
+    fencing_token: Option<FencingToken>,
+    source_provenance: SessionBindingSourceProvenance,
     bound_at: u64,
 }
 
@@ -161,6 +167,30 @@ impl SessionBindingProjection {
 
     pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
         self.codex_thread_id.as_ref()
+    }
+
+    pub fn worker_id(&self) -> Option<&WorkerId> {
+        self.worker_id.as_ref()
+    }
+
+    pub fn worker_instance_id(&self) -> Option<&WorkerInstanceId> {
+        self.worker_instance_id.as_ref()
+    }
+
+    pub fn lease_id(&self) -> Option<&LeaseId> {
+        self.lease_id.as_ref()
+    }
+
+    pub const fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    pub fn fencing_token(&self) -> Option<&FencingToken> {
+        self.fencing_token.as_ref()
+    }
+
+    pub const fn source_provenance(&self) -> &SessionBindingSourceProvenance {
+        &self.source_provenance
     }
 
     pub const fn bound_at(&self) -> u64 {
@@ -695,6 +725,12 @@ fn project_stages(delivery: &Delivery) -> Result<Vec<StageProjection>, Projectio
             execution_job_id: binding.execution_job_id.clone(),
             worker_session_id: binding.worker_session_id.clone(),
             codex_thread_id: binding.codex_thread_id.clone(),
+            worker_id: binding.worker_id.clone(),
+            worker_instance_id: binding.worker_instance_id.clone(),
+            lease_id: binding.lease_id.clone(),
+            attempt: binding.attempt,
+            fencing_token: binding.fencing_token.clone(),
+            source_provenance: binding.source_provenance.clone(),
             bound_at: binding.bound_at_millis,
         });
         stages.push(StageProjection {
@@ -984,6 +1020,7 @@ mod tests {
         duplicate.execution_job_id = ExecutionJobId("job-verifier-duplicate".into());
         duplicate.worker_session_id = Some(WorkerSessionId("worker-verifier-duplicate".into()));
         duplicate.codex_thread_id = Some(CodexThreadId("thread-verifier-duplicate".into()));
+        duplicate = duplicate.with_test_authority("projection-verifier-duplicate", 1);
         ambiguous.session_bindings.push(duplicate);
         let ambiguous = Delivery::try_from_snapshot(ambiguous).expect("canonical ambiguity");
         assert_eq!(
@@ -1019,6 +1056,7 @@ mod tests {
         binding.worker_session_id = Some(WorkerSessionId("worker-ui".into()));
         binding.codex_thread_id = Some(CodexThreadId("thread-ui".into()));
         binding.bound_at_millis += 5;
+        binding = binding.with_test_authority("projection-ui", 1);
         snapshot.session_bindings.push(binding);
         let mut evidence = snapshot.evidence[0].clone();
         evidence.id = EvidenceId("evidence-ui".into());

@@ -584,7 +584,7 @@
         "kind": "canonical-publication",
         "refs": [
           "packages/contracts/src/strongflow-github-publication.ts",
-          "packages/strongflow/src/github-publication-journal.ts",
+          "crates/winwincode-control-plane/src/publication_preparation.rs",
           "schema/winwincode/v1/control-plane-http.schema.json"
         ]
       },
@@ -602,20 +602,11 @@
       "baseline": {
         "publicSymbols": [
           {
-            "path": "packages/strongflow/src/github-publication-journal.ts",
-            "name": "StrongFlowGitHubPublicationJournal"
-          },
-          {
             "path": "packages/strongflow/src/github-publication.ts",
             "name": "assertStrongFlowGitHubPublicationCurrent"
           }
         ],
-        "tests": [
-          {
-            "path": "tests/github-review-package.test.mjs",
-            "name": "live publication persists intent and replays all four provider operations once"
-          }
-        ]
+        "tests": []
       },
       "rust": {
         "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
@@ -917,7 +908,7 @@
       "statement": "A publication status is shown only when its Delivery, target, current Spec revision, frozen candidate, passing Verdict, and human approval still match. Any resourceRef is a closed GitHub issue or pull-request identity on the exact target repository, never an arbitrary URL.",
       "refs": [
         "packages/strongflow/src/github-publication.ts",
-        "packages/strongflow/src/github-publication-journal.ts"
+        "crates/winwincode-control-plane/src/publication_preparation.rs"
       ],
       "baseline": {
         "tests": [
@@ -1054,7 +1045,7 @@
       "action": "Fail the entire bounded read whenever a publication fact exists but any exact join field is stale, foreign, ambiguous, or unavailable.",
       "refs": [
         "schema/winwincode/v1/control-plane-http.schema.json",
-        "packages/strongflow/src/github-publication-journal.ts"
+        "crates/winwincode-control-plane/src/publication_preparation.rs"
       ],
       "resolution": "DeliveryDetailProjection carries an optional PublicationProjection whose fields bind the current Delivery, Spec revision, candidate, passing Verdict, approval, target, closed GitHub resource identity, and publication digest in one delivery.get snapshot; arbitrary URLs are excluded."
     },

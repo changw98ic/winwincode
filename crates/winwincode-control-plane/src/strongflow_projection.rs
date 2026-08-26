@@ -17,17 +17,22 @@ use winwincode_api::generated::{
     PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
     RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
 };
-use winwincode_domain::is_canonical_delivery_id;
+use winwincode_domain::{SchemaVersion, is_canonical_delivery_id};
 
 use crate::ControlPlane;
 
 pub use application::PublicationAuthorizationSnapshot;
+pub(crate) use application::{
+    current_publication_approval, derive_publication_binding, load_current,
+};
 pub use sources::{
     DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, PublicationFactBinding,
     PublicationResourceFact, PublicationResourceKind, PublicationResultFact, RuntimeCutExpectation,
+    SqliteStorageRuntimeProjectionReadCutReader, SqliteTrustedRuntimeProjectionAdapter,
     StrongFlowProjectionSources, TrustedProjectionReadError, TrustedPublicationProjectionAdapter,
-    TrustedPublicationProjectionRead, TrustedRuntimeProjectionAdapter,
-    TrustedRuntimeProjectionRead,
+    TrustedPublicationProjectionRead, TrustedRuntimeFoldSnapshot, TrustedRuntimeProjectionAdapter,
+    TrustedRuntimeProjectionRead, TrustedRuntimeProjectionReadCut,
+    TrustedRuntimeProjectionReadCutReader,
 };
 
 /// Stable failure classes for typed `StrongFlow` reads.
@@ -153,7 +158,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         };
         Ok(QueryResultResponse::DeliveryGetResultResponse(
             DeliveryGetResultResponse {
-                schema_version: winwincode_api::generated::SchemaVersion::WinwincodeV1,
+                schema_version: SchemaVersion::WinwincodeV1,
                 request_id: query.request_id.clone(),
                 query: DeliveryGetResultResponseQuery::DeliveryGet,
                 result: mapping::delivery_detail(&read)?,
@@ -220,7 +225,7 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
         };
         Ok(QueryResultResponse::RuntimeProjectionGetResultResponse(
             RuntimeProjectionGetResultResponse {
-                schema_version: winwincode_api::generated::SchemaVersion::WinwincodeV1,
+                schema_version: SchemaVersion::WinwincodeV1,
                 request_id: query.request_id.clone(),
                 query: RuntimeProjectionGetResultResponseQuery::RuntimeProjectionGet,
                 result: snapshot,

@@ -256,18 +256,6 @@
       ]
     },
     {
-      "surfaceId": "dsh-github-provider",
-      "observableContracts": [
-        "credential reference resolution",
-        "lookup-before-apply idempotency",
-        "bounded GitHub failures without response-body persistence"
-      ],
-      "flowIds": [
-        "publication",
-        "provider-and-credential-gateway"
-      ]
-    },
-    {
       "surfaceId": "dsh-profile-composition",
       "observableContracts": [
         "installed DSH profile composition"
@@ -304,8 +292,8 @@
       "surfaceId": "strongflow-publication",
       "observableContracts": [
         "candidate- and verdict-bound publication approval",
-        "deterministic review package",
-        "durable external-effect intent and reconciliation"
+        "deterministic publication approval context",
+        "presentation-only decision handoff"
       ],
       "flowIds": [
         "publication",

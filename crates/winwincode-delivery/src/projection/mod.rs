@@ -252,6 +252,7 @@ mod tests {
             Some(WorkerSessionId("worker-session-verifier-2".into()));
         second_binding.codex_thread_id = Some(CodexThreadId("codex-thread-verifier-2".into()));
         second_binding.bound_at_millis += 100;
+        second_binding = second_binding.with_test_authority("projection-verifier-2", 1);
         first.session_bindings.push(second_binding);
 
         let first = Delivery::try_from_snapshot(first).expect("first Delivery");

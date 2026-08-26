@@ -8,9 +8,8 @@
 - 过渡期 TypeScript 产品路径：[`packages/contracts/src/delivery.ts`](../../packages/contracts/src/delivery.ts)、[`packages/contracts/src/strongflow-delivery-api.ts`](../../packages/contracts/src/strongflow-delivery-api.ts)、[`packages/strongflow/src/delivery-service.ts`](../../packages/strongflow/src/delivery-service.ts)、[`packages/strongflow/src/delivery-store.ts`](../../packages/strongflow/src/delivery-store.ts)；页面切换由 `winwincode-9c4.16.6.3` 承担，旧后端删除由 `winwincode-9c4.16.6.6` 承担。
 - 执行语义投影：[`packages/dsh-profile/src/runtime-events.ts`](../../packages/dsh-profile/src/runtime-events.ts)、[`packages/strongflow/src/delivery-runtime-projection.ts`](../../packages/strongflow/src/delivery-runtime-projection.ts)
 - 图上执行投影：[`packages/contracts/src/strongflow-diagram-execution.ts`](../../packages/contracts/src/strongflow-diagram-execution.ts)、[`packages/strongflow/src/diagram-execution-projection.ts`](../../packages/strongflow/src/diagram-execution-projection.ts)
-- GitHub 发布绑定：[`packages/contracts/src/strongflow-github-publication.ts`](../../packages/contracts/src/strongflow-github-publication.ts)、[`packages/strongflow/src/github-publication.ts`](../../packages/strongflow/src/github-publication.ts)
-- GitHub 审核包：[`packages/contracts/src/strongflow-github-review-package.ts`](../../packages/contracts/src/strongflow-github-review-package.ts)、[`packages/strongflow/src/github-review-package.ts`](../../packages/strongflow/src/github-review-package.ts)
-- GitHub 副作用控制：[`packages/strongflow/src/github-publication-provider.ts`](../../packages/strongflow/src/github-publication-provider.ts)、[`packages/strongflow/src/github-publication-journal.ts`](../../packages/strongflow/src/github-publication-journal.ts)、[`packages/strongflow/src/github-publication-runner.ts`](../../packages/strongflow/src/github-publication-runner.ts)
+- GitHub 发布批准界面：[`packages/contracts/src/strongflow-github-publication.ts`](../../packages/contracts/src/strongflow-github-publication.ts)、[`packages/strongflow/src/github-publication.ts`](../../packages/strongflow/src/github-publication.ts)
+- GitHub 审核包与写入控制：[`crates/winwincode-control-plane/src/publication_preparation.rs`](../../crates/winwincode-control-plane/src/publication_preparation.rs)、[`crates/winwincode-control-plane/src/publication_policy.rs`](../../crates/winwincode-control-plane/src/publication_policy.rs)、[`crates/winwincode-publication/src/github.rs`](../../crates/winwincode-publication/src/github.rs)
 - 重启协调：[`packages/dsh-profile/src/delivery-recovery.ts`](../../packages/dsh-profile/src/delivery-recovery.ts)
 - 独立验证投影：[`packages/strongflow/src/independent-verification.ts`](../../packages/strongflow/src/independent-verification.ts)
 - DSH 与 CLI 入口：[`packages/strongflow/src/delivery-remote.ts`](../../packages/strongflow/src/delivery-remote.ts)、[`apps/host/src/strongflow-cli.ts`](../../apps/host/src/strongflow-cli.ts)
@@ -155,19 +154,13 @@ winwincode.github-issue-delivery-id.v1\0github\0issue\0<lowercase owner/reposito
 
 调用方可以重复提交来源，但不能为来源指定另一个合法 `dlv_` 身份。TypeScript 与 Rust 都重新计算并逐字比对。`publicationTarget` 是单值，Spec 更新不能把同一个 Delivery 改到另一项 Pull Request。provider idempotency key 由 Delivery、来源和目标确定，因此候选返工后仍指向同一项预期 PR；新的候选和 Verdict 会产生新的审核集合摘要和人工批准。
 
-在真实提供商调用前，`generateStrongFlowGitHubReviewPackage()` 从当前 Delivery、冻结候选和 DSH/Codex RuntimeEvent 生成 `winwincode.github-review-package.v1` 本地派生包。固定目录把需求、批准方案、方案决定、系统架构图、流程图、候选、Diff、EvidenceRef、CriterionResult、DeliveryVerdict、发布审核上下文和 Pull Request 预览分开。包内不复制原始 Session 日志；Evidence 仍然只保存来源引用。生成时每个引用都必须能从当前候选或原始运行事件重建，结束图也必须由同一个候选 Diff 和已批准图重新投影。
+在真实提供商调用前，Rust Control Plane 从当前 Delivery journal、冻结候选、当前通过 Verdict、精确人工批准和 GitHub 目标生成一份确定性的 review package。它通过 `ArtifactStore` 写入内容寻址对象，随后重新读取并校验摘要。包内只保存安全的 Delivery 投影、候选 Git 关系、Artifact 引用、目标和批准身份/时间；不复制原始 Session 日志、WorkerSession、CodexThread、Attention 文本、lease、fence、token 或凭据。相同事实得到相同 Artifact ID，不同内容不会复用同一身份。
 
-Manifest 保存每个文件的 SHA-256 与字节数，并绑定 Spec、方案审核集合、候选、Verdict、发布审核集合和稳定 provider key。离线读取会重算所有摘要，并检查方案、两张图、决定、Evidence、验收结果、Verdict、发布上下文和 PR 预览之间的身份。相同事实得到相同 Package ID 和预览。写入使用本地临时目录和原子重命名；已有同一 Package ID 会直接复用，不同内容会报告冲突。
+`publication.publish` 在访问 GitHub 前先经过 Repository Policy，并把 allow/deny decision 写入不可变 AuditStore。允许后，Control Plane 把 Publication intent、command receipt 和事件原子写入 SQLite。每次 resume 都再次经过 policy；完成后再写一条绑定 Publication 摘要与 revision 的结果审计，因此 Pending、Publishing、Published、Failed 和 Cancelled 都能在重启后得到同一个可检查结果。
 
-`github/dry-run.json` 固定记录 `publicationOccurred: false` 和 `remoteWriteCount: 0`。包生成接口不接收 GitHub 客户端，也没有 branch、Pull Request、release、comment 或 status 写入能力，因此本步骤只形成正式人工审核依据。Review Package 属于可重建文件协议，不写入 Delivery，也不增加新的业务对象；live 发布协调器只消费通过校验的审核包和人工发布决定。
+GitHub adapter 固定按 head branch、Pull Request、来源 Issue comment 和 candidate commit status 执行。每一步都先 lookup，再在明确 absent 后 apply。调用中断或结果不明确时，Publication 保持 Publishing，下一次 resume 重新 lookup；已存在且身份完全相同的远端对象会被接管，不会重复创建。只有四项结果全部确认后才进入 Published，任何失败都不会伪装成功。
 
-发布入口 `runStrongFlowGitHubPublication()` 默认采用 `dry-run`，即使调用方传入 provider 也不会执行查询或写入。`live` 必须显式指定，并重新验证 Delivered 状态、当前人工发布决定、Spec、Candidate、Verdict、Review Package、来源和目标。任一内容过期都会在 provider 调用前结束。
-
-通过校验后，协调器一次性派生四项有序操作：head branch、Pull Request、来源 Issue comment 和 candidate commit status。每项都有稳定 operation key 和请求摘要。provider adapter 由 DSH 或提供商插件注入，负责使用原有认证边界，并保证相同 operation key 的 apply 收敛；WinWinCode 不增加凭据设置或 GitHub 账号存储。
-
-协调器先把完整发布意图写入 `$DSH_HOME/winwincode/github-publications` 下的追加式 operational journal，再为每一项执行 lookup、记录 apply intent、调用 provider、记录结果。调用抛错、返回不明确或结果格式异常都记录为不含原始错误文本的 `unknown`，当前运行返回 pending。下一次运行先 lookup：找到同一请求摘要就补记成功；仍然不明确就继续 pending；明确缺失后才再次 apply。这样即使进程在远端成功后、本地结果落盘前结束，也能通过 provider 查询恢复。
-
-同一 Package 的并发运行可能重复只读 lookup 或幂等 apply 调用，但不会确认第二份 branch、Pull Request、comment 或 status；journal 的成功事实也不会被后来的 unknown 结果降级。Provider 返回的资源引用在落盘前经过严格结构和认证材料检查。这个 journal 只记录外部副作用的意图与对账事实，不写入 Delivery，不成为第十一个业务对象，也不接管 GitHub 的 Issue、PR、评论或状态所有权。
+TypeScript 只保留发布批准的界面与请求构造，不再生成 review package、不再保存 Publication journal、不再解析 GitHub 凭据，也没有 GitHub 写入 provider。Publication 的业务状态和外部副作用只有这一条 Rust 路径。
 
 ### Evidence 与 Verdict
 

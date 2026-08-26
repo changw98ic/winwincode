@@ -87,7 +87,16 @@
       "executionJobId": "execution-job-verifier",
       "workerSessionId": "worker-session-verifier",
       "codexThreadId": "codex-thread-verifier",
-      "boundAtMillis": 1800000000011
+      "boundAtMillis": 1800000000011,
+      "workerId": "wrk_01J00000000000000000000000",
+      "workerInstanceId": "wki_01J00000000000000000000000",
+      "leaseId": "lse_01J00000000000000000000000",
+      "attempt": 1,
+      "fencingToken": "7",
+      "sourceProvenance": {
+        "kind": "execution-port",
+        "reference": "msg_01J00000000000000000000000"
+      }
     }
   ],
   "attentionItems": [],

@@ -3302,6 +3302,7 @@ dependencies = [
  "cookie",
  "document-features",
  "idna",
+ "indexmap 2.14.0",
  "log",
  "publicsuffix",
  "serde",
@@ -11750,14 +11751,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d39cb1dbab692d82a977c0392ffac19e188bd9186a9f32806f0aaa859d75585a"
 dependencies = [
  "base64 0.22.1",
+ "cookie_store",
  "der",
  "log",
  "native-tls",
  "percent-encoding",
+ "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "ureq-proto",
  "utf-8",
  "webpki-root-certs",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -12614,16 +12620,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-control-plane"
+name = "winwincode-audit"
 version = "0.0.0"
 dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "winwincode-domain",
+]
+
+[[package]]
+name = "winwincode-control-plane"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "winwincode-api",
+ "winwincode-audit",
  "winwincode-delivery",
  "winwincode-domain",
+ "winwincode-execution-port",
+ "winwincode-publication",
+ "winwincode-session",
  "winwincode-storage",
 ]
 
@@ -12635,6 +12657,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-domain",
+ "winwincode-storage",
 ]
 
 [[package]]
@@ -12642,6 +12665,16 @@ name = "winwincode-domain"
 version = "0.0.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "winwincode-execution-port"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-domain",
 ]
 
 [[package]]
@@ -12679,10 +12712,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-publication"
+version = "0.0.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+ "winwincode-domain",
+ "winwincode-storage",
+]
+
+[[package]]
+name = "winwincode-session"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-domain",
+]
+
+[[package]]
 name = "winwincode-storage"
 version = "0.0.0"
 dependencies = [
  "rusqlite",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "winwincode-domain",
 ]

@@ -60,7 +60,8 @@
     "controlPlaneRequiredDependencies": [
       "winwincode-api",
       "winwincode-delivery",
-      "winwincode-storage"
+      "winwincode-storage",
+      "winwincode-publication"
     ],
     "deliveryForbiddenDependencies": [
       "winwincode-api",
@@ -254,7 +255,7 @@
       "refs": [
         "docs/decisions/0023-canonical-delivery-ownership.md",
         "packages/strongflow/src/github-publication.ts",
-        "packages/strongflow/src/github-publication-journal.ts"
+        "crates/winwincode-control-plane/src/publication_preparation.rs"
       ],
       "verification": {
         "kind": "black-box",
@@ -357,8 +358,8 @@
     {
       "id": "publication-authority",
       "owner": "winwincode-publication",
-      "outcome": "The complete trusted publication fact binding is implemented; the production winwincode-publication owner belongs to Phase 3.",
-      "status": "boundary-implemented-production-owner-phase-3"
+      "outcome": "The winwincode-publication domain, durable intent ledger, provider port, trusted fact types, and production GitHub HTTP/credential-reference adapter are implemented under one recovery path.",
+      "status": "implemented"
     },
     {
       "id": "control-plane-composition",
@@ -412,7 +413,7 @@
       "refs": [
         "crates/winwincode-api/src/generated.rs",
         "packages/strongflow/src/github-publication.ts",
-        "packages/strongflow/src/github-publication-journal.ts"
+        "crates/winwincode-control-plane/src/publication_preparation.rs"
       ]
     },
     {

@@ -1,10 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use winwincode_api::generated::{
-    DeliveryStageExecutionScope, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, JobCancelAckMessage, SchemaVersion,
-};
 use winwincode_control_plane::delivery_execution::{
     DeliveryExecutionCommitReceipt, DeliveryExecutionConfig, DeliveryExecutionPortError,
     DeliveryExecutionTransaction, ExecutionJobDispatcher, PendingDeliveryExecution,
@@ -22,8 +18,12 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     AttentionItemId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionJobId, ExecutionMessageId,
-    FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, Sha256Digest,
-    StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, SchemaVersion,
+    SessionIdentity, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+};
+use winwincode_execution_port::generated::{
+    DeliveryStageExecutionScope, ExecutionLeaseStamp, ExecutionLimits, ExecutionScope,
+    ExecutionWorkspace, JobCancelAckMessage, JobCancelAckMessageKind, JobCancelAckMessageStatus,
 };
 
 fn canonical_id(prefix: &str, value: u64) -> String {
@@ -94,7 +94,8 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef".into(),
             repository_id: RepositoryId(canonical_id("rep", seed)),
-            write_mode: winwincode_api::generated::ExecutionWorkspaceWriteMode::Candidate,
+            write_mode:
+                winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
         },
         limits: ExecutionLimits {
             deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
@@ -184,7 +185,7 @@ struct RecordingDispatcher {
 impl ExecutionJobDispatcher for RecordingDispatcher {
     fn dispatch(
         &mut self,
-        job: &winwincode_api::generated::ExecutionJob,
+        job: &winwincode_execution_port::generated::ExecutionJob,
     ) -> Result<(), DeliveryExecutionPortError> {
         self.trace
             .lock()
@@ -382,7 +383,7 @@ fn delivery_stage_scope_carries_exact_product_delivery_task_and_run_identity() {
 
     assert_eq!(
         kind,
-        &winwincode_api::generated::DeliveryStageExecutionScopeKind::DeliveryStage
+        &winwincode_execution_port::generated::DeliveryStageExecutionScopeKind::DeliveryStage
     );
     assert_eq!(delivery_id.0, canonical_id("dlv", 3));
     assert_eq!(
@@ -402,20 +403,60 @@ fn job_cancel_ack_does_not_settle_stage_before_terminal_outcome() {
     let binding = snapshot.session_bindings.last_mut().expect("binding");
     binding.worker_session_id = Some(WorkerSessionId(canonical_id("wsn", 4)));
     binding.codex_thread_id = Some(CodexThreadId(canonical_id("cdx", 4)));
+    *binding = binding
+        .clone()
+        .with_test_authority("cancel-acknowledgement", 1);
+    binding.worker_id = Some(WorkerId(canonical_id("wrk", 4)));
+    binding.worker_instance_id = Some(WorkerInstanceId(canonical_id("wki", 4)));
+    binding.lease_id = Some(LeaseId(canonical_id("lse", 4)));
+    binding.attempt = 1;
+    binding.fencing_token = Some(FencingToken("4".into()));
     let delivery = Delivery::try_from_snapshot(snapshot).expect("accepted WorkerSession");
     let intent = request_cancel(&delivery, delivery.revision()).expect("cancel intent");
+    let ExecutionScope::DeliveryStageExecutionScope(scope) = &pending.job().scope else {
+        panic!("cancel acknowledgement must use a Delivery stage scope");
+    };
+    let binding = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.stage_run_id == scope.stage_run_id)
+        .expect("cancel acknowledgement binding");
+    assert_eq!(binding.execution_job_id, intent.execution_job_id);
+    assert_eq!(binding.product_session_id, scope.product_session_id);
     let lease = active_lease_identity(
         intent.execution_job_id.clone(),
         intent.attempt,
-        LeaseId(canonical_id("lse", 4)),
-        FencingToken("4".into()),
-        WorkerId(canonical_id("wrk", 4)),
-        WorkerInstanceId(canonical_id("wki", 4)),
+        binding
+            .lease_id
+            .clone()
+            .expect("cancel acknowledgement lease"),
+        binding
+            .fencing_token
+            .clone()
+            .expect("cancel acknowledgement fence"),
+        binding
+            .worker_id
+            .clone()
+            .expect("cancel acknowledgement Worker"),
+        binding
+            .worker_instance_id
+            .clone()
+            .expect("cancel acknowledgement Worker instance"),
         intent.worker_session_id.clone(),
     );
+    let session_identity = SessionIdentity {
+        codex_thread_id: binding
+            .codex_thread_id
+            .clone()
+            .expect("cancel acknowledgement CodexThread"),
+        product_session_id: scope.product_session_id.clone(),
+        stage_run_id: Some(scope.stage_run_id.clone()),
+        worker_session_id: lease.worker_session_id().clone(),
+    };
     let ack = JobCancelAckMessage {
         error: None,
-        kind: winwincode_api::generated::JobCancelAckMessageKind::JobCancelAck,
+        kind: JobCancelAckMessageKind::JobCancelAck,
         lease: ExecutionLeaseStamp {
             attempt: i64::try_from(lease.attempt()).expect("attempt"),
             expires_at: Instant("2026-08-25T12:10:00.000Z".into()),
@@ -430,7 +471,8 @@ fn job_cancel_ack_does_not_settle_stage_before_terminal_outcome() {
         request_id: RequestId(canonical_id("req", 4)),
         schema_version: SchemaVersion::WinwincodeV1,
         sent_at: Instant("2026-08-25T12:00:01.000Z".into()),
-        status: "accepted".into(),
+        session_identity,
+        status: JobCancelAckMessageStatus::Accepted,
         worker_session_id: lease.worker_session_id().clone(),
     };
 

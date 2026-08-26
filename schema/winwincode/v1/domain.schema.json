@@ -62,6 +62,59 @@
       "type": "string",
       "pattern": "^cdx_[0-9A-HJKMNP-TV-Z]{26}$"
     },
+    "SessionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId"
+      ],
+      "properties": {
+        "productSessionId": {
+          "$ref": "#/$defs/ProductSessionId"
+        },
+        "workerSessionId": {
+          "$ref": "#/$defs/WorkerSessionId"
+        },
+        "codexThreadId": {
+          "$ref": "#/$defs/CodexThreadId"
+        },
+        "stageRunId": {
+          "$ref": "#/$defs/StageRunId"
+        }
+      },
+      "description": "Identity of one executable session. Delivery-stage sessions carry StageRun; ProductSession Chat sessions omit it."
+    },
+    "SessionBindingSourceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workerId",
+        "workerSessionId",
+        "leaseId",
+        "workerInstanceId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "execution-worker"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "workerSessionId": {
+          "$ref": "#/$defs/WorkerSessionId"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "workerInstanceId": {
+          "$ref": "#/$defs/WorkerInstanceId"
+        }
+      },
+      "description": "Stable source identity that produced a SessionBinding."
+    },
     "CredentialReferenceId": {
       "type": "string",
       "pattern": "^crd_[0-9A-HJKMNP-TV-Z]{26}$"
@@ -69,6 +122,11 @@
     "WorkerId": {
       "type": "string",
       "pattern": "^wrk_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "WorkerInstanceId": {
+      "type": "string",
+      "pattern": "^wki_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one Worker process boot; changes after every restart."
     },
     "LeaseId": {
       "type": "string",

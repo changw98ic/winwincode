@@ -164,6 +164,39 @@
         }
       }
     },
+    "ControlPlaneWebSocketSessionExecutionWorkerSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workerId",
+        "workerSessionId",
+        "leaseId",
+        "codexThreadId",
+        "sessionIdentity"
+      ],
+      "properties": {
+        "kind": {
+          "const": "execution-worker"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "description": "Execution-worker source for a session-scoped event. The block must exactly join the event payload."
+    },
     "ControlPlaneWebSocketEventSource": {
       "oneOf": [
         {
@@ -171,6 +204,9 @@
         },
         {
           "$ref": "#/$defs/ControlPlaneWebSocketExecutionWorkerSource"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketSessionExecutionWorkerSource"
         }
       ]
     },
@@ -1011,7 +1047,8 @@
         "stageRunId",
         "projectionRevision",
         "lastProjectionSequence",
-        "reloadQueries"
+        "reloadQueries",
+        "sessionIdentity"
       ],
       "properties": {
         "type": {
@@ -1050,6 +1087,9 @@
           "items": false,
           "minItems": 2,
           "maxItems": 2
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "description": "Delivery-stage invalidation. The browser reloads Delivery first and replays runtime at the exact returned StrongFlowReadCursor."
@@ -1149,6 +1189,20 @@
       "authorizationEpochBaseline": "accepted.authorizationEpoch",
       "retentionLossFrame": "transport.reset-required.v1",
       "retentionLossCloseCode": 4409
+    },
+    "sessionIdentity": {
+      "sessionScopedPayloads": [
+        "runtime-projection.invalidated.v1:delivery-stage"
+      ],
+      "identityBlock": "sessionIdentity",
+      "sourcePayloadExactJoin": [
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "stageRunId"
+      ],
+      "productSessionEvents": "do_not_require_execution_identity",
+      "workerHealthEvents": "do_not_require_execution_identity"
     }
   }
 }

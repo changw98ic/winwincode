@@ -40,7 +40,7 @@
     "runtimeFallbackAllowed": false,
     "expected": {
       "path": "tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json",
-      "sha256": "4aaab65259218df5df814b9d9743d71e779aad81a552c0540df63ad8490f1c71"
+      "sha256": "198c61015ff49885d1640c074f3927b4b5dbc98bf858fbb0cc5541b7ed5495d7"
     },
     "checkpoints": [
       {
@@ -99,7 +99,6 @@
       "deniedDependencies": [
         "winwincode-api",
         "winwincode-control-plane",
-        "winwincode-storage",
         "winwincode-worker",
         "winwincode-native"
       ]

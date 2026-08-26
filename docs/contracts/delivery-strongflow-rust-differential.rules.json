@@ -654,16 +654,36 @@
           "workerId",
           "workerInstanceId"
         ],
+        "sessionIdentityExactKeys": [
+          "codexThreadId",
+          "productSessionId",
+          "stageRunId",
+          "workerSessionId"
+        ],
+        "sessionBindingSourceIdentityExactKeys": [
+          "kind",
+          "leaseId",
+          "workerId",
+          "workerInstanceId",
+          "workerSessionId"
+        ],
         "exactKeysByTarget": {
           "session.binding": [
+            "attempt",
             "boundAt",
             "codexThreadId",
+            "fencingToken",
             "kind",
             "lease",
+            "leaseId",
             "messageId",
             "productSessionId",
             "schemaVersion",
             "sentAt",
+            "sessionIdentity",
+            "sourceIdentity",
+            "stageRunId",
+            "workerId",
             "workerSessionId"
           ],
           "job.outcome": [
@@ -673,6 +693,7 @@
             "outcome",
             "schemaVersion",
             "sentAt",
+            "sessionIdentity",
             "workerSessionId"
           ]
         },

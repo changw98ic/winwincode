@@ -34,7 +34,9 @@ pub use candidate::{
     ValidatedGitSnapshotFact, freeze_delivery_candidate,
 };
 pub use evidence::{EvidenceRef, EvidenceRefType};
-pub use session_binding::SessionBinding;
+pub use session_binding::{
+    SessionBinding, SessionBindingSourceKind, SessionBindingSourceProvenance,
+};
 pub use spec::{
     AcceptanceCriterion, DeliveryPublicationTarget, DeliverySourceRef, DeliverySpec,
     GitHubIssueSourceRef, GitHubPullRequestTargetRef, RepositoryKind, RepositoryRef,
@@ -520,6 +522,30 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
     )?;
     duplicate_ids(
         snapshot
+            .session_bindings
+            .iter()
+            .filter_map(|binding| binding.worker_instance_id.as_ref())
+            .map(|instance_id| instance_id.0.as_str()),
+        "delivery.sessionBindings.workerInstanceId",
+    )?;
+    duplicate_ids(
+        snapshot
+            .session_bindings
+            .iter()
+            .filter_map(|binding| binding.lease_id.as_ref())
+            .map(|lease_id| lease_id.0.as_str()),
+        "delivery.sessionBindings.leaseId",
+    )?;
+    duplicate_ids(
+        snapshot
+            .session_bindings
+            .iter()
+            .filter_map(|binding| binding.fencing_token.as_ref())
+            .map(|fencing_token| fencing_token.0.as_str()),
+        "delivery.sessionBindings.fencingToken",
+    )?;
+    duplicate_ids(
+        snapshot
             .attention_items
             .iter()
             .map(|item| item.id.0.as_str()),
@@ -619,6 +645,7 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             || run.is_some_and(|run| {
                 run.actor_type != StageRunActorType::Codex
                     || run.delivery_task_id != binding.delivery_task_id
+                    || run.attempt != binding.attempt
                     || binding.bound_at_millis < run.started_at_millis
             })
         {
@@ -868,5 +895,30 @@ mod aggregate_tests {
                 .code(),
             DeliveryValidationErrorCode::InvalidShape
         );
+    }
+
+    #[test]
+    fn canonical_delivery_rejects_a_complete_binding_without_authority_fields() {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
+                .expect("canonical fixture json");
+        let binding = value["sessionBindings"][0]
+            .as_object_mut()
+            .expect("SessionBinding object");
+        for field in [
+            "workerId",
+            "workerInstanceId",
+            "leaseId",
+            "attempt",
+            "fencingToken",
+            "sourceProvenance",
+        ] {
+            binding.remove(field);
+        }
+        let encoded = serde_json::to_vec(&value).expect("legacy snapshot json");
+        let error = Delivery::decode_json(&encoded)
+            .expect_err("legacy complete binding must be migrated before canonical decode");
+
+        assert_eq!(error.code(), DeliveryValidationErrorCode::InvalidShape);
     }
 }

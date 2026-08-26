@@ -203,8 +203,8 @@ Control Plane 返回稳定的生成错误，不输出其余“看起来还能用
    runtime-ledger adapter 在 Phase 4 接入。
 3. canonical schema/codegen 已一次性生成 StrongFlow detail DTO 和不透明 projection cursor，
    同步更新 Rust 与 TypeScript。
-4. trusted publication read port 已冻结完整 fact binding；真实 `winwincode-publication` owner 在
-   Phase 3 接入。
+4. `winwincode-publication` 已拥有完整 fact binding、持久 intent ledger、provider port 和
+   Phase 3.3 的生产 GitHub HTTP/credential-reference adapter；它们共用同一恢复路径。
 5. Control Plane 已实现 `StrongFlowProjectionQueryPort`，在同一 read cut 下组合三类事实。
 6. 后续只接 HTTP/WebSocket adapter；Web 只消费生成 client，Worker 仍只走 ExecutionPort。
 

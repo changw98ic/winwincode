@@ -1693,18 +1693,22 @@ mod tests {
             started_at_millis,
             finished_at_millis,
         });
-        snapshot.session_bindings.push(SessionBinding {
-            schema_version: super::super::DELIVERY_SCHEMA_VERSION,
-            id: SessionBindingId(binding_id.into()),
-            delivery_id: snapshot.id.clone(),
-            delivery_task_id: Some(task_id),
-            stage_run_id: StageRunId(run_id.into()),
-            product_session_id: ProductSessionId(format!("product-{run_id}")),
-            execution_job_id: ExecutionJobId(format!("job-{run_id}")),
-            worker_session_id: Some(WorkerSessionId(format!("worker-session-{run_id}"))),
-            codex_thread_id: Some(CodexThreadId(format!("thread-{run_id}"))),
-            bound_at_millis: started_at_millis + 1,
-        });
+        snapshot.session_bindings.push(
+            SessionBinding {
+                schema_version: super::super::DELIVERY_SCHEMA_VERSION,
+                id: SessionBindingId(binding_id.into()),
+                delivery_id: snapshot.id.clone(),
+                delivery_task_id: Some(task_id),
+                stage_run_id: StageRunId(run_id.into()),
+                product_session_id: ProductSessionId(format!("product-{run_id}")),
+                execution_job_id: ExecutionJobId(format!("job-{run_id}")),
+                worker_session_id: Some(WorkerSessionId(format!("worker-session-{run_id}"))),
+                codex_thread_id: Some(CodexThreadId(format!("thread-{run_id}"))),
+                bound_at_millis: started_at_millis + 1,
+                ..Default::default()
+            }
+            .with_test_authority(binding_id, attempt),
+        );
         snapshot.status = if status == StageRunStatus::Running {
             DeliveryStatus::Reworking
         } else {
@@ -2237,9 +2241,8 @@ mod tests {
                 finished_at_millis: Some(1_800_000_000_025),
             },
         );
-        stale_attempt_snapshot
-            .session_bindings
-            .push(SessionBinding {
+        stale_attempt_snapshot.session_bindings.push(
+            SessionBinding {
                 schema_version: super::super::DELIVERY_SCHEMA_VERSION,
                 id: SessionBindingId("binding-remediator-unrecorded-prior".into()),
                 delivery_id: stale_attempt_snapshot.id.clone(),
@@ -2252,7 +2255,10 @@ mod tests {
                 )),
                 codex_thread_id: Some(CodexThreadId("thread-remediator-unrecorded-prior".into())),
                 bound_at_millis: 1_800_000_000_024,
-            });
+                ..Default::default()
+            }
+            .with_test_authority("binding-remediator-unrecorded-prior", 1),
+        );
         let stale_attempt = Delivery::try_from_snapshot(stale_attempt_snapshot)
             .expect("global rework history changed after authorization");
         assert!(

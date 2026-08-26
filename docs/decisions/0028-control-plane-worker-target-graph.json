@@ -553,10 +553,7 @@
     },
     {
       "phase": "3",
-      "surfaceIds": [
-        "dsh-github-provider",
-        "strongflow-publication"
-      ]
+      "surfaceIds": []
     },
     {
       "phase": "4",
@@ -583,7 +580,8 @@
         "strongflow-cordis-remote",
         "strongflow-typescript-web",
         "node-native-selector",
-        "napi-kernel-bridge"
+        "napi-kernel-bridge",
+        "strongflow-publication"
       ]
     }
   ]

@@ -95,6 +95,12 @@
         "productSessionId": "psn_00000000000000000000000000",
         "workerSessionId": "wsn_00000000000000000000000000",
         "executionJobId": "job_00000000000000000000000000",
+        "sessionIdentity": {
+          "productSessionId": "psn_00000000000000000000000000",
+          "workerSessionId": "wsn_00000000000000000000000000",
+          "codexThreadId": "cdx_00000000000000000000000000",
+          "stageRunId": "run_00000000000000000000000000"
+        },
         "inputRequestId": "inp_00000000000000000000000000",
         "status": "provided",
         "value": {
@@ -755,7 +761,25 @@
               "executionJobId": "job_00000000000000000000000000",
               "workerSessionId": "wsn_00000000000000000000000000",
               "codexThreadId": "cdx_00000000000000000000000000",
-              "boundAt": "2026-08-24T09:00:00.000Z"
+              "boundAt": "2026-08-24T09:00:00.000Z",
+              "sessionIdentity": {
+                "productSessionId": "psn_00000000000000000000000000",
+                "workerSessionId": "wsn_00000000000000000000000000",
+                "codexThreadId": "cdx_00000000000000000000000000",
+                "stageRunId": "run_00000000000000000000000000"
+              },
+              "stageRunId": "run_00000000000000000000000000",
+              "workerId": "wrk_00000000000000000000000000",
+              "leaseId": "lse_00000000000000000000000000",
+              "attempt": 1,
+              "fencingToken": "1",
+              "sourceIdentity": {
+                "kind": "execution-worker",
+                "workerId": "wrk_00000000000000000000000000",
+                "workerSessionId": "wsn_00000000000000000000000000",
+                "leaseId": "lse_00000000000000000000000000",
+                "workerInstanceId": "wki_00000000000000000000000000"
+              }
             }
           },
           {

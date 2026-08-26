@@ -440,7 +440,13 @@
             "workerId": "wrk_01J00000000000000000000000",
             "workerSessionId": "wsn_01J00000000000000000000000",
             "leaseId": "lse_01J00000000000000000000000",
-            "codexThreadId": "cdx_01J00000000000000000000000"
+            "codexThreadId": "cdx_01J00000000000000000000000",
+            "sessionIdentity": {
+              "productSessionId": "psn_01J00000000000000000000000",
+              "workerSessionId": "wsn_01J00000000000000000000000",
+              "codexThreadId": "cdx_01J00000000000000000000000",
+              "stageRunId": "run_01J00000000000000000000000"
+            }
           },
           "authorizationEpoch": 7,
           "event": {
@@ -454,7 +460,13 @@
               "delivery.get",
               "runtime.projection.get"
             ],
-            "scopeKind": "delivery-stage"
+            "scopeKind": "delivery-stage",
+            "sessionIdentity": {
+              "productSessionId": "psn_01J00000000000000000000000",
+              "workerSessionId": "wsn_01J00000000000000000000000",
+              "codexThreadId": "cdx_01J00000000000000000000000",
+              "stageRunId": "run_01J00000000000000000000000"
+            }
           }
         },
         {

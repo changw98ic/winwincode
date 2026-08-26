@@ -115,10 +115,12 @@
         "productSessionId",
         "workerSessionId",
         "executionJobId",
-        "inputRequestId"
+        "inputRequestId",
+        "sessionIdentity"
       ],
       "mapsAfterValidationTo": "execution-port:input.response",
-      "rejectsArbitraryExecutionMessages": true
+      "rejectsArbitraryExecutionMessages": true,
+      "identityJoin": "payload.sessionIdentity must equal the accepted SessionBinding identity"
     },
     "projectionRecovery": {
       "chatMessages": "session.messages.list",
@@ -194,11 +196,22 @@
         "bindingId",
         "productSessionId",
         "executionJobId",
-        "boundAt"
+        "boundAt",
+        "workerSessionId",
+        "codexThreadId",
+        "sessionIdentity",
+        "stageRunId",
+        "workerId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "sourceIdentity"
       ],
       "codexThreadRequiresWorkerSession": true,
       "humanStageBinding": "must_be_null",
-      "runtimeSessionBinding": "worker_and_codex_required"
+      "runtimeSessionBinding": "worker_and_codex_required",
+      "completeIdentityBlock": "sessionIdentity",
+      "completeSourceIdentity": "sourceIdentity"
     },
     "solutionReview": {
       "digestIncludesOrderedTaskProposals": true,
@@ -974,7 +987,8 @@
         "executionJobId",
         "inputRequestId",
         "status",
-        "value"
+        "value",
+        "sessionIdentity"
       ],
       "properties": {
         "productSessionId": {
@@ -1006,6 +1020,9 @@
               "type": "null"
             }
           ]
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "allOf": [
@@ -3555,7 +3572,14 @@
         "executionJobId",
         "workerSessionId",
         "codexThreadId",
-        "boundAt"
+        "boundAt",
+        "sessionIdentity",
+        "stageRunId",
+        "workerId",
+        "leaseId",
+        "attempt",
+        "fencingToken",
+        "sourceIdentity"
       ],
       "properties": {
         "bindingId": {
@@ -3592,12 +3616,111 @@
         },
         "boundAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stageRunId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/StageRunId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workerId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/WorkerId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "leaseId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/LeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempt": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fencingToken": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]{0,19}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceIdentity": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "oneOf": [
         {
           "properties": {
             "codexThreadId": {
+              "type": "null"
+            },
+            "workerSessionId": {
+              "type": "null"
+            },
+            "sessionIdentity": {
+              "type": "null"
+            },
+            "stageRunId": {
+              "type": "null"
+            },
+            "workerId": {
+              "type": "null"
+            },
+            "leaseId": {
+              "type": "null"
+            },
+            "attempt": {
+              "type": "null"
+            },
+            "fencingToken": {
+              "type": "null"
+            },
+            "sourceIdentity": {
               "type": "null"
             }
           }
@@ -3609,6 +3732,32 @@
             },
             "codexThreadId": {
               "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+            },
+            "sessionIdentity": {
+              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+            },
+            "stageRunId": {
+              "$ref": "./domain.schema.json#/$defs/StageRunId"
+            },
+            "workerId": {
+              "$ref": "./domain.schema.json#/$defs/WorkerId"
+            },
+            "leaseId": {
+              "$ref": "./domain.schema.json#/$defs/LeaseId"
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "fencingToken": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]{0,19}$"
+            },
+            "sourceIdentity": {
+              "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
             }
           }
         }

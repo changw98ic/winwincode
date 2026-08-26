@@ -24,9 +24,8 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     CommandCompletedResponse, CommandEnvelope, ControlPlaneWebSocketDeliveryChangedEvent,
     ControlPlaneWebSocketDeliveryChangedEventTypeValue, DeliveryDetailProjection, DeliveryGetQuery,
-    DeliveryStageProjection, DeliveryStageSessionBindingProjection, ErrorEnvelope, ExecutionLimits,
-    ExecutionOutcomeStatus, ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobOutcomeMessage,
-    QueryResultResponse, RepositoryScope, RuntimeProjectionGetQuery, SessionBindingMessage,
+    DeliveryStageProjection, DeliveryStageSessionBindingProjection, ErrorEnvelope,
+    QueryResultResponse, RepositoryScope, RuntimeProjectionGetQuery,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
@@ -96,13 +95,21 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     AttentionItemId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId, FencingToken,
-    Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, Revision, Sha256Digest,
+    Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, Revision,
+    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
     StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+};
+use winwincode_execution_port::generated::{
+    ExecutionLimits, ExecutionOutcomeStatus, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    JobOutcomeMessage, SessionBindingMessage,
+};
+use winwincode_session::migration::{
+    MigrationCommit, MigrationTransaction, migrate_legacy_delivery_json,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-    ProductStateStorage, ProjectionEventStream, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
-    SqliteStorage, StateCommit,
+    ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
 };
 
 const PLAN_SCHEMA: &str = "winwincode.delivery-strongflow-differential-plan.v2";
@@ -292,10 +299,13 @@ pub fn run_differential_plan(plan: &DifferentialPlan) -> Result<Value, String> {
         }
         runner.require_all_terminal_outcome_statuses_consumed()?;
         fold_human_binding_provenance(scenario, &mut commands)?;
+        let observation = runner
+            .observe()
+            .map_err(|error| format!("scenario {} observation failed: {error}", scenario.id))?;
         scenarios.push(json!({
             "id": scenario.id,
             "commands": commands,
-            "observation": runner.observe()?,
+            "observation": observation,
         }));
     }
 
@@ -479,6 +489,58 @@ struct ExecutionSource {
     candidate: Option<Value>,
     candidate_fact: Option<FrozenDeliveryCandidate>,
     runtime_events: Vec<Value>,
+    /// Cursor of the durable cut from which this fixture source was read.
+    ///
+    /// The differential runner re-reads its in-memory source at each current
+    /// durable cursor before installing the projection authority. Keeping the
+    /// marker on the source makes an old cloned source ineligible for a later
+    /// cursor and gives the test seam an explicit provenance check.
+    read_cut_cursor: Option<ProjectionEventCursor>,
+}
+
+impl ExecutionSource {
+    /// Reads the fixture source at one durable cursor. The returned source and
+    /// cursor are subsequently consumed as one `FixtureRuntimeReadCut`.
+    fn read_at(&self, event_cursor: ProjectionEventCursor) -> Self {
+        let mut source = self.clone();
+        source.read_cut_cursor = Some(event_cursor);
+        source
+    }
+}
+
+/// Test-only runtime source and public cursor captured as one stable read cut.
+///
+/// The differential runner has no production runtime source adapter of its own:
+/// it translates the frozen source events into sealed projection facts. Keeping
+/// those facts and the resource-local cursor in one value prevents later code
+/// from replacing only one side of the pair.
+#[derive(Clone)]
+struct FixtureRuntimeReadCut {
+    source: ExecutionSource,
+    event_cursor: ProjectionEventCursor,
+}
+
+impl FixtureRuntimeReadCut {
+    fn capture(source: &ExecutionSource, event_cursor: ProjectionEventCursor) -> Self {
+        Self {
+            source: source.clone(),
+            event_cursor,
+        }
+    }
+
+    /// Returns the frozen fixture source only when the caller names this
+    /// read-cut's exact public cursor. A cursor from a later cut is never
+    /// allowed to rebind the source captured here.
+    fn source_at_cursor(
+        &self,
+        expected: &ProjectionEventCursor,
+    ) -> Result<&ExecutionSource, TrustedProjectionReadError> {
+        if &self.event_cursor != expected || self.source.read_cut_cursor.as_ref() != Some(expected)
+        {
+            return Err(TrustedProjectionReadError::Stale);
+        }
+        Ok(&self.source)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -503,8 +565,13 @@ impl ProjectionAuthority {
         &self,
         scope: &RepositoryScope,
         delivery: &Delivery,
-        source: &ExecutionSource,
+        read_cut: FixtureRuntimeReadCut,
     ) -> Result<(), String> {
+        let event_cursor = read_cut.event_cursor.clone();
+        let source = read_cut
+            .source_at_cursor(&event_cursor)
+            .map_err(|error| error.to_string())?
+            .clone();
         let projection = semantic_runtime_projection(delivery, &source.runtime_events)?;
         let accepted_sequence = projection
             .snapshot()
@@ -519,10 +586,11 @@ impl ProjectionAuthority {
             Revision(i64::try_from(accepted_sequence).map_err(string_error)?),
             accepted_sequence,
             Instant(millis_to_rfc3339(delivery.snapshot().updated_at_millis)?),
-            projection,
+            &projection,
             Sha256Digest(format!("sha256:{}", "a".repeat(64))),
         )
-        .map_err(string_error)?;
+        .map_err(string_error)?
+        .with_event_cursor(event_cursor);
         let publication = TrustedPublicationProjectionRead::try_new(
             scope.clone(),
             delivery.id().clone(),
@@ -551,6 +619,23 @@ struct RuntimeSourceAdapter {
 }
 
 impl TrustedRuntimeProjectionAdapter for RuntimeSourceAdapter {
+    fn read_delivery_with_storage(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        request: &DeliveryRuntimeReadRequest,
+        _delivery: &Delivery,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        self.read_delivery(request)
+    }
+
+    fn read_product_session_with_storage(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        request: &ProductSessionRuntimeReadRequest,
+    ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+        self.read_product_session(request)
+    }
+
     fn read_delivery(
         &self,
         request: &DeliveryRuntimeReadRequest,
@@ -563,7 +648,7 @@ impl TrustedRuntimeProjectionAdapter for RuntimeSourceAdapter {
             .as_ref()
             .ok_or(TrustedProjectionReadError::Unavailable)?;
         if read.scope() != request.scope()
-            || read.snapshot().delivery_id != *request.delivery_id()
+            || read.snapshot().delivery_id.as_ref() != Some(request.delivery_id())
             || read.delivery_revision() != request.delivery_revision()
             || request.expected().is_some_and(|expected| {
                 expected.ledger_revision() != read.ledger_revision()
@@ -674,10 +759,22 @@ fn semantic_runtime_projection(
             observed_count
         };
         let authority = RuntimeAuthorityFixture {
-            lease_id: LeaseId(canonical_id("lse_", &run.id.0)),
-            fencing_token: FencingToken(run.attempt.to_string()),
-            worker_id: WorkerId(canonical_id("wrk_", &run.id.0)),
-            worker_instance_id: WorkerInstanceId(canonical_id("wki_", &run.id.0)),
+            lease_id: binding
+                .lease_id
+                .clone()
+                .ok_or_else(|| "runtime fixture binding lost its LeaseId".to_owned())?,
+            fencing_token: binding
+                .fencing_token
+                .clone()
+                .ok_or_else(|| "runtime fixture binding lost its fencing token".to_owned())?,
+            worker_id: binding
+                .worker_id
+                .clone()
+                .ok_or_else(|| "runtime fixture binding lost its WorkerId".to_owned())?,
+            worker_instance_id: binding
+                .worker_instance_id
+                .clone()
+                .ok_or_else(|| "runtime fixture binding lost its WorkerInstanceId".to_owned())?,
         };
         let accepted = accepted_binding(
             delivery,
@@ -771,13 +868,13 @@ impl EventPublisher for CapturingPublisher {
 
 #[derive(Default)]
 struct RecordingDispatcher {
-    jobs: Vec<winwincode_api::generated::ExecutionJob>,
+    jobs: Vec<winwincode_execution_port::generated::ExecutionJob>,
 }
 
 impl ExecutionJobDispatcher for RecordingDispatcher {
     fn dispatch(
         &mut self,
-        job: &winwincode_api::generated::ExecutionJob,
+        job: &winwincode_execution_port::generated::ExecutionJob,
     ) -> Result<(), DeliveryExecutionPortError> {
         self.jobs.push(job.clone());
         Ok(())
@@ -1425,6 +1522,7 @@ impl ScenarioRunner {
                 run.attempt,
             ))
         });
+        let expects_acceptance = authority.is_some();
         let (product_session_id, execution_job_id, attempt) = authority.unwrap_or_else(|| {
             (
                 ProductSessionId(canonical_id("psn_", &stage_run_id.0)),
@@ -1433,49 +1531,76 @@ impl ScenarioRunner {
             )
         });
         let bound_at = self.clock.peek_next();
+        let worker_id = WorkerId(canonical_id("wrk_", &stage_run_id.0));
+        let worker_instance_id = WorkerInstanceId(canonical_id("wki_", &stage_run_id.0));
+        let lease_id = LeaseId(canonical_id("lse_", &stage_run_id.0));
+        let fencing_token = FencingToken(bound_at.to_string());
+        let issued_at = Instant(millis_to_rfc3339(bound_at)?);
+        let expires_at = Instant(millis_to_rfc3339(bound_at.saturating_add(60_000))?);
+        let active_lease = active_lease_identity(
+            execution_job_id.clone(),
+            attempt,
+            lease_id.clone(),
+            fencing_token.clone(),
+            worker_id.clone(),
+            worker_instance_id.clone(),
+            worker_session_id.clone(),
+        );
+        let binding_authority =
+            session_binding_authority(active_lease, issued_at.clone(), expires_at.clone());
         let request = json!({
             "schemaVersion": API_SCHEMA,
             "messageId": canonical_id("xmsg_", request_id),
             "kind": "session.binding",
-            "sentAt": millis_to_rfc3339(bound_at)?,
+            "sentAt": issued_at,
             "lease": {
                 "attempt": attempt,
-                "expiresAt": millis_to_rfc3339(bound_at.saturating_add(60_000))?,
-                "fencingToken": attempt.to_string(),
-                "issuedAt": millis_to_rfc3339(bound_at)?,
+                "expiresAt": expires_at,
+                "fencingToken": fencing_token,
+                "issuedAt": issued_at,
                 "jobId": execution_job_id,
-                "leaseId": canonical_id("lse_", &stage_run_id.0),
-                "workerId": canonical_id("wrk_", &stage_run_id.0),
-                "workerInstanceId": canonical_id("wki_", &stage_run_id.0),
+                "leaseId": lease_id,
+                "workerId": worker_id,
+                "workerInstanceId": worker_instance_id,
             },
             "productSessionId": product_session_id,
             "workerSessionId": worker_session_id,
             "codexThreadId": codex_thread_id,
             "boundAt": millis_to_rfc3339(bound_at)?,
+            "sessionIdentity": {
+                "productSessionId": product_session_id,
+                "workerSessionId": worker_session_id,
+                "codexThreadId": codex_thread_id,
+                "stageRunId": stage_run_id,
+            },
+            "sourceIdentity": {
+                "kind": "execution-worker",
+                "workerId": worker_id,
+                "workerSessionId": worker_session_id,
+                "leaseId": lease_id,
+                "workerInstanceId": worker_instance_id,
+            },
+            "stageRunId": stage_run_id,
+            "workerId": worker_id,
+            "leaseId": lease_id,
+            "attempt": attempt,
+            "fencingToken": fencing_token,
         });
         let message: SessionBindingMessage = serde_json::from_value(request.clone())
             .map_err(|error| format!("canonical SessionBindingMessage rejected: {error}"))?;
         if serde_json::to_value(&message).map_err(string_error)? != request {
             return Err("SessionBindingMessage did not round-trip exactly".to_owned());
         }
-        let active_lease = active_lease_identity(
-            message.lease.job_id.clone(),
-            u64::try_from(message.lease.attempt).map_err(string_error)?,
-            message.lease.lease_id.clone(),
-            message.lease.fencing_token.clone(),
-            message.lease.worker_id.clone(),
-            message.lease.worker_instance_id.clone(),
-            message.worker_session_id.clone(),
-        );
-        let binding_authority = session_binding_authority(
-            active_lease,
-            message.lease.issued_at.clone(),
-            message.lease.expires_at.clone(),
-        );
         let result = self
             .control_plane_mut()
             .commit_delivery_session_binding(&message, &binding_authority);
         let response = match result {
+            Ok(_) if !expects_acceptance => {
+                return Err(format!(
+                    "foreign SessionBinding source {source_index} unexpectedly accepted stage {}",
+                    stage_run_id.0
+                ));
+            }
             Ok(commit) => {
                 let worker = commit.worker_session_receipt();
                 let thread = commit.codex_thread_receipt();
@@ -1513,6 +1638,12 @@ impl ScenarioRunner {
                         }
                     ],
                 })
+            }
+            Err(error) if expects_acceptance => {
+                return Err(format!(
+                    "expected SessionBinding source {source_index} for stage {} to be accepted: {error}",
+                    stage_run_id.0
+                ));
             }
             Err(error) => session_binding_error_response(
                 &message.message_id.0,
@@ -1841,11 +1972,7 @@ impl ScenarioRunner {
             .entry(source_candidate_ref)
             .or_insert_with(|| candidate.clone());
         self.execution_source.candidate_fact = Some(candidate.clone());
-        self.projection_authority.replace(
-            &self.repository_scope,
-            &delivery,
-            &self.execution_source,
-        )?;
+        self.refresh_projection_authority()?;
         let digest = candidate
             .candidate_ref()
             .strip_prefix("git-candidate:")
@@ -2084,6 +2211,7 @@ impl ScenarioRunner {
             "sentAt": finished_at,
             "lease": fixture.binding_message.lease,
             "workerSessionId": worker_session_id,
+            "sessionIdentity": fixture.binding_message.session_identity,
             "outcome": {
                 "artifacts": [],
                 "codexThreadId": codex_thread_id,
@@ -2476,13 +2604,39 @@ impl ScenarioRunner {
         Ok(())
     }
 
-    fn refresh_projection_authority(&self) -> Result<(), String> {
+    fn refresh_projection_authority(&mut self) -> Result<(), String> {
         let Some(delivery_id) = self.delivery_id.as_ref() else {
             return Ok(());
         };
+        let storage = SqliteStorage::open(&self.home).map_err(string_error)?;
+        let event_key = ProjectionEventStreamKey::new(
+            fixture_repository_scope_key(&self.repository_scope)?,
+            ProjectionEventStream::Delivery(delivery_id.clone()),
+        )
+        .map_err(string_error)?;
+        let cursor_before = storage
+            .load_projection_read_cut(&[], &event_key, None)
+            .map_err(string_error)?
+            .projection_event_cursor()
+            .clone();
         let delivery = self.query(delivery_id)?;
+        let cursor_after = storage
+            .load_projection_read_cut(&[], &event_key, None)
+            .map_err(string_error)?
+            .projection_event_cursor()
+            .clone();
+        Box::new(storage).close().map_err(string_error)?;
+        if cursor_before != cursor_after {
+            return Err(
+                "the fixture projection source changed while its stable cut was established"
+                    .to_owned(),
+            );
+        }
+        let source = self.execution_source.read_at(cursor_before.clone());
+        self.execution_source = source.clone();
+        let read_cut = FixtureRuntimeReadCut::capture(&source, cursor_before);
         self.projection_authority
-            .replace(&self.repository_scope, &delivery, &self.execution_source)
+            .replace(&self.repository_scope, &delivery, read_cut)
     }
 
     fn terminal_handoff(
@@ -2547,16 +2701,16 @@ impl ScenarioRunner {
         ))
     }
 
-    fn observe(&self) -> Result<Value, String> {
+    fn observe(&mut self) -> Result<Value, String> {
         let delivery_id = self
             .delivery_id
-            .as_ref()
+            .clone()
             .ok_or_else(|| format!("scenario {} never established a Delivery", self.id))?;
-        let delivery = self.query(delivery_id)?;
+        let delivery = self.query(&delivery_id)?;
         self.refresh_projection_authority()?;
         let (delivery_projection, runtime_projection) =
             self.typed_projection_pair(&delivery, "observation")?;
-        let stored = sqlite_durable_observation(&self.home, delivery_id)?;
+        let stored = sqlite_durable_observation(&self.home, &delivery_id)?;
         Ok(json!({
             "events": self.execution_source.runtime_events,
             "projection": {
@@ -2745,82 +2899,130 @@ fn invalid_cycle_review_fixture(
     })
 }
 
+struct CycleValidationFixture {
+    delivery_id: DeliveryId,
+    started_at: u64,
+    planning_stage_id: StageRunId,
+    planning_binding_id: SessionBindingId,
+    planning_job_id: ExecutionJobId,
+    planning_product_session_id: ProductSessionId,
+    worker_session_id: WorkerSessionId,
+    codex_thread_id: CodexThreadId,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    binding_message_id: String,
+}
+
+impl CycleValidationFixture {
+    fn from_spec(spec: &Value) -> Result<Self, String> {
+        let delivery_id = DeliveryId(required_str(spec, "deliveryId")?.to_owned());
+        let started_at = required_u64(spec, "createdAtMillis")?.saturating_add(100);
+        let planning_stage_id = canonical_stage_run_id("oracle-task-dag-cycle-planning");
+        Ok(Self {
+            delivery_id,
+            started_at,
+            planning_binding_id: canonical_session_binding_id(&planning_stage_id.0)?,
+            planning_job_id: ExecutionJobId(canonical_id("job_", &planning_stage_id.0)),
+            planning_product_session_id: ProductSessionId(canonical_id(
+                "psn_",
+                &planning_stage_id.0,
+            )),
+            worker_session_id: WorkerSessionId(canonical_id("wsn_", &planning_stage_id.0)),
+            codex_thread_id: CodexThreadId(canonical_id("cdx_", &planning_stage_id.0)),
+            worker_id: WorkerId(canonical_id("wrk_", &planning_stage_id.0)),
+            worker_instance_id: WorkerInstanceId(canonical_id("wki_", &planning_stage_id.0)),
+            lease_id: LeaseId(canonical_id("lse_", &planning_stage_id.0)),
+            fencing_token: FencingToken(started_at.to_string()),
+            binding_message_id: canonical_id("xmsg_", &planning_stage_id.0),
+            planning_stage_id,
+        })
+    }
+
+    fn delivery(&self, spec: &Value) -> Result<Delivery, String> {
+        Delivery::decode_json(
+            &serde_json::to_vec(&json!({
+                "schemaVersion": 3,
+                "id": self.delivery_id,
+                "revision": 1,
+                "spec": spec,
+                "tasks": [],
+                "stageRuns": [{
+                    "schemaVersion": 3,
+                    "id": self.planning_stage_id,
+                    "deliveryId": self.delivery_id,
+                    "deliveryTaskId": null,
+                    "stage": "planning",
+                    "actorType": "codex",
+                    "role": "planner",
+                    "attempt": 1,
+                    "status": "running",
+                    "startedAtMillis": self.started_at,
+                    "finishedAtMillis": null,
+                }],
+                "sessionBindings": [{
+                    "schemaVersion": 3,
+                    "id": self.planning_binding_id,
+                    "deliveryId": self.delivery_id,
+                    "deliveryTaskId": null,
+                    "stageRunId": self.planning_stage_id,
+                    "productSessionId": self.planning_product_session_id,
+                    "executionJobId": self.planning_job_id,
+                    "workerSessionId": self.worker_session_id,
+                    "codexThreadId": self.codex_thread_id,
+                    "workerId": self.worker_id,
+                    "workerInstanceId": self.worker_instance_id,
+                    "leaseId": self.lease_id,
+                    "attempt": 1,
+                    "fencingToken": self.fencing_token,
+                    "sourceProvenance": {
+                        "kind": "execution-port",
+                        "reference": self.binding_message_id,
+                    },
+                    "boundAtMillis": self.started_at,
+                }],
+                "attentionItems": [],
+                "evidence": [],
+                "verdict": null,
+                "status": "planning",
+                "createdAtMillis": spec["createdAtMillis"],
+                "updatedAtMillis": self.started_at,
+            }))
+            .map_err(string_error)?,
+        )
+        .map_err(string_error)
+    }
+}
+
 fn cycle_validation_delivery(spec: &Value) -> Result<(Delivery, AdvanceStageInput), String> {
-    let delivery_id = DeliveryId(required_str(spec, "deliveryId")?.to_owned());
-    let started_at = required_u64(spec, "createdAtMillis")?.saturating_add(100);
-    let planning_stage_id = canonical_stage_run_id("oracle-task-dag-cycle-planning");
-    let planning_binding_id = canonical_session_binding_id(&planning_stage_id.0)?;
-    let planning_job_id = ExecutionJobId(canonical_id("job_", &planning_stage_id.0));
-    let planning_product_session_id = ProductSessionId(canonical_id("psn_", &planning_stage_id.0));
-    let worker_session_id = WorkerSessionId(canonical_id("wsn_", &planning_stage_id.0));
-    let codex_thread_id = CodexThreadId(canonical_id("cdx_", &planning_stage_id.0));
-    let delivery = Delivery::decode_json(
-        &serde_json::to_vec(&json!({
-            "schemaVersion": 3,
-            "id": delivery_id,
-            "revision": 1,
-            "spec": spec,
-            "tasks": [],
-            "stageRuns": [{
-                "schemaVersion": 3,
-                "id": planning_stage_id,
-                "deliveryId": delivery_id,
-                "deliveryTaskId": null,
-                "stage": "planning",
-                "actorType": "codex",
-                "role": "planner",
-                "attempt": 1,
-                "status": "running",
-                "startedAtMillis": started_at,
-                "finishedAtMillis": null,
-            }],
-            "sessionBindings": [{
-                "schemaVersion": 3,
-                "id": planning_binding_id,
-                "deliveryId": delivery_id,
-                "deliveryTaskId": null,
-                "stageRunId": planning_stage_id,
-                "productSessionId": planning_product_session_id,
-                "executionJobId": planning_job_id,
-                "workerSessionId": worker_session_id,
-                "codexThreadId": codex_thread_id,
-                "boundAtMillis": started_at,
-            }],
-            "attentionItems": [],
-            "evidence": [],
-            "verdict": null,
-            "status": "planning",
-            "createdAtMillis": spec["createdAtMillis"],
-            "updatedAtMillis": started_at,
-        }))
-        .map_err(string_error)?,
-    )
-    .map_err(string_error)?;
+    let fixture = CycleValidationFixture::from_spec(spec)?;
+    let delivery = fixture.delivery(spec)?;
     let lease = active_lease_identity(
-        planning_job_id,
+        fixture.planning_job_id.clone(),
         1,
-        LeaseId(canonical_id("lse_", &planning_stage_id.0)),
-        FencingToken("1".to_owned()),
-        WorkerId(canonical_id("wrk_", &planning_stage_id.0)),
-        WorkerInstanceId(canonical_id("wki_", &planning_stage_id.0)),
-        worker_session_id.clone(),
+        fixture.lease_id.clone(),
+        fixture.fencing_token.clone(),
+        fixture.worker_id.clone(),
+        fixture.worker_instance_id.clone(),
+        fixture.worker_session_id.clone(),
     );
     let terminal = verify_terminal_outcome(
         &delivery,
         &lease,
         terminal_worker_outcome(
-            planning_stage_id,
+            fixture.planning_stage_id,
             lease.execution_job_id().clone(),
             1,
             lease.lease_id().clone(),
             lease.fencing_token().clone(),
             lease.worker_id().clone(),
             lease.worker_instance_id().clone(),
-            worker_session_id,
+            fixture.worker_session_id,
             TerminalOutcomeStatus::Succeeded,
             terminal_outcome_metadata(
-                Some(codex_thread_id),
-                started_at.saturating_add(1),
+                Some(fixture.codex_thread_id),
+                fixture.started_at.saturating_add(1),
                 ExecutionAckSequence(1),
                 Vec::new(),
             ),
@@ -2841,7 +3043,7 @@ fn cycle_validation_delivery(spec: &Value) -> Result<(Delivery, AdvanceStageInpu
         previous_outcome: Some(terminal),
         current_lease: Some(lease),
         rework_authorization: None,
-        now_millis: started_at.saturating_add(1),
+        now_millis: fixture.started_at.saturating_add(1),
     };
     Ok((delivery, input))
 }
@@ -3533,6 +3735,7 @@ fn parse_execution_source(input: &Value) -> ExecutionSource {
             .cloned(),
         candidate_fact: None,
         runtime_events,
+        read_cut_cursor: None,
     }
 }
 
@@ -3837,7 +4040,23 @@ fn parse_execution_source_with_candidates(
     source
 }
 
-fn migrate_legacy_snapshot(mut snapshot: Value) -> Result<Value, String> {
+struct DifferentialMigrationCapture;
+
+impl MigrationTransaction for DifferentialMigrationCapture {
+    fn commit_once(
+        &mut self,
+        _source_key: &str,
+        _canonical_snapshot: &[u8],
+    ) -> Result<MigrationCommit, String> {
+        Ok(MigrationCommit::Applied)
+    }
+}
+
+fn migrate_legacy_snapshot(snapshot: Value) -> Result<Value, String> {
+    let input = serde_json::to_vec(&snapshot).map_err(string_error)?;
+    let canonical = migrate_legacy_delivery_json(&input, &mut DifferentialMigrationCapture)
+        .map_err(string_error)?;
+    let mut snapshot: Value = serde_json::from_slice(&canonical).map_err(string_error)?;
     let delivery_id = required_str(&snapshot, "id")?.to_owned();
     let task_id_map = snapshot
         .get("tasks")
@@ -3897,39 +4116,24 @@ fn migrate_legacy_snapshot(mut snapshot: Value) -> Result<Value, String> {
             );
         }
     }
-    let runs = stage_runs
-        .iter()
-        .map(|run| Ok::<_, String>((required_str(run, "id")?.to_owned(), run.clone())))
-        .collect::<Result<HashMap<_, _>, _>>()?;
     let bindings = snapshot
         .get_mut("sessionBindings")
         .and_then(Value::as_array_mut)
-        .ok_or_else(|| "legacy seed sessionBindings must be an array".to_owned())?;
-    let mut canonical = Vec::new();
-    for binding in bindings.iter() {
-        let stage_run_id = required_str(binding, "stageRunId")?;
-        let run = runs
-            .get(stage_run_id)
-            .ok_or_else(|| format!("legacy seed binding references missing {stage_run_id}"))?;
-        if required_str(run, "actorType")? == "human" {
-            continue;
+        .ok_or_else(|| "canonical seed sessionBindings must be an array".to_owned())?;
+    for binding in bindings {
+        if let Some(source_task_id) = binding.get("deliveryTaskId").and_then(Value::as_str) {
+            binding["deliveryTaskId"] = Value::String(
+                task_id_map
+                    .get(source_task_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "canonical seed SessionBinding references missing task {source_task_id}"
+                        )
+                    })?
+                    .clone(),
+            );
         }
-        let dsh = required_str(binding, "dshSessionId")?;
-        let codex = required_str(binding, "codexSessionId")?;
-        canonical.push(json!({
-            "schemaVersion": binding["schemaVersion"],
-            "id": binding["id"],
-            "deliveryId": delivery_id,
-            "deliveryTaskId": run.get("deliveryTaskId").cloned().unwrap_or(Value::Null),
-            "stageRunId": stage_run_id,
-            "productSessionId": canonical_id("psn_", dsh),
-            "executionJobId": canonical_id("job_", &format!("{delivery_id}:{stage_run_id}")),
-            "workerSessionId": canonical_id("wsn_", dsh),
-            "codexThreadId": canonical_id("cdx_", codex),
-            "boundAtMillis": binding["boundAtMillis"],
-        }));
     }
-    *bindings = canonical;
     Ok(snapshot)
 }
 
@@ -4628,7 +4832,9 @@ fn canonical_request_id(input: &str) -> String {
 }
 
 fn canonical_stage_run_id(input: &str) -> StageRunId {
-    if input.len() == 30 && input.starts_with("run_") {
+    if input.strip_prefix("run_").is_some_and(|suffix| {
+        suffix.len() == 26 && suffix.bytes().all(|byte| CROCKFORD_BASE32.contains(&byte))
+    }) {
         StageRunId(input.to_owned())
     } else {
         StageRunId(canonical_id("run_", input))
@@ -4676,11 +4882,9 @@ fn millis_to_rfc3339(value: u64) -> Result<String, String> {
     let hour = seconds_of_day / 3_600;
     let minute = (seconds_of_day % 3_600) / 60;
     let second = seconds_of_day % 60;
-    Ok(if millis == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-    })
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
+    ))
 }
 
 fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
@@ -4757,20 +4961,48 @@ mod tests {
     #[test]
     fn runtime_binding_selector_uses_typed_projection_stage_order() {
         fn stage(suffix: &str) -> DeliveryStageProjection {
+            let attempt = 1_i64;
+            let stage_run_id = StageRunId(format!("run_{suffix}"));
+            let product_session_id = ProductSessionId(format!("psn_{suffix}"));
+            let worker_session_id = WorkerSessionId(format!("wsn_{suffix}"));
+            let codex_thread_id = CodexThreadId(format!("cdx_{suffix}"));
+            let execution_job_id = ExecutionJobId(format!("job_{suffix}"));
+            let worker_id = WorkerId(canonical_id("wrk_", &stage_run_id.0));
+            let lease_id = LeaseId(canonical_id("lse_", &stage_run_id.0));
+            let worker_instance_id = WorkerInstanceId(canonical_id("wki_", &stage_run_id.0));
+            let fencing_token = attempt.to_string();
             DeliveryStageProjection {
                 actor_type: "codex".to_owned(),
-                attempt: 1,
+                attempt,
                 delivery_task_id: None,
                 finished_at: None,
-                id: StageRunId(format!("run_{suffix}")),
+                id: stage_run_id.clone(),
                 role: "executor".to_owned(),
                 session_binding: Some(DeliveryStageSessionBindingProjection {
+                    attempt: Some(attempt),
                     binding_id: format!("sbn_{suffix}"),
                     bound_at: Instant("2061-11-23T19:33:20.100Z".to_owned()),
-                    codex_thread_id: Some(CodexThreadId(format!("cdx_{suffix}"))),
-                    execution_job_id: ExecutionJobId(format!("job_{suffix}")),
-                    product_session_id: ProductSessionId(format!("psn_{suffix}")),
-                    worker_session_id: Some(WorkerSessionId(format!("wsn_{suffix}"))),
+                    codex_thread_id: Some(codex_thread_id.clone()),
+                    execution_job_id: execution_job_id.clone(),
+                    fencing_token: Some(fencing_token),
+                    lease_id: Some(lease_id.clone()),
+                    product_session_id: product_session_id.clone(),
+                    session_identity: Some(SessionIdentity {
+                        codex_thread_id: codex_thread_id.clone(),
+                        product_session_id: product_session_id.clone(),
+                        stage_run_id: Some(stage_run_id.clone()),
+                        worker_session_id: worker_session_id.clone(),
+                    }),
+                    source_identity: Some(SessionBindingSourceIdentity {
+                        kind: SessionBindingSourceIdentityKind::ExecutionWorker,
+                        lease_id: lease_id.clone(),
+                        worker_id: worker_id.clone(),
+                        worker_instance_id: worker_instance_id.clone(),
+                        worker_session_id: worker_session_id.clone(),
+                    }),
+                    stage_run_id: Some(stage_run_id),
+                    worker_id: Some(worker_id),
+                    worker_session_id: Some(worker_session_id),
                 }),
                 stage: "executing".to_owned(),
                 started_at: Instant("2061-11-23T19:33:20.100Z".to_owned()),
@@ -5144,6 +5376,164 @@ mod tests {
                 .candidate_ref(),
             candidate.candidate_ref()
         );
+    }
+
+    #[test]
+    fn differential_runtime_source_rejects_a_new_cursor_for_an_old_runtime_read() {
+        let scope: RepositoryScope = serde_json::from_value(fixture_scope("stale-runtime-cursor"))
+            .expect("canonical repository scope");
+        let delivery_id = DeliveryId("dlv_01J00000000000000000000000".to_owned());
+        let old_cursor = fixture_delivery_cursor(
+            &scope,
+            &delivery_id,
+            1,
+            &canonical_id("evt_", "fixture-old"),
+        );
+        let new_cursor = fixture_delivery_cursor(
+            &scope,
+            &delivery_id,
+            2,
+            &canonical_id("evt_", "fixture-new"),
+        );
+        let old_runtime = ExecutionSource {
+            runtime_events: vec![json!({
+                "source": { "sessionId": "wsn_fixture_old" },
+                "sequence": 1,
+            })],
+            read_cut_cursor: Some(old_cursor.clone()),
+            ..ExecutionSource::default()
+        };
+        let read_cut = FixtureRuntimeReadCut::capture(&old_runtime, old_cursor.clone());
+
+        // Before the fixture read-cut seam, ProjectionAuthority accepted an
+        // old runtime source and a newly read cursor as separate arguments.
+        assert!(read_cut.source_at_cursor(&old_cursor).is_ok());
+        assert!(matches!(
+            read_cut.source_at_cursor(&new_cursor),
+            Err(TrustedProjectionReadError::Stale)
+        ));
+    }
+
+    #[test]
+    fn differential_runtime_read_cut_rejects_stale_source_on_the_real_projection_path() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-differential-stale-read-cut-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut scenario = ScenarioRunner::open(
+            &root,
+            "stale-runtime-cursor-real-path",
+            HashMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("open differential scenario");
+        let mut delivery_value: Value = serde_json::from_slice(include_bytes!(
+            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
+        ))
+        .expect("canonical Delivery fixture");
+        delivery_value["revision"] = json!(1);
+        delivery_value["status"] = json!("verifying");
+        delivery_value["evidence"] = json!([]);
+        delivery_value["verdict"] = Value::Null;
+        let delivery = Delivery::decode_json(
+            &serde_json::to_vec(&delivery_value).expect("encode revision-one Delivery"),
+        )
+        .expect("revision-one Delivery fixture");
+
+        scenario.stop_control_plane().expect("stop empty scenario");
+        seed_snapshot_sqlite(&scenario.home, &scenario.id, &delivery).expect("seed Delivery");
+        scenario
+            .start_control_plane()
+            .expect("restart seeded scenario");
+        scenario.delivery_id = Some(delivery.id().clone());
+        scenario.execution_source = ExecutionSource {
+            runtime_events: vec![json!({
+                "source": { "sessionId": "fixture-old-runtime" },
+                "sequence": 1,
+            })],
+            ..ExecutionSource::default()
+        };
+        scenario
+            .refresh_projection_authority()
+            .expect("capture initial runtime and cursor");
+
+        let old_runtime = scenario.execution_source.clone();
+        let new_cursor = fixture_delivery_cursor(
+            &scenario.repository_scope,
+            &delivery.id().clone(),
+            2,
+            &canonical_id("evt_", "fixture-new-real-path"),
+        );
+        let baseline_query: DeliveryGetQuery = serde_json::from_value(query_envelope(
+            &scenario.id,
+            "delivery.get",
+            "stale-runtime-cursor-baseline-query",
+            json!({ "deliveryId": delivery.id(), "atCursor": null }),
+        ))
+        .expect("baseline delivery query");
+        assert!(
+            scenario
+                .control_plane()
+                .delivery_get(&baseline_query)
+                .is_ok(),
+            "matching refresh read cut must reach the installed adapter"
+        );
+        let replace = scenario.projection_authority.replace(
+            &scenario.repository_scope,
+            &delivery,
+            FixtureRuntimeReadCut::capture(&old_runtime, new_cursor),
+        );
+
+        // This first red run reaches the same replace -> installed adapter ->
+        // ControlPlane query path used by the differential runner. The old
+        // implementation accepts the mismatched pair and serves it; the
+        // final assertion states the required fail-closed behavior.
+        if replace.is_ok() {
+            let query: DeliveryGetQuery = serde_json::from_value(query_envelope(
+                &scenario.id,
+                "delivery.get",
+                "stale-runtime-cursor-real-path-query",
+                json!({ "deliveryId": delivery.id(), "atCursor": null }),
+            ))
+            .expect("delivery query");
+            let adapter_result = scenario.control_plane().delivery_get(&query);
+            assert!(
+                adapter_result.is_ok(),
+                "old runtime + new cursor reached the installed adapter: {adapter_result:?}"
+            );
+        }
+        assert!(
+            replace.is_err(),
+            "old runtime + new cursor must be rejected before publication"
+        );
+
+        scenario
+            .stop_control_plane()
+            .expect("stop stale-cut scenario");
+        fs::remove_dir_all(root).expect("remove stale-cut fixture");
+    }
+
+    fn fixture_delivery_cursor(
+        scope: &RepositoryScope,
+        delivery_id: &DeliveryId,
+        sequence: u64,
+        event_id: &str,
+    ) -> ProjectionEventCursor {
+        let key = ProjectionEventStreamKey::new(
+            fixture_repository_scope_key(scope).expect("fixture scope key"),
+            ProjectionEventStream::Delivery(delivery_id.clone()),
+        )
+        .expect("fixture delivery event stream key");
+        ProjectionEventCursor::try_new(
+            key,
+            sequence,
+            Some(winwincode_domain::ControlPlaneEventId(event_id.to_owned())),
+        )
+        .expect("fixture delivery event cursor")
     }
 
     #[test]

@@ -2,17 +2,20 @@
 
 //! Lossless mapping from Delivery-owned read models to generated transport DTOs.
 
-use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
     domain::{
         AttentionItemStatus, AttentionItemType, CriterionVerdict, DeliveryStage,
         DeliveryStatus as DomainDeliveryStatus, DeliveryTaskStatus as DomainTaskStatus,
-        EvidenceRefType, RepositoryKind, StageRunActorType, StageRunStatus,
+        EvidenceRefType, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
+        StageRunStatus,
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
-use winwincode_domain::{Count, GitHubRepositorySlug, Instant, Revision, Sha256Digest};
+use winwincode_domain::{
+    Count, GitHubRepositorySlug, Instant, Revision, SchemaVersion, SessionBindingSourceIdentity,
+    SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+};
 
 use super::{StrongFlowProjectionError, application::EstablishedDeliveryRead};
 
@@ -30,7 +33,7 @@ pub(super) fn delivery_detail(
     let publication = publication(read, &read_cursor)?;
     Ok(api::DeliveryDetailProjection {
         kind: api::DeliveryDetailProjectionKind::DeliveryDetail,
-        schema_version: api::SchemaVersion::WinwincodeV1,
+        schema_version: SchemaVersion::WinwincodeV1,
         read_cursor,
         delivery_id: source.delivery_id().clone(),
         delivery_revision: revision(source.delivery_revision(), "delivery revision")?,
@@ -145,17 +148,107 @@ fn stage(
         finished_at: source.finished_at().map(millis_to_instant).transpose()?,
         session_binding: source
             .session_binding()
-            .map(|binding| {
-                Ok::<_, StrongFlowProjectionError>(api::DeliveryStageSessionBindingProjection {
-                    binding_id: binding.binding_id().0.clone(),
-                    product_session_id: binding.product_session_id().clone(),
-                    execution_job_id: binding.execution_job_id().clone(),
-                    worker_session_id: binding.worker_session_id().cloned(),
-                    codex_thread_id: binding.codex_thread_id().cloned(),
-                    bound_at: millis_to_instant(binding.bound_at())?,
-                })
-            })
+            .map(|binding| session_binding(binding, source.id(), source.attempt()))
             .transpose()?,
+    })
+}
+
+fn session_binding(
+    source: &delivery_projection::SessionBindingProjection,
+    stage_run_id: &winwincode_domain::StageRunId,
+    stage_attempt: u64,
+) -> Result<api::DeliveryStageSessionBindingProjection, StrongFlowProjectionError> {
+    if source.attempt() != stage_attempt {
+        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "SessionBinding attempt does not match its StageRun".to_owned(),
+        ));
+    }
+
+    let authority_presence = [
+        source.worker_id().is_some(),
+        source.worker_instance_id().is_some(),
+        source.lease_id().is_some(),
+        source.fencing_token().is_some(),
+    ];
+    if authority_presence.iter().any(|present| *present)
+        && !authority_presence.iter().all(|present| *present)
+    {
+        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "SessionBinding has partial persisted Worker authority".to_owned(),
+        ));
+    }
+
+    let complete = authority_presence.iter().all(|present| *present)
+        && source.worker_session_id().is_some()
+        && source.codex_thread_id().is_some();
+    if !complete {
+        return Ok(api::DeliveryStageSessionBindingProjection {
+            attempt: None,
+            binding_id: source.binding_id().0.clone(),
+            bound_at: millis_to_instant(source.bound_at())?,
+            codex_thread_id: None,
+            execution_job_id: source.execution_job_id().clone(),
+            fencing_token: None,
+            lease_id: None,
+            product_session_id: source.product_session_id().clone(),
+            session_identity: None,
+            source_identity: None,
+            stage_run_id: None,
+            worker_id: None,
+            worker_session_id: None,
+        });
+    }
+
+    let worker_id = source.worker_id().cloned().expect("complete authority");
+    let worker_instance_id = source
+        .worker_instance_id()
+        .cloned()
+        .expect("complete authority");
+    let lease_id = source.lease_id().cloned().expect("complete authority");
+    let fencing_token = source.fencing_token().cloned().expect("complete authority");
+    let worker_session_id = source
+        .worker_session_id()
+        .cloned()
+        .expect("complete identity");
+    let codex_thread_id = source
+        .codex_thread_id()
+        .cloned()
+        .expect("complete identity");
+    let attempt = integer(source.attempt(), "session binding attempt")?;
+    let source_identity = match source.source_provenance().kind() {
+        SessionBindingSourceKind::ExecutionPort => SessionBindingSourceIdentity {
+            kind: SessionBindingSourceIdentityKind::ExecutionWorker,
+            lease_id: lease_id.clone(),
+            worker_id: worker_id.clone(),
+            worker_instance_id,
+            worker_session_id: worker_session_id.clone(),
+        },
+        SessionBindingSourceKind::DeliveryAdvance | SessionBindingSourceKind::LegacyMigration => {
+            return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+                "SessionBinding source is not an accepted execution-worker authority".to_owned(),
+            ));
+        }
+    };
+    let session_identity = SessionIdentity {
+        codex_thread_id: codex_thread_id.clone(),
+        product_session_id: source.product_session_id().clone(),
+        stage_run_id: Some(stage_run_id.clone()),
+        worker_session_id: worker_session_id.clone(),
+    };
+    Ok(api::DeliveryStageSessionBindingProjection {
+        attempt: Some(attempt),
+        binding_id: source.binding_id().0.clone(),
+        bound_at: millis_to_instant(source.bound_at())?,
+        codex_thread_id: Some(codex_thread_id),
+        execution_job_id: source.execution_job_id().clone(),
+        fencing_token: Some(fencing_token.0),
+        lease_id: Some(lease_id),
+        product_session_id: source.product_session_id().clone(),
+        session_identity: Some(session_identity),
+        source_identity: Some(source_identity),
+        stage_run_id: Some(stage_run_id.clone()),
+        worker_id: Some(worker_id),
+        worker_session_id: Some(worker_session_id),
     })
 }
 
@@ -514,14 +607,6 @@ fn publication(
         .resource()
         .map(|resource| publication_resource_ref(resource, &target))
         .transpose()?;
-    let publication_set_sha256 = {
-        let bytes = serde_json::to_vec(binding).map_err(|_| {
-            StrongFlowProjectionError::Internal(
-                "publication authorization cannot be encoded".to_owned(),
-            )
-        })?;
-        Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)))
-    };
     if cursor.delivery_id != *binding.delivery_id()
         || cursor.delivery_revision.0
             != integer(binding.delivery_revision(), "publication delivery revision")?
@@ -535,18 +620,18 @@ fn publication(
         id: result.publication_id().clone(),
         revision: result.revision().clone(),
         delivery_id: binding.delivery_id().clone(),
-        delivery_spec_id: binding.delivery_spec_id().0.clone(),
+        delivery_spec_id: binding.delivery_spec_id().to_owned(),
         delivery_spec_revision: revision(
             binding.delivery_spec_revision(),
             "publication spec revision",
         )?,
         candidate_ref: binding.candidate_ref().to_owned(),
-        delivery_verdict_id: binding.verdict_id().0.clone(),
+        delivery_verdict_id: binding.verdict_id().to_owned(),
         verdict_status: api::PublicationProjectionVerdictStatus::Pass,
         approval_attention_item_id: binding.approval_id().clone(),
         approved_by: actor_id(approved_by)?,
         approved_at: millis_to_instant(approved_at)?,
-        publication_set_sha256,
+        publication_set_sha256: result.publication_set_sha256().clone(),
         target,
         state: result.state().to_owned(),
         resource_ref,
@@ -950,11 +1035,8 @@ fn millis_to_instant(value: u64) -> Result<Instant, StrongFlowProjectionError> {
     let hour = seconds_of_day / 3_600;
     let minute = (seconds_of_day % 3_600) / 60;
     let second = seconds_of_day % 60;
-    let text = if millis == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-    };
+    let text =
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z");
     Ok(Instant(text))
 }
 
@@ -1021,5 +1103,58 @@ mod tests {
             publication_resource_ref(&resource, &pull_request_target()),
             Err(StrongFlowProjectionError::RevisionConflict(_))
         ));
+    }
+
+    #[test]
+    fn pending_session_binding_maps_to_the_closed_nullable_branch() {
+        let parsed = winwincode_delivery::domain::Delivery::decode_json(include_bytes!(
+            "../../../winwincode-delivery/tests/fixtures/delivery-main.json"
+        ))
+        .expect("canonical Delivery fixture");
+        let mut snapshot = parsed.into_snapshot();
+        snapshot.status = DomainDeliveryStatus::Verifying;
+        snapshot.evidence.clear();
+        snapshot.verdict = None;
+        let binding = snapshot
+            .session_bindings
+            .first_mut()
+            .expect("fixture SessionBinding");
+        binding.worker_session_id = None;
+        binding.codex_thread_id = None;
+        binding.worker_id = None;
+        binding.worker_instance_id = None;
+        binding.lease_id = None;
+        binding.fencing_token = None;
+        binding.source_provenance =
+            winwincode_delivery::domain::SessionBindingSourceProvenance::delivery_advance(
+                "delivery.advance",
+            );
+        let delivery = winwincode_delivery::domain::Delivery::try_from_snapshot(snapshot)
+            .expect("pending SessionBinding");
+        let projected = winwincode_delivery::projection::project_delivery_detail(
+            winwincode_delivery::projection::ProjectionInput::new(&delivery),
+        )
+        .expect("Delivery projection");
+
+        let source = projected.stages().first().expect("fixture StageRun");
+        let mapped = stage(source).expect("generated stage projection");
+        let binding = mapped.session_binding.expect("Codex stage SessionBinding");
+        assert_eq!(binding.worker_session_id, None);
+        assert_eq!(binding.codex_thread_id, None);
+        assert_eq!(binding.stage_run_id, None);
+        assert_eq!(binding.worker_id, None);
+        assert_eq!(binding.lease_id, None);
+        assert_eq!(binding.attempt, None);
+        assert_eq!(binding.fencing_token, None);
+        assert_eq!(binding.session_identity, None);
+        assert_eq!(binding.source_identity, None);
+    }
+
+    #[test]
+    fn whole_second_projection_timestamp_keeps_the_required_milliseconds() {
+        assert_eq!(
+            millis_to_instant(0).expect("Unix epoch").0,
+            "1970-01-01T00:00:00.000Z"
+        );
     }
 }

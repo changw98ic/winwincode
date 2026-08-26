@@ -103,9 +103,6 @@ pub struct AcceptedRuntimeEvent {
     seal: Sha256Digest,
 }
 
-// Phase 4 will add the only production constructor from persisted accepted
-// Worker facts. Until then these variants are reachable only through the
-// feature-gated fixture adapter below.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -382,6 +379,58 @@ impl RuntimeProjection {
 
     pub fn snapshot(&self) -> &RuntimeFoldSnapshot {
         &self.snapshot
+    }
+
+    /// Rebuilds a Delivery-stage projection from the accepted runtime-ledger
+    /// positions retained by the Control Plane.
+    ///
+    /// The ledger deliberately stores the generated `ExecutionEventRecord`
+    /// separately from this Delivery-domain crate. The bridge therefore folds
+    /// each already-accepted position as a bounded checkpoint; it never
+    /// interprets Worker payload bytes or promotes an unaccepted event into a
+    /// projection fact. A future semantic fact adapter can replace the
+    /// checkpoint mapper while retaining this exact binding and sequence
+    /// boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current Delivery binding, `StageRun`, scheduler
+    /// authority, or accepted sequence positions are not exact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persisted_checkpoints(
+        delivery: &Delivery,
+        session_binding_id: &SessionBindingId,
+        lease_id: LeaseId,
+        fencing_token: FencingToken,
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        settled_last_sequence: Option<u64>,
+        accepted_events: &[(u64, ExecutionEventId)],
+    ) -> Result<Self, RuntimeProjectionError> {
+        let binding = persisted_binding(
+            delivery,
+            session_binding_id,
+            lease_id,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+            settled_last_sequence,
+        )?;
+        let events = accepted_events
+            .iter()
+            .map(|(sequence, event_id)| {
+                let mut event = AcceptedRuntimeEvent {
+                    identity: binding.identity.clone(),
+                    sequence: *sequence,
+                    event_id: event_id.clone(),
+                    fact: AcceptedRuntimeFact::Checkpoint,
+                    seal: Sha256Digest(String::new()),
+                };
+                event.seal = seal_event(&event)?;
+                Ok(event)
+            })
+            .collect::<Result<Vec<_>, RuntimeProjectionError>>()?;
+        Self::replay(delivery, vec![binding], &events)
     }
 
     /// Rebuilds the projection from a complete ordered accepted-fact stream.
@@ -929,6 +978,73 @@ fn portable_value(value: &str, maximum: usize) -> bool {
 
 fn safe_source_ref(value: &str) -> bool {
     is_safe_source_ref(value)
+}
+
+fn persisted_binding(
+    delivery: &Delivery,
+    session_binding_id: &SessionBindingId,
+    lease_id: LeaseId,
+    fencing_token: FencingToken,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    settled_last_sequence: Option<u64>,
+) -> Result<AcceptedRuntimeBinding, RuntimeProjectionError> {
+    let binding = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| &binding.id == session_binding_id)
+        .ok_or_else(|| {
+            projection_error(
+                RuntimeProjectionErrorCode::InvalidBinding,
+                "persisted runtime SessionBinding is missing",
+            )
+        })?;
+    let run = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == binding.stage_run_id)
+        .ok_or_else(|| {
+            projection_error(
+                RuntimeProjectionErrorCode::InvalidBinding,
+                "persisted runtime StageRun is missing",
+            )
+        })?;
+    let accepted = binding.worker_session_id.clone().ok_or_else(|| {
+        projection_error(
+            RuntimeProjectionErrorCode::InvalidBinding,
+            "persisted runtime WorkerSession is missing",
+        )
+    })?;
+    let codex_thread_id = binding.codex_thread_id.clone().ok_or_else(|| {
+        projection_error(
+            RuntimeProjectionErrorCode::InvalidBinding,
+            "persisted runtime CodexThread is missing",
+        )
+    })?;
+    let mut accepted = AcceptedRuntimeBinding {
+        session_binding_id: binding.id.clone(),
+        delivery_task_id: binding.delivery_task_id.clone(),
+        identity: RuntimeIdentity {
+            delivery_id: delivery.id().clone(),
+            stage_run_id: run.id.clone(),
+            product_session_id: binding.product_session_id.clone(),
+            worker_session_id: accepted,
+            codex_thread_id,
+            execution_job_id: binding.execution_job_id.clone(),
+            lease_id,
+            attempt: run.attempt,
+            fencing_token,
+            worker_id,
+            worker_instance_id,
+        },
+        settled_last_sequence,
+        seal: Sha256Digest(String::new()),
+    };
+    accepted.seal = seal_binding(&accepted)?;
+    validate_binding(delivery, &accepted)?;
+    Ok(accepted)
 }
 
 fn same_session_scope(left: &RuntimeIdentity, right: &RuntimeIdentity) -> bool {

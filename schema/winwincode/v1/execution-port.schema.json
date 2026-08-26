@@ -64,14 +64,19 @@
         "productSessionId",
         "workerSessionId",
         "codexThreadId",
+        "stageRunId",
         "executionJobId",
         "attempt",
+        "workerId",
         "leaseId",
-        "fencingToken"
+        "fencingToken",
+        "sourceIdentity"
       ],
       "duplicate": "same_identity_is_idempotent_changed_identity_is_conflict",
       "runtimeBeforeBinding": "reject_before_persist_and_projection",
-      "runtimeThreadMismatch": "reject_before_persist_and_projection"
+      "runtimeThreadMismatch": "reject_before_persist_and_projection",
+      "sessionIdentityBlock": "sessionIdentity",
+      "sourceIdentity": "SessionBindingSourceIdentity"
     }
   },
   "$defs": {
@@ -79,11 +84,6 @@
       "type": "string",
       "pattern": "^xmsg_[0-9A-HJKMNP-TV-Z]{26}$",
       "description": "Unique identity of one ExecutionPort message envelope."
-    },
-    "WorkerInstanceId": {
-      "type": "string",
-      "pattern": "^wki_[0-9A-HJKMNP-TV-Z]{26}$",
-      "description": "Identity of one Worker process boot; changes after every restart."
     },
     "ExecutionEventId": {
       "type": "string",
@@ -172,7 +172,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerId"
         },
         "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "attempt": {
           "type": "integer",
@@ -742,7 +742,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerId"
         },
         "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "startedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -790,7 +790,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerId"
         },
         "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "status": {
           "type": "string",
@@ -860,7 +860,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerId"
         },
         "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "observedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
@@ -905,7 +905,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerId"
         },
         "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "heartbeatSequence": {
           "$ref": "#/$defs/ExecutionSequence"
@@ -962,7 +962,7 @@
           "$ref": "./domain.schema.json#/$defs/WorkerId"
         },
         "workerInstanceId": {
-          "$ref": "#/$defs/WorkerInstanceId"
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
         },
         "heartbeatSequence": {
           "$ref": "#/$defs/ExecutionSequence"
@@ -1175,6 +1175,9 @@
         },
         "codexThreadId": {
           "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1185,7 +1188,8 @@
         "lease",
         "workerSessionId",
         "codexThreadId",
-        "event"
+        "event",
+        "sessionIdentity"
       ],
       "title": "runtime.event",
       "description": "Publishes one ordered, replayable, provider-neutral runtime fact.",
@@ -1225,6 +1229,9 @@
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1235,7 +1242,8 @@
         "lease",
         "workerSessionId",
         "status",
-        "ackSequence"
+        "ackSequence",
+        "sessionIdentity"
       ],
       "title": "runtime.ack",
       "description": "Acknowledges the highest contiguous runtime event and requests a gap replay when needed.",
@@ -1320,6 +1328,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 10000
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1331,7 +1342,8 @@
         "lease",
         "workerSessionId",
         "afterSequence",
-        "maxEvents"
+        "maxEvents",
+        "sessionIdentity"
       ],
       "title": "runtime.replay_request",
       "description": "Requests original runtime events strictly after the acknowledged sequence.",
@@ -1365,6 +1377,9 @@
         },
         "artifact": {
           "$ref": "#/$defs/ArtifactDescriptor"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1375,7 +1390,8 @@
         "requestId",
         "lease",
         "workerSessionId",
-        "artifact"
+        "artifact",
+        "sessionIdentity"
       ],
       "title": "artifact.open",
       "description": "Begins a lease-scoped artifact stream without exposing an object-store implementation.",
@@ -1415,6 +1431,9 @@
         },
         "isFinal": {
           "type": "boolean"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1427,7 +1446,8 @@
         "artifactId",
         "sequence",
         "payload",
-        "isFinal"
+        "isFinal",
+        "sessionIdentity"
       ],
       "title": "artifact.chunk",
       "description": "Transfers one ordered artifact chunk through either local or remote adapters.",
@@ -1470,6 +1490,9 @@
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1481,7 +1504,8 @@
         "workerSessionId",
         "artifactId",
         "status",
-        "ackSequence"
+        "ackSequence",
+        "sessionIdentity"
       ],
       "title": "artifact.ack",
       "description": "Acknowledges the highest contiguous artifact chunk.",
@@ -1567,6 +1591,9 @@
         },
         "request": {
           "$ref": "#/$defs/EncodedPayload"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1579,7 +1606,8 @@
         "workerSessionId",
         "modelExchangeId",
         "route",
-        "request"
+        "request",
+        "sessionIdentity"
       ],
       "title": "model.open",
       "description": "Opens one provider-neutral model exchange through the Control Plane gateway.",
@@ -1622,6 +1650,9 @@
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1633,7 +1664,8 @@
         "workerSessionId",
         "modelExchangeId",
         "sequence",
-        "isFinal"
+        "isFinal",
+        "sessionIdentity"
       ],
       "title": "model.chunk",
       "description": "Streams one opaque provider-neutral model response chunk.",
@@ -1676,6 +1708,9 @@
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1687,7 +1722,8 @@
         "workerSessionId",
         "modelExchangeId",
         "status",
-        "ackSequence"
+        "ackSequence",
+        "sessionIdentity"
       ],
       "title": "model.ack",
       "description": "Acknowledges model chunks and requests replay after a stream interruption.",
@@ -1790,6 +1826,9 @@
         },
         "expiresAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1804,7 +1843,8 @@
         "mode",
         "prompt",
         "allowEmpty",
-        "expiresAt"
+        "expiresAt",
+        "sessionIdentity"
       ],
       "title": "input.request",
       "description": "Requests one typed user input through the Control Plane product session.",
@@ -1856,6 +1896,9 @@
         },
         "respondedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1868,7 +1911,8 @@
         "inputRequestId",
         "status",
         "value",
-        "respondedAt"
+        "respondedAt",
+        "sessionIdentity"
       ],
       "title": "input.response",
       "description": "Returns a typed input result without exposing product-session storage.",
@@ -1933,6 +1977,9 @@
         },
         "expiresAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -1945,7 +1992,8 @@
         "workerSessionId",
         "approvalId",
         "action",
-        "expiresAt"
+        "expiresAt",
+        "sessionIdentity"
       ],
       "title": "approval.request",
       "description": "Requests a decision for one execution action; business approval state remains Control Plane owned.",
@@ -2000,6 +2048,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 2000
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -2012,7 +2063,8 @@
         "approvalId",
         "decision",
         "scope",
-        "decidedAt"
+        "decidedAt",
+        "sessionIdentity"
       ],
       "title": "approval.decision",
       "description": "Returns the resolved execution approval decision.",
@@ -2056,6 +2108,9 @@
         },
         "requestedAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -2067,7 +2122,8 @@
         "lease",
         "workerSessionId",
         "reason",
-        "requestedAt"
+        "requestedAt",
+        "sessionIdentity"
       ],
       "title": "job.cancel",
       "description": "Requests cooperative cancellation for the currently fenced attempt.",
@@ -2112,6 +2168,9 @@
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -2122,7 +2181,8 @@
         "requestId",
         "lease",
         "workerSessionId",
-        "status"
+        "status",
+        "sessionIdentity"
       ],
       "title": "job.cancel_ack",
       "description": "Acknowledges cancellation without declaring a Delivery result.",
@@ -2153,6 +2213,9 @@
         },
         "outcome": {
           "$ref": "#/$defs/ExecutionOutcome"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -2162,7 +2225,8 @@
         "sentAt",
         "lease",
         "workerSessionId",
-        "outcome"
+        "outcome",
+        "sessionIdentity"
       ],
       "title": "job.outcome",
       "description": "Reports an execution outcome; Control Plane alone derives canonical Delivery state and verdicts.",
@@ -2204,6 +2268,9 @@
         },
         "error": {
           "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
         }
       },
       "required": [
@@ -2213,7 +2280,8 @@
         "sentAt",
         "lease",
         "workerSessionId",
-        "status"
+        "status",
+        "sessionIdentity"
       ],
       "title": "job.outcome_ack",
       "description": "Accepts or rejects one lease-fenced execution outcome idempotently.",
@@ -2410,7 +2478,14 @@
         "productSessionId",
         "workerSessionId",
         "codexThreadId",
-        "boundAt"
+        "boundAt",
+        "sessionIdentity",
+        "sourceIdentity",
+        "stageRunId",
+        "workerId",
+        "leaseId",
+        "attempt",
+        "fencingToken"
       ],
       "properties": {
         "kind": {
@@ -2439,6 +2514,29 @@
         },
         "boundAt": {
           "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "sourceIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
         }
       },
       "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease.",
