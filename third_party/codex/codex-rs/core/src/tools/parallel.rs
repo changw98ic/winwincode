@@ -132,6 +132,10 @@ impl ToolCallRuntime {
         let terminal_outcome_reached = Arc::new(AtomicBool::new(false));
         let dispatch_terminal_outcome_reached = Arc::clone(&terminal_outcome_reached);
         let dispatch_call = call.clone();
+        let tool_call_gate = session
+            .services
+            .thread_extension_data
+            .get::<crate::ToolCallGateAttachment>();
 
         let dispatch_span = trace_span!(
             "dispatch_tool_call_with_code_mode_result",
@@ -155,6 +159,47 @@ impl ToolCallRuntime {
                 } else {
                     Either::Right(lock.write().await)
                 };
+                if let Some(attachment) = tool_call_gate
+                    && !runtime_gates_action(&dispatch_call)
+                {
+                    let payload = match &dispatch_call.payload {
+                        ToolPayload::Function { arguments } => {
+                            crate::ToolCallGatePayload::Function {
+                                arguments: arguments.clone(),
+                            }
+                        }
+                        ToolPayload::ToolSearch { arguments } => {
+                            crate::ToolCallGatePayload::ToolSearch {
+                                arguments_json: serde_json::to_string(arguments).map_err(|_| {
+                                    FunctionCallError::RespondToModel(
+                                        "tool authorization payload is invalid".to_string(),
+                                    )
+                                })?,
+                            }
+                        }
+                        ToolPayload::Custom { input } => crate::ToolCallGatePayload::Custom {
+                            input: input.clone(),
+                        },
+                    };
+                    let request = crate::ToolCallGateRequest {
+                        thread_id: session.thread_id.to_string(),
+                        turn_id: turn.sub_id.clone(),
+                        call_id: dispatch_call.call_id.clone(),
+                        namespace: dispatch_call.tool_name.namespace.clone(),
+                        tool_name: dispatch_call.tool_name.name.clone(),
+                        payload,
+                    };
+                    attachment
+                        .gate()
+                        .authorize(request.clone())
+                        .await
+                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                    attachment
+                        .gate()
+                        .revalidate(request)
+                        .await
+                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                }
                 // Admission through the parallel-execution gate marks the end
                 // of dispatch waiting and the start of handler execution.
                 if let Some(execution_started_at) = execution_started_at {
@@ -220,6 +265,14 @@ impl ToolCallRuntime {
         }
         .in_current_span()
     }
+}
+
+fn runtime_gates_action(call: &ToolCall) -> bool {
+    call.tool_name.is_default_namespace()
+        && matches!(
+            call.tool_name.name.as_str(),
+            "shell_command" | "exec_command" | "apply_patch"
+        )
 }
 
 impl ToolCallRuntime {
@@ -368,6 +421,7 @@ impl Drop for ToolCallTimingGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use crate::session::step_context::StepContext;
@@ -385,6 +439,198 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tracing_test::internal::MockWriter;
+
+    struct BlockingToolCallGate {
+        entered: std::sync::Mutex<Option<oneshot::Sender<crate::ToolCallGateRequest>>>,
+        release: Arc<Notify>,
+    }
+
+    impl crate::ToolCallGate for BlockingToolCallGate {
+        fn authorize(
+            &self,
+            request: crate::ToolCallGateRequest,
+        ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
+            let entered = self
+                .entered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if let Some(entered) = entered {
+                    let _ = entered.send(request);
+                }
+                release.notified().await;
+                Ok(())
+            })
+        }
+
+        fn revalidate(
+            &self,
+            _request: crate::ToolCallGateRequest,
+        ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
+            Box::pin(async {
+                Err(crate::ToolCallGateRejection::new(
+                    "UNEXPECTED_REVALIDATION",
+                    "test gate did not expect revalidation",
+                ))
+            })
+        }
+    }
+
+    struct CountingHandler {
+        tool_name: codex_tools::ToolName,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ToolExecutor<ToolInvocation> for CountingHandler {
+        fn tool_name(&self) -> codex_tools::ToolName {
+            self.tool_name.clone()
+        }
+
+        fn spec(&self) -> codex_tools::ToolSpec {
+            codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+                name: self.tool_name.name.clone(),
+                description: "Counting test tool.".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters: codex_tools::JsonSchema::default(),
+                output_schema: None,
+            })
+        }
+
+        fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(
+                    Box::new(FunctionToolOutput::from_text("ok".to_string(), Some(true)))
+                        as Box<dyn crate::tools::context::ToolOutput>,
+                )
+            })
+        }
+    }
+
+    impl CoreToolRuntime for CountingHandler {}
+
+    #[tokio::test]
+    async fn cancellation_while_action_gate_waits_never_enters_handler() -> anyhow::Result<()> {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        session
+            .services
+            .thread_extension_data
+            .insert(crate::ToolCallGateAttachment::new(Arc::new(
+                BlockingToolCallGate {
+                    entered: std::sync::Mutex::new(Some(entered_tx)),
+                    release: Arc::clone(&release),
+                },
+            )));
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tool_name = codex_tools::ToolName::plain("test_tool");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = Arc::new(CountingHandler {
+            tool_name: tool_name.clone(),
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn CoreToolRuntime>;
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([handler]),
+            Vec::new(),
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let cancellation_token = CancellationToken::new();
+        let call = ToolCall {
+            tool_name,
+            call_id: "call-typed".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{\"TOKEN\":\"exact\"}".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+
+        let response_task =
+            tokio::spawn(runtime.handle_tool_call(call, cancellation_token.clone()));
+        let observed = tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("gate should receive request")
+            .expect("gate request channel should remain open");
+        assert_eq!(observed.call_id, "call-typed");
+        assert_eq!(
+            observed.payload,
+            crate::ToolCallGatePayload::Function {
+                arguments: "{\"TOKEN\":\"exact\"}".to_string(),
+            }
+        );
+        cancellation_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), response_task)
+            .await
+            .expect("cancelled call should finish")
+            .expect("cancelled call task should join")
+            .expect("cancelled call should produce an aborted response");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        release.notify_waiters();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_action_revalidation_never_enters_handler() -> anyhow::Result<()> {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        session
+            .services
+            .thread_extension_data
+            .insert(crate::ToolCallGateAttachment::new(Arc::new(
+                BlockingToolCallGate {
+                    entered: std::sync::Mutex::new(Some(entered_tx)),
+                    release: Arc::clone(&release),
+                },
+            )));
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tool_name = codex_tools::ToolName::plain("test_tool");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = Arc::new(CountingHandler {
+            tool_name: tool_name.clone(),
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn CoreToolRuntime>;
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([handler]),
+            Vec::new(),
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let response_task = tokio::spawn(runtime.handle_tool_call(
+            ToolCall {
+                tool_name,
+                call_id: "call-stale".to_string(),
+                payload: ToolPayload::Function {
+                    arguments: "{}".to_string(),
+                },
+                encrypted_function_args: None,
+            },
+            CancellationToken::new(),
+        ));
+        let observed = tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("authorization should receive request")
+            .expect("authorization request channel should remain open");
+        assert_eq!(observed.call_id, "call-stale");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), response_task)
+            .await
+            .expect("rejected revalidation should finish")
+            .expect("rejected revalidation task should join")
+            .expect("rejection should be returned to the model");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
 
     #[test]
     fn tool_call_timing_guard_ignores_code_mode_source() {

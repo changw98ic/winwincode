@@ -35,9 +35,9 @@ import {
   RuntimeApprovalRouter,
   RuntimeProjectionError,
   RuntimeSessionLedger,
-  WinWinCodeAgentFactory,
   reconcileDeliveryAfterRestart,
-} from '../../packages/dsh-profile/dist/index.js'
+} from './dsh-profile/index.mjs'
+import { WinWinCodeAgentFactoryFixture } from './dsh-profile/agent-factory-test-support.mjs'
 import { WinWinCodeKernel } from '../../packages/native/dist/index.js'
 import {
   DeliveryRuntimeProjection,
@@ -294,7 +294,7 @@ export class ScriptedDshFixtureRuntime {
 
     const runtime = this
     const factoryPlugin = pluginContext => {
-      new WinWinCodeAgentFactory(
+      new WinWinCodeAgentFactoryFixture(
         pluginContext,
         { home: runtime.home, roleId: 'chat' },
         options => {

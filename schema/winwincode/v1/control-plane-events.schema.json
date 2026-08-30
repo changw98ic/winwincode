@@ -31,6 +31,7 @@
       "enum": [
         "activity.recorded.v1",
         "approval.changed.v1",
+        "chat-interactions.invalidated.v1",
         "attention.changed.v1",
         "delivery.changed.v1",
         "delivery-task.changed.v1",
@@ -38,7 +39,17 @@
         "product-session.changed.v1",
         "product-session.message.appended.v1",
         "runtime-projection.invalidated.v1",
-        "worker-health.changed.v1"
+        "worker-health.changed.v1",
+        "enterprise-organization.invalidated.v1",
+        "enterprise-membership.invalidated.v1",
+        "enterprise-team.invalidated.v1",
+        "enterprise-role.invalidated.v1",
+        "enterprise-project.invalidated.v1",
+        "enterprise-policy.invalidated.v1",
+        "enterprise-fleet.invalidated.v1",
+        "enterprise-usage.invalidated.v1",
+        "enterprise-audit.invalidated.v1",
+        "enterprise-integration.invalidated.v1"
       ]
     },
     "ControlPlaneWebSocketAcknowledgedCursor": {
@@ -594,6 +605,9 @@
           "$ref": "#/$defs/ControlPlaneWebSocketApprovalChangedEvent"
         },
         {
+          "$ref": "#/$defs/ControlPlaneWebSocketChatInteractionsInvalidatedEvent"
+        },
+        {
           "$ref": "#/$defs/ControlPlaneWebSocketAttentionChangedEvent"
         },
         {
@@ -610,6 +624,36 @@
         },
         {
           "$ref": "#/$defs/ControlPlaneWebSocketActivityRecordedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseMembershipInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseTeamInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseRoleInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseProjectInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterprisePolicyInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseFleetInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseUsageInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseAuditInvalidatedEvent"
+        },
+        {
+          "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseIntegrationInvalidatedEvent"
         }
       ]
     },
@@ -1112,6 +1156,368 @@
         }
       ],
       "description": "Exact start point: a named origin or the cursor returned by the HTTP snapshot."
+    },
+    "ControlPlaneWebSocketChatInteractionListReloadQuery": {
+      "const": "session.interactions.list"
+    },
+    "ControlPlaneWebSocketApprovalListReloadQuery": {
+      "const": "approval.list"
+    },
+    "ControlPlaneWebSocketChatInteractionsInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "productSessionId",
+        "revision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "chat-interactions.invalidated.v1"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketChatInteractionListReloadQuery"
+            },
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketApprovalListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "description": "Secret-safe invalidation. Browsers reload Control Plane interaction and approval snapshots; no Worker payload is carried over WebSocket."
+    },
+    "ControlPlaneWebSocketEnterpriseOrganizationListReloadQuery": {
+      "const": "enterprise.organization.list"
+    },
+    "ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-organization.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseOrganizationListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe organization invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseMembershipListReloadQuery": {
+      "const": "enterprise.membership.list"
+    },
+    "ControlPlaneWebSocketEnterpriseMembershipInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-membership.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseMembershipListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe membership invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseProjectListReloadQuery": {
+      "const": "enterprise.project.list"
+    },
+    "ControlPlaneWebSocketEnterpriseProjectInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-project.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseProjectListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe project invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterprisePolicyListReloadQuery": {
+      "const": "enterprise.policy.list"
+    },
+    "ControlPlaneWebSocketEnterprisePolicyInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-policy.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterprisePolicyListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe policy invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseFleetListReloadQuery": {
+      "const": "enterprise.fleet.list"
+    },
+    "ControlPlaneWebSocketEnterpriseFleetInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-fleet.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseFleetListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe fleet invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseUsageListReloadQuery": {
+      "const": "enterprise.usage.list"
+    },
+    "ControlPlaneWebSocketEnterpriseUsageInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-usage.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseUsageListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe usage invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseAuditListReloadQuery": {
+      "const": "enterprise.audit.list"
+    },
+    "ControlPlaneWebSocketEnterpriseAuditInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-audit.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseAuditListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe audit invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseIntegrationListReloadQuery": {
+      "const": "enterprise.integration.list"
+    },
+    "ControlPlaneWebSocketEnterpriseIntegrationInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-integration.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseIntegrationListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe integration invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseTeamListReloadQuery": {
+      "const": "enterprise.team.list"
+    },
+    "ControlPlaneWebSocketEnterpriseTeamInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-team.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseTeamListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe team invalidation. The browser reloads only the named bounded enterprise query."
+    },
+    "ControlPlaneWebSocketEnterpriseRoleListReloadQuery": {
+      "const": "enterprise.role.list"
+    },
+    "ControlPlaneWebSocketEnterpriseRoleInvalidatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshotRevision",
+        "reloadQueries"
+      ],
+      "properties": {
+        "type": {
+          "const": "enterprise-role.invalidated.v1"
+        },
+        "snapshotRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reloadQueries": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/ControlPlaneWebSocketEnterpriseRoleListReloadQuery"
+            }
+          ],
+          "items": false,
+          "minItems": 1,
+          "maxItems": 1
+        }
+      },
+      "description": "Secret-safe role invalidation. The browser reloads only the named bounded enterprise query."
     }
   },
   "x-winwincode-transports": {
@@ -1203,6 +1609,44 @@
       ],
       "productSessionEvents": "do_not_require_execution_identity",
       "workerHealthEvents": "do_not_require_execution_identity"
+    },
+    "enterpriseManagementInvalidation": {
+      "payload": "snapshot_revision_and_exact_single_reload_query_only",
+      "rawResourcePayloadAllowed": false,
+      "domains": [
+        {
+          "eventType": "enterprise-organization.invalidated.v1",
+          "query": "enterprise.organization.list"
+        },
+        {
+          "eventType": "enterprise-membership.invalidated.v1",
+          "query": "enterprise.membership.list"
+        },
+        {
+          "eventType": "enterprise-project.invalidated.v1",
+          "query": "enterprise.project.list"
+        },
+        {
+          "eventType": "enterprise-policy.invalidated.v1",
+          "query": "enterprise.policy.list"
+        },
+        {
+          "eventType": "enterprise-fleet.invalidated.v1",
+          "query": "enterprise.fleet.list"
+        },
+        {
+          "eventType": "enterprise-usage.invalidated.v1",
+          "query": "enterprise.usage.list"
+        },
+        {
+          "eventType": "enterprise-audit.invalidated.v1",
+          "query": "enterprise.audit.list"
+        },
+        {
+          "eventType": "enterprise-integration.invalidated.v1",
+          "query": "enterprise.integration.list"
+        }
+      ]
     }
   }
 }

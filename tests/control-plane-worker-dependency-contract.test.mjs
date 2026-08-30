@@ -24,21 +24,20 @@ const inventoryPath = join(
 
 const REQUIRED_GUARDRAILS = Object.freeze({
   controlPlaneRoots: ['winwincode-control-plane'],
-  controlPlaneForbiddenPackagePatterns: ['codex-*', 'winwincode-codex'],
+  controlPlaneForbiddenPackagePatterns: [
+    'codex-*',
+    'winwincode-codex',
+    'winwincode-kernel',
+  ],
   workerRoots: ['winwincode-worker'],
   workerForbiddenPackages: [
-    'winwincode-approval',
+    'winwincode-api',
     'winwincode-audit',
-    'winwincode-collaboration',
     'winwincode-control-plane',
-    'winwincode-credential',
     'winwincode-delivery',
-    'winwincode-github',
-    'winwincode-identity',
-    'winwincode-project',
-    'winwincode-provider',
     'winwincode-publication',
     'winwincode-session',
+    'winwincode-storage',
   ],
   webAllowedBackends: ['control-plane-http', 'control-plane-websocket'],
   webForbiddenBackends: ['execution-port', 'execution-worker'],
@@ -49,7 +48,29 @@ const REQUIRED_GUARDRAILS = Object.freeze({
     'winwincode-observability',
     'winwincode-worker',
   ],
+  serverEntrypoint: 'winwincode-server',
+  serverAllowedProductDependencies: [
+    'winwincode-api',
+    'winwincode-codex',
+    'winwincode-control-plane',
+    'winwincode-domain',
+    'winwincode-execution-port',
+    'winwincode-local',
+    'winwincode-storage',
+    'winwincode-worker',
+  ],
+  helperExecutable: 'winwincode-kernel-helper',
 })
+
+const CANONICAL_PATHS = Object.freeze([
+  'apps/client',
+  'crates/helper',
+  'crates/kernel',
+  'crates/winwincode-server',
+  'crates/winwincode-control-plane',
+  'crates/winwincode-worker',
+  'crates/winwincode-local',
+])
 
 function json(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
@@ -88,13 +109,20 @@ function filesBelow(path) {
   return files
 }
 
-test('target graph declares the accepted modules without claiming planned crates exist', () => {
+function productDependencies(package_) {
+  return package_.dependencies
+    .filter(dependency => dependency.kind !== 'dev')
+    .map(dependency => dependency.name)
+    .filter(name => name.startsWith('winwincode-'))
+}
+
+test('target graph declares the accepted single path and existing directories', () => {
   const graph = json(targetGraphPath)
   assert.equal(graph.schemaVersion, 1)
   assert.equal(graph.status, 'accepted-target')
   assert.equal(graph.decision, 'docs/decisions/0028-control-plane-worker-migration.md')
   assert.deepEqual(graph.verification, {
-    plannedModulesMayBeAbsent: true,
+    plannedModulesMayBeAbsent: false,
     enforceCargoDependenciesWhenManifestExists: true,
     implementationCompletionSource: 'beads-and-release-gates',
   })
@@ -103,37 +131,93 @@ test('target graph declares the accepted modules without claiming planned crates
   const nodePaths = graph.nodes.map(node => node.path)
   assert.equal(duplicate(nodeIds), undefined)
   assert.equal(duplicate(nodePaths), undefined)
-  assert.ok(graph.nodes.some(node => node.id === 'typescript-web'))
-  assert.ok(graph.nodes.some(node => node.id === 'winwincode-control-plane'))
-  assert.ok(graph.nodes.some(node => node.id === 'winwincode-worker'))
-  assert.ok(graph.nodes.some(node => node.id === 'winwincode-codex'))
+  for (const path of CANONICAL_PATHS) assert.ok(existsSync(join(root, path)), path)
+  for (const id of [
+    'typescript-web',
+    'winwincode-server',
+    'winwincode-control-plane',
+    'winwincode-worker',
+    'winwincode-local',
+    'winwincode-kernel-helper',
+  ]) assert.ok(nodeIds.includes(id), id)
 
   for (const node of graph.nodes) {
     assert.match(node.id, /^[a-z][a-z0-9-]+$/u)
     assert.match(node.phase, /^(?:[1-6]|enterprise)$/u)
-    assert.ok(['generated', 'rust-crate', 'schema', 'typescript-app'].includes(node.kind))
+    assert.ok(['generated', 'rust-crate', 'schema', 'typescript-app', 'typescript-package'].includes(node.kind))
     assert.ok(node.responsibilities.length > 0)
     assert.equal(duplicate(node.allowedInternalDependencies), undefined)
+    assert.ok(existsSync(join(root, node.path)), `${node.id} path is missing`)
     for (const dependency of node.allowedInternalDependencies) {
       assert.ok(nodeIds.includes(dependency), `${node.id} has unknown dependency ${dependency}`)
     }
 
     if (node.kind === 'rust-crate') {
       assert.equal(node.packageName, node.id)
-      assert.equal(node.path, `crates/${node.id}`)
+      const expectedPath = node.id === 'winwincode-kernel'
+        ? 'crates/kernel'
+        : node.id === 'winwincode-kernel-helper'
+          ? 'crates/helper'
+          : `crates/${node.id}`
+      assert.equal(node.path, expectedPath)
+    } else if (['typescript-app', 'typescript-package'].includes(node.kind)) {
+      assert.match(node.packageName, /^@winwincode\/[a-z][a-z0-9-]+$/u)
+      const manifest = json(join(root, node.path, 'package.json'))
+      assert.equal(manifest.name, node.packageName)
     } else {
       assert.equal(Object.hasOwn(node, 'packageName'), false)
     }
   }
+
+  for (const forbidden of [
+    'apps/host',
+    'apps/web',
+    'packages/dsh-profile',
+    'packages/native',
+    'crates/native',
+    'dsh-profile',
+    'napi-kernel-bridge',
+  ]) {
+    assert.equal(JSON.stringify(graph).includes(forbidden), false, forbidden)
+  }
 })
 
-test('planned dependency closure enforces the Control Plane, Worker, Web, and local seams', () => {
+test('dependency graph enforces the Control Plane, Server, Worker, Client, Local and Helper seams', () => {
   const graph = json(targetGraphPath)
   assert.deepEqual(graph.guardrails, REQUIRED_GUARDRAILS)
 
   const dependenciesById = new Map(graph.nodes.map(node => (
     [node.id, node.allowedInternalDependencies]
   )))
+  const controlPlane = graph.nodes.find(node => node.id === 'winwincode-control-plane')
+  assert.ok(controlPlane)
+  assert.ok(controlPlane.allowedInternalDependencies.includes('winwincode-repository-context'))
+  const codexAdapter = graph.nodes.find(node => node.id === 'winwincode-codex')
+  assert.deepEqual(codexAdapter.allowedInternalDependencies, [
+    'winwincode-domain',
+    'winwincode-execution-port',
+    'winwincode-kernel',
+  ])
+  const worker = graph.nodes.find(node => node.id === 'winwincode-worker')
+  assert.deepEqual(worker.allowedInternalDependencies, [
+    'winwincode-codex',
+    'winwincode-domain',
+    'winwincode-execution-port',
+  ])
+  const server = graph.nodes.find(node => node.id === 'winwincode-server')
+  assert.deepEqual(server.allowedInternalDependencies, [
+    'winwincode-api',
+    'winwincode-codex',
+    'winwincode-control-plane',
+    'winwincode-domain',
+    'winwincode-execution-port',
+    'winwincode-local',
+    'winwincode-storage',
+    'winwincode-worker',
+  ])
+  const helper = graph.nodes.find(node => node.id === 'winwincode-kernel-helper')
+  assert.deepEqual(helper.allowedInternalDependencies, [])
+
   const controlPlaneClosure = transitiveDependencies(
     graph.guardrails.controlPlaneRoots,
     dependenciesById,
@@ -156,7 +240,7 @@ test('planned dependency closure enforces the Control Plane, Worker, Web, and lo
     assert.equal(
       workerClosure.has(dependency),
       false,
-      `Worker target reaches Control Plane business package ${dependency}`,
+      `Worker target reaches forbidden product package ${dependency}`,
     )
   }
 
@@ -177,14 +261,14 @@ test('planned dependency closure enforces the Control Plane, Worker, Web, and lo
   ])
 
   assert.deepEqual(graph.providerGateway, {
-    owner: 'winwincode-provider',
-    credentialOwner: 'winwincode-credential',
+    owner: 'winwincode-control-plane',
+    credentialOwner: 'winwincode-control-plane',
     workerInterface: 'execution-port-model-stream',
-    longLivedCredentialConsumers: ['winwincode-provider'],
+    longLivedCredentialConsumers: ['winwincode-control-plane'],
   })
 })
 
-test('every migration inventory surface has one matching phase and target node', () => {
+test('inventory surfaces map one-to-one to graph phases and current paths', () => {
   const graph = json(targetGraphPath)
   const inventory = json(inventoryPath)
   const graphPaths = new Set(graph.nodes.map(node => node.path))
@@ -196,7 +280,7 @@ test('every migration inventory surface has one matching phase and target node',
   )
 
   for (const phase of graph.migrationPhases) {
-    assert.match(phase.phase, /^[1-6]$/u)
+    assert.match(phase.phase, /^(?:[1-6]|enterprise)$/u)
     const expectedIds = inventory.surfaces
       .filter(surface => surface.phase === phase.phase)
       .map(surface => surface.id)
@@ -204,17 +288,59 @@ test('every migration inventory surface has one matching phase and target node',
     assert.deepEqual([...phase.surfaceIds].sort(), expectedIds)
   }
 
+  for (const rootPath of inventory.sourceRoots) {
+    assert.ok(existsSync(join(root, rootPath)), rootPath)
+  }
   for (const surface of inventory.surfaces) {
-    for (const targetPath of surface.targetModules) {
-      assert.ok(
-        graphPaths.has(targetPath),
-        `${surface.id} target module is missing from target graph: ${targetPath}`,
-      )
+    assert.ok(surface.sourcePaths.length > 0, surface.id)
+    for (const sourcePath of surface.sourcePaths) {
+      assert.ok(existsSync(join(root, sourcePath)), `${surface.id}: ${sourcePath}`)
     }
+    for (const targetPath of surface.targetModules) {
+      assert.ok(graphPaths.has(targetPath), `${surface.id}: ${targetPath}`)
+    }
+  }
+
+  assert.deepEqual(inventory.upstreamPackages, [])
+  assert.deepEqual(inventory.temporaryAdapters, [])
+  assert.deepEqual(inventory.removedCapabilities, [])
+  assert.equal(JSON.stringify(inventory).includes('apps/host'), false)
+  assert.equal(JSON.stringify(inventory).includes('packages/dsh-profile'), false)
+  assert.equal(JSON.stringify(inventory).includes('packages/native'), false)
+  assert.equal(JSON.stringify(inventory).includes('crates/native'), false)
+})
+
+test('pnpm workspace members and internal dependencies exactly match the target graph', () => {
+  const graph = json(targetGraphPath)
+  const result = spawnSync(
+    'corepack',
+    ['pnpm', 'list', '-r', '--depth', '-1', '--json'],
+    { cwd: root, encoding: 'utf8' },
+  )
+  assert.equal(result.status, 0, result.stderr)
+  const workspacePackages = JSON.parse(result.stdout)
+    .filter(package_ => package_.path !== root)
+  const targetPackages = graph.nodes
+    .filter(node => ['typescript-app', 'typescript-package'].includes(node.kind))
+  assert.deepEqual(
+    workspacePackages.map(package_ => relative(root, package_.path)).sort(),
+    targetPackages.map(node => node.path).sort(),
+  )
+  const nodeByPackageName = new Map(targetPackages.map(node => [node.packageName, node]))
+  const workspaceNodeIds = new Set(targetPackages.map(node => node.id))
+  for (const node of targetPackages) {
+    const manifest = json(join(root, node.path, 'package.json'))
+    const dependencies = Object.keys(manifest.dependencies ?? {})
+      .filter(name => name.startsWith('@winwincode/'))
+    assert.deepEqual(
+      dependencies.map(name => nodeByPackageName.get(name)?.id ?? name).sort(),
+      node.allowedInternalDependencies.filter(id => workspaceNodeIds.has(id)).sort(),
+      `${node.id} workspace package dependency list`,
+    )
   }
 })
 
-test('existing target Cargo manifests obey the declared dependency graph', () => {
+test('existing target Cargo manifests obey the declared production dependency graph', () => {
   const graph = json(targetGraphPath)
   const result = spawnSync(
     'cargo',
@@ -231,35 +357,38 @@ test('existing target Cargo manifests obey the declared dependency graph', () =>
       .map(node => node.packageName),
   )
   const actualDependencies = new Map()
+  const graphRustPackages = graph.nodes
+    .filter(node => node.kind === 'rust-crate')
+    .map(node => node.packageName)
+    .sort()
+  const workspaceRustPackages = metadata.packages
+    .filter(package_ => package_.manifest_path.startsWith(`${root}/crates/`))
+    .map(package_ => package_.name)
+    .sort()
+  assert.deepEqual(graphRustPackages, workspaceRustPackages)
 
   for (const node of graph.nodes.filter(node => node.kind === 'rust-crate')) {
     const manifestExists = existsSync(join(root, node.path, 'Cargo.toml'))
     const package_ = packageByName.get(node.packageName)
-    if (!manifestExists) {
-      assert.equal(package_, undefined)
-      continue
-    }
+    assert.equal(manifestExists, true, `${node.path}/Cargo.toml is missing`)
     assert.ok(package_, `${node.path}/Cargo.toml exists but is not a workspace package`)
-    const dependencies = package_.dependencies.map(dependency => dependency.name)
+    const dependencies = productDependencies(package_)
     actualDependencies.set(node.id, dependencies)
+    assert.deepEqual(
+      [...dependencies].sort(),
+      [...node.allowedInternalDependencies].filter(name => name.startsWith('winwincode-')).sort(),
+      `${node.id} production dependency list`,
+    )
     for (const dependency of dependencies) {
-      if (dependency.startsWith('winwincode-')) {
-        assert.ok(
-          plannedRustPackages.has(dependency),
-          `${node.id} depends on unplanned product package ${dependency}`,
-        )
-        assert.ok(
-          node.allowedInternalDependencies.includes(dependency),
-          `${node.id} has forbidden product dependency ${dependency}`,
-        )
-      }
+      assert.ok(
+        plannedRustPackages.has(dependency),
+        `${node.id} depends on unplanned product package ${dependency}`,
+      )
     }
   }
 
   const actualControlPlaneClosure = transitiveDependencies(
-    graph.nodes
-      .filter(node => node.zone === 'control-plane' && actualDependencies.has(node.id))
-      .map(node => node.id),
+    graph.guardrails.controlPlaneRoots.filter(id => actualDependencies.has(id)),
     actualDependencies,
   )
   for (const dependency of actualControlPlaneClosure) {
@@ -279,9 +408,15 @@ test('existing target Cargo manifests obey the declared dependency graph', () =>
   for (const dependency of graph.guardrails.workerForbiddenPackages) {
     assert.equal(actualWorkerClosure.has(dependency), false)
   }
+
+  const actualServerDependencies = actualDependencies.get(graph.guardrails.serverEntrypoint)
+  assert.deepEqual(
+    [...actualServerDependencies].sort(),
+    [...graph.guardrails.serverAllowedProductDependencies].sort(),
+  )
 })
 
-test('existing Web and local launcher sources cannot bypass their declared owners', () => {
+test('Client and Local sources cannot bypass their declared owners', () => {
   const graph = json(targetGraphPath)
   const web = graph.nodes.find(node => node.id === 'typescript-web')
   const webRoot = join(root, web.path)
@@ -300,38 +435,33 @@ test('existing Web and local launcher sources cannot bypass their declared owner
   }
 
   const local = graph.nodes.find(node => node.id === graph.guardrails.localLauncher)
-  if (existsSync(join(root, local.path, 'Cargo.toml'))) {
-    const metadata = spawnSync(
-      'cargo',
-      ['metadata', '--format-version', '1', '--locked', '--no-deps'],
-      { cwd: root, encoding: 'utf8' },
-    )
-    assert.equal(metadata.status, 0, metadata.stderr)
-    const package_ = JSON.parse(metadata.stdout).packages.find(entry => (
-      entry.name === local.packageName
-    ))
-    assert.ok(package_)
-    const productDependencies = package_.dependencies
-      .map(dependency => dependency.name)
-      .filter(name => name.startsWith('winwincode-'))
-      .sort()
-    assert.deepEqual(
-      productDependencies,
-      [...graph.guardrails.localLauncherAllowedProductDependencies].sort(),
-    )
-  }
+  const metadata = spawnSync(
+    'cargo',
+    ['metadata', '--format-version', '1', '--locked', '--no-deps'],
+    { cwd: root, encoding: 'utf8' },
+  )
+  assert.equal(metadata.status, 0, metadata.stderr)
+  const package_ = JSON.parse(metadata.stdout).packages.find(entry => (
+    entry.name === local.packageName
+  ))
+  assert.ok(package_)
+  assert.deepEqual(
+    productDependencies(package_).sort(),
+    [...graph.guardrails.localLauncherAllowedProductDependencies].sort(),
+  )
 })
 
-test('dependency rules explain what is planned, what is checked now, and what fails later', () => {
+test('dependency rules document the current single path and exact checks', () => {
   const text = readFileSync(dependencyRulesPath, 'utf8')
   for (const requiredStatement of [
-    '目标声明，不是完成声明',
-    'Control Plane 不得依赖 Codex Core',
-    'Worker 不得依赖产品业务模块',
-    'Web 只能访问 Control Plane',
-    '本地启动器只负责组装',
-    'Provider Gateway 是长期模型凭据的唯一使用者',
-    '阶段 2 到阶段 6',
-    '`cargo metadata`',
+    '已接受的单一路径合同',
+    'Control Plane 不得到达 Codex 执行模块',
+    'Worker 只持有执行闭包',
+    'Client 只能访问 Server',
+    'Local 只负责组装',
+    'Provider Gateway 和 Credential',
+    '`winwincode-kernel-helper`',
+    '`cargo metadata --locked`',
+    '不为旧入口或临时适配器留下允许边',
   ]) assert.ok(text.includes(requiredStatement), `missing rule: ${requiredStatement}`)
 })

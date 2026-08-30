@@ -5,16 +5,10 @@
       "path": "./packages/contracts"
     },
     {
-      "path": "./packages/native"
-    },
-    {
-      "path": "./packages/dsh-profile"
-    },
-    {
       "path": "./packages/strongflow"
     },
     {
-      "path": "./apps/host"
+      "path": "./apps/client"
     }
   ]
 }

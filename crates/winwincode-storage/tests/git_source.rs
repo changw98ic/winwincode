@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    ArtifactId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId, RequestId, Sha256Digest,
-    WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
-    ArtifactAccess, ArtifactChunk, ArtifactErrorKind, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore,
-    GitSourcePathState, LocalGitSourceResolver, ReceiptScopeKey,
+    ArtifactAccess, ArtifactChunk, ArtifactErrorKind, ArtifactMeteringAttribution, ArtifactOpen,
+    ArtifactProvenance, ArtifactRetention, ArtifactStore, CandidateSourceManifest,
+    FakeArtifactObjectStore, GitSourcePathState, LocalGitSourceResolver, ReceiptScopeKey,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -145,6 +146,18 @@ fn artifact_chunk(
     )
 }
 
+fn metering_attribution() -> ArtifactMeteringAttribution {
+    ArtifactMeteringAttribution {
+        organization_id: OrganizationId("org_00000000000000000000000001".into()),
+        workspace_id: WorkspaceId("wsp_00000000000000000000000001".into()),
+        project_id: ProjectId("prj_00000000000000000000000001".into()),
+        repository_id: RepositoryId("rep_00000000000000000000000001".into()),
+        delivery_id: Some(DeliveryId("dlv_00000000000000000000000001".into())),
+        product_session_id: Some(ProductSessionId("psn_00000000000000000000000001".into())),
+        user_id: UserId("usr_00000000000000000000000001".into()),
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn local_git_resolver_rebuilds_identity_from_exact_candidate_artifact() {
@@ -178,6 +191,7 @@ fn local_git_resolver_rebuilds_identity_from_exact_candidate_artifact() {
             manifest.len() as u64,
             Some("candidate.json".into()),
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_800_000_000_000,
         ))
@@ -296,6 +310,7 @@ fn local_git_resolver_rejects_a_noncanonical_candidate_manifest() {
             manifest.len() as u64,
             Some("candidate.json".into()),
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_800_000_000_000,
         ))
@@ -367,6 +382,7 @@ fn local_git_resolver_ignores_repository_replace_refs() {
             manifest.len() as u64,
             Some("candidate.json".into()),
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_800_000_000_000,
         ))

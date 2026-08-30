@@ -6,6 +6,13 @@
 //! catalog while delegating large bytes to an [`ArtifactObjectStore`]. The
 //! object adapter never receives repository scope or Worker credentials.
 
+mod metering;
+
+pub use metering::{
+    ArtifactMeteringAttribution, ArtifactStorageOperationKind, ArtifactStorageSourceCursor,
+    ArtifactStorageSourceEntry, ArtifactStorageSourceFact, ArtifactStorageSourcePage,
+};
+
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -24,8 +31,9 @@ use winwincode_domain::{
 use crate::ReceiptScopeKey;
 
 const CATALOG_FILE_NAME: &str = "artifact-catalog.sqlite3";
+const MAX_UNFINISHED_ARTIFACTS_PER_JOB: usize = 4_096;
 const CATALOG_STARTUP_LOCK_FILE_NAME: &str = "artifact-catalog.startup.lock";
-const CATALOG_SCHEMA_VERSION: i64 = 1;
+const CATALOG_SCHEMA_VERSION: i64 = 2;
 const MAX_ARTIFACT_BYTES: u64 = 1_099_511_627_776;
 const MAX_TEXT_BYTES: usize = 4_096;
 static NEXT_TEMPORARY_OBJECT_FILE: AtomicU64 = AtomicU64::new(1);
@@ -79,6 +87,44 @@ impl ArtifactError {
 
     pub(crate) fn adapter(message: impl Into<String>) -> Self {
         Self::new(ArtifactErrorKind::Adapter, message)
+    }
+
+    /// Builds a fixed, secret-safe error at the external object-adapter seam.
+    ///
+    /// Object adapters deliberately cannot attach endpoint, bucket, key, body,
+    /// or provider diagnostics. Domain-only states remain owned by
+    /// [`ArtifactStore`] and collapse to an adapter failure at this boundary.
+    #[must_use]
+    pub fn object_adapter(kind: ArtifactErrorKind) -> Self {
+        match kind {
+            ArtifactErrorKind::InvalidInput => {
+                Self::new(kind, "Artifact object adapter rejected invalid input")
+            }
+            ArtifactErrorKind::NotFound => {
+                Self::new(kind, "Artifact object adapter did not find the object")
+            }
+            ArtifactErrorKind::Conflict => Self::new(
+                kind,
+                "Artifact object adapter detected an identity conflict",
+            ),
+            ArtifactErrorKind::PermissionDenied => {
+                Self::new(kind, "Artifact object adapter denied the request")
+            }
+            ArtifactErrorKind::DigestMismatch => {
+                Self::new(kind, "Artifact object adapter rejected corrupt bytes")
+            }
+            ArtifactErrorKind::Corrupt => {
+                Self::new(kind, "Artifact object adapter returned corrupt state")
+            }
+            ArtifactErrorKind::Adapter
+            | ArtifactErrorKind::SequenceGap
+            | ArtifactErrorKind::Incomplete
+            | ArtifactErrorKind::Retained
+            | ArtifactErrorKind::Closed => Self::new(
+                ArtifactErrorKind::Adapter,
+                "Artifact object adapter is unavailable",
+            ),
+        }
     }
 
     fn closed() -> Self {
@@ -228,6 +274,7 @@ pub struct ArtifactOpen {
     size_bytes: u64,
     file_name: Option<String>,
     provenance: ArtifactProvenance,
+    metering_attribution: ArtifactMeteringAttribution,
     retention: ArtifactRetention,
     created_at_millis: u64,
 }
@@ -246,6 +293,7 @@ impl ArtifactOpen {
         size_bytes: u64,
         file_name: Option<String>,
         provenance: ArtifactProvenance,
+        metering_attribution: ArtifactMeteringAttribution,
         retention: ArtifactRetention,
         created_at_millis: u64,
     ) -> Self {
@@ -260,9 +308,40 @@ impl ArtifactOpen {
             size_bytes,
             file_name,
             provenance,
+            metering_attribution,
             retention,
             created_at_millis,
         }
+    }
+
+    /// Returns the immutable Artifact identity sealed before storage admission.
+    #[must_use]
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
+    /// Returns the durable open request identity used by storage metering.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    /// Returns the exact byte count promised before the object write starts.
+    #[must_use]
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    /// Returns the trusted Control Plane attribution frozen with this open.
+    #[must_use]
+    pub const fn metering_attribution(&self) -> &ArtifactMeteringAttribution {
+        &self.metering_attribution
+    }
+
+    /// Returns the validated open time in Unix milliseconds.
+    #[must_use]
+    pub const fn created_at_millis(&self) -> u64 {
+        self.created_at_millis
     }
 
     fn validate(&self) -> Result<(), ArtifactError> {
@@ -270,6 +349,7 @@ impl ArtifactOpen {
         canonical_id(&self.request_id.0, "req_", "requestId")?;
         canonical_id(&self.artifact_id.0, "art_", "artifactId")?;
         self.provenance.validate()?;
+        self.metering_attribution.validate()?;
         sha256_hex(&self.digest)?;
         bounded_text(&self.kind, "Artifact kind", 120)?;
         bounded_text(&self.media_type, "Artifact media type", 200)?;
@@ -442,6 +522,11 @@ impl ArtifactRecord {
     #[must_use]
     pub const fn provenance(&self) -> &ArtifactProvenance {
         &self.open.provenance
+    }
+
+    #[must_use]
+    pub const fn metering_attribution(&self) -> &ArtifactMeteringAttribution {
+        &self.open.metering_attribution
     }
 
     #[must_use]
@@ -866,6 +951,9 @@ impl ArtifactStore {
             }
             require_chunk_provenance(&stored_record, chunk)?;
             if message_chunk_is_exact(&stored, chunk) {
+                if stored.chunk.is_final {
+                    metering::require_complete_source(&transaction, &stored_record)?;
+                }
                 transaction.commit().map_err(sql_error)?;
                 return Ok(ArtifactWriteReceipt {
                     record: stored_record,
@@ -884,6 +972,9 @@ impl ArtifactStore {
             return Err(ArtifactError::conflict(
                 "Artifact metadata changed while appending a chunk",
             ));
+        }
+        if chunk.is_final {
+            let _ = metering::insert_final_source(&transaction, &latest, chunk)?;
         }
         transaction
             .execute(
@@ -959,6 +1050,44 @@ impl ArtifactStore {
         })
     }
 
+    /// Reconstructs the durable write receipt for one complete Artifact.
+    ///
+    /// This is the receipt-first bridge used by candidate Git retention after
+    /// an acknowledgement response is lost.  It reads the catalog authority
+    /// with the exact scope and provenance, and never trusts a caller-provided
+    /// descriptor or sequence.  The returned receipt is marked as a replay so
+    /// callers can distinguish recovery from a newly accepted write.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing, foreign, deleted, or incomplete Artifact, or a
+    /// closed/corrupt catalog.
+    pub fn complete_write_receipt(
+        &self,
+        scope_key: &ReceiptScopeKey,
+        artifact_id: &ArtifactId,
+        provenance: &ArtifactProvenance,
+    ) -> Result<ArtifactWriteReceipt, ArtifactError> {
+        canonical_id(&artifact_id.0, "art_", "artifactId")?;
+        let record = self.load_authorized(scope_key, artifact_id)?;
+        if &record.open.provenance != provenance {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::PermissionDenied,
+                "Artifact receipt provenance does not match its immutable authority",
+            ));
+        }
+        if !record.complete {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::Incomplete,
+                "Artifact upload is not complete",
+            ));
+        }
+        Ok(ArtifactWriteReceipt {
+            record,
+            duplicate: true,
+        })
+    }
+
     /// Returns the highest contiguous sequence accepted for one Artifact.
     ///
     /// This is the transport recovery cursor used after a sequence gap or a
@@ -975,6 +1104,58 @@ impl ArtifactStore {
         Ok(self
             .load_authorized(scope_key, artifact_id)?
             .acknowledged_sequence)
+    }
+
+    /// Reads one bounded page of immutable completed-storage sources.
+    ///
+    /// The first page freezes a sequence upper bound, so concurrent Artifact
+    /// completions are visible only when a new scan begins.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid limits/cursors, incomplete or mismatched source rows,
+    /// corrupt Artifact metadata, and unavailable catalog storage.
+    pub fn scan_storage_sources(
+        &self,
+        cursor: Option<&ArtifactStorageSourceCursor>,
+        limit: u64,
+    ) -> Result<ArtifactStorageSourcePage, ArtifactError> {
+        metering::scan(self.catalog_ref()?, cursor, limit)
+    }
+
+    /// Loads the one immutable storage-finalization source for an Artifact.
+    ///
+    /// A completed Artifact must have exactly one source. An incomplete
+    /// Artifact has no source and therefore cannot be enterprise-settled.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed identities, source/catalog mismatches, and unavailable
+    /// catalog storage.
+    pub fn storage_source_for_artifact(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<ArtifactStorageSourceEntry>, ArtifactError> {
+        metering::load_for_artifact(self.catalog_ref()?, artifact_id)
+    }
+
+    /// Loads the bounded immutable opens that still reserve storage for one Job.
+    ///
+    /// The catalog, rather than a terminal Worker message, is the authority for
+    /// the open request, expected bytes, attribution, and source seal. Completed
+    /// Artifacts are omitted because their immutable Usage source must settle
+    /// rather than release the reservation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed Job identity, corrupt/foreign catalog rows, an
+    /// unavailable catalog, or more than the supported unfinished bound.
+    pub fn unfinished_quota_opens_for_job(
+        &self,
+        execution_job_id: &ExecutionJobId,
+    ) -> Result<Vec<ArtifactOpen>, ArtifactError> {
+        canonical_id(&execution_job_id.0, "job_", "executionJobId")?;
+        unfinished_quota_opens_for_job(self.catalog_ref()?, execution_job_id)
     }
 
     /// Tombstones one exact Artifact after its retention hold ends. Content is
@@ -1599,7 +1780,7 @@ fn migrate_catalog(connection: &mut Connection) -> Result<(), ArtifactError> {
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sql_error)?;
-    if !matches!(version, 0 | CATALOG_SCHEMA_VERSION) {
+    if !matches!(version, 0 | 1 | CATALOG_SCHEMA_VERSION) {
         return Err(ArtifactError::adapter(format!(
             "unsupported Artifact catalog schema version {version}"
         )));
@@ -1607,6 +1788,24 @@ fn migrate_catalog(connection: &mut Connection) -> Result<(), ArtifactError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
+    if version == 1 {
+        let has_legacy_rows = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts LIMIT 1)
+                     OR EXISTS(SELECT 1 FROM artifact_chunks LIMIT 1)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(sql_error)?;
+        if has_legacy_rows {
+            return Err(ArtifactError::adapter(
+                "Artifact catalog v1 contains rows without verified metering attribution",
+            ));
+        }
+        transaction
+            .execute_batch("DROP TABLE artifact_chunks; DROP TABLE artifacts;")
+            .map_err(sql_error)?;
+    }
     transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS artifacts (
@@ -1631,7 +1830,8 @@ fn migrate_catalog(connection: &mut Connection) -> Result<(), ArtifactError> {
                  created_at_millis INTEGER NOT NULL CHECK (created_at_millis > 0),
                  acknowledged_sequence INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged_sequence >= 0),
                  complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)),
-                 deleted_at_millis INTEGER CHECK (deleted_at_millis > 0)
+                 deleted_at_millis INTEGER CHECK (deleted_at_millis > 0),
+                 metering_attribution_json TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS artifacts_digest ON artifacts (digest);
              CREATE TABLE IF NOT EXISTS artifact_chunks (
@@ -1647,6 +1847,9 @@ fn migrate_catalog(connection: &mut Connection) -> Result<(), ArtifactError> {
                  FOREIGN KEY (artifact_id) REFERENCES artifacts (artifact_id) ON DELETE CASCADE
              );",
         )
+        .map_err(sql_error)?;
+    transaction
+        .execute_batch(metering::SCHEMA)
         .map_err(sql_error)?;
     validate_catalog_schema(&transaction)?;
     transaction
@@ -1681,12 +1884,14 @@ fn validate_catalog_schema(transaction: &rusqlite::Transaction<'_>) -> Result<()
             "acknowledged_sequence",
             "complete",
             "deleted_at_millis",
+            "metering_attribution_json",
         ]
     {
         return Err(ArtifactError::adapter(
             "Artifact metadata schema is not canonical",
         ));
     }
+    validate_text_not_null_column(transaction, "artifacts", "metering_attribution_json")?;
     let chunk_columns = table_columns(transaction, "artifact_chunks")?;
     if chunk_columns
         != [
@@ -1704,7 +1909,40 @@ fn validate_catalog_schema(transaction: &rusqlite::Transaction<'_>) -> Result<()
             "Artifact chunk metadata schema is not canonical",
         ));
     }
+    metering::validate_schema(transaction)?;
     Ok(())
+}
+
+fn validate_text_not_null_column(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<(), ArtifactError> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut statement = transaction.prepare(&pragma).map_err(sql_error)?;
+    let mut rows = statement.query([]).map_err(sql_error)?;
+    let mut actual = None;
+    while actual.is_none() {
+        let Some(row) = rows.next().map_err(sql_error)? else {
+            break;
+        };
+        if row.get::<_, String>(1).map_err(sql_error)? == column {
+            actual = Some((
+                row.get::<_, String>(2).map_err(sql_error)?,
+                row.get::<_, bool>(3).map_err(sql_error)?,
+            ));
+        }
+    }
+    if actual
+        .as_ref()
+        .is_some_and(|(kind, not_null)| kind.eq_ignore_ascii_case("TEXT") && *not_null)
+    {
+        Ok(())
+    } else {
+        Err(ArtifactError::adapter(
+            "Artifact metering attribution column is not canonical",
+        ))
+    }
 }
 
 fn table_columns(
@@ -1740,9 +1978,10 @@ fn insert_open(
              (artifact_id, scope_key, open_message_id, open_request_id, kind, media_type,
               digest, size_bytes, file_name, execution_job_id, attempt, lease_id, fencing_token, worker_id,
               worker_instance_id, worker_session_id, retention_kind,
-              retention_until_millis, created_at_millis, acknowledged_sequence, complete)
+              retention_until_millis, created_at_millis, acknowledged_sequence, complete,
+              metering_attribution_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18, ?19, 0, 0)",
+                     ?14, ?15, ?16, ?17, ?18, ?19, 0, 0, ?20)",
             params![
                 open.artifact_id.0,
                 open.scope_key.as_bytes(),
@@ -1763,6 +2002,9 @@ fn insert_open(
                 retention_kind,
                 retention_until,
                 i64_value(open.created_at_millis, "Artifact creation timestamp")?,
+                serde_json::to_string(&open.metering_attribution).map_err(|_| {
+                    ArtifactError::invalid("Artifact metering attribution is not serializable")
+                })?,
             ],
         )
         .map_err(sql_error)?;
@@ -1779,77 +2021,10 @@ fn load_record(
                     size_bytes, file_name, execution_job_id, attempt, lease_id, fencing_token, worker_id,
                     worker_instance_id, worker_session_id, retention_kind,
                     retention_until_millis, created_at_millis, acknowledged_sequence, complete,
-                    deleted_at_millis
+                    deleted_at_millis, metering_attribution_json
              FROM artifacts WHERE artifact_id = ?1",
             [&artifact_id.0],
-            |row| {
-                let retention_kind = row.get::<_, String>(15)?;
-                let retention_until = row.get::<_, Option<i64>>(16)?;
-                let retention = match (retention_kind.as_str(), retention_until) {
-                    ("until", Some(value)) if value >= 0 => {
-                        ArtifactRetention::UntilMillis(value.cast_unsigned())
-                    }
-                    ("indefinite", None) => ArtifactRetention::Indefinite,
-                    _ => {
-                        return Err(rusqlite::Error::InvalidColumnType(
-                            15,
-                            "retention_kind".into(),
-                            rusqlite::types::Type::Text,
-                        ));
-                    }
-                };
-                let attempt = row.get::<_, i64>(9)?;
-                let size_bytes = row.get::<_, i64>(6)?;
-                let created_at_millis = row.get::<_, i64>(17)?;
-                let acknowledged_sequence = row.get::<_, i64>(18)?;
-                if attempt <= 0
-                    || size_bytes < 0
-                    || created_at_millis <= 0
-                    || acknowledged_sequence < 0
-                {
-                    return Err(rusqlite::Error::IntegralValueOutOfRange(0, attempt));
-                }
-                Ok(ArtifactRecord {
-                    open: ArtifactOpen {
-                        scope_key: ReceiptScopeKey::from_encoded(row.get(0)?).map_err(|_| {
-                            rusqlite::Error::InvalidColumnType(
-                                0,
-                                "scope_key".into(),
-                                rusqlite::types::Type::Blob,
-                            )
-                        })?,
-                        message_id: ExecutionMessageId(row.get(1)?),
-                        request_id: RequestId(row.get(2)?),
-                        artifact_id: artifact_id.clone(),
-                        kind: row.get(3)?,
-                        media_type: row.get(4)?,
-                        digest: Sha256Digest(row.get(5)?),
-                        size_bytes: size_bytes.cast_unsigned(),
-                        file_name: row.get(7)?,
-                        provenance: ArtifactProvenance {
-                            execution_job_id: ExecutionJobId(row.get(8)?),
-                            attempt: attempt.cast_unsigned(),
-                            lease_id: LeaseId(row.get(10)?),
-                            fencing_token: FencingToken(row.get(11)?),
-                            worker_id: WorkerId(row.get(12)?),
-                            worker_instance_id: WorkerInstanceId(row.get(13)?),
-                            worker_session_id: WorkerSessionId(row.get(14)?),
-                        },
-                        retention,
-                        created_at_millis: created_at_millis.cast_unsigned(),
-                    },
-                    acknowledged_sequence: acknowledged_sequence.cast_unsigned(),
-                    complete: row.get::<_, i64>(19)? == 1,
-                    deleted_at_millis: row
-                        .get::<_, Option<i64>>(20)?
-                        .map(|value| {
-                            u64::try_from(value).map_err(|_| {
-                                rusqlite::Error::IntegralValueOutOfRange(20, value)
-                            })
-                        })
-                        .transpose()?,
-                })
-            },
+            |row| artifact_record_row(row, artifact_id),
         )
         .optional()
         .map_err(sql_error)?;
@@ -1866,8 +2041,78 @@ fn load_record(
                 "Artifact catalog contains inconsistent lifecycle metadata",
             ));
         }
+        if record.complete {
+            metering::require_complete_source(connection, record)?;
+        }
     }
     Ok(record)
+}
+
+fn artifact_record_row(
+    row: &rusqlite::Row<'_>,
+    artifact_id: &ArtifactId,
+) -> rusqlite::Result<ArtifactRecord> {
+    let retention_kind = row.get::<_, String>(15)?;
+    let retention_until = row.get::<_, Option<i64>>(16)?;
+    let retention = match (retention_kind.as_str(), retention_until) {
+        ("until", Some(value)) if value >= 0 => {
+            ArtifactRetention::UntilMillis(value.cast_unsigned())
+        }
+        ("indefinite", None) => ArtifactRetention::Indefinite,
+        _ => return Err(invalid_artifact_column(15, "retention_kind")),
+    };
+    let attempt = row.get::<_, i64>(9)?;
+    let size_bytes = row.get::<_, i64>(6)?;
+    let created_at_millis = row.get::<_, i64>(17)?;
+    let acknowledged_sequence = row.get::<_, i64>(18)?;
+    if attempt <= 0 || size_bytes < 0 || created_at_millis <= 0 || acknowledged_sequence < 0 {
+        return Err(rusqlite::Error::IntegralValueOutOfRange(0, attempt));
+    }
+    let attribution_json = row.get::<_, String>(21)?;
+    let metering_attribution: ArtifactMeteringAttribution = serde_json::from_str(&attribution_json)
+        .map_err(|_| invalid_artifact_column(21, "metering_attribution_json"))?;
+    if serde_json::to_string(&metering_attribution).ok().as_deref() != Some(&attribution_json) {
+        return Err(invalid_artifact_column(21, "metering_attribution_json"));
+    }
+    Ok(ArtifactRecord {
+        open: ArtifactOpen {
+            scope_key: ReceiptScopeKey::from_encoded(row.get(0)?)
+                .map_err(|_| invalid_artifact_column(0, "scope_key"))?,
+            message_id: ExecutionMessageId(row.get(1)?),
+            request_id: RequestId(row.get(2)?),
+            artifact_id: artifact_id.clone(),
+            kind: row.get(3)?,
+            media_type: row.get(4)?,
+            digest: Sha256Digest(row.get(5)?),
+            size_bytes: size_bytes.cast_unsigned(),
+            file_name: row.get(7)?,
+            provenance: ArtifactProvenance {
+                execution_job_id: ExecutionJobId(row.get(8)?),
+                attempt: attempt.cast_unsigned(),
+                lease_id: LeaseId(row.get(10)?),
+                fencing_token: FencingToken(row.get(11)?),
+                worker_id: WorkerId(row.get(12)?),
+                worker_instance_id: WorkerInstanceId(row.get(13)?),
+                worker_session_id: WorkerSessionId(row.get(14)?),
+            },
+            metering_attribution,
+            retention,
+            created_at_millis: created_at_millis.cast_unsigned(),
+        },
+        acknowledged_sequence: acknowledged_sequence.cast_unsigned(),
+        complete: row.get::<_, i64>(19)? == 1,
+        deleted_at_millis: row
+            .get::<_, Option<i64>>(20)?
+            .map(|value| {
+                u64::try_from(value)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(20, value))
+            })
+            .transpose()?,
+    })
+}
+
+fn invalid_artifact_column(index: usize, name: &str) -> rusqlite::Error {
+    rusqlite::Error::InvalidColumnType(index, name.into(), rusqlite::types::Type::Text)
 }
 
 fn load_record_by_open_identity(
@@ -1896,6 +2141,50 @@ fn load_record_by_open_identity(
             "Artifact open message and request identities resolve to different records",
         )),
     }
+}
+
+fn unfinished_quota_opens_for_job(
+    connection: &Connection,
+    execution_job_id: &ExecutionJobId,
+) -> Result<Vec<ArtifactOpen>, ArtifactError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT artifact_id FROM artifacts
+             WHERE execution_job_id = ?1 AND complete = 0 AND deleted_at_millis IS NULL
+             ORDER BY artifact_id LIMIT ?2",
+        )
+        .map_err(sql_error)?;
+    let limit = i64::try_from(MAX_UNFINISHED_ARTIFACTS_PER_JOB + 1)
+        .expect("unfinished Artifact bound fits SQLite");
+    let artifact_ids = statement
+        .query_map(params![execution_job_id.0, limit], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    if artifact_ids.len() > MAX_UNFINISHED_ARTIFACTS_PER_JOB {
+        return Err(ArtifactError::adapter(
+            "unfinished Artifact quota authority exceeds the supported bound",
+        ));
+    }
+    artifact_ids
+        .into_iter()
+        .map(|artifact_id| {
+            let record = load_record(connection, &ArtifactId(artifact_id))?.ok_or_else(|| {
+                ArtifactError::corrupt("unfinished Artifact disappeared from its catalog read")
+            })?;
+            if record.complete
+                || record.deleted_at_millis.is_some()
+                || record.open.provenance.execution_job_id != *execution_job_id
+            {
+                return Err(ArtifactError::corrupt(
+                    "unfinished Artifact quota authority differs from its catalog index",
+                ));
+            }
+            Ok(record.open)
+        })
+        .collect()
 }
 
 fn replay_open_identity(

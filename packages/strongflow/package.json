@@ -1,12 +1,9 @@
 {
   "name": "@winwincode/strongflow",
   "version": "0.1.0-alpha.1",
-  "description": "StrongFlow advanced-mode host and DSH conversation-view boundary",
+  "description": "StrongFlow delivery domain and projection contracts",
   "license": "Apache-2.0",
   "type": "module",
-  "sideEffects": [
-    "./dist/client.js"
-  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -14,47 +11,15 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./client": {
-      "types": "./dist/client.d.ts",
-      "default": "./dist/client.js"
-    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"
   },
-  "dsh": {
-    "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-api-gateway",
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-conversation"
-      ]
-    }
-  },
   "files": [
     "dist"
   ],
-  "scripts": {
-    "bundle": "tsdown --config tsdown.config.mjs"
-  },
   "dependencies": {
-    "@winwincode/contracts": "workspace:*",
-    "@winwincode/native": "workspace:*"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-api-gateway": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-session": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-typert-protocol": "0.1.0-rc.8",
-    "react": "catalog:"
-  },
-  "devDependencies": {
-    "react": "catalog:"
+    "@winwincode/contracts": "workspace:*"
   }
 }

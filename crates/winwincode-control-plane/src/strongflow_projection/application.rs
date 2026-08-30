@@ -153,6 +153,64 @@ pub(crate) struct CurrentPublicationApproval<'delivery> {
     pub(crate) resolved_at: u64,
 }
 
+/// Loads one restart-stable current Publication read from the installed
+/// production authority without composing a runtime projection.
+///
+/// # Errors
+///
+/// Rejects missing adapters, foreign scope, a changed Delivery, or changed
+/// candidate/Publication facts between the current and exact reads.
+pub(crate) fn load_current_publication_read(
+    control_plane: &ControlPlane,
+    scope: &RepositoryScope,
+    delivery_id: &DeliveryId,
+) -> Result<TrustedPublicationProjectionRead, StrongFlowProjectionError> {
+    validate_scope(scope)?;
+    let sources = control_plane.strongflow_sources.as_ref().ok_or_else(|| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "trusted runtime and publication facts are unavailable".to_owned(),
+        )
+    })?;
+    let first = load_current(control_plane, delivery_id)?;
+    let storage = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?;
+    let publication = sources
+        .publication
+        .read_current_with_storage(
+            storage,
+            control_plane.artifact_store.as_ref(),
+            control_plane.git_source_resolver.as_deref(),
+            &first,
+            scope,
+            delivery_id,
+            first.revision(),
+            None,
+        )
+        .map_err(current_source_error)?;
+    validate_publication_read(scope, delivery_id, &publication, first.revision())?;
+    let second = load_current(control_plane, delivery_id)?;
+    let exact = sources
+        .publication
+        .read_current_with_storage(
+            storage,
+            control_plane.artifact_store.as_ref(),
+            control_plane.git_source_resolver.as_deref(),
+            &first,
+            scope,
+            delivery_id,
+            first.revision(),
+            Some(publication.publication_revision()),
+        )
+        .map_err(current_source_error)?;
+    if second != first || exact != publication {
+        return Err(StrongFlowProjectionError::RevisionConflict(
+            "Delivery or publication facts changed while the read cut was established".to_owned(),
+        ));
+    }
+    Ok(publication)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn establish_delivery_read(
     control_plane: &ControlPlane,
@@ -172,9 +230,21 @@ pub(super) fn establish_delivery_read(
     let event_key = delivery_event_stream_key(scope, delivery_id)?;
 
     let first = load_current(control_plane, delivery_id)?;
+    let storage = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?;
     let publication = sources
         .publication
-        .read_current(scope, delivery_id, first.revision(), None)
+        .read_current_with_storage(
+            storage,
+            control_plane.artifact_store.as_ref(),
+            control_plane.git_source_resolver.as_deref(),
+            &first,
+            scope,
+            delivery_id,
+            first.revision(),
+            None,
+        )
         .map_err(current_source_error)?;
     validate_publication_read(scope, delivery_id, &publication, first.revision())?;
     let detail = project_delivery_detail(publication.candidate().map_or_else(
@@ -191,9 +261,6 @@ pub(super) fn establish_delivery_read(
         None,
         source_limit,
     );
-    let storage = control_plane
-        .storage_ref()
-        .map_err(current_event_storage_error)?;
     let runtime = sources
         .runtime
         .read_delivery_with_storage(storage, &runtime_request, &first)
@@ -218,7 +285,11 @@ pub(super) fn establish_delivery_read(
     }
     let exact_publication = sources
         .publication
-        .read_current(
+        .read_current_with_storage(
+            storage,
+            control_plane.artifact_store.as_ref(),
+            control_plane.git_source_resolver.as_deref(),
+            &first,
             scope,
             delivery_id,
             first.revision(),
@@ -329,7 +400,11 @@ pub(super) fn replay_delivery_read(
     let first = load_revision(control_plane, delivery_id, delivery_revision)?;
     let publication = sources
         .publication
-        .read_current(
+        .read_current_with_storage(
+            storage,
+            control_plane.artifact_store.as_ref(),
+            control_plane.git_source_resolver.as_deref(),
+            &first,
             scope,
             delivery_id,
             delivery_revision,
@@ -373,7 +448,11 @@ pub(super) fn replay_delivery_read(
     let second = load_revision(control_plane, delivery_id, delivery_revision)?;
     let exact_publication = sources
         .publication
-        .read_current(
+        .read_current_with_storage(
+            storage,
+            control_plane.artifact_store.as_ref(),
+            control_plane.git_source_resolver.as_deref(),
+            &first,
             scope,
             delivery_id,
             delivery_revision,

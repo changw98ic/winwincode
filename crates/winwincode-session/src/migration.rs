@@ -77,27 +77,72 @@ const CANONICAL_BINDING_FIELDS: &[&str] = &[
 ];
 
 /// Result of the atomic marker-and-snapshot transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationCommit {
     /// The canonical snapshot and its consumed marker were committed together.
     Applied,
-    /// The source marker already existed; no second write was made.
-    AlreadyMigrated,
+    /// The consumed marker already existed and the durable snapshot was read.
+    AlreadyConsumed {
+        /// Exact canonical bytes written by the first successful transaction.
+        canonical_snapshot: Vec<u8>,
+    },
 }
+
+/// Explicit result of consuming one legacy source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    /// This call atomically stored the canonical snapshot and consumed marker.
+    Applied {
+        /// Durable key identifying the one-time legacy source.
+        source_key: String,
+        /// Exact canonical snapshot bytes stored by this call.
+        canonical_snapshot: Vec<u8>,
+    },
+    /// A prior call consumed the source; no write was performed.
+    AlreadyConsumed {
+        /// Durable key identifying the one-time legacy source.
+        source_key: String,
+        /// Exact canonical bytes read from the first successful transaction.
+        canonical_snapshot: Vec<u8>,
+    },
+}
+
+/// Closed failure returned by the durable migration transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationTransactionError {
+    /// Durable rows violate the all-or-nothing migration invariant.
+    CorruptState { message: String },
+    /// The storage engine could not complete the transaction.
+    Storage { message: String },
+}
+
+impl fmt::Display for MigrationTransactionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CorruptState { message } => {
+                write!(formatter, "corrupt migration state: {message}")
+            }
+            Self::Storage { message } => write!(formatter, "migration storage failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for MigrationTransactionError {}
 
 /// Storage boundary for one-time migration.
 ///
-/// Implementations persist `canonical_snapshot` and the consumed marker for
-/// `source_key` in one atomic transaction. They must return
-/// `MigrationCommit::AlreadyMigrated` when that marker already exists and leave
-/// both records unchanged when returning an error.
+/// Implementations persist `canonical_snapshot`, the `source_key` marker, and
+/// the consumed marker in one atomic transaction. They must return
+/// `MigrationCommit::AlreadyConsumed` when that marker already exists, return
+/// the original durable snapshot, and leave every record unchanged when
+/// returning an error.
 pub trait MigrationTransaction {
     /// Atomically commit one converted snapshot and its source marker.
     fn commit_once(
         &mut self,
         source_key: &str,
         canonical_snapshot: &[u8],
-    ) -> Result<MigrationCommit, String>;
+    ) -> Result<MigrationCommit, MigrationTransactionError>;
 }
 
 /// Failure returned when the old snapshot cannot be converted or committed.
@@ -112,7 +157,7 @@ pub enum MigrationError {
     InvalidJson { message: String },
     Serialization { message: String },
     Transaction { message: String },
-    AlreadyMigrated { source_key: String },
+    CorruptState { message: String },
 }
 
 impl fmt::Display for MigrationError {
@@ -144,8 +189,8 @@ impl fmt::Display for MigrationError {
             Self::Transaction { message } => {
                 write!(formatter, "migration transaction failed: {message}")
             }
-            Self::AlreadyMigrated { source_key } => {
-                write!(formatter, "legacy source already migrated: {source_key}")
+            Self::CorruptState { message } => {
+                write!(formatter, "corrupt migration state: {message}")
             }
         }
     }
@@ -165,7 +210,7 @@ impl std::error::Error for MigrationError {}
 pub fn migrate_legacy_delivery_json<T: MigrationTransaction>(
     input: &[u8],
     transaction: &mut T,
-) -> Result<Vec<u8>, MigrationError> {
+) -> Result<MigrationOutcome, MigrationError> {
     let mut snapshot = parse_json(input)?;
     let source_key = transform_snapshot(&mut snapshot)?;
     let canonical_snapshot =
@@ -175,10 +220,25 @@ pub fn migrate_legacy_delivery_json<T: MigrationTransaction>(
 
     let commit = transaction
         .commit_once(&source_key, &canonical_snapshot)
-        .map_err(|message| MigrationError::Transaction { message })?;
+        .map_err(|error| match error {
+            MigrationTransactionError::CorruptState { message } => {
+                MigrationError::CorruptState { message }
+            }
+            MigrationTransactionError::Storage { message } => {
+                MigrationError::Transaction { message }
+            }
+        })?;
     match commit {
-        MigrationCommit::Applied => Ok(canonical_snapshot),
-        MigrationCommit::AlreadyMigrated => Err(MigrationError::AlreadyMigrated { source_key }),
+        MigrationCommit::Applied => Ok(MigrationOutcome::Applied {
+            source_key,
+            canonical_snapshot,
+        }),
+        MigrationCommit::AlreadyConsumed { canonical_snapshot } => {
+            Ok(MigrationOutcome::AlreadyConsumed {
+                source_key,
+                canonical_snapshot,
+            })
+        }
     }
 }
 

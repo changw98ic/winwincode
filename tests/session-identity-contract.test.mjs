@@ -60,8 +60,8 @@ const publicContractFiles = [
 ].map(name => join(schemaRoot, name)).concat([
   join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs'),
   join(root, 'crates', 'winwincode-api', 'src', 'generated.rs'),
-  join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts'),
-  join(root, 'apps', 'web', 'src', 'generated', 'control-plane-client.ts'),
+  join(root, 'apps', 'client', 'src', 'generated', 'contracts.ts'),
+  join(root, 'apps', 'client', 'src', 'generated', 'control-plane-client.ts'),
 ])
 
 // Migration fixtures are the only public test input directory allowed to
@@ -235,4 +235,36 @@ test('the differential seed translator delegates legacy sessions to the canonica
       `differential seed migration duplicated ${duplicatePath}`,
     )
   }
+})
+
+test('the differential runner does not derive execution identities from old session fields', () => {
+  const path = join(
+    root,
+    'crates',
+    'winwincode-control-plane',
+    'tests',
+    'support',
+    'differential_runner.rs',
+  )
+  const source = readFileSync(path, 'utf8')
+  const bindStart = source.indexOf('fn bind_session')
+  const bindEnd = source.indexOf('\n    fn resolve_attention', bindStart)
+  const runtimeStart = source.indexOf('fn semantic_runtime_projection')
+  const runtimeEnd = source.indexOf('\n#[derive(Clone)]\nstruct LeaseFixture', runtimeStart)
+  assert.notEqual(bindStart, -1, 'missing differential Session binding translator')
+  assert.notEqual(bindEnd, -1, 'Session binding translator boundary changed')
+  assert.notEqual(runtimeStart, -1, 'missing differential runtime projection translator')
+  assert.notEqual(runtimeEnd, -1, 'runtime projection translator boundary changed')
+
+  const binding = source.slice(bindStart, bindEnd)
+  const runtime = source.slice(runtimeStart, runtimeEnd)
+  for (const duplicateFormula of [
+    'canonical_id("wsn_", dsh)',
+    'canonical_id("wsn_", legacy_session_id)',
+    'canonical_id("cdx_", codex)',
+  ]) {
+    assert.equal(binding.includes(duplicateFormula), false, duplicateFormula)
+  }
+  assert.equal(runtime.includes('canonical_id("wsn_", session)'), false)
+  assert.match(runtime, /fixture\.legacy_session_id/u)
 })

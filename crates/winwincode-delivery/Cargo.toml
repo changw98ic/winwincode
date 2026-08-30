@@ -14,6 +14,7 @@ publish = false
 test-support = []
 
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,3 +31,7 @@ required-features = ["test-support"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "production_verdict_authority"
+required-features = ["test-support"]

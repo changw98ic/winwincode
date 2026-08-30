@@ -288,6 +288,7 @@
             },
             "eventTypes": [
               "approval.changed.v1",
+              "chat-interactions.invalidated.v1",
               "presence.changed.v1",
               "product-session.changed.v1",
               "product-session.message.appended.v1",
@@ -545,6 +546,42 @@
           }
         },
         {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000002",
+          "eventId": "evt_01J0000000000000000000001A",
+          "scope": {
+            "kind": "repository",
+            "organizationId": "org_01J00000000000000000000000",
+            "workspaceId": "wsp_01J00000000000000000000000",
+            "projectId": "prj_01J00000000000000000000000",
+            "repositoryId": "rep_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "product-session",
+            "productSessionId": "psn_01J00000000000000000000000"
+          },
+          "sequence": 10,
+          "occurredAt": "2026-08-24T12:00:20.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "chat-interaction-projection",
+            "actor": {
+              "kind": "system",
+              "id": "sys_01J00000000000000000000000"
+            }
+          },
+          "authorizationEpoch": 7,
+          "event": {
+            "type": "chat-interactions.invalidated.v1",
+            "productSessionId": "psn_01J00000000000000000000000",
+            "revision": 12,
+            "reloadQueries": [
+              "session.interactions.list",
+              "approval.list"
+            ]
+          }
+        },
+        {
           "type": "transport.ack.v1",
           "subscriptionId": "sub_01J00000000000000000000002",
           "cursor": {
@@ -559,8 +596,8 @@
               "kind": "product-session",
               "productSessionId": "psn_01J00000000000000000000000"
             },
-            "sequence": 9,
-            "eventId": "evt_01J00000000000000000000019"
+            "sequence": 10,
+            "eventId": "evt_01J0000000000000000000001A"
           }
         }
       ]
@@ -781,6 +818,359 @@
             "lastProjectionSequence": 12,
             "reloadQueries": [
               "runtime.projection.get"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "enterprise-management-scope-invalidations",
+      "frames": [
+        {
+          "type": "transport.subscribe.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "subscription": {
+            "scope": {
+              "kind": "organization",
+              "organizationId": "org_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "scope"
+            },
+            "eventTypes": [
+              "enterprise-organization.invalidated.v1",
+              "enterprise-membership.invalidated.v1",
+              "enterprise-team.invalidated.v1",
+              "enterprise-role.invalidated.v1",
+              "enterprise-project.invalidated.v1",
+              "enterprise-policy.invalidated.v1",
+              "enterprise-fleet.invalidated.v1",
+              "enterprise-usage.invalidated.v1",
+              "enterprise-audit.invalidated.v1",
+              "enterprise-integration.invalidated.v1"
+            ]
+          },
+          "startAt": "latest"
+        },
+        {
+          "type": "transport.subscription-accepted.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "cursor": {
+            "scope": {
+              "kind": "organization",
+              "organizationId": "org_01J00000000000000000000000"
+            },
+            "stream": {
+              "kind": "scope"
+            },
+            "sequence": 0,
+            "eventId": null
+          },
+          "authorizationEpoch": 1,
+          "limits": {
+            "maxUnackedEvents": 256,
+            "hardUnackedEvents": 1024,
+            "ackDeadlineMillis": 30000,
+            "backpressureCloseCode": 4408
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000040",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 1,
+          "occurredAt": "2026-08-27T12:00:01.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-organization.invalidated.v1",
+            "snapshotRevision": 1,
+            "reloadQueries": [
+              "enterprise.organization.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000041",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 2,
+          "occurredAt": "2026-08-27T12:00:02.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-membership.invalidated.v1",
+            "snapshotRevision": 2,
+            "reloadQueries": [
+              "enterprise.membership.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000042",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 3,
+          "occurredAt": "2026-08-27T12:00:03.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-team.invalidated.v1",
+            "snapshotRevision": 3,
+            "reloadQueries": [
+              "enterprise.team.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000043",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 4,
+          "occurredAt": "2026-08-27T12:00:04.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-role.invalidated.v1",
+            "snapshotRevision": 4,
+            "reloadQueries": [
+              "enterprise.role.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000044",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 5,
+          "occurredAt": "2026-08-27T12:00:05.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-project.invalidated.v1",
+            "snapshotRevision": 5,
+            "reloadQueries": [
+              "enterprise.project.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000045",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 6,
+          "occurredAt": "2026-08-27T12:00:06.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-policy.invalidated.v1",
+            "snapshotRevision": 6,
+            "reloadQueries": [
+              "enterprise.policy.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000046",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 7,
+          "occurredAt": "2026-08-27T12:00:07.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-fleet.invalidated.v1",
+            "snapshotRevision": 7,
+            "reloadQueries": [
+              "enterprise.fleet.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000047",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 8,
+          "occurredAt": "2026-08-27T12:00:08.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-usage.invalidated.v1",
+            "snapshotRevision": 8,
+            "reloadQueries": [
+              "enterprise.usage.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000048",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 9,
+          "occurredAt": "2026-08-27T12:00:09.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-audit.invalidated.v1",
+            "snapshotRevision": 9,
+            "reloadQueries": [
+              "enterprise.audit.list"
+            ]
+          }
+        },
+        {
+          "type": "event.v1",
+          "subscriptionId": "sub_01J00000000000000000000005",
+          "eventId": "evt_01J00000000000000000000049",
+          "scope": {
+            "kind": "organization",
+            "organizationId": "org_01J00000000000000000000000"
+          },
+          "stream": {
+            "kind": "scope"
+          },
+          "authorizationEpoch": 1,
+          "sequence": 10,
+          "occurredAt": "2026-08-27T12:00:10.000Z",
+          "source": {
+            "kind": "control-plane",
+            "component": "enterprise-management",
+            "actor": {
+              "kind": "user",
+              "id": "usr_01J00000000000000000000000"
+            }
+          },
+          "event": {
+            "type": "enterprise-integration.invalidated.v1",
+            "snapshotRevision": 10,
+            "reloadQueries": [
+              "enterprise.integration.list"
             ]
           }
         }

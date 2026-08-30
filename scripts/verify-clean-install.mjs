@@ -7,6 +7,7 @@ import { basename, join, relative, resolve, sep } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-clean-'))
+const temporaryCargoTarget = join(temporaryRoot, 'target')
 const COMMAND_TIMEOUT_MILLIS = 600_000
 const TERMINATION_GRACE_MILLIS = 5_000
 const excludedNames = new Set([
@@ -18,18 +19,16 @@ const excludedNames = new Set([
   '.git',
   'dist',
   'node_modules',
-  'prebuild',
-  'prebuilds',
   'target',
 ])
 const commands = [
   ['install', '--frozen-lockfile', '--prefer-offline'],
   ['format:check'],
   ['lint'],
-  ['test'],
   ['build'],
-  ['verify:packages'],
-  ['verify:upstream'],
+  ['test'],
+  ['verify:products'],
+  ['verify:phase-6.6'],
 ]
 
 function terminateProcessGroup(child, signal) {
@@ -54,6 +53,7 @@ function runCommand(args) {
       detached: true,
       env: {
         ...process.env,
+        CARGO_TARGET_DIR: temporaryCargoTarget,
         CI: '1',
         COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
       },

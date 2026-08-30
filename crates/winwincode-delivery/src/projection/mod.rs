@@ -76,10 +76,12 @@ pub struct ProjectionError {
 }
 
 impl ProjectionError {
+    #[must_use]
     pub const fn code(&self) -> ProjectionErrorCode {
         self.code
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -118,46 +120,57 @@ pub struct DeliveryProjection {
 }
 
 impl DeliveryProjection {
+    #[must_use]
     pub fn delivery_id(&self) -> &winwincode_domain::DeliveryId {
         &self.delivery_id
     }
 
+    #[must_use]
     pub const fn delivery_revision(&self) -> u64 {
         self.delivery_revision
     }
 
+    #[must_use]
     pub const fn status(&self) -> DeliveryStatus {
         self.status
     }
 
+    #[must_use]
     pub const fn requirements(&self) -> &RequirementsProjection {
         &self.requirements
     }
 
+    #[must_use]
     pub const fn solution_review(&self) -> Option<&SolutionReviewProjection> {
         self.solution_review.as_ref()
     }
 
+    #[must_use]
     pub fn stages(&self) -> &[StageProjection] {
         &self.stages
     }
 
+    #[must_use]
     pub fn tasks(&self) -> &[DeliveryTaskProjection] {
         &self.tasks
     }
 
+    #[must_use]
     pub fn attention(&self) -> &[AttentionItemProjection] {
         &self.attention
     }
 
+    #[must_use]
     pub fn evidence(&self) -> &[EvidenceProjection] {
         &self.evidence
     }
 
+    #[must_use]
     pub const fn current_candidate(&self) -> Option<&CurrentCandidateProjection> {
         self.current_candidate.as_ref()
     }
 
+    #[must_use]
     pub const fn verdict(&self) -> Option<&VerdictProjection> {
         self.verdict.as_ref()
     }

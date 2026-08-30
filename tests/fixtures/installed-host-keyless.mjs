@@ -14,12 +14,12 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 
 import {
   RuntimeSessionLedger,
-  WinWinCodeAgentFactory,
   chatSurface,
 } from './dist/index.js'
 import { WinWinCodeKernel } from '@winwincode/native'
 import { strongFlowSurface } from '@winwincode/strongflow'
 
+import { WinWinCodeAgentFactoryFixture } from './dist/agent-factory-test-support.js'
 function requiredEnvironment(name) {
   const value = process.env[name]
   if (value === undefined || value.length === 0) throw new Error(`${name} is required`)
@@ -77,7 +77,7 @@ try {
   adapterPlugin.inject = ['llm']
   await ctx.plugin(adapterPlugin)
   const factoryPlugin = pluginCtx => {
-    new WinWinCodeAgentFactory(
+    new WinWinCodeAgentFactoryFixture(
       pluginCtx,
       { home, roleId: 'chat' },
       options => {

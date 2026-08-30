@@ -1,0 +1,34 @@
+[package]
+name = "winwincode-cli"
+description = "Canonical wwc repository setup, attachment, and diagnostics command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "wwc"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+winwincode-delivery = { path = "../winwincode-delivery" }
+winwincode-evidence-export = { path = "../winwincode-evidence-export" }
+winwincode-repository-context = { path = "../winwincode-repository-context" }
+winwincode-test-assets = { path = "../winwincode-test-assets" }
+
+[dev-dependencies]
+winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
+winwincode-domain.workspace = true
+winwincode-storage = { path = "../winwincode-storage" }
+
+[lints]
+workspace = true

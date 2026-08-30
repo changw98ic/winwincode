@@ -28,6 +28,7 @@ pub struct ProjectionRedactionError {
 }
 
 impl ProjectionRedactionError {
+    #[must_use]
     pub const fn code(&self) -> ProjectionRedactionErrorCode {
         self.code
     }
@@ -54,22 +55,27 @@ pub struct RuntimeDiffSummaryProjection {
 }
 
 impl RuntimeDiffSummaryProjection {
+    #[must_use]
     pub const fn changed_file_count(&self) -> u64 {
         self.changed_file_count
     }
 
+    #[must_use]
     pub const fn additions(&self) -> u64 {
         self.additions
     }
 
+    #[must_use]
     pub const fn deletions(&self) -> u64 {
         self.deletions
     }
 
+    #[must_use]
     pub const fn details_visible(&self) -> bool {
         self.details_visible
     }
 
+    #[must_use]
     pub fn source_ref(&self) -> &str {
         &self.source_ref
     }

@@ -865,6 +865,29 @@ impl SessionIo {
         reply_rx.await.unwrap_or(Err(CodexErr::InternalAgentDied))
     }
 
+    pub(crate) async fn submit_turn_input_with_id(
+        &self,
+        mut request: TurnInputRequest,
+        mode: TurnInputMode,
+        submission_id: String,
+    ) -> CodexResult<TurnInputSubmission> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let trace = request.trace.take();
+        self.submit_with_id(Submission {
+            id: submission_id,
+            op: Op::TurnInput {
+                request: Box::new(request),
+                mode,
+                reply: reply_tx,
+            },
+            trace,
+            parent_turn_id: None,
+            root_turn_id: None,
+        })
+        .await?;
+        reply_rx.await.unwrap_or(Err(CodexErr::InternalAgentDied))
+    }
+
     pub(crate) async fn submit_recover_turn(
         &self,
         thread_settings: ThreadSettingsOverrides,
@@ -2688,14 +2711,28 @@ impl Session {
         let sub_id = turn_context.sub_id.clone();
         let (tx_response, rx_response) = oneshot::channel();
         let event_id = sub_id.clone();
-        let prev_entry = {
+        let (queued_response, prev_entry) = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_user_input(sub_id, tx_response)
+                    if let Some(response) = ts.take_pending_user_input_response(&sub_id) {
+                        (Some(response), None)
+                    } else {
+                        let mut pending = self.pending_user_input_responses.lock().await;
+                        match pending.remove(&sub_id) {
+                            Some(response) => (Some(response), None),
+                            None => (
+                                None,
+                                ts.insert_pending_user_input(sub_id.clone(), tx_response),
+                            ),
+                        }
+                    }
                 }
-                None => None,
+                None => {
+                    let mut pending = self.pending_user_input_responses.lock().await;
+                    (pending.remove(&sub_id), None)
+                }
             }
         };
         if prev_entry.is_some() {
@@ -2713,7 +2750,10 @@ impl Session {
             .turn_metadata_state
             .mark_user_input_requested_during_turn();
         self.send_event(turn_context, event).await;
-        rx_response.await.ok()
+        match queued_response {
+            Some(response) => Some(response),
+            None => rx_response.await.ok(),
+        }
     }
 
     #[expect(
@@ -2725,22 +2765,39 @@ impl Session {
         sub_id: &str,
         response: RequestUserInputResponse,
     ) {
-        let entry = {
+        let (entry, replaced_response, response_to_send) = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_user_input(sub_id)
+                    match ts.remove_pending_user_input(sub_id) {
+                        Some(entry) => (Some(entry), None, Some(response)),
+                        None => {
+                            let replaced =
+                                ts.insert_pending_user_input_response(sub_id.to_string(), response);
+                            (None, replaced, None)
+                        }
+                    }
                 }
-                None => None,
+                None => {
+                    let mut pending = self.pending_user_input_responses.lock().await;
+                    let replaced = pending.insert(sub_id.to_string(), response);
+                    (None, replaced, None)
+                }
             }
         };
         match entry {
             Some(tx_response) => {
-                tx_response.send(response).ok();
+                if let Some(response) = response_to_send {
+                    tx_response.send(response).ok();
+                }
             }
             None => {
-                warn!("No pending user input found for sub_id: {sub_id}");
+                if replaced_response.is_some() {
+                    warn!("Overwriting queued user input response for sub_id: {sub_id}");
+                } else {
+                    debug!("Queued user input response until turn waiter is restored: {sub_id}");
+                }
             }
         }
     }

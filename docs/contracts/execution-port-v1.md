@@ -28,6 +28,21 @@
 两种分支都经过相同的 Job、Attempt、Lease 和 Fencing 校验。ProductSession Chat 不能伪造
 Delivery 身份，Delivery 阶段也不能省略当前 StageRun。
 
+## Delivery Job 封印阶段输入
+
+`delivery-stage` Job 必须携带结构化 `stageInput`；`product-session` Job 必须省略它。
+`stageInput` 在 Delivery authority 创建 Job 时一次封印，Scheduler 只校验并原样传递：
+
+- 当前 `deliverySpecId`、`deliverySpecRevision`、标题、目标、范围、排除项和约束；
+- 全部当前验收条件，包括稳定 ID、说明、验证方法与是否必需；
+- 执行、返工和验证阶段的当前任务及其验收条件 ID；
+- Reviewer、Verifier 和返工阶段所绑定的精确 frozen `candidateRef`。
+
+Planner 缺少 `stageInput`、验证 Job 缺少 `candidateRef`、ProductSession 携带
+`stageInput`，都在启动 Codex 前拒绝。`payloadDigest` 与 Worker/Codex 的完整 Job digest
+都覆盖这些字段；重启时任何 Spec、Criterion、Task、Role 或 Candidate 变化都会形成冲突，
+不会重新查询可变 Delivery 状态，也不会把 JSON 藏进 `goal`。
+
 ## 一份合同，两种 Adapter
 
 本地同进程 Adapter 与远程进程 Adapter 必须接受同一份 `ExecutionPortMessage` union，

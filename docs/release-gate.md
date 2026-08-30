@@ -74,6 +74,8 @@ corepack pnpm verify:release \
 
 同一输入重复运行会复用字节完全相同的输出。已有输出内容不同会失败，避免新旧证据被静默混合。
 
+门禁在读取证据、真实评估和 tarball 后、生成通过报告前运行 Credential 泄漏扫描。扫描会展开 gzip/tar、检查 JSON 字段策略、已知 Provider 凭据编码和显式秘密指纹；命中时只报告文件与规则，不回显匹配值。损坏或不支持的压缩条目按失败处理。
+
 ## 5. 人工审核报告
 
 发布批准人至少检查：
@@ -98,5 +100,6 @@ corepack pnpm verify:release \
 | `EVALUATION_MISMATCH` | 保存的测量不能从原始结果重新算出 |
 | `LEGAL_BOUNDARY_FAILED` | 项目许可证或必要第三方通知不完整 |
 | `DESIGN_BOUNDARY_FAILED` | 当前源码重新引入了已排除的 CPB 运行依赖或状态路径 |
+| `CREDENTIAL_LEAK_DETECTED` | 证据、真实评估或发布包命中 Credential 泄漏门禁 |
 
 失败报告区分产物、源码、真实评估和法律边界。修复对应事实并重新生成证据；不要手改 evidence JSON 或最终报告。

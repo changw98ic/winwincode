@@ -83,6 +83,9 @@ pub(crate) fn execute(
         &delivery_id,
         transition.delivery().revision(),
         DeliveryChangeKind::Advanced,
+        crate::instant_from_millis(transition.delivery().snapshot().updated_at_millis)
+            .map_err(DeliveryVerdictCommitError::Storage)?,
+        "delivery-verdict-transaction",
     )
     .map_err(DeliveryVerdictCommitError::Storage)?;
     let stream_id = delivery_stream_id(&delivery_id);

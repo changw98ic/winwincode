@@ -17,11 +17,16 @@ use winwincode_execution_port::generated::{
     ExecutionPortErrorCode, ExecutionScope, LeaseWriteStatus,
 };
 use winwincode_storage::{
-    ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, ArtifactWriteReceipt, DurableOutboxEvent,
-    ProductStateStorage, StorageError,
+    ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactMeteringAttribution, ArtifactOpen,
+    ArtifactProvenance, ArtifactRetention, ArtifactStore, ArtifactWriteReceipt, DurableOutboxEvent,
+    EnterpriseQuotaReservationState, ProductStateStorage, PublicEventActor, StorageError,
+    public_actor_from_receipt_key,
 };
 
+use crate::artifact_enterprise_quota::{
+    ArtifactEnterpriseQuotaAdmission, ArtifactEnterpriseQuotaReservation,
+    ArtifactEnterpriseQuotaSaga, ArtifactEnterpriseQuotaSagaError,
+};
 use crate::delivery_transaction::{delivery_stream_id, load_durable_execution_job};
 use crate::repository_scope_key;
 use crate::session_binding_transaction::{instant_millis, require_id};
@@ -33,6 +38,8 @@ const MAX_ENCODED_PAYLOAD_BYTES: usize = 16_777_216;
 pub enum ArtifactMessageError {
     Storage(StorageError),
     Artifact(ArtifactError),
+    EnterpriseQuota(ArtifactEnterpriseQuotaSagaError),
+    EnterpriseQuotaDenied,
 }
 
 impl fmt::Display for ArtifactMessageError {
@@ -40,6 +47,8 @@ impl fmt::Display for ArtifactMessageError {
         match self {
             Self::Storage(error) => write!(formatter, "Artifact authority failed: {error}"),
             Self::Artifact(error) => write!(formatter, "Artifact storage failed: {error}"),
+            Self::EnterpriseQuota(error) => write!(formatter, "Artifact quota failed: {error}"),
+            Self::EnterpriseQuotaDenied => formatter.write_str("Artifact quota denied the write"),
         }
     }
 }
@@ -58,12 +67,19 @@ impl From<ArtifactError> for ArtifactMessageError {
     }
 }
 
+impl From<ArtifactEnterpriseQuotaSagaError> for ArtifactMessageError {
+    fn from(error: ArtifactEnterpriseQuotaSagaError) -> Self {
+        Self::EnterpriseQuota(error)
+    }
+}
+
 pub(crate) fn accept_open(
     storage: &dyn ProductStateStorage,
     artifacts: &mut ArtifactStore,
     scope: &RepositoryScope,
     message: &ArtifactOpenMessage,
     authority: &SessionBindingAuthority,
+    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_open_shape(message)?;
     let context = ArtifactMessageContext::from_authority(
@@ -73,22 +89,6 @@ pub(crate) fn accept_open(
         &message.sent_at,
         authority,
     )?;
-    let size_bytes = u64::try_from(message.artifact.size_bytes)
-        .map_err(|_| StorageError::invalid_input("Artifact sizeBytes is out of range"))?;
-    let open = ArtifactOpen::new(
-        context.scope_key.clone(),
-        message.message_id.clone(),
-        message.request_id.clone(),
-        message.artifact.artifact_id.clone(),
-        artifact_kind(&message.artifact.kind),
-        message.artifact.media_type.clone(),
-        message.artifact.digest.clone(),
-        size_bytes,
-        message.artifact.file_name.clone(),
-        context.provenance.clone(),
-        ArtifactRetention::Indefinite,
-        context.sent_at_millis,
-    );
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let session_claim = ArtifactSessionClaim {
         worker_session_id: &message.worker_session_id,
@@ -102,8 +102,12 @@ pub(crate) fn accept_open(
         &message.lease,
         session_claim,
     )?;
+    let open = frozen_artifact_open(scope, message, &context, &durable, &job, &replay_identity)?;
     match artifacts.replay_open(&open) {
-        Ok(Some(receipt)) => return ack_open(message, &receipt, &replay_identity),
+        Ok(Some(receipt)) => {
+            require_replay_quota(enterprise_quota, &open, &message.sent_at)?;
+            return ack_open(message, &receipt, &replay_identity);
+        }
         Ok(None) => {}
         Err(error) if error.kind() == ArtifactErrorKind::Conflict => {
             return ack_open_conflict(
@@ -141,17 +145,136 @@ pub(crate) fn accept_open(
             &session_identity,
         );
     }
-    match artifacts.open_artifact(open) {
+    let reservation = reserve_artifact_open(enterprise_quota, &open, &message.sent_at)?;
+    match artifacts.open_artifact(open.clone()) {
         Ok(receipt) => ack_open(message, &receipt, &session_identity),
-        Err(error) if error.kind() == ArtifactErrorKind::Conflict => ack_open_conflict(
-            artifacts,
-            &context.scope_key,
-            message,
-            &error,
-            &session_identity,
-        ),
-        Err(error) => Err(error.into()),
+        Err(error) if error.kind() == ArtifactErrorKind::Conflict => {
+            if let Some(receipt) = artifacts.replay_open(&open)? {
+                return ack_open(message, &receipt, &session_identity);
+            }
+            enterprise_quota.release(
+                &reservation,
+                winwincode_storage::EnterpriseQuotaReleaseReason::Failed,
+                &message.sent_at,
+            )?;
+            ack_open_conflict(
+                artifacts,
+                &context.scope_key,
+                message,
+                &error,
+                &session_identity,
+            )
+        }
+        Err(error) => {
+            enterprise_quota.release(
+                &reservation,
+                winwincode_storage::EnterpriseQuotaReleaseReason::Failed,
+                &message.sent_at,
+            )?;
+            Err(error.into())
+        }
     }
+}
+
+fn frozen_artifact_open(
+    scope: &RepositoryScope,
+    message: &ArtifactOpenMessage,
+    context: &ArtifactMessageContext,
+    durable: &DurableOutboxEvent,
+    job: &ExecutionJob,
+    session_identity: &SessionIdentity,
+) -> Result<ArtifactOpen, ArtifactMessageError> {
+    let size_bytes = u64::try_from(message.artifact.size_bytes)
+        .map_err(|_| StorageError::invalid_input("Artifact sizeBytes is out of range"))?;
+    Ok(ArtifactOpen::new(
+        context.scope_key.clone(),
+        message.message_id.clone(),
+        message.request_id.clone(),
+        message.artifact.artifact_id.clone(),
+        artifact_kind(&message.artifact.kind),
+        message.artifact.media_type.clone(),
+        message.artifact.digest.clone(),
+        size_bytes,
+        message.artifact.file_name.clone(),
+        context.provenance.clone(),
+        metering_attribution(scope, durable, job, session_identity)?,
+        ArtifactRetention::Indefinite,
+        context.sent_at_millis,
+    ))
+}
+
+fn reserve_artifact_open(
+    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
+    open: &ArtifactOpen,
+    requested_at: &winwincode_domain::Instant,
+) -> Result<ArtifactEnterpriseQuotaReservation, ArtifactMessageError> {
+    match enterprise_quota.reserve_open(open, requested_at)? {
+        ArtifactEnterpriseQuotaAdmission::Admitted(reservation) => Ok(reservation),
+        ArtifactEnterpriseQuotaAdmission::TerminalReplay(_) => {
+            Err(ArtifactMessageError::EnterpriseQuota(
+                ArtifactEnterpriseQuotaSagaError::UnexpectedTerminalReservation,
+            ))
+        }
+        ArtifactEnterpriseQuotaAdmission::Denied(_) => {
+            Err(ArtifactMessageError::EnterpriseQuotaDenied)
+        }
+    }
+}
+
+fn require_replay_quota(
+    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
+    open: &ArtifactOpen,
+    requested_at: &winwincode_domain::Instant,
+) -> Result<(), ArtifactMessageError> {
+    match enterprise_quota.reserve_open(open, requested_at)? {
+        ArtifactEnterpriseQuotaAdmission::Admitted(_) => Ok(()),
+        ArtifactEnterpriseQuotaAdmission::TerminalReplay(receipt)
+            if receipt.record.state == EnterpriseQuotaReservationState::Settled =>
+        {
+            Ok(())
+        }
+        ArtifactEnterpriseQuotaAdmission::TerminalReplay(_) => {
+            Err(ArtifactMessageError::EnterpriseQuota(
+                ArtifactEnterpriseQuotaSagaError::UnexpectedTerminalReservation,
+            ))
+        }
+        ArtifactEnterpriseQuotaAdmission::Denied(_) => {
+            Err(ArtifactMessageError::EnterpriseQuotaDenied)
+        }
+    }
+}
+
+fn metering_attribution(
+    scope: &RepositoryScope,
+    durable: &DurableOutboxEvent,
+    job: &ExecutionJob,
+    session_identity: &SessionIdentity,
+) -> Result<ArtifactMeteringAttribution, StorageError> {
+    let actor = public_actor_from_receipt_key(durable.receipt_identity().actor_key())?;
+    let PublicEventActor::User { id: user_id } = actor else {
+        return Err(StorageError::invalid_input(
+            "Artifact storage attribution requires the authenticated User actor",
+        ));
+    };
+    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        return Err(StorageError::invalid_input(
+            "Artifact storage attribution requires a Delivery stage",
+        ));
+    };
+    if session_identity.product_session_id != job_scope.product_session_id {
+        return Err(StorageError::invalid_input(
+            "Artifact storage attribution differs from the verified ProductSession",
+        ));
+    }
+    Ok(ArtifactMeteringAttribution {
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        project_id: scope.project_id.clone(),
+        repository_id: scope.repository_id.clone(),
+        delivery_id: Some(job_scope.delivery_id.clone()),
+        product_session_id: Some(session_identity.product_session_id.clone()),
+        user_id,
+    })
 }
 
 pub(crate) fn accept_chunk(
@@ -160,6 +283,7 @@ pub(crate) fn accept_chunk(
     scope: &RepositoryScope,
     message: &ArtifactChunkMessage,
     authority: &SessionBindingAuthority,
+    enterprise_quota: &mut ArtifactEnterpriseQuotaSaga<'_, '_>,
 ) -> Result<ArtifactAckMessage, ArtifactMessageError> {
     validate_chunk_shape(message)?;
     let context = ArtifactMessageContext::from_authority(
@@ -205,7 +329,12 @@ pub(crate) fn accept_chunk(
         session_claim,
     )?;
     match artifacts.replay_chunk(&chunk) {
-        Ok(Some(receipt)) => return ack_chunk(message, &receipt, &replay_identity),
+        Ok(Some(receipt)) => {
+            if message.is_final {
+                enterprise_quota.recover_final(&message.artifact_id, artifacts)?;
+            }
+            return ack_chunk(message, &receipt, &replay_identity);
+        }
         Ok(None) => {}
         Err(error) => {
             return ack_chunk_error(
@@ -240,7 +369,12 @@ pub(crate) fn accept_chunk(
         );
     }
     match artifacts.append_chunk(&chunk) {
-        Ok(receipt) => ack_chunk(message, &receipt, &session_identity),
+        Ok(receipt) => {
+            if message.is_final {
+                enterprise_quota.recover_final(&message.artifact_id, artifacts)?;
+            }
+            ack_chunk(message, &receipt, &session_identity)
+        }
         Err(error) => ack_chunk_error(
             artifacts,
             &context.scope_key,

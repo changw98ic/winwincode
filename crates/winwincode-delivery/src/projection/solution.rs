@@ -60,30 +60,37 @@ pub struct SolutionComponentProjection {
 }
 
 impl SolutionComponentProjection {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
 
+    #[must_use]
     pub fn responsibility(&self) -> &str {
         &self.responsibility
     }
 
+    #[must_use]
     pub const fn kind(&self) -> SolutionComponentKind {
         self.kind
     }
 
+    #[must_use]
     pub fn trust_boundary(&self) -> Option<&str> {
         self.trust_boundary.as_deref()
     }
 
+    #[must_use]
     pub const fn unresolved(&self) -> bool {
         self.unresolved
     }
 
+    #[must_use]
     pub fn repository_path_prefixes(&self) -> &[String] {
         &self.repository_path_prefixes
     }
@@ -99,18 +106,22 @@ pub struct SolutionConnectionProjection {
 }
 
 impl SolutionConnectionProjection {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn from(&self) -> &str {
         &self.from
     }
 
+    #[must_use]
     pub fn to(&self) -> &str {
         &self.to
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -158,26 +169,32 @@ pub struct DiagramNodeProjection {
 }
 
 impl DiagramNodeProjection {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
 
+    #[must_use]
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    #[must_use]
     pub const fn kind(&self) -> DiagramNodeKind {
         self.kind
     }
 
+    #[must_use]
     pub fn trust_boundary(&self) -> Option<&str> {
         self.trust_boundary.as_deref()
     }
 
+    #[must_use]
     pub const fn unresolved(&self) -> bool {
         self.unresolved
     }
@@ -193,18 +210,22 @@ pub struct DiagramEdgeProjection {
 }
 
 impl DiagramEdgeProjection {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn from(&self) -> &str {
         &self.from
     }
 
+    #[must_use]
     pub fn to(&self) -> &str {
         &self.to
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -221,22 +242,27 @@ pub struct DiagramProjection {
 }
 
 impl DiagramProjection {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub const fn kind(&self) -> DiagramKind {
         self.kind
     }
 
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
+    #[must_use]
     pub fn nodes(&self) -> &[DiagramNodeProjection] {
         &self.nodes
     }
 
+    #[must_use]
     pub fn edges(&self) -> &[DiagramEdgeProjection] {
         &self.edges
     }
@@ -253,22 +279,27 @@ pub struct DeliveryTaskProposalProjection {
 }
 
 impl DeliveryTaskProposalProjection {
+    #[must_use]
     pub fn id(&self) -> &DeliveryTaskId {
         &self.id
     }
 
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
+    #[must_use]
     pub fn goal(&self) -> &str {
         &self.goal
     }
 
+    #[must_use]
     pub fn acceptance_criterion_ids(&self) -> &[AcceptanceCriterionId] {
         &self.acceptance_criterion_ids
     }
 
+    #[must_use]
     pub fn blocked_by_task_ids(&self) -> &[DeliveryTaskId] {
         &self.blocked_by_task_ids
     }
@@ -305,75 +336,99 @@ pub struct SolutionReviewProjection {
 }
 
 impl SolutionReviewProjection {
+    #[must_use]
     pub fn delivery_id(&self) -> &DeliveryId {
         &self.delivery_id
     }
+    #[must_use]
     pub fn delivery_spec_id(&self) -> &DeliverySpecId {
         &self.delivery_spec_id
     }
+    #[must_use]
     pub const fn delivery_spec_revision(&self) -> u64 {
         self.delivery_spec_revision
     }
+    #[must_use]
     pub fn planning_stage_run_id(&self) -> &StageRunId {
         &self.planning_stage_run_id
     }
+    #[must_use]
     pub fn planning_session_binding_id(&self) -> &SessionBindingId {
         &self.planning_session_binding_id
     }
+    #[must_use]
     pub fn review_stage_run_id(&self) -> &StageRunId {
         &self.review_stage_run_id
     }
+    #[must_use]
     pub fn attention_item_id(&self) -> &AttentionItemId {
         &self.attention_item_id
     }
+    #[must_use]
     pub fn review_set_sha256(&self) -> &str {
         &self.review_set_sha256
     }
+    #[must_use]
     pub fn solution_id(&self) -> &str {
         &self.solution_id
     }
+    #[must_use]
     pub fn summary(&self) -> &str {
         &self.summary
     }
+    #[must_use]
     pub fn approach(&self) -> &[String] {
         &self.approach
     }
+    #[must_use]
     pub fn components(&self) -> &[SolutionComponentProjection] {
         &self.components
     }
+    #[must_use]
     pub fn connections(&self) -> &[SolutionConnectionProjection] {
         &self.connections
     }
+    #[must_use]
     pub const fn architecture_diagram(&self) -> &DiagramProjection {
         &self.architecture_diagram
     }
+    #[must_use]
     pub const fn process_diagram(&self) -> &DiagramProjection {
         &self.process_diagram
     }
+    #[must_use]
     pub fn risks(&self) -> &[String] {
         &self.risks
     }
+    #[must_use]
     pub fn unresolved_items(&self) -> &[String] {
         &self.unresolved_items
     }
+    #[must_use]
     pub fn task_proposals(&self) -> &[DeliveryTaskProposalProjection] {
         &self.task_proposals
     }
+    #[must_use]
     pub const fn review_status(&self) -> SolutionReviewStatusProjection {
         self.review_status
     }
+    #[must_use]
     pub const fn decision(&self) -> Option<SolutionReviewDecisionProjection> {
         self.decision
     }
+    #[must_use]
     pub fn comments(&self) -> Option<&str> {
         self.comments.as_deref()
     }
+    #[must_use]
     pub fn requested_changes(&self) -> Option<&[String]> {
         self.requested_changes.as_deref()
     }
+    #[must_use]
     pub fn reviewer_id(&self) -> Option<&str> {
         self.reviewer_id.as_deref()
     }
+    #[must_use]
     pub const fn reviewed_at(&self) -> Option<u64> {
         self.reviewed_at
     }

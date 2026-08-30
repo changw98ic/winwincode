@@ -10,11 +10,9 @@ use std::{error::Error, fmt};
 use crate::domain::{Delivery, MAX_SAFE_INTEGER};
 
 pub mod attention;
+pub mod failure_router;
 pub mod session_binding;
-#[cfg(any(test, feature = "test-support"))]
 pub mod solution_review;
-#[cfg(not(any(test, feature = "test-support")))]
-pub(crate) mod solution_review;
 pub mod stage;
 pub mod task;
 pub mod task_breakdown;
@@ -45,10 +43,12 @@ impl CoordinationError {
         }
     }
 
+    #[must_use]
     pub const fn code(&self) -> CoordinationErrorCode {
         self.code
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }

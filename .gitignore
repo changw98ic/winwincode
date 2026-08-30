@@ -10,7 +10,6 @@ node_modules/
 dist/
 .cache/
 *.tgz
-packages/native-*/prebuild/
 
 # Rust
 target/
@@ -19,6 +18,9 @@ target/
 coverage/
 test-results/
 playwright-report/
+server-data/
+publication-secrets/
+source-repositories/
 
 # Local configuration and credentials
 .env
@@ -30,3 +32,8 @@ playwright-report/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated local API test credentials
+/fixture-cert.pem
+/fixture-key.pem
+/openssl.cnf

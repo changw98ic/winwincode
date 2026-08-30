@@ -79,14 +79,17 @@ pub struct ComputedDeliveryVerdict {
 }
 
 impl ComputedDeliveryVerdict {
+    #[must_use]
     pub fn evidence(&self) -> &[EvidenceRef] {
         &self.evidence
     }
 
+    #[must_use]
     pub fn verdict(&self) -> &DeliveryVerdict {
         &self.verdict
     }
 
+    #[must_use]
     pub const fn next_status(&self) -> DeliveryStatus {
         self.next_status
     }

@@ -643,7 +643,7 @@ fn validate_model_open(message: &ModelOpenMessage) -> Result<(), TypedReplayMapp
         &message.lease,
         &message.worker_session_id,
         &message.session_identity,
-        true,
+        false,
     )?;
     if message.message_id.0.is_empty()
         || message.request_id.0.is_empty()
@@ -663,7 +663,7 @@ fn validate_model_chunk(message: &ModelChunkMessage) -> Result<(), TypedReplayMa
         &message.lease,
         &message.worker_session_id,
         &message.session_identity,
-        true,
+        false,
     )?;
     if message.message_id.0.is_empty() || message.model_exchange_id.0.is_empty() {
         return Err(TypedReplayMappingError::EmptyIdentity);
@@ -681,7 +681,7 @@ fn validate_model_ack(message: &ModelAckMessage) -> Result<(), TypedReplayMappin
         &message.lease,
         &message.worker_session_id,
         &message.session_identity,
-        true,
+        false,
     )?;
     if message.message_id.0.is_empty() || message.model_exchange_id.0.is_empty() {
         return Err(TypedReplayMappingError::EmptyIdentity);

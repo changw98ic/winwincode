@@ -118,6 +118,7 @@ fn pending_execution(seed: u64, checkout_revision: &str) -> PendingDeliveryExecu
         result,
         DeliveryExecutionConfig {
             payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            candidate_ref: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: checkout_revision.into(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),
@@ -174,6 +175,7 @@ fn pending_rework(
         fixture.transition.clone(),
         DeliveryExecutionConfig {
             payload_digest: Sha256Digest(format!("sha256:{}", digest_byte.to_string().repeat(64))),
+            candidate_ref: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: fixture.source_candidate_commit_id.clone(),
                 repository_id: RepositoryId(canonical_id("rep", seed)),

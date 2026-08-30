@@ -201,6 +201,15 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         &req.turn_environment
     }
 
+    fn action_gate_payload(&self, req: &UnifiedExecRequest) -> Option<crate::ToolCallGatePayload> {
+        let (program, args) = req.command.split_first()?;
+        Some(crate::ToolCallGatePayload::Shell {
+            program: program.clone(),
+            args: args.to_vec(),
+            working_directory: req.cwd.to_path_buf().to_string_lossy().into_owned(),
+        })
+    }
+
     fn uses_executor_managed_process_sandbox(&self, req: &UnifiedExecRequest) -> bool {
         req.turn_environment.environment.is_remote()
     }
@@ -618,7 +627,7 @@ mod tests {
             shell_type: ShellType::Sh,
             hook_command: "pwd".to_string(),
             process_id: 1000,
-            cwd: cwd.into(),
+            cwd: cwd.clone().into(),
             sandbox_cwd: sandbox_cwd.clone().into(),
             turn_environment: test_turn_environment(sandbox_cwd.clone().into()),
             env: HashMap::new(),
@@ -640,6 +649,14 @@ mod tests {
         assert_eq!(
             runtime.sandbox_cwd(&request),
             Some(&PathUri::from_abs_path(&sandbox_cwd))
+        );
+        assert_eq!(
+            runtime.action_gate_payload(&request),
+            Some(crate::ToolCallGatePayload::Shell {
+                program: "pwd".to_string(),
+                args: Vec::new(),
+                working_directory: cwd.to_string_lossy().into_owned(),
+            })
         );
     }
 

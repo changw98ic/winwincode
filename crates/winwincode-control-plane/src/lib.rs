@@ -6,42 +6,475 @@
 //! durable event publication. It has no dependency on Codex Core, an HTTP
 //! server, or an Execution Worker runtime.
 
+mod action_policy_enforcement;
+mod artifact_enterprise_quota;
 mod artifact_transaction;
+mod candidate_git_release;
 mod candidate_source;
+mod chat_interaction_application;
+pub mod chat_interaction_projection;
+mod collaboration;
+mod collaboration_inbox;
+mod collaboration_inbox_production;
+mod control_plane_instance;
+pub mod credential_leak_gate;
+pub mod credential_reference;
+mod delivery_application;
 mod delivery_command_transaction;
 pub mod delivery_execution;
+mod delivery_production_adapters;
 mod delivery_transaction;
+mod delivery_verdict_authority;
+mod durable_execution_port;
+mod enterprise_hierarchy;
+mod enterprise_identity;
+mod enterprise_identity_lifecycle;
+mod enterprise_identity_protocols;
+mod enterprise_identity_verification;
+mod enterprise_policy;
+mod enterprise_policy_enforcement;
+mod enterprise_policy_evaluation;
+mod enterprise_quota;
+mod enterprise_rbac;
+mod enterprise_reporting;
+mod enterprise_scope_binding;
+mod enterprise_usage;
 pub mod execution_port_service;
+mod gate_interaction_service;
+pub mod local_secret_store;
+mod model_admission;
+mod model_execution_runtime;
+mod model_policy_source;
+mod model_request_pool;
+mod model_retry_planner;
+mod model_retry_settlement;
+mod model_retry_usage;
+pub mod model_settings;
+mod model_stream_flow_control;
+mod observer_decision_service;
+mod planning_solution_authority;
+mod product_session_execution_application;
+mod product_session_service;
+mod provider_admission;
+mod provider_anthropic;
+pub mod provider_catalog;
+mod provider_enterprise_quota;
+pub mod provider_gateway;
+mod provider_https_sse;
+mod provider_policy;
+mod provider_production;
+pub mod provider_stream;
+mod publication_application;
+mod publication_enterprise_quota;
 mod publication_policy;
+mod publication_policy_enforcement;
 mod publication_preparation;
+mod publication_production;
+pub mod recovery_router;
+mod remote_worker_pool;
+mod repository_scheduler;
+mod responsibility_assignment;
+mod responsibility_assignment_authority;
 mod rework_transaction;
 mod runtime_event_transaction;
 mod session_binding_transaction;
 pub mod session_identity;
 pub mod strongflow_projection;
 mod task_breakdown_transaction;
+mod temporary_root_lease;
 mod terminal_outcome_transaction;
+mod vault_kms_network;
+mod vault_secret_store;
 mod verdict_transaction;
+mod worker_enterprise_quota;
+mod worker_execution_lifecycle;
+mod worker_fleet_projection;
+mod worker_interaction_outbound;
+pub mod worker_management;
+mod worker_policy;
 
+pub use action_policy_enforcement::{
+    ActionPolicyEnforcementError, ActionPolicyEnforcementErrorKind,
+    issue_action_enforcement_receipt,
+};
+pub use artifact_enterprise_quota::{
+    ArtifactEnterpriseQuotaAdmission, ArtifactEnterpriseQuotaReservation,
+    ArtifactEnterpriseQuotaSaga, ArtifactEnterpriseQuotaSagaError, ArtifactEnterpriseUsagePort,
+    DurableArtifactEnterpriseUsage,
+};
 pub use artifact_transaction::ArtifactMessageError;
+pub use candidate_git_release::CandidateGitReadsClosedReceipt;
 pub use candidate_source::CandidateResolutionError;
+pub use chat_interaction_application::{
+    ApprovalDecideMutationReceipt, ChatInteractionApiService, ChatInteractionMutationReceipt,
+    ChatInteractionService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
+    ChatInteractionWriteStatus, InputRespondMutationReceipt, RecordApprovalInteractionCommand,
+    RecordInputInteractionCommand, WorkerInteractionAuthority, WorkerInteractionDeliveryError,
+    WorkerInteractionDeliveryErrorKind, WorkerInteractionOutboundPort,
+};
+pub use collaboration::{
+    CollaborationActivityRecordRequest, CollaborationClock, CollaborationClockError,
+    CollaborationError, CollaborationErrorKind, CollaborationService, SystemCollaborationClock,
+};
+pub use collaboration_inbox::{
+    CollaborationAnnotation, CollaborationAnnotationAction, CollaborationAnnotationCommand,
+    CollaborationAnnotationId, CollaborationAnnotationState, CollaborationAnnotationTarget,
+    CollaborationCandidateIdentity, CollaborationClaim, CollaborationClaimAction,
+    CollaborationClaimCommand, CollaborationInboxAudience, CollaborationInboxAuthorityError,
+    CollaborationInboxAuthorityPort, CollaborationInboxAuthoritySnapshot, CollaborationInboxClock,
+    CollaborationInboxClockError, CollaborationInboxCommandContext, CollaborationInboxError,
+    CollaborationInboxErrorKind, CollaborationInboxFilter, CollaborationInboxItem,
+    CollaborationInboxItemId, CollaborationInboxItemKind, CollaborationInboxItemState,
+    CollaborationInboxListRequest, CollaborationInboxPage, CollaborationInboxReceipt,
+    CollaborationInboxService, CollaborationInboxSourceError, CollaborationInboxSourceItem,
+    CollaborationInboxSourcePort, CollaborationInboxSourceSnapshot,
+    CollaborationResponsibilityEntitlement, FormalCollaborationCommandRoute,
+    SystemCollaborationInboxClock,
+};
+pub use collaboration_inbox_production::{
+    DurableCollaborationInboxSource, EnterpriseCollaborationInboxAuthority,
+};
+pub use control_plane_instance::{
+    ControlPlaneInstanceRuntime, ControlPlaneInstanceRuntimeConfig,
+    ControlPlaneInstanceRuntimeError, ControlPlaneInstanceRuntimeErrorKind,
+};
+pub use credential_leak_gate::{
+    CredentialLeakError, CredentialLeakErrorKind, CredentialLeakGate, CredentialOutputBoundary,
+};
+pub use credential_reference::{
+    CredentialReferenceError, CredentialReferenceErrorKind, CredentialReferenceResolution,
+    CredentialReferenceService, CredentialSecretResolutionError, ResolvedSecret, SecretStoreError,
+    SecretStoreErrorKind, SecretStorePort,
+};
+pub use delivery_application::{
+    DeliveryAdvanceAuthority, DeliveryApplicationError, DeliveryAttentionAuthority,
+    DeliveryAuthorityError, DeliveryAuthorityPort, DeliveryAuthorityRequest, DeliveryAuthoritySeal,
+    DeliverySpecificationAuthority, DeliveryVerdictAuthority, load_delivery_authority_seal,
+};
 pub use delivery_command_transaction::{DeliveryCommandFacts, DeliverySpecFacts};
+pub use delivery_production_adapters::{
+    LocalDeliveryAdapterConfig, LocalDeliveryAdapterError, LocalDeliveryAuthority,
+    LocalExecutionJobDispatcher,
+};
+pub use durable_execution_port::{
+    DurableExecutionPortContext, DurableExecutionPortDelegate, DurableExecutionPortError,
+    DurableExecutionPortIngress, DurableExecutionPortSupplement,
+};
+pub use enterprise_hierarchy::{
+    EnterpriseHierarchyCommand, EnterpriseHierarchyError, EnterpriseHierarchyErrorKind,
+    EnterpriseHierarchyReceipt, EnterpriseHierarchyService, EnvironmentId, HierarchyMutation,
+    HierarchyResource, HierarchyResourceId, HierarchyResourceKind, HierarchyResourceState,
+    HierarchyScope, ResolvedHierarchyResource,
+};
+pub use enterprise_identity::{
+    AuthenticatedEnterpriseIdentity, EnterpriseIdentityClock, EnterpriseIdentityClockError,
+    EnterpriseIdentityError, EnterpriseIdentityErrorKind, EnterpriseIdentityService,
+    GeneratedApiToken, SystemEnterpriseIdentityClock, generate_api_token,
+};
+pub use enterprise_identity_lifecycle::{
+    BrowserSessionLifecycleError, BrowserSessionLifecyclePort,
+    CanonicalEnterpriseIdentityLifecycle, DeprovisionExternalUser,
+    EnterpriseIdentityLifecycleError, EnterpriseIdentityLifecycleErrorKind,
+    EnterpriseIdentityLifecyclePort, ExternalIdentityLifecycleOutcome, ExternalIdentityPrincipal,
+    ExternalIdentityProvider, ExternalIdentityReference, ProvisionExternalUser, UpsertExternalTeam,
+    external_identity_id, membership_id,
+};
+pub use enterprise_identity_protocols::{
+    EnterpriseIdentityProtocolAdapter, EnterpriseIdentityProtocolConfig, EnterpriseProtocolClock,
+    EnterpriseProtocolClockError, EnterpriseProtocolError, EnterpriseProtocolErrorKind,
+    ExternalAuthenticationOutcome, OidcIdToken, OidcTokenVerifier, ProtocolVerificationError,
+    ProtocolVerificationErrorKind, SamlResponse, SamlResponseVerifier, ScimBearerToken,
+    ScimBearerVerifier, ScimLifecycleEvent, ScimOperation, ScimTeamUpsert, ScimUserDeprovision,
+    ScimUserProvision, SystemEnterpriseProtocolClock, TrustedProtocolParty, VerifiedOidcClaims,
+    VerifiedSamlClaims, VerifiedScimClient,
+};
+pub use enterprise_identity_verification::{
+    EnterpriseIdentityProductionVerifiers, EnterpriseIdentityVerifierConfig,
+    EnterpriseIdentityVerifierTimeouts, EnterpriseIdentityVerifierTlsRoots,
+    ProductionOidcTokenVerifier, ProductionSamlResponseVerifier, ProductionScimBearerVerifier,
+};
+pub use enterprise_policy::{
+    EnterprisePolicyApiError, EnterprisePolicyApiErrorKind, EnterprisePolicyApiService,
+    EnterprisePolicyClock,
+};
+pub use enterprise_policy_enforcement::{
+    EnterprisePolicyEnforcement, EnterprisePolicyEnforcementError,
+    EnterprisePolicyEnforcementErrorKind, EnterprisePolicyEnforcementRequest,
+    enforce_enterprise_policy, enterprise_policy_condition_sha256,
+    enterprise_policy_subject_sha256,
+};
+pub use enterprise_policy_evaluation::{
+    EnterprisePolicyDecisionClock, EnterprisePolicyEvaluationService,
+    EnterprisePolicyEvaluationTarget, EnterprisePolicyExceptionDecisionRequest,
+    EnterprisePolicyExceptionOpenRequest,
+};
+pub use enterprise_quota::{
+    DurableEnterpriseQuotaAdmission, EnterpriseQuotaAdmission, EnterpriseQuotaAdmissionPort,
+    EnterpriseQuotaPermit,
+};
+pub use enterprise_rbac::{
+    ActiveMemberContext, ActiveTeamContext, EnterpriseRbacClock, EnterpriseRbacClockError,
+    EnterpriseRbacError, EnterpriseRbacErrorKind, EnterpriseRbacService, EvaluatedRoleVersion,
+    RbacAuthoritySeal, RbacDecision, RbacDenialReason, SystemEnterpriseRbacClock,
+};
+pub use enterprise_reporting::{
+    EnterpriseReportCurrencyRule, EnterpriseReportCursor, EnterpriseReportDetail,
+    EnterpriseReportDimension, EnterpriseReportError, EnterpriseReportErrorKind,
+    EnterpriseReportExport, EnterpriseReportFormat, EnterpriseReportGroup, EnterpriseReportPage,
+    EnterpriseReportQuery, EnterpriseReportRow, EnterpriseReportTimeRule, EnterpriseReportTotals,
+    EnterpriseReportingLimits, EnterpriseReportingProjection, EnterpriseReportingService,
+};
+pub use enterprise_scope_binding::{
+    EnterpriseScopeBinding, EnterpriseScopeBindingCommand, EnterpriseScopeBindingError,
+    EnterpriseScopeBindingErrorKind, EnterpriseScopeBindingMutation, EnterpriseScopeBindingReceipt,
+    EnterpriseScopeBindingService, LocalScopeMigrationCommand, LocalScopeMigrationReceipt,
+    LocalScopeMigrationStatus, ResolvedScopeBinding, ScopeBindingSource, ScopeBindingSubject,
+    ScopeBindingSubjectKind, local_scope_inventory_digest,
+};
+pub use enterprise_usage::{
+    ProviderEnterpriseUsageError, ProviderEnterpriseUsageErrorKind,
+    ProviderEnterpriseUsageReconciler, ProviderEnterpriseUsageReconciliation,
+    PublicationEnterpriseUsageError, PublicationEnterpriseUsageErrorKind,
+    PublicationEnterpriseUsageReconciler, PublicationEnterpriseUsageReconciliation,
+    StorageEnterpriseUsageError, StorageEnterpriseUsageErrorKind, StorageEnterpriseUsageReconciler,
+    StorageEnterpriseUsageReconciliation, WorkerEnterpriseUsageError,
+    WorkerEnterpriseUsageErrorKind, WorkerEnterpriseUsageReconciler,
+    WorkerEnterpriseUsageReconciliation,
+};
 pub use execution_port_service::{
     DEFAULT_HEARTBEAT_INTERVAL_MS, ExecutionPortService, ExecutionPortServiceError,
     RuntimeReplayRequestCommand,
 };
+pub use gate_interaction_service::{
+    ExpireGateInteractionCommand, GATE_INTERACTION_SCHEMA_VERSION, GateActionSeal,
+    GateCandidateIdentity, GateDecisionFact, GateHumanDecision, GateInteractionActor,
+    GateInteractionAuthority, GateInteractionCommandContext, GateInteractionMutationReceipt,
+    GateInteractionRecord, GateInteractionService, GateInteractionServiceError,
+    GateInteractionServiceErrorCode, GateInteractionState, GateInteractionSubject,
+    RegisterGateInteractionCommand, RespondGateInteractionCommand, RoutableGateDecision,
+    RoutableGateDecisionKind,
+};
+pub use local_secret_store::{
+    LocalSecretCleanupReceipt, LocalSecretStoreAdapter, LocalSecretWriteReceipt,
+};
+pub use model_admission::{
+    FrozenModelAdmissionPolicy, FrozenModelRouteAuthority, ModelAdmissionClock,
+    ModelAdmissionClockError, ModelAdmissionDenialReason, ModelAdmissionError,
+    ModelAdmissionErrorKind, ModelAdmissionLimits, ModelAdmissionPolicyLayer,
+    ModelAdmissionService, ModelAdmissionSnapshot, ModelPolicySource, ModelReservationCompletion,
+    ModelReservationReceipt, ModelReservationRelease, ModelReservationReleaseReason,
+    ModelReservationRequest, ModelReservationTerminalOutcome, ModelReservationTerminalReceipt,
+    ModelRoutePolicyDecision,
+};
+pub use model_execution_runtime::{
+    DurableModelExchangeAuthority, ModelExecutionAckReceipt, ModelExecutionBatchReceipt,
+    ModelExecutionOpenReceipt, ModelExecutionPortReceipt, ModelExecutionRuntime,
+    ModelExecutionRuntimeError, ModelExecutionRuntimeErrorKind,
+};
+pub use model_policy_source::{
+    EnterpriseModelPolicyCeiling, LocalModelPolicyAuthority, LocalModelPolicyAuthorityConfig,
+    ModelPolicyAuthorityError, ModelPolicyAuthorityPort, ModelPolicyAuthoritySnapshot,
+    ModelPolicyResolution, ModelPolicyResolutionError, ModelPolicyResolutionErrorKind,
+    ModelPolicyRouteKey, ProductionModelPolicySource,
+};
+pub use model_request_pool::{
+    ModelFrameAckReceipt, ModelFrameWriteReceipt, ModelFrameWriteStatus, ModelRequestAdmission,
+    ModelRequestAdmissionReceipt, ModelRequestAdmissionStatus, ModelRequestPool,
+    ModelRequestPoolConfig, ModelRequestPoolError, ModelRequestPoolErrorCode, ModelRequestRouteKey,
+    ModelRequestSnapshot, ModelRequestState, ModelRequestTerminalOutcome,
+    ModelRequestTerminalReceipt, ModelRoutePoolSnapshot, ModelStreamFrame, ModelStreamReadControl,
+};
+pub use model_retry_planner::{
+    ConfiguredModelRetryPlanAuthority, DurableModelRetryPreOpenPlanner,
+    ModelRetryAdmissionReleaseAuthority, ModelRetryPlanAuthorityPort, ModelRetryPlannerError,
+    ModelRetryPlannerErrorKind, ModelRetryPreOpenPlannerPort,
+};
+pub use model_retry_settlement::{
+    DurableModelRetryContextSource, DurableProviderRetrySettlement, ModelRetrySettlementContext,
+    ModelRetrySettlementContextError, ModelRetrySettlementContextErrorKind,
+    ModelRetrySettlementContextPort, ModelRetrySettlementError, ModelRetrySettlementErrorKind,
+    ModelRetrySettlementReceipt,
+};
+pub use model_retry_usage::{
+    FrozenModelRetryPlan, ModelAttemptCharge, ModelAttemptCompletionCommand,
+    ModelAttemptFailureCommand, ModelAttemptFailureFact, ModelAttemptFailureKind,
+    ModelAttemptStartCommand, ModelAttemptStartReceipt, ModelExecutionCertainty, ModelRetryAction,
+    ModelRetryDecisionReceipt, ModelRetryStep, ModelRetryUsageError, ModelRetryUsageErrorKind,
+    ModelRetryUsageRequest, ModelRetryUsageService, ModelUsageAttribution, ModelUsageFilter,
+    ModelUsageReconciliation, ModelUsageSettlementReceipt, ModelUsageSourceCursor,
+    ModelUsageSourceEntry, ModelUsageSourcePage, ModelUsageTotals, SettledModelUsage,
+};
+pub use model_settings::{
+    DEFAULT_WORKER_CONCURRENCY_LIMIT, ModelSelection, ModelSettingsChange, ModelSettingsError,
+    ModelSettingsErrorKind, ModelSettingsMutationReceipt, ModelSettingsProjection,
+    ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget, ModelSettingsValues,
+};
+pub use model_stream_flow_control::{
+    ModelStreamFlowAckReceipt, ModelStreamFlowCancellationReceipt, ModelStreamFlowCoordinator,
+    ModelStreamFlowError, ModelStreamFlowErrorKind, ModelStreamFlowWriteReceipt,
+};
+pub use observer_decision_service::{
+    ApplyObserverCheckpointCommand, OBSERVER_DECISION_SERVICE_SCHEMA_VERSION,
+    ObserverCheckpointKind, ObserverDecisionCommandContext, ObserverDecisionInput,
+    ObserverDecisionKind, ObserverDecisionMutationReceipt, ObserverDecisionOrigin,
+    ObserverDecisionPersistence, ObserverDecisionProjection, ObserverDecisionService,
+    ObserverDecisionServiceError, ObserverDecisionServiceErrorCode, ObserverDecisionState,
+    ObserverExecutionSource, ObserverRetainedResources, ObserverRuntimeTraceRef,
+    ObserverSafeCheckpoint, RecordObserverDecisionCommand,
+};
+pub use product_session_execution_application::{
+    ProductSessionExecutionApplication, ProductSessionExecutionApplicationError,
+};
+pub(crate) use product_session_service::ReplaceProductSessionExecutionBindingCommand;
+pub use product_session_service::{
+    AppendAssistantMessageCommand, AssistantMessageMutationReceipt, AssistantMessageState,
+    CancelProductSessionCommand, ChatSubmitMutationReceipt, CloseProductSessionCommand,
+    ContinueProductSessionCommand, CreateProductSessionCommand, DurableSessionBinding,
+    ForkProductSessionCommand, PRODUCT_SESSION_SERVICE_SCHEMA_VERSION, ProductSessionApiClock,
+    ProductSessionApiService, ProductSessionAuthoritySeal, ProductSessionCancellationReceipt,
+    ProductSessionCommandContext, ProductSessionExecutionConfig, ProductSessionMessagePage,
+    ProductSessionMutationReceipt, ProductSessionPageRead, ProductSessionPageRequest,
+    ProductSessionPersistence, ProductSessionRecord, ProductSessionService,
+    ProductSessionServiceError, ProductSessionServiceErrorCode, ProductSessionTurnIntent,
+    ProductSessionTurnState, ProductSessionTurnTerminalOutcome, RecordAssistantTerminalCommand,
+    SubmitChatMessageCommand, product_session_command_context, product_session_state_filters,
+};
+pub use provider_admission::{
+    DurableProviderGatewayAdmission, ProviderAdmissionError, ProviderAdmissionErrorKind,
+    ProviderAdmissionOpenReceipt, ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig,
+    ProviderGatewayAdmissionPort, SystemModelAdmissionClock,
+};
+pub use provider_anthropic::ProviderTokenPricing;
+pub use provider_catalog::{
+    CatalogAvailability, ModelCapability, ModelCapabilityProjection, ModelCatalogVersion,
+    ModelToolSupport, PROVIDER_CATALOG_VERSION_EVENT_TOPIC, ProviderCatalogChange,
+    ProviderCatalogEntryProjection, ProviderCatalogError, ProviderCatalogErrorKind,
+    ProviderCatalogMutationReceipt, ProviderCatalogProjection, ProviderCatalogRequest,
+    ProviderCatalogService, ProviderCatalogVersionEvent, ProviderDescriptor,
+    ResolvedModelCapability,
+};
+pub use provider_enterprise_quota::{
+    DurableProviderEnterpriseUsageSource, ProviderEnterpriseQuotaError,
+    ProviderEnterpriseQuotaErrorKind, ProviderEnterpriseQuotaOpen,
+    ProviderEnterpriseQuotaReservation, ProviderEnterpriseQuotaSaga,
+    ProviderEnterpriseUsageSourcePort, ProviderOperationalAdmissionError,
+    ProviderOperationalAdmissionPort,
+};
+pub use provider_gateway::{
+    ProviderAdapterError, ProviderAdapterErrorKind, ProviderAdapterInvocation,
+    ProviderAdapterOpenReceipt, ProviderAdapterPort, ProviderGateway,
+    ProviderGatewayDurableExchange, ProviderGatewayError, ProviderGatewayErrorKind,
+    ProviderGatewayIdentity, ProviderGatewayIdentityError, ProviderGatewayIdentityErrorKind,
+    ProviderGatewayIdentityPort, ProviderGatewayOpenReceipt, ProviderGatewaySettlement,
+    ProviderGatewaySettlementError, ProviderGatewaySettlementPort, ProviderGatewayTerminal,
+    ProviderGatewayTerminalCharge, ProviderGatewayTerminalOutcome, ProviderGatewayTerminalProgress,
+    ProviderGatewayTerminalProgressPort, ProviderGatewayTerminalProgressStage,
+    ProviderGatewayTerminalReceipt, ProviderStreamControlAction, ProviderStreamControlReceipt,
+};
+pub use provider_https_sse::{
+    HttpsSseProviderAdapter, HttpsSseProviderCompletion, HttpsSseProviderConfig,
+    HttpsSseProviderError, HttpsSseProviderErrorKind, HttpsSseProviderLimits,
+    HttpsSseProviderTimeouts, ProviderTlsRoots,
+};
+pub use provider_policy::{
+    DurableProviderPolicyEnforcement, ProviderPolicyError, ProviderPolicyErrorKind,
+    ProviderPolicyReceipt,
+};
+pub use provider_production::{
+    DeterministicLoopbackProviderAdapter, DurableProviderGatewayIdentitySource,
+    StandaloneModelExecutionApplication, StandaloneModelExecutionConfig,
+    StandaloneModelExecutionError, StandaloneModelExecutionErrorKind, StandaloneProviderConfig,
+    local_loopback_retry_policy,
+};
+pub use provider_stream::{
+    CanonicalModelStreamFrame, ProviderFinishReason, ProviderStreamConversionError,
+    ProviderStreamConversionErrorKind, ProviderStreamConverter, ProviderStreamEvent,
+    ProviderStreamFailure, ProviderStreamFailureKind, ProviderTokenUsage, ProviderToolIdentity,
+    ProviderToolIdentityError, ProviderToolKind,
+};
+pub use publication_enterprise_quota::PublicationEnterpriseQuotaSaga;
 pub use publication_policy::PublicationCommandError;
+pub use publication_policy_enforcement::{
+    DurablePublicationPolicyEnforcement, PublicationEnterprisePolicyError,
+    PublicationEnterprisePolicyErrorKind,
+};
 pub use publication_preparation::{PreparedPublication, PublicationPreparationError};
+pub use publication_production::{
+    LocalGitHubProviderConfig, LocalPublicationAdapterConfig, LocalPublicationAdapterError,
+    LocalPublicationAuthority, LocalPublicationAuthorityConfig, LocalPublicationProviderRegistry,
+    PublicationAuthorityError, PublicationAuthorityErrorKind, PublicationAuthorityFacts,
+    PublicationAuthorityPort, PublicationAuthorityRequest, PublicationProviderRegistry,
+    PublicationProviderRegistryError, PublicationProviderRegistryErrorKind,
+    PublicationProviderSession,
+};
+pub use remote_worker_pool::{
+    RemoteWorkerAuthenticationError, RemoteWorkerAuthenticationErrorKind,
+    RemoteWorkerAuthenticator, RemoteWorkerConnection, RemoteWorkerConnectionState,
+    RemoteWorkerCredential, RemoteWorkerPoolAdapter, RemoteWorkerPoolError,
+    RemoteWorkerPoolErrorKind, RemoteWorkerPrincipal,
+};
+pub use repository_scheduler::{RepositoryExecutionScheduler, RepositoryExecutionSchedulerError};
+pub use responsibility_assignment::{
+    ResponsibilityAssignment, ResponsibilityAssignmentAction, ResponsibilityAssignmentClock,
+    ResponsibilityAssignmentClockError, ResponsibilityAssignmentCommand,
+    ResponsibilityAssignmentContext, ResponsibilityAssignmentError,
+    ResponsibilityAssignmentErrorKind, ResponsibilityAssignmentId,
+    ResponsibilityAssignmentListRequest, ResponsibilityAssignmentOperation,
+    ResponsibilityAssignmentReceipt, ResponsibilityAssignmentService,
+    ResponsibilityAssignmentState, ResponsibilityAuthorityError, ResponsibilityAuthorityPort,
+    ResponsibilityAuthorityRequest, ResponsibilityCommandAuthority, ResponsibilityInboxAuthority,
+    ResponsibilityInboxSnapshot, ResponsibilityListAuthority, ResponsibilityPrincipalAuthority,
+    ResponsibilityReviewKind, ResponsibilityRole, ResponsibilityTarget,
+    SystemResponsibilityAssignmentClock,
+};
+pub use responsibility_assignment_authority::{
+    DurableResponsibilityTargetAuthority, EnterpriseResponsibilityAuthority,
+    ResponsibilityTargetAuthorityPort, ResponsibilityTargetAuthoritySeal,
+};
 pub use runtime_event_transaction::RuntimeMessageError;
 pub use session_identity::{
     SessionBindingAcceptance, SessionIdentityAdapterError, validate_session_binding,
 };
+pub use temporary_root_lease::{
+    OwnedTemporaryRoot, SystemTemporaryRootLeaseRuntime, TEMPORARY_ROOT_LEASE_FILE,
+    TemporaryRootLease, TemporaryRootLeaseConfig, TemporaryRootLeaseError,
+    TemporaryRootLeaseErrorKind, TemporaryRootLeaseManager, TemporaryRootLeaseRuntime,
+    TemporaryRootReclaimReport, TemporaryRootTarget,
+};
+pub use vault_kms_network::{
+    VaultKmsNetworkAdapter, VaultKmsNetworkConfig, VaultKmsNetworkKeyRotationReceipt,
+    VaultKmsNetworkLeaseReceipt, VaultKmsNetworkLeasedSecret, VaultKmsNetworkRevocationReceipt,
+    VaultKmsNetworkTimeouts, VaultKmsNetworkTlsRoots, VaultKmsNetworkWriteReceipt,
+    VaultKmsWorkloadCredential, VaultKmsWorkloadIdentityPort,
+};
+pub use vault_secret_store::{
+    SystemVaultKmsClock, VaultKmsClock, VaultKmsClockError, VaultKmsKeyMaterial, VaultKmsKeyring,
+    VaultKmsRewrapReceipt, VaultKmsSecretStoreAdapter, VaultLeasedSecret,
+    VaultSecretCleanupReceipt, VaultSecretLeaseReceipt, VaultSecretWriteReceipt,
+};
+pub use worker_enterprise_quota::{
+    WorkerEnterpriseQuotaAuthority, WorkerEnterpriseQuotaAuthorityPort, WorkerEnterpriseQuotaClaim,
+    WorkerEnterpriseQuotaError, WorkerEnterpriseQuotaErrorKind, WorkerEnterpriseQuotaReservation,
+    WorkerEnterpriseQuotaSaga, WorkerEnterpriseUsageSourcePort, WorkerOperationalClaimPort,
+};
+pub use worker_execution_lifecycle::{
+    DurableWorkerExecutionLifecycle, WorkerExecutionLifecycleError,
+    WorkerExecutionLifecycleErrorKind, WorkerExecutionRelease, WorkerExecutionTerminalReceipt,
+    WorkerExecutionUsageSettlement,
+};
+pub use worker_fleet_projection::{
+    WorkerFleetProjectionService, WorkerFleetProjectionServiceError,
+    WorkerFleetProjectionServiceErrorKind,
+};
+pub use worker_interaction_outbound::{
+    DurableWorkerInteractionOutbound, WorkerInteractionClaim, WorkerInteractionClaimPage,
+    WorkerInteractionConnectionError, WorkerInteractionConnectionErrorKind,
+    WorkerInteractionPageCursor,
+};
+pub use worker_policy::{DurableWorkerPolicyEnforcement, WorkerPolicyError, WorkerPolicyErrorKind};
 
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use delivery_execution::{
     DeliveryExecutionDispatchReceipt, DeliveryExecutionError, DeliveryExecutionPortError,
@@ -57,7 +490,7 @@ pub use terminal_outcome_transaction::{
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
     ControlPlaneWebSocketDeliveryChangedEventTypeValue, ControlPlaneWebSocketEventType,
-    RepositoryScope, RepositoryScopeKind, Scope,
+    RepositoryScope, Scope,
 };
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
@@ -66,19 +499,28 @@ use winwincode_audit::{
 use winwincode_delivery::application::{CoordinationError, verdict::SubmitVerdictFacts};
 use winwincode_delivery::domain::Delivery;
 use winwincode_domain::{
-    ControlPlaneEventId, DeliveryId, OrganizationId, ProjectId, RepositoryId, Revision,
-    Sha256Digest, SystemActorId, WorkspaceId,
+    ControlPlaneEventId, DeliveryId, Instant, RequestId, Revision, Sha256Digest, SystemActorId,
 };
-use winwincode_execution_port::generated as execution_port;
+use winwincode_execution_port::generated::{self as execution_port, ExecutionScope};
 pub use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, ArtifactObjectStore,
-    ArtifactStore, CommitReceipt, DurableOutboxEvent, GitSourceResolver, LoadedAggregateJournal,
-    NewOutboxEvent, OutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventCursor,
+    ArtifactStore, CandidateGitPinReceipt, CandidateGitReleaseAuthority,
+    CandidateGitReleaseReceipt, CandidateGitRetentionError, CandidateGitTerminalOutcome,
+    CommitReceipt, DurableOutboxEvent, GitSourceResolver, LoadedAggregateJournal, NewOutboxEvent,
+    OutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventCursor,
     ProjectionEventStream, ProjectionEventStreamKey, StorageError, StorageErrorKind, StoredState,
 };
 use winwincode_storage::{
-    LocalArtifactObjectStore, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit,
+    LocalArtifactObjectStore, PublicEventActor, PublicEventScope, PublicEventSource,
+    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+    StateRevisionGuard, public_receipt_identity as storage_public_receipt_identity,
+    receipt_actor_key as storage_receipt_actor_key, receipt_scope_key as storage_receipt_scope_key,
+    repository_scope_from_receipt_key as storage_repository_scope_from_receipt_key,
+};
+pub use worker_management::{
+    ScopeWorkerHealthEventPort, WORKER_HEALTH_CHANGED_TOPIC, WorkerHealthEventPort,
+    WorkerHealthEventPortError, WorkerHealthEventPortErrorKind, WorkerHealthEventRequest,
+    WorkerManagementService, WorkerManagementServiceError, WorkerManagementServiceErrorKind,
 };
 
 /// Deterministic trusted-fact fixtures for exercising the typed Control Plane
@@ -186,9 +628,6 @@ pub mod test_support {
         )
     }
 }
-
-const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
-const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryChangeKind {
@@ -580,12 +1019,18 @@ impl std::error::Error for ShutdownError {}
 /// background tasks, so shutdown has a finite and observable ownership chain.
 pub struct ControlPlane {
     storage: Option<Box<dyn ProductStateStorage>>,
+    local_database_path: Option<PathBuf>,
     audit_store: Option<AuditStore>,
     artifact_store: Option<ArtifactStore>,
     git_source_resolver: Option<Box<dyn GitSourceResolver>>,
+    git_repository_root: Option<PathBuf>,
     publisher: Option<Box<dyn EventPublisher>>,
     temporary_root: Option<OwnedTemporaryRoot>,
     strongflow_sources: Option<strongflow_projection::StrongFlowProjectionSources>,
+    delivery_authority: Option<Box<dyn DeliveryAuthorityPort>>,
+    delivery_dispatcher: Option<Box<dyn ExecutionJobDispatcher>>,
+    publication_authority: Option<Box<dyn PublicationAuthorityPort>>,
+    publication_providers: Option<Box<dyn PublicationProviderRegistry>>,
 }
 
 impl ControlPlane {
@@ -711,8 +1156,10 @@ impl ControlPlane {
                 )));
             }
         };
+        let local_database_path = storage.database_path().to_path_buf();
         Self::start_with_resources(
             Box::new(storage),
+            Some(local_database_path),
             Some(audit_store),
             Some(artifact_store),
             publisher,
@@ -747,7 +1194,7 @@ impl ControlPlane {
                 )));
             }
         };
-        Self::start_with_resources(storage, None, None, publisher, temporary_root)
+        Self::start_with_resources(storage, None, None, None, publisher, temporary_root)
     }
 
     /// Composes the application with explicit product-state and Artifact adapters.
@@ -784,6 +1231,7 @@ impl ControlPlane {
         Self::start_with_resources(
             storage,
             None,
+            None,
             Some(artifact_store),
             publisher,
             temporary_root,
@@ -792,6 +1240,7 @@ impl ControlPlane {
 
     fn start_with_resources(
         storage: Box<dyn ProductStateStorage>,
+        local_database_path: Option<PathBuf>,
         audit_store: Option<AuditStore>,
         artifact_store: Option<ArtifactStore>,
         publisher: Box<dyn EventPublisher>,
@@ -799,12 +1248,18 @@ impl ControlPlane {
     ) -> Result<Self, StartError> {
         let mut control_plane = Self {
             storage: Some(storage),
+            local_database_path,
             audit_store,
             artifact_store,
             git_source_resolver: None,
+            git_repository_root: None,
             publisher: Some(publisher),
             temporary_root: Some(temporary_root),
             strongflow_sources: None,
+            delivery_authority: None,
+            delivery_dispatcher: None,
+            publication_authority: None,
+            publication_providers: None,
         };
         if let Err(error) = control_plane.flush_outbox() {
             let cleanup_failures = control_plane.close_resources();
@@ -818,6 +1273,15 @@ impl ControlPlane {
             )));
         }
         Ok(control_plane)
+    }
+
+    /// Returns the canonical local product-state database owned by this host.
+    ///
+    /// Hosts composed through adapter injection do not claim a local database
+    /// identity and return `None`.
+    #[must_use]
+    pub fn local_database_path(&self) -> Option<&Path> {
+        self.local_database_path.as_deref()
     }
 
     /// Returns the instance-owned temporary root while the host is running.
@@ -834,6 +1298,7 @@ impl ControlPlane {
             .as_ref()
             .expect("a running Control Plane always owns a temporary root")
             .path()
+            .expect("a running Control Plane must retain a healthy temporary-root lease")
     }
 
     /// Installs the trusted runtime-ledger and publication read adapters before
@@ -874,8 +1339,52 @@ impl ControlPlane {
                 StorageError::invalid_input("Git source resolver is already installed"),
             ));
         }
+        self.git_repository_root = resolver.controlled_repository_root().map(Path::to_path_buf);
         self.git_source_resolver = Some(resolver);
         Ok(())
+    }
+
+    /// Installs the controlled repository root used by durable candidate Git
+    /// references.  Local source resolvers provide this automatically; this
+    /// setter is for a resolver adapter whose repository root is configured by
+    /// the application rather than exposed by the adapter itself.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing/non-directory root or replacement of an already
+    /// selected retention root.
+    pub fn install_git_repository_root(
+        &mut self,
+        root: impl AsRef<Path>,
+    ) -> Result<(), CandidateResolutionError> {
+        let root = std::fs::canonicalize(root.as_ref()).map_err(|_| {
+            CandidateResolutionError::Storage(StorageError::invalid_input(
+                "controlled Git repository root is unavailable",
+            ))
+        })?;
+        if !root.is_dir() {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input("controlled Git repository root is not a directory"),
+            ));
+        }
+        if self
+            .git_repository_root
+            .as_ref()
+            .is_some_and(|existing| existing != &root)
+        {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input("controlled Git repository root is already installed"),
+            ));
+        }
+        self.git_repository_root = Some(root);
+        Ok(())
+    }
+
+    /// Returns the one controlled repository root selected for candidate
+    /// reconstruction and durable Git retention.
+    #[must_use]
+    pub fn git_repository_root(&self) -> Option<&Path> {
+        self.git_repository_root.as_deref()
     }
 
     /// Commits one canonical HTTP command's state and outbox first, then
@@ -940,7 +1449,27 @@ impl ControlPlane {
             let storage = self
                 .storage_mut()
                 .map_err(DeliveryCommandCommitError::Storage)?;
-            delivery_command_transaction::execute(storage, command, facts)?
+            delivery_command_transaction::execute(storage, command, facts, None)?
+        };
+        self.flush_outbox()
+            .map_err(|source| DeliveryCommandCommitError::PublicationPending {
+                receipt: Box::new(receipt.clone()),
+                source,
+            })?;
+        Ok(receipt)
+    }
+
+    fn commit_delivery_command_with_handoff(
+        &mut self,
+        command: &CommandEnvelope,
+        facts: &DeliveryCommandFacts,
+        handoff: &terminal_outcome_transaction::DeliveryTerminalHandoff,
+    ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
+        let receipt = {
+            let storage = self
+                .storage_mut()
+                .map_err(DeliveryCommandCommitError::Storage)?;
+            delivery_command_transaction::execute(storage, command, facts, Some(handoff))?
         };
         self.flush_outbox()
             .map_err(|source| DeliveryCommandCommitError::PublicationPending {
@@ -969,7 +1498,29 @@ impl ControlPlane {
             let storage = self.storage_mut().map_err(|error| {
                 DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
             })?;
-            delivery_transaction::execute(storage, command, pending, dispatcher)?
+            delivery_transaction::execute(storage, command, pending, dispatcher, None)?
+        };
+        self.flush_outbox().map_err(|source| {
+            DeliveryExecutionError::ProjectionPublicationAfterDispatch {
+                commit: Box::new(receipt.commit.clone()),
+                source: DeliveryExecutionPortError::new(source.to_string()),
+            }
+        })?;
+        Ok(receipt)
+    }
+
+    fn commit_delivery_execution_with_handoff(
+        &mut self,
+        command: &CommandEnvelope,
+        pending: &PendingDeliveryExecution,
+        dispatcher: &mut dyn ExecutionJobDispatcher,
+        handoff: &terminal_outcome_transaction::DeliveryTerminalHandoff,
+    ) -> Result<DeliveryExecutionDispatchReceipt, DeliveryExecutionError> {
+        let receipt = {
+            let storage = self.storage_mut().map_err(|error| {
+                DeliveryExecutionError::Commit(DeliveryExecutionPortError::new(error.to_string()))
+            })?;
+            delivery_transaction::execute(storage, command, pending, dispatcher, Some(handoff))?
         };
         self.flush_outbox().map_err(|source| {
             DeliveryExecutionError::ProjectionPublicationAfterDispatch {
@@ -985,8 +1536,9 @@ impl ControlPlane {
     /// `CodexThread`.
     ///
     /// The generated message is the only wire input. The second argument is an
-    /// opaque scheduler-owned `SessionBinding` authority; the message cannot
-    /// authorize itself.
+    /// opaque scheduler-owned `SessionBinding` authority, and `server_time` is
+    /// captured from the trusted ingress clock. The message cannot authorize
+    /// itself or backdate `sentAt` to reopen an expired lease.
     ///
     /// # Errors
     ///
@@ -998,12 +1550,13 @@ impl ControlPlane {
         &mut self,
         message: &execution_port::SessionBindingMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        server_time: &Instant,
     ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliverySessionBindingCommitError::Storage)?;
-            session_binding_transaction::execute(storage, message, authority)?
+            session_binding_transaction::execute_at(storage, message, authority, server_time)?
         };
         self.flush_outbox().map_err(|source| {
             DeliverySessionBindingCommitError::PublicationPending {
@@ -1016,8 +1569,10 @@ impl ControlPlane {
 
     /// Accepts one generated Worker `runtime.event` only after joining its
     /// durable Delivery-stage `ExecutionJob` to the current four-identity
-    /// `SessionBinding`. Rejected input returns a stable generated ack and
-    /// does not write Delivery state, journal, receipt, or outbox members.
+    /// `SessionBinding`. `server_time` is the trusted ingress clock; Worker
+    /// `sentAt` remains only a causal/audit fact. Rejected input returns a
+    /// stable generated ack and does not write Delivery state, journal,
+    /// receipt, or outbox members.
     ///
     /// # Errors
     ///
@@ -1029,10 +1584,11 @@ impl ControlPlane {
         scope: &RepositoryScope,
         message: &execution_port::RuntimeEventMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+        server_time: &Instant,
     ) -> Result<execution_port::RuntimeAckMessage, RuntimeMessageError> {
         let ack = {
             let storage = self.storage_mut().map_err(RuntimeMessageError::Storage)?;
-            runtime_event_transaction::execute(storage, scope, message, authority)?
+            runtime_event_transaction::execute_at(storage, scope, message, authority, server_time)?
         };
         if !matches!(
             ack.status,
@@ -1062,15 +1618,40 @@ impl ControlPlane {
         message: &execution_port::ArtifactOpenMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
-        let storage = self.storage.as_deref().ok_or_else(|| {
-            ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
-        })?;
-        let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
-            ArtifactMessageError::Storage(StorageError::adapter(
-                "Control Plane Artifact store is not configured",
-            ))
-        })?;
-        artifact_transaction::accept_open(storage, artifacts, scope, message, authority)
+        let data_directory = self.enterprise_quota_data_directory()?;
+        let mut quota = DurableEnterpriseQuotaAdmission::new(
+            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
+        );
+        let mut usage = DurableArtifactEnterpriseUsage::new(
+            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
+        );
+        let result = {
+            let storage = self.storage.as_deref().ok_or_else(|| {
+                ArtifactMessageError::Storage(StorageError::adapter(
+                    "Control Plane storage is closed",
+                ))
+            })?;
+            let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
+                ArtifactMessageError::Storage(StorageError::adapter(
+                    "Control Plane Artifact store is not configured",
+                ))
+            })?;
+            let mut enterprise_quota = ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage);
+            artifact_transaction::accept_open(
+                storage,
+                artifacts,
+                scope,
+                message,
+                authority,
+                &mut enterprise_quota,
+            )
+        };
+        let usage_close = usage.close();
+        let quota_close = quota.close();
+        let ack = result?;
+        usage_close.map_err(ArtifactMessageError::Storage)?;
+        quota_close.map_err(ArtifactMessageError::Storage)?;
+        Ok(ack)
     }
 
     /// Accepts one generated `artifact.chunk` through the same lease-scoped
@@ -1086,15 +1667,109 @@ impl ControlPlane {
         message: &execution_port::ArtifactChunkMessage,
         authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
     ) -> Result<execution_port::ArtifactAckMessage, ArtifactMessageError> {
-        let storage = self.storage.as_deref().ok_or_else(|| {
-            ArtifactMessageError::Storage(StorageError::adapter("Control Plane storage is closed"))
-        })?;
-        let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
-            ArtifactMessageError::Storage(StorageError::adapter(
-                "Control Plane Artifact store is not configured",
-            ))
-        })?;
-        artifact_transaction::accept_chunk(storage, artifacts, scope, message, authority)
+        let data_directory = self.enterprise_quota_data_directory()?;
+        let mut quota = DurableEnterpriseQuotaAdmission::new(
+            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
+        );
+        let mut usage = DurableArtifactEnterpriseUsage::new(
+            SqliteStorage::open(&data_directory).map_err(ArtifactMessageError::Storage)?,
+        );
+        let result = {
+            let storage = self.storage.as_deref().ok_or_else(|| {
+                ArtifactMessageError::Storage(StorageError::adapter(
+                    "Control Plane storage is closed",
+                ))
+            })?;
+            let artifacts = self.artifact_store.as_mut().ok_or_else(|| {
+                ArtifactMessageError::Storage(StorageError::adapter(
+                    "Control Plane Artifact store is not configured",
+                ))
+            })?;
+            let mut enterprise_quota = ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage);
+            artifact_transaction::accept_chunk(
+                storage,
+                artifacts,
+                scope,
+                message,
+                authority,
+                &mut enterprise_quota,
+            )
+        };
+        let usage_close = usage.close();
+        let quota_close = quota.close();
+        let ack = result?;
+        usage_close.map_err(ArtifactMessageError::Storage)?;
+        quota_close.map_err(ArtifactMessageError::Storage)?;
+        if message.is_final
+            && matches!(
+                ack.status,
+                execution_port::LeaseWriteStatus::Accepted
+                    | execution_port::LeaseWriteStatus::Duplicate
+            )
+            && self.git_source_resolver.is_some()
+            && self.git_repository_root.is_some()
+        {
+            self.pin_candidate_git_after_final_artifact_ack(scope, message, &ack, authority)
+                .map_err(|error| {
+                    ArtifactMessageError::Storage(StorageError::adapter(error.to_string()))
+                })?;
+        }
+        Ok(ack)
+    }
+
+    fn enterprise_quota_data_directory(&self) -> Result<PathBuf, ArtifactMessageError> {
+        self.local_enterprise_quota_directory()
+            .map_err(ArtifactMessageError::Storage)
+    }
+
+    fn local_enterprise_quota_directory(&self) -> Result<PathBuf, StorageError> {
+        self.local_database_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                StorageError::adapter(
+                    "enterprise quota requires canonical local Control Plane storage",
+                )
+            })
+    }
+
+    fn release_terminal_artifact_quota(
+        &mut self,
+        message: &execution_port::JobOutcomeMessage,
+        status: winwincode_delivery::application::stage::TerminalOutcomeStatus,
+    ) -> Result<(), ArtifactEnterpriseQuotaSagaError> {
+        let data_directory = self.local_enterprise_quota_directory()?;
+        let mut quota = DurableEnterpriseQuotaAdmission::new(SqliteStorage::open(&data_directory)?);
+        let mut usage = DurableArtifactEnterpriseUsage::new(SqliteStorage::open(&data_directory)?);
+        let reason = match status {
+            winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled => {
+                winwincode_storage::EnterpriseQuotaReleaseReason::Cancelled
+            }
+            winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
+            | winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError => {
+                winwincode_storage::EnterpriseQuotaReleaseReason::Failed
+            }
+            winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded => {
+                unreachable!("successful terminal outcomes do not release Artifact quota")
+            }
+        };
+        let result = {
+            let artifacts = self.artifact_store.as_ref().ok_or_else(|| {
+                ArtifactEnterpriseQuotaSagaError::Storage(StorageError::adapter(
+                    "Control Plane Artifact store is not configured",
+                ))
+            })?;
+            ArtifactEnterpriseQuotaSaga::new(&mut quota, &mut usage)
+                .release_unfinished_job(artifacts, &message.lease.job_id, reason, &message.sent_at)
+                .map(|_| ())
+        };
+        let usage_close = usage.close();
+        let quota_close = quota.close();
+        result?;
+        usage_close?;
+        quota_close?;
+        Ok(())
     }
 
     /// Rebuilds and freezes the current Delivery candidate from one exact,
@@ -1144,13 +1819,411 @@ impl ControlPlane {
         )
     }
 
+    /// Pins a complete candidate Artifact after its final generated
+    /// acknowledgement has been accepted.
+    ///
+    /// The acknowledgement and chunk are checked against the same sealed
+    /// `SessionBinding` that accepted the upload.  Candidate source facts are
+    /// rebuilt from the durable Artifact and controlled Git repository before
+    /// the retention ledger creates its stable reference.  Calling this method
+    /// for a non-final or non-candidate frame is a no-op; exact final retries
+    /// return the existing durable pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns before a pin is created for a changed acknowledgement, missing
+    /// source, foreign Artifact, unavailable local retention storage, or a Git
+    /// object/reference conflict.  Remote/custom resolver adapters can leave
+    /// the repository root unset; those adapters must invoke their equivalent
+    /// retention seam with a configured controlled root.
+    #[allow(clippy::too_many_lines)]
+    pub fn pin_candidate_git_after_final_artifact_ack(
+        &mut self,
+        scope: &RepositoryScope,
+        chunk: &execution_port::ArtifactChunkMessage,
+        acknowledgement: &execution_port::ArtifactAckMessage,
+        authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+    ) -> Result<Option<CandidateGitPinReceipt>, CandidateResolutionError> {
+        if !chunk.is_final
+            || chunk.artifact_id != acknowledgement.artifact_id
+            || !matches!(
+                acknowledgement.status,
+                execution_port::LeaseWriteStatus::Accepted
+                    | execution_port::LeaseWriteStatus::Duplicate
+            )
+            || acknowledgement.error.is_some()
+            || acknowledgement.replay_from_sequence.is_some()
+        {
+            return Ok(None);
+        }
+        if acknowledgement.lease != chunk.lease
+            || acknowledgement.worker_session_id != chunk.worker_session_id
+            || acknowledgement.session_identity != chunk.session_identity
+            || acknowledgement.ack_sequence.0 != chunk.sequence.0
+            || acknowledgement.lease != authority_lease(authority)
+        {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input(
+                    "final Artifact acknowledgement differs from its sealed Worker authority",
+                ),
+            ));
+        }
+        let local_database_path = self.local_database_path.clone().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "candidate Git retention requires local Control Plane storage",
+            ))
+        })?;
+        let repository_root = self.git_repository_root.clone().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "candidate Git retention repository root is not configured",
+            ))
+        })?;
+        let source_resolver = self.git_source_resolver.as_deref().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane Git source resolver is not configured",
+            ))
+        })?;
+        let storage = self
+            .storage_ref()
+            .map_err(CandidateResolutionError::Storage)?;
+        let (_, job) = delivery_transaction::load_durable_execution_job(
+            storage,
+            &acknowledgement.lease.job_id,
+        )
+        .map_err(CandidateResolutionError::Storage)?;
+        let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input(
+                    "candidate Artifact retention requires a Delivery execution Job",
+                ),
+            ));
+        };
+        let provenance = candidate_source::provenance_from_session_binding(authority)?;
+        let scope_key = repository_scope_key(scope)?;
+        let artifacts = self.artifact_store.as_ref().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane Artifact store is not configured",
+            ))
+        })?;
+        let receipt = artifacts.complete_write_receipt(
+            &scope_key,
+            &acknowledgement.artifact_id,
+            &provenance,
+        )?;
+        if receipt.record().kind() != "candidate" {
+            return Ok(None);
+        }
+        if u64::try_from(acknowledgement.ack_sequence.0).ok()
+            != Some(receipt.acknowledged_sequence())
+        {
+            return Err(CandidateResolutionError::Storage(
+                StorageError::invalid_input(
+                    "final Artifact acknowledgement sequence is not complete",
+                ),
+            ));
+        }
+        let source = candidate_source::resolve_source(
+            storage,
+            artifacts,
+            source_resolver,
+            scope,
+            &job_scope.delivery_id,
+            &acknowledgement.artifact_id,
+            receipt.record().digest(),
+            receipt.record().provenance().clone(),
+        )?;
+        let final_ack_digest = artifact_ack_digest(acknowledgement)?;
+        let mut retention_storage =
+            SqliteStorage::open(local_database_path.parent().ok_or_else(|| {
+                CandidateResolutionError::Storage(StorageError::adapter(
+                    "Control Plane database path has no parent",
+                ))
+            })?)
+            .map_err(CandidateResolutionError::Storage)?;
+        let pin = {
+            let mut retention = retention_storage
+                .git_candidate_retention(&repository_root)
+                .map_err(CandidateResolutionError::GitRetention)?;
+            retention
+                .pin_after_final_artifact_ack(&receipt, &source, &final_ack_digest)
+                .map_err(CandidateResolutionError::GitRetention)?
+        };
+        Box::new(retention_storage)
+            .close()
+            .map_err(CandidateResolutionError::Storage)?;
+        Ok(Some(pin))
+    }
+
+    /// Durably records that a terminal Delivery and every candidate reader
+    /// have closed.  The supplied terminal receipt must already be present in
+    /// the canonical receipt table and must identify the current Delivery
+    /// revision; this method is the only Control Plane constructor for the
+    /// release authority used below.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal receipt is stale, foreign, or the
+    /// read-closure mutation cannot be committed.
+    pub fn commit_candidate_git_reads_closed(
+        &mut self,
+        delivery_id: &DeliveryId,
+        terminal_receipt: &CommitReceipt,
+        terminal_outcome: CandidateGitTerminalOutcome,
+    ) -> Result<CandidateGitReadsClosedReceipt, CandidateResolutionError> {
+        self.commit_candidate_git_reads_closed_with_guards(
+            delivery_id,
+            terminal_receipt,
+            terminal_outcome,
+            &[],
+        )
+    }
+
+    fn commit_candidate_git_reads_closed_with_guards(
+        &mut self,
+        delivery_id: &DeliveryId,
+        terminal_receipt: &CommitReceipt,
+        terminal_outcome: CandidateGitTerminalOutcome,
+        reader_guards: &[StateRevisionGuard],
+    ) -> Result<CandidateGitReadsClosedReceipt, CandidateResolutionError> {
+        let receipt = {
+            let storage = self
+                .storage_mut()
+                .map_err(CandidateResolutionError::Storage)?;
+            candidate_git_release::commit(
+                storage,
+                delivery_id,
+                terminal_receipt,
+                terminal_outcome,
+                reader_guards,
+            )?
+        };
+        self.flush_outbox().map_err(|error| {
+            CandidateResolutionError::Storage(StorageError::adapter(error.to_string()))
+        })?;
+        Ok(receipt)
+    }
+
+    /// Releases a candidate Git reference using the exact durable Delivery
+    /// terminal/read-closure receipt.  The receipt is checked again against
+    /// canonical state so a stale or tampered in-memory value cannot authorize
+    /// deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the read-closure receipt is missing or the
+    /// resulting release authority fails durable validation.
+    pub fn release_candidate_git_after_delivery_reads_closed(
+        &mut self,
+        pin: &CandidateGitPinReceipt,
+        reads_closed: &CandidateGitReadsClosedReceipt,
+    ) -> Result<CandidateGitReleaseReceipt, CandidateResolutionError> {
+        let authority = reads_closed.release_authority()?;
+        self.release_candidate_git_after_delivery_final(pin, &authority)
+    }
+
+    /// Releases a durable candidate Git reference only after the caller has
+    /// sealed both the Delivery terminal receipt and the read-closure receipt.
+    /// The release ledger is receipt-first and idempotent across retries and
+    /// process restarts.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a changed pin/terminal authority, a foreign repository, a moved
+    /// reference, or an unavailable local retention database.
+    pub fn release_candidate_git_after_delivery_final(
+        &mut self,
+        pin: &CandidateGitPinReceipt,
+        authority: &CandidateGitReleaseAuthority,
+    ) -> Result<CandidateGitReleaseReceipt, CandidateResolutionError> {
+        candidate_git_release::validate_release_authority(
+            self.storage_ref()
+                .map_err(CandidateResolutionError::Storage)?,
+            pin,
+            authority,
+        )?;
+        let local_database_path = self.local_database_path.clone().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "candidate Git retention requires local Control Plane storage",
+            ))
+        })?;
+        let repository_root = self.git_repository_root.clone().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "candidate Git retention repository root is not configured",
+            ))
+        })?;
+        let parent = local_database_path.parent().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane database path has no parent",
+            ))
+        })?;
+        let mut retention_storage =
+            SqliteStorage::open(parent).map_err(CandidateResolutionError::Storage)?;
+        let release = {
+            let mut retention = retention_storage
+                .git_candidate_retention(&repository_root)
+                .map_err(CandidateResolutionError::GitRetention)?;
+            retention
+                .release_after_delivery_final(pin, authority)
+                .map_err(CandidateResolutionError::GitRetention)?
+        };
+        Box::new(retention_storage)
+            .close()
+            .map_err(CandidateResolutionError::Storage)?;
+        Ok(release)
+    }
+
+    /// Completes the production terminal Delivery boundary for every
+    /// candidate retained by that Delivery.
+    ///
+    /// The terminal/read-closure receipt is committed before any Git
+    /// reference is touched.  Candidate bindings are loaded from the durable
+    /// retention ledger, then each exact reference is released through the
+    /// receipt-first compare-and-swap operation.  A failure after one or more
+    /// releases leaves the closure and release intents durable; an exact
+    /// Delivery command replay can therefore resume the remaining releases.
+    ///
+    /// This is intentionally a narrow Control Plane composition seam.  The
+    /// Delivery application calls it only after a canonical terminal
+    /// Delivery mutation (or its exact replay) has been loaded.  It does not
+    /// accept caller-supplied commit/tree/reference identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns before releasing any reference when the terminal receipt is
+    /// stale or the Delivery still has an active reader.  A storage or Git
+    /// failure after the read-closure commit is retryable because all prior
+    /// receipts remain durable.
+    pub fn finalize_candidate_git_after_delivery_terminal(
+        &mut self,
+        delivery_id: &DeliveryId,
+        terminal_receipt: &CommitReceipt,
+        terminal_outcome: CandidateGitTerminalOutcome,
+    ) -> Result<Vec<CandidateGitReleaseReceipt>, CandidateResolutionError> {
+        // Adapter-injected Control Planes without a local candidate-retention
+        // root have no Git refs to release.  The local production composition
+        // always installs both values before accepting a Delivery command.
+        if self.git_source_resolver.is_none() && self.git_repository_root.is_none() {
+            return Ok(Vec::new());
+        }
+        let Some(reader_guards) = candidate_git_release::ensure_publication_readers_closed(
+            self.storage_ref()
+                .map_err(CandidateResolutionError::Storage)?,
+            delivery_id,
+        )?
+        else {
+            // A configured publication target is a future reader even before
+            // its durable Publication intent exists.  Keep every candidate
+            // pin until that intent reaches a terminal state.
+            return Ok(Vec::new());
+        };
+        let reads_closed = self.commit_candidate_git_reads_closed_with_guards(
+            delivery_id,
+            terminal_receipt,
+            terminal_outcome,
+            &reader_guards,
+        )?;
+        let pins = self.load_candidate_git_pins_for_delivery(delivery_id)?;
+        let mut releases = Vec::with_capacity(pins.len());
+        for pin in pins {
+            releases
+                .push(self.release_candidate_git_after_delivery_reads_closed(&pin, &reads_closed)?);
+        }
+        Ok(releases)
+    }
+
+    fn load_candidate_git_pins_for_delivery(
+        &self,
+        delivery_id: &DeliveryId,
+    ) -> Result<Vec<CandidateGitPinReceipt>, CandidateResolutionError> {
+        let local_database_path = self.local_database_path.clone().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "candidate Git retention requires local Control Plane storage",
+            ))
+        })?;
+        let repository_root = self.git_repository_root.clone().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "candidate Git retention repository root is not configured",
+            ))
+        })?;
+        let parent = local_database_path.parent().ok_or_else(|| {
+            CandidateResolutionError::Storage(StorageError::adapter(
+                "Control Plane database path has no parent",
+            ))
+        })?;
+        let mut retention_storage =
+            SqliteStorage::open(parent).map_err(CandidateResolutionError::Storage)?;
+        let pins = {
+            let mut retention = retention_storage
+                .git_candidate_retention(&repository_root)
+                .map_err(CandidateResolutionError::GitRetention)?;
+            retention
+                .load_by_delivery(delivery_id)
+                .map_err(CandidateResolutionError::GitRetention)?
+        };
+        Box::new(retention_storage)
+            .close()
+            .map_err(CandidateResolutionError::Storage)?;
+        Ok(pins)
+    }
+
+    /// Retries the production candidate release for a terminal Delivery by
+    /// resolving its original durable mutation receipt from the canonical
+    /// stream revision.  Publication recovery uses this narrow composition
+    /// after a Published, Failed, or Cancelled Publication response, where
+    /// the original Delivery command response is no longer in memory.
+    pub(crate) fn finalize_candidate_git_for_terminal_delivery(
+        &mut self,
+        delivery_id: &DeliveryId,
+    ) -> Result<(), CandidateResolutionError> {
+        if self.git_source_resolver.is_none() && self.git_repository_root.is_none() {
+            return Ok(());
+        }
+        let stream_id = delivery_transaction::delivery_stream_id(delivery_id);
+        let receipt = {
+            let storage = self
+                .storage_ref()
+                .map_err(CandidateResolutionError::Storage)?;
+            let state = storage.load_state(&stream_id)?.ok_or_else(|| {
+                CandidateResolutionError::Storage(StorageError::invalid_input(
+                    "terminal Delivery state is missing",
+                ))
+            })?;
+            let delivery = Delivery::decode_json(&state.payload).map_err(|error| {
+                CandidateResolutionError::Storage(StorageError::invalid_input(format!(
+                    "terminal Delivery state is invalid: {error}"
+                )))
+            })?;
+            if delivery.id() != delivery_id
+                || delivery.revision() != state.revision
+                || delivery.snapshot().status
+                    != winwincode_delivery::domain::DeliveryStatus::Delivered
+            {
+                return Ok(());
+            }
+            storage
+                .load_receipt_for_stream_revision(&stream_id, state.revision)?
+                .ok_or_else(|| {
+                    CandidateResolutionError::Storage(StorageError::invalid_input(
+                        "terminal Delivery revision has no durable command receipt",
+                    ))
+                })?
+        };
+        self.finalize_candidate_git_after_delivery_terminal(
+            delivery_id,
+            &receipt,
+            CandidateGitTerminalOutcome::Delivered,
+        )
+        .map(|_| ())
+    }
+
     /// Persists one lease-fenced Worker `job.outcome` through the only typed
     /// terminal Delivery transaction.
     ///
     /// Receipt replay is resolved before current Delivery, journal, durable job,
     /// or replacement authority is read. A new message is joined to its exact
     /// durable dispatch intent and opaque scheduler/Worker facts before the
-    /// canonical terminal transition is committed.
+    /// canonical terminal transition is committed. `server_time` is the
+    /// trusted ingress clock and Worker `sentAt` cannot authorize the lease.
     ///
     /// # Errors
     ///
@@ -1161,13 +2234,78 @@ impl ControlPlane {
         scope: &RepositoryScope,
         message: &execution_port::JobOutcomeMessage,
         facts: &winwincode_delivery::application::stage::DeliveryTerminalOutcomeFacts,
+        server_time: &Instant,
     ) -> Result<DeliveryTerminalOutcomeCommitReceipt, DeliveryTerminalOutcomeCommitError> {
+        let verifier_policy = terminal_outcome_transaction::verifier_policy_authority_at(
+            self.storage_ref()
+                .map_err(DeliveryTerminalOutcomeCommitError::Storage)?,
+            scope,
+            message,
+            facts,
+            server_time,
+        )?;
+        if let Some(authority) = verifier_policy {
+            let directory = self.local_enterprise_quota_directory()?;
+            let mut policy = DurableWorkerPolicyEnforcement::open(directory).map_err(|_| {
+                DeliveryTerminalOutcomeCommitError::Storage(StorageError::adapter(
+                    "Verifier enterprise Policy authority is unavailable",
+                ))
+            })?;
+            let result = policy.enforce_verifier(&authority);
+            policy.close().map_err(|_| {
+                DeliveryTerminalOutcomeCommitError::Storage(StorageError::adapter(
+                    "Verifier enterprise Policy authority could not close",
+                ))
+            })?;
+            result.map_err(|error| {
+                let message = match error.kind() {
+                    WorkerPolicyErrorKind::Rejected => {
+                        "Verifier enterprise Policy denied the terminal outcome"
+                    }
+                    WorkerPolicyErrorKind::Unavailable => {
+                        "Verifier enterprise Policy authority is unavailable"
+                    }
+                };
+                DeliveryTerminalOutcomeCommitError::Storage(StorageError::adapter(message))
+            })?;
+        }
         let commit = {
             let storage = self
                 .storage_mut()
                 .map_err(DeliveryTerminalOutcomeCommitError::Storage)?;
-            terminal_outcome_transaction::execute(storage, scope, message, facts)?
+            terminal_outcome_transaction::execute_at(storage, scope, message, facts, server_time)?
         };
+        let data_directory = self
+            .local_enterprise_quota_directory()
+            .map_err(WorkerExecutionLifecycleError::from);
+        let worker_terminal = data_directory.and_then(|data_directory| {
+            let lifecycle = DurableWorkerExecutionLifecycle::open(data_directory)?;
+            match facts.status() {
+                winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded => {
+                    lifecycle.settle_terminal_outcome(message).map(|_| ())
+                }
+                winwincode_delivery::application::stage::TerminalOutcomeStatus::Failed
+                | winwincode_delivery::application::stage::TerminalOutcomeStatus::Cancelled
+                | winwincode_delivery::application::stage::TerminalOutcomeStatus::InfrastructureError => {
+                    lifecycle.release_terminal_outcome(message).map(|_| ())
+                }
+            }
+        });
+        if let Err(source) = worker_terminal {
+            return Err(DeliveryTerminalOutcomeCommitError::WorkerQuotaPending {
+                commit: Box::new(commit),
+                source,
+            });
+        }
+        if facts.status()
+            != winwincode_delivery::application::stage::TerminalOutcomeStatus::Succeeded
+            && let Err(source) = self.release_terminal_artifact_quota(message, facts.status())
+        {
+            return Err(DeliveryTerminalOutcomeCommitError::ArtifactQuotaPending {
+                commit: Box::new(commit),
+                source,
+            });
+        }
         self.flush_outbox().map_err(|source| {
             DeliveryTerminalOutcomeCommitError::PublicationPending {
                 commit: Box::new(commit.clone()),
@@ -1372,6 +2510,8 @@ impl ControlPlane {
 
     fn close_resources(&mut self) -> Vec<String> {
         let mut failures = Vec::new();
+        self.publication_providers.take();
+        self.publication_authority.take();
         if let Some(mut publisher) = self.publisher.take()
             && let Err(error) = publisher.close()
         {
@@ -1412,6 +2552,39 @@ fn reserved_delivery_transaction_topic(topic: &str) -> bool {
     topic.starts_with("delivery.") || topic.starts_with("runtime.")
 }
 
+fn authority_lease(
+    authority: &winwincode_delivery::application::stage::SessionBindingAuthority,
+) -> execution_port::ExecutionLeaseStamp {
+    let active = authority.active_lease();
+    execution_port::ExecutionLeaseStamp {
+        attempt: i64::try_from(active.attempt()).unwrap_or(i64::MAX),
+        expires_at: authority.expires_at().clone(),
+        fencing_token: active.fencing_token().clone(),
+        issued_at: authority.issued_at().clone(),
+        job_id: active.execution_job_id().clone(),
+        lease_id: active.lease_id().clone(),
+        worker_id: active.worker_id().clone(),
+        worker_instance_id: active.worker_instance_id().clone(),
+    }
+}
+
+fn artifact_ack_digest(
+    acknowledgement: &execution_port::ArtifactAckMessage,
+) -> Result<Sha256Digest, CandidateResolutionError> {
+    // A replay of the same final chunk is acknowledged as `Duplicate` while
+    // the original write was acknowledged as `Accepted`.  Both responses
+    // describe the same immutable final write, so retention identity must use
+    // one canonical status rather than creating a second pin on replay.
+    let mut canonical = acknowledgement.clone();
+    canonical.status = execution_port::LeaseWriteStatus::Accepted;
+    let bytes = serde_json::to_vec(&canonical).map_err(|_| {
+        CandidateResolutionError::Storage(StorageError::adapter(
+            "final Artifact acknowledgement cannot be encoded",
+        ))
+    })?;
+    Ok(Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes))))
+}
+
 pub(crate) fn storage_commit(
     command: &CommandEnvelope,
     change: StateChange,
@@ -1443,7 +2616,7 @@ const EXECUTION_AUDIT_ORIGIN: &str = "control-plane.execution-port";
 pub(crate) fn execution_audit_event(
     event_id: AuditEventId,
     occurred_at_millis: u64,
-    request_id: winwincode_domain::RequestId,
+    request_id: RequestId,
     scope: &RepositoryScope,
     action: AuditAction,
     before: &Delivery,
@@ -1475,7 +2648,7 @@ pub(crate) fn execution_audit_event(
 pub(crate) fn execution_audit_event_with_state(
     event_id: AuditEventId,
     occurred_at_millis: u64,
-    request_id: winwincode_domain::RequestId,
+    request_id: RequestId,
     scope: &RepositoryScope,
     action: AuditAction,
     state: AuditState,
@@ -1527,70 +2700,100 @@ fn delivery_state_digest(delivery: &Delivery) -> Result<Sha256Digest, StorageErr
     )))
 }
 
-/// Reconstructs the repository scope encoded in a durable receipt key. This
-/// is used only where the generated Worker binding message carries no scope;
-/// malformed or non-repository keys are rejected rather than guessed.
+pub(crate) fn public_event_actor(actor: &Actor) -> PublicEventActor {
+    match actor {
+        Actor::UserActor(actor) => PublicEventActor::User {
+            id: actor.id.clone(),
+        },
+        Actor::ServiceAccountActor(actor) => PublicEventActor::ServiceAccount {
+            id: actor.id.clone(),
+        },
+        Actor::SystemActor(actor) => PublicEventActor::System {
+            id: actor.id.clone(),
+        },
+    }
+}
+
+pub(crate) fn public_event_scope(scope: &Scope) -> PublicEventScope {
+    match scope {
+        Scope::OrganizationScope(scope) => PublicEventScope::Organization {
+            organization_id: scope.organization_id.clone(),
+        },
+        Scope::WorkspaceScope(scope) => PublicEventScope::Workspace {
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+        },
+        Scope::ProjectScope(scope) => PublicEventScope::Project {
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            project_id: scope.project_id.clone(),
+        },
+        Scope::RepositoryScope(scope) => public_repository_scope(scope),
+    }
+}
+
+pub(crate) fn public_repository_scope(scope: &RepositoryScope) -> PublicEventScope {
+    PublicEventScope::Repository {
+        organization_id: scope.organization_id.clone(),
+        workspace_id: scope.workspace_id.clone(),
+        project_id: scope.project_id.clone(),
+        repository_id: scope.repository_id.clone(),
+    }
+}
+
+fn receipt_actor_key(actor: &Actor) -> Result<ReceiptActorKey, StorageError> {
+    storage_receipt_actor_key(&public_event_actor(actor))
+}
+
+fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
+    storage_receipt_scope_key(&public_event_scope(scope))
+}
+
+/// Builds the one canonical storage receipt identity from a generated command
+/// envelope's authenticated actor, exact tenant scope, and request id.
+///
+/// # Errors
+///
+/// Rejects a non-canonical actor, scope, or request identity.
+pub fn command_receipt_identity(
+    actor: &Actor,
+    scope: &Scope,
+    request_id: RequestId,
+) -> Result<ReceiptIdentity, StorageError> {
+    storage_public_receipt_identity(
+        &public_event_actor(actor),
+        &public_event_scope(scope),
+        request_id,
+    )
+}
+
+pub(crate) fn repository_scope_key(
+    scope: &RepositoryScope,
+) -> Result<ReceiptScopeKey, StorageError> {
+    storage_receipt_scope_key(&public_repository_scope(scope))
+}
+
 pub(crate) fn repository_scope_from_receipt_key(
     key: &ReceiptScopeKey,
 ) -> Result<RepositoryScope, StorageError> {
-    let mut offset = 0;
-    let prefix = decode_key_field(key.as_bytes(), &mut offset)?;
-    let tag = decode_key_field(key.as_bytes(), &mut offset)?;
-    let organization_id = decode_key_field(key.as_bytes(), &mut offset)?;
-    let workspace_id = decode_key_field(key.as_bytes(), &mut offset)?;
-    let project_id = decode_key_field(key.as_bytes(), &mut offset)?;
-    let repository_id = decode_key_field(key.as_bytes(), &mut offset)?;
-    if offset != key.as_bytes().len() || prefix != SCOPE_KEY_PREFIX || tag != b"repository" {
+    let PublicEventScope::Repository {
+        organization_id,
+        workspace_id,
+        project_id,
+        repository_id,
+    } = storage_repository_scope_from_receipt_key(key)?
+    else {
         return Err(StorageError::invalid_input(
-            "receipt scope key is not a canonical repository scope",
+            "receipt scope is not a repository",
         ));
-    }
-    let organization_id = String::from_utf8(organization_id).map_err(|_| {
-        StorageError::invalid_input("repository scope organization id is not UTF-8")
-    })?;
-    let workspace_id = String::from_utf8(workspace_id)
-        .map_err(|_| StorageError::invalid_input("repository scope workspace id is not UTF-8"))?;
-    let project_id = String::from_utf8(project_id)
-        .map_err(|_| StorageError::invalid_input("repository scope project id is not UTF-8"))?;
-    let repository_id = String::from_utf8(repository_id)
-        .map_err(|_| StorageError::invalid_input("repository scope repository id is not UTF-8"))?;
-    require_canonical_id(&organization_id, "org_", "repository scope organizationId")?;
-    require_canonical_id(&workspace_id, "wsp_", "repository scope workspaceId")?;
-    require_canonical_id(&project_id, "prj_", "repository scope projectId")?;
-    require_canonical_id(&repository_id, "rep_", "repository scope repositoryId")?;
+    };
     Ok(RepositoryScope {
-        kind: RepositoryScopeKind::Repository,
-        organization_id: OrganizationId(organization_id),
-        workspace_id: WorkspaceId(workspace_id),
-        project_id: ProjectId(project_id),
-        repository_id: RepositoryId(repository_id),
+        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        organization_id,
+        workspace_id,
+        project_id,
+        repository_id,
     })
-}
-
-fn decode_key_field(bytes: &[u8], offset: &mut usize) -> Result<Vec<u8>, StorageError> {
-    let length_bytes = bytes
-        .get(*offset..(*offset).saturating_add(8))
-        .ok_or_else(|| {
-            StorageError::invalid_input("receipt scope key has a truncated field length")
-        })?;
-    let length = u64::from_be_bytes(
-        length_bytes
-            .try_into()
-            .expect("receipt scope key length is exactly eight bytes"),
-    );
-    *offset = (*offset)
-        .checked_add(8)
-        .ok_or_else(|| StorageError::invalid_input("receipt scope key offset overflow"))?;
-    let length = usize::try_from(length)
-        .map_err(|_| StorageError::invalid_input("receipt scope key field is too large"))?;
-    let end = (*offset)
-        .checked_add(length)
-        .ok_or_else(|| StorageError::invalid_input("receipt scope key field overflows"))?;
-    let field = bytes
-        .get(*offset..end)
-        .ok_or_else(|| StorageError::invalid_input("receipt scope key has a truncated field"))?;
-    *offset = end;
-    Ok(field.to_vec())
 }
 
 pub(crate) fn delivery_changed_event(
@@ -1598,21 +2801,34 @@ pub(crate) fn delivery_changed_event(
     delivery_id: &DeliveryId,
     delivery_revision: u64,
     change_kind: DeliveryChangeKind,
+    occurred_at: Instant,
+    component: &'static str,
 ) -> Result<NewOutboxEvent, StorageError> {
     let Scope::RepositoryScope(scope) = &command.scope else {
         return Err(StorageError::invalid_input(
             "Delivery change events require repository scope",
         ));
     };
-    let scope_key = repository_scope_key(scope)?;
-    delivery_changed_event_for_scope(&scope_key, delivery_id, delivery_revision, change_kind)
+    delivery_changed_event_for_scope(
+        public_repository_scope(scope),
+        delivery_id,
+        delivery_revision,
+        change_kind,
+        occurred_at,
+        PublicEventSource::ControlPlane {
+            actor: public_event_actor(&command.actor),
+            component: component.to_owned(),
+        },
+    )
 }
 
 pub(crate) fn delivery_changed_event_for_scope(
-    scope_key: &ReceiptScopeKey,
+    scope: PublicEventScope,
     delivery_id: &DeliveryId,
     delivery_revision: u64,
     change_kind: DeliveryChangeKind,
+    occurred_at: Instant,
+    source: PublicEventSource,
 ) -> Result<NewOutboxEvent, StorageError> {
     let revision = i64::try_from(delivery_revision)
         .map(Revision)
@@ -1627,13 +2843,49 @@ pub(crate) fn delivery_changed_event_for_scope(
         StorageError::adapter(format!("failed to encode Delivery change event: {error}"))
     })?;
     let topic = delivery_changed_topic()?;
-    let event_id = delivery_changed_event_id(scope_key, &payload);
-    Ok(NewOutboxEvent::projection(
+    let scope_key = storage_receipt_scope_key(&scope)?;
+    let event_id = delivery_changed_event_id(&scope_key, &payload);
+    NewOutboxEvent::public_projection(
         event_id,
         topic,
         payload,
         ProjectionEventStream::Delivery(delivery_id.clone()),
-    ))
+        scope,
+        occurred_at,
+        source,
+    )
+}
+
+pub(crate) fn instant_from_millis(value: u64) -> Result<Instant, StorageError> {
+    let seconds = value / 1_000;
+    let millis = value % 1_000;
+    let days = i64::try_from(seconds / 86_400)
+        .map_err(|_| StorageError::invalid_input("timestamp exceeds RFC 3339"))?;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    if !(1970..=9999).contains(&year) {
+        return Err(StorageError::invalid_input("timestamp exceeds RFC 3339"));
+    }
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    Ok(Instant(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
+    )))
+}
+
+const fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += (month <= 2) as i64;
+    (year, month, day)
 }
 
 pub(crate) fn validate_delivery_changed_receipt(
@@ -1742,102 +2994,6 @@ fn delivery_command(command: &CommandName) -> bool {
     )
 }
 
-fn receipt_actor_key(actor: &Actor) -> Result<ReceiptActorKey, StorageError> {
-    let (tag, id) = match actor {
-        Actor::UserActor(actor) => {
-            require_canonical_id(&actor.id.0, "usr_", "command user actor id")?;
-            (b"user".as_slice(), actor.id.0.as_str())
-        }
-        Actor::ServiceAccountActor(actor) => {
-            require_canonical_id(&actor.id.0, "svc_", "command service account actor id")?;
-            (b"service_account".as_slice(), actor.id.0.as_str())
-        }
-        Actor::SystemActor(actor) => {
-            require_canonical_id(&actor.id.0, "sys_", "command system actor id")?;
-            (b"system".as_slice(), actor.id.0.as_str())
-        }
-    };
-    ReceiptActorKey::from_encoded(encode_key(ACTOR_KEY_PREFIX, tag, &[id]))
-}
-
-fn receipt_scope_key(scope: &Scope) -> Result<ReceiptScopeKey, StorageError> {
-    let encoded = match scope {
-        Scope::OrganizationScope(scope) => {
-            require_canonical_id(
-                &scope.organization_id.0,
-                "org_",
-                "command scope organizationId",
-            )?;
-            encode_key(
-                SCOPE_KEY_PREFIX,
-                b"organization",
-                &[scope.organization_id.0.as_str()],
-            )
-        }
-        Scope::WorkspaceScope(scope) => {
-            require_canonical_id(
-                &scope.organization_id.0,
-                "org_",
-                "command scope organizationId",
-            )?;
-            require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
-            encode_key(
-                SCOPE_KEY_PREFIX,
-                b"workspace",
-                &[
-                    scope.organization_id.0.as_str(),
-                    scope.workspace_id.0.as_str(),
-                ],
-            )
-        }
-        Scope::ProjectScope(scope) => {
-            require_canonical_id(
-                &scope.organization_id.0,
-                "org_",
-                "command scope organizationId",
-            )?;
-            require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
-            require_canonical_id(&scope.project_id.0, "prj_", "command scope projectId")?;
-            encode_key(
-                SCOPE_KEY_PREFIX,
-                b"project",
-                &[
-                    scope.organization_id.0.as_str(),
-                    scope.workspace_id.0.as_str(),
-                    scope.project_id.0.as_str(),
-                ],
-            )
-        }
-        Scope::RepositoryScope(scope) => {
-            return repository_scope_key(scope);
-        }
-    };
-    ReceiptScopeKey::from_encoded(encoded)
-}
-
-pub(crate) fn repository_scope_key(
-    scope: &RepositoryScope,
-) -> Result<ReceiptScopeKey, StorageError> {
-    require_canonical_id(
-        &scope.organization_id.0,
-        "org_",
-        "command scope organizationId",
-    )?;
-    require_canonical_id(&scope.workspace_id.0, "wsp_", "command scope workspaceId")?;
-    require_canonical_id(&scope.project_id.0, "prj_", "command scope projectId")?;
-    require_canonical_id(&scope.repository_id.0, "rep_", "command scope repositoryId")?;
-    ReceiptScopeKey::from_encoded(encode_key(
-        SCOPE_KEY_PREFIX,
-        b"repository",
-        &[
-            scope.organization_id.0.as_str(),
-            scope.workspace_id.0.as_str(),
-            scope.project_id.0.as_str(),
-            scope.repository_id.0.as_str(),
-        ],
-    ))
-}
-
 fn require_canonical_id(value: &str, prefix: &str, label: &str) -> Result<(), StorageError> {
     let Some(suffix) = value.strip_prefix(prefix) else {
         return Err(StorageError::invalid_input(format!(
@@ -1864,84 +3020,6 @@ const fn is_crockford_base32(byte: u8) -> bool {
             | b'P'..=b'T'
             | b'V'..=b'Z'
     )
-}
-
-fn encode_key(prefix: &[u8], tag: &[u8], values: &[&str]) -> Vec<u8> {
-    let mut encoded = Vec::new();
-    append_key_field(&mut encoded, prefix);
-    append_key_field(&mut encoded, tag);
-    for value in values {
-        append_key_field(&mut encoded, value.as_bytes());
-    }
-    encoded
-}
-
-fn append_key_field(encoded: &mut Vec<u8>, value: &[u8]) {
-    encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    encoded.extend_from_slice(value);
-}
-
-const OWNERSHIP_MARKER: &str = ".winwincode-control-plane-owner";
-static NEXT_TEMPORARY_ROOT_ID: AtomicU64 = AtomicU64::new(1);
-
-struct OwnedTemporaryRoot {
-    path: PathBuf,
-    marker: String,
-}
-
-impl OwnedTemporaryRoot {
-    fn create(parent: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let parent = parent.as_ref();
-        fs::create_dir_all(parent)?;
-        // Phase 2.1 deliberately does not enumerate or remove roots left by a
-        // previous process. A PID or old-looking marker is not proof that a
-        // lease is stale. Each instance only creates and releases its own exact
-        // marker/path pair until a real renewable lease is introduced.
-        loop {
-            let instance_id = NEXT_TEMPORARY_ROOT_ID.fetch_add(1, Ordering::Relaxed);
-            let marker = format!(
-                "winwincode-control-plane\npid={}\ninstance={instance_id}\n",
-                std::process::id()
-            );
-            let path = parent.join(format!("instance-{}-{instance_id}", std::process::id()));
-            match fs::create_dir(&path) {
-                Ok(()) => {
-                    let marker_path = path.join(OWNERSHIP_MARKER);
-                    let marker_result = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&marker_path)
-                        .and_then(|mut file| {
-                            file.write_all(marker.as_bytes())?;
-                            file.sync_all()
-                        });
-                    if let Err(error) = marker_result {
-                        let _ = fs::remove_dir_all(&path);
-                        return Err(error);
-                    }
-                    return Ok(Self { path, marker });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn release(self) -> Result<(), std::io::Error> {
-        let marker_path = self.path.join(OWNERSHIP_MARKER);
-        let actual_marker = fs::read_to_string(&marker_path)?;
-        if actual_marker != self.marker {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "temporary root ownership marker does not match this instance",
-            ));
-        }
-        fs::remove_dir_all(self.path)
-    }
 }
 
 fn close_publisher(publisher: &mut Box<dyn EventPublisher>) -> String {

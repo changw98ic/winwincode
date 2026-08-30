@@ -200,6 +200,55 @@
         "expiresAt"
       ]
     },
+    "ExecutionJobReplacementAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receiptId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "receiptDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "logicalJobDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "scope": {
+          "$ref": "#/$defs/ExecutionScope"
+        },
+        "predecessorLease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "predecessorSessionIdentity": {
+          "description": "The exact slot-bound predecessor WorkerSession and CodexThread. Null means no predecessor slot-bound runtime exists; the predecessor dispatch may have been accepted, but null authorizes neither dirty-workspace reuse nor continuation of an old runtime or Artifact stream.",
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "successorLease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "receiptId",
+        "receiptDigest",
+        "logicalJobDigest",
+        "scope",
+        "predecessorLease",
+        "predecessorSessionIdentity",
+        "successorLease",
+        "createdAt"
+      ],
+      "description": "Control Plane seal for one exact predecessor-to-successor Job replacement. The predecessor lease and optional bound session also authorize exact continuation of an already durable Artifact stream; they never authorize a new stream."
+    },
     "WorkerCapabilityFeature": {
       "type": "string",
       "enum": [
@@ -373,7 +422,11 @@
           "maxLength": 200
         },
         "writeMode": {
-          "const": "candidate"
+          "type": "string",
+          "enum": [
+            "read-only",
+            "candidate"
+          ]
         }
       },
       "required": [
@@ -406,9 +459,211 @@
         "maxArtifactBytes"
       ]
     },
+    "DeliveryStageAcceptanceCriterionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "criterionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "verificationMethod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "criterionId",
+        "description",
+        "required"
+      ]
+    },
+    "DeliveryStageTaskInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "acceptanceCriterionIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+          }
+        }
+      },
+      "required": [
+        "taskId",
+        "title",
+        "goal",
+        "acceptanceCriterionIds"
+      ]
+    },
+    "DeliveryStageInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        },
+        "deliverySpecRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "scope": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "outOfScope": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/DeliveryStageAcceptanceCriterionInput"
+          }
+        },
+        "task": {
+          "$ref": "#/$defs/DeliveryStageTaskInput"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "title",
+        "goal",
+        "scope",
+        "outOfScope",
+        "constraints",
+        "acceptanceCriteria"
+      ]
+    },
     "ExecutionJob": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "$ref": "#/$defs/DeliveryStageExecutionScope"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "properties": {
+              "stageInput": {
+                "$ref": "#/$defs/DeliveryStageInput"
+              }
+            },
+            "required": [
+              "stageInput"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "$ref": "#/$defs/ProductSessionExecutionScope"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "not": {
+              "properties": {
+                "stageInput": {
+                  "$ref": "#/$defs/DeliveryStageInput"
+                }
+              },
+              "required": [
+                "stageInput"
+              ]
+            }
+          }
+        }
+      ],
       "properties": {
         "jobId": {
           "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
@@ -436,6 +691,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 20000
+        },
+        "stageInput": {
+          "$ref": "#/$defs/DeliveryStageInput"
         },
         "limits": {
           "$ref": "#/$defs/ExecutionLimits"
@@ -667,6 +925,32 @@
         "succeeded"
       ]
     },
+    "ExecutionOutcomeUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runtimeMillis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "costMicrounits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "runtimeMillis",
+        "tokens",
+        "costMicrounits"
+      ]
+    },
     "ExecutionOutcome": {
       "type": "object",
       "additionalProperties": false,
@@ -684,6 +968,9 @@
         },
         "lastEventSequence": {
           "$ref": "#/$defs/ExecutionAckSequence"
+        },
+        "usage": {
+          "$ref": "#/$defs/ExecutionOutcomeUsage"
         },
         "codexThreadId": {
           "$ref": "./domain.schema.json#/$defs/CodexThreadId"
@@ -705,6 +992,28 @@
         "finishedAt",
         "lastEventSequence",
         "artifacts"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "usage": {}
+            },
+            "required": [
+              "usage"
+            ]
+          }
+        }
       ]
     },
     "LeaseWriteStatus": {
@@ -1028,6 +1337,16 @@
         },
         "lease": {
           "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "replacementAuthority": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExecutionJobReplacementAuthority"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1037,7 +1356,8 @@
         "sentAt",
         "requestId",
         "job",
-        "lease"
+        "lease",
+        "replacementAuthority"
       ],
       "title": "job.dispatch",
       "description": "Dispatches one immutable job payload under one attempt and lease.",
@@ -2369,6 +2689,12 @@
         },
         {
           "$ref": "#/$defs/JobOutcomeAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ActionEnforcementRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/ActionEnforcementReceiptMessage"
         }
       ]
     },
@@ -2481,7 +2807,6 @@
         "boundAt",
         "sessionIdentity",
         "sourceIdentity",
-        "stageRunId",
         "workerId",
         "leaseId",
         "attempt",
@@ -2522,7 +2847,8 @@
           "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
         },
         "stageRunId": {
-          "$ref": "./domain.schema.json#/$defs/StageRunId"
+          "$ref": "./domain.schema.json#/$defs/StageRunId",
+          "description": "Exact Delivery StageRun identity. ProductSession Chat bindings omit this field."
         },
         "workerId": {
           "$ref": "./domain.schema.json#/$defs/WorkerId"
@@ -2539,10 +2865,255 @@
           "$ref": "#/$defs/FencingToken"
         }
       },
-      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease.",
+      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery-stage bindings carry the exact StageRun; ProductSession Chat bindings omit it.",
       "title": "session.binding",
       "x-direction": "worker-to-control-plane",
       "x-authority": "lease-write"
+    },
+    "ActionPolicyKind": {
+      "type": "string",
+      "enum": [
+        "repository",
+        "tool",
+        "network"
+      ],
+      "title": "ActionPolicyKind",
+      "description": "Enterprise Policy family selected for one normalized Worker action."
+    },
+    "ActionEnforcementDecision": {
+      "type": "string",
+      "enum": [
+        "permit",
+        "reject"
+      ],
+      "title": "ActionEnforcementDecision",
+      "description": "Closed Control Plane action enforcement outcome."
+    },
+    "ActionPolicyVersionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policyId": {
+          "type": "string",
+          "pattern": "^pol_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "versionDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "effectiveDefinitionSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "policyId",
+        "version",
+        "versionDigest",
+        "effectiveDefinitionSha256"
+      ],
+      "title": "ActionPolicyVersionReference",
+      "description": "Exact immutable enterprise Policy version used for one action decision."
+    },
+    "ActionEnforcementRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "action.enforcement_request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "policyKind": {
+          "$ref": "#/$defs/ActionPolicyKind"
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "subjectSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "matchedConditionSha256": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "jobId",
+        "lease",
+        "workerSessionId",
+        "sessionIdentity",
+        "policyKind",
+        "resource",
+        "subjectSha256",
+        "matchedConditionSha256"
+      ],
+      "title": "action.enforcement_request",
+      "description": "Requests one Control Plane Policy decision for a normalized action under current durable Worker authority.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "telemetry"
+    },
+    "ActionEnforcementReceiptMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "action.enforcement_receipt"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+        },
+        "actor": {
+          "$ref": "./domain.schema.json#/$defs/UserActor"
+        },
+        "policyKind": {
+          "$ref": "#/$defs/ActionPolicyKind"
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "subjectSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "matchedConditionSha256": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+          }
+        },
+        "decision": {
+          "$ref": "#/$defs/ActionEnforcementDecision"
+        },
+        "policyMode": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ActionPolicyMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyVersion": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ActionPolicyVersionReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluationSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "evaluatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "receiptSignature": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "jobId",
+        "lease",
+        "workerSessionId",
+        "sessionIdentity",
+        "scope",
+        "actor",
+        "policyKind",
+        "resource",
+        "subjectSha256",
+        "matchedConditionSha256",
+        "decision",
+        "policyMode",
+        "policyVersion",
+        "evaluationSha256",
+        "evaluatedAt",
+        "receiptSignature"
+      ],
+      "title": "action.enforcement_receipt",
+      "description": "Immutable Control Plane-issued action receipt bound to tenant, actor, Policy version, invocation, action digest, and current Worker authority.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "ActionPolicyMode": {
+      "type": "string",
+      "enum": [
+        "enforce",
+        "audit"
+      ],
+      "title": "ActionPolicyMode",
+      "description": "Enterprise Policy enforcement mode captured by an action receipt."
     }
   }
 }

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use winwincode_session::migration::{
-    MigrationCommit, MigrationError, MigrationTransaction, migrate_legacy_delivery_json,
+    MigrationCommit, MigrationError, MigrationOutcome, MigrationTransaction,
+    MigrationTransactionError, migrate_legacy_delivery_json,
 };
 
 #[derive(Default)]
@@ -22,13 +23,21 @@ impl MigrationTransaction for RecordingTransaction {
         &mut self,
         source_key: &str,
         canonical_snapshot: &[u8],
-    ) -> Result<MigrationCommit, String> {
+    ) -> Result<MigrationCommit, MigrationTransactionError> {
         if self.fail_next {
             self.fail_next = false;
-            return Err("simulated transaction crash".to_owned());
+            return Err(MigrationTransactionError::Storage {
+                message: "simulated transaction crash".to_owned(),
+            });
         }
         if self.consumed_sources.contains(source_key) {
-            return Ok(MigrationCommit::AlreadyMigrated);
+            return Ok(MigrationCommit::AlreadyConsumed {
+                canonical_snapshot: self
+                    .committed_snapshots
+                    .get(source_key)
+                    .expect("consumed source has its snapshot")
+                    .clone(),
+            });
         }
 
         self.commit_count += 1;
@@ -65,8 +74,19 @@ fn oracle_snapshots() -> Vec<(String, Value)> {
 }
 
 fn migrate(input: &[u8], transaction: &mut RecordingTransaction) -> Value {
-    let output = migrate_legacy_delivery_json(input, transaction).expect("legacy migration");
-    serde_json::from_slice(&output).expect("canonical delivery json")
+    let outcome = migrate_legacy_delivery_json(input, transaction).expect("legacy migration");
+    serde_json::from_slice(outcome_snapshot(&outcome)).expect("canonical delivery json")
+}
+
+fn outcome_snapshot(outcome: &MigrationOutcome) -> &[u8] {
+    match outcome {
+        MigrationOutcome::Applied {
+            canonical_snapshot, ..
+        }
+        | MigrationOutcome::AlreadyConsumed {
+            canonical_snapshot, ..
+        } => canonical_snapshot,
+    }
 }
 
 fn bindings(snapshot: &Value) -> &[Value] {
@@ -218,17 +238,18 @@ fn all_ten_legacy_oracle_snapshots_migrate_to_closed_shapes() {
 }
 
 #[test]
-fn migration_commits_once_and_reports_already_migrated() {
+fn migration_commits_once_and_reports_already_consumed() {
     let input = fixture("legacy-verifier.json");
     let mut transaction = RecordingTransaction::default();
     let first = migrate_legacy_delivery_json(&input, &mut transaction).expect("first migration");
     let second = migrate_legacy_delivery_json(&input, &mut transaction);
 
-    assert!(!first.is_empty());
+    assert!(matches!(first, MigrationOutcome::Applied { .. }));
     assert!(matches!(
-        second,
-        Err(MigrationError::AlreadyMigrated { .. })
+        &second,
+        Ok(MigrationOutcome::AlreadyConsumed { .. })
     ));
+    assert_eq!(outcome_snapshot(&first), outcome_snapshot(&second.unwrap()));
     assert_eq!(transaction.commit_count, 1);
     assert_eq!(transaction.consumed_sources.len(), 1);
 }
@@ -267,7 +288,7 @@ fn transaction_crash_leaves_marker_unset_and_retry_applies_once() {
     assert!(transaction.committed_snapshots.is_empty());
 
     let output = migrate_legacy_delivery_json(&input, &mut transaction).expect("retry migration");
-    assert!(!output.is_empty());
+    assert!(matches!(output, MigrationOutcome::Applied { .. }));
     assert_eq!(transaction.commit_count, 1);
     assert_eq!(transaction.consumed_sources.len(), 1);
 }
@@ -295,7 +316,7 @@ fn canonical_input_is_rejected_as_a_second_shape() {
     let canonical = migrate_legacy_delivery_json(&input, &mut first_store).expect("migration");
     let mut second_store = RecordingTransaction::default();
 
-    let result = migrate_legacy_delivery_json(&canonical, &mut second_store);
+    let result = migrate_legacy_delivery_json(outcome_snapshot(&canonical), &mut second_store);
     assert!(matches!(
         result,
         Err(MigrationError::MixedIdentityShape { .. })

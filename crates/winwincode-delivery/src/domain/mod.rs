@@ -104,14 +104,17 @@ pub struct DeliveryValidationError {
 }
 
 impl DeliveryValidationError {
+    #[must_use]
     pub fn code(&self) -> DeliveryValidationErrorCode {
         self.code
     }
 
+    #[must_use]
     pub fn path(&self) -> &str {
         &self.path
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -399,18 +402,22 @@ impl Delivery {
         serde_json::to_vec(&self.snapshot)
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> &DeliverySnapshot {
         &self.snapshot
     }
 
+    #[must_use]
     pub fn into_snapshot(self) -> DeliverySnapshot {
         self.snapshot
     }
 
+    #[must_use]
     pub fn id(&self) -> &DeliveryId {
         &self.snapshot.id
     }
 
+    #[must_use]
     pub fn revision(&self) -> u64 {
         self.snapshot.revision
     }
@@ -520,14 +527,9 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             .map(|thread_id| thread_id.0.as_str()),
         "delivery.sessionBindings.codexThreadId",
     )?;
-    duplicate_ids(
-        snapshot
-            .session_bindings
-            .iter()
-            .filter_map(|binding| binding.worker_instance_id.as_ref())
-            .map(|instance_id| instance_id.0.as_str()),
-        "delivery.sessionBindings.workerInstanceId",
-    )?;
+    // A long-lived local Worker process may execute sequential StageRuns. Its
+    // process-generation and fencing identities are intentionally reused;
+    // WorkerSession, CodexThread, and lease identities remain per execution.
     duplicate_ids(
         snapshot
             .session_bindings
@@ -535,14 +537,6 @@ fn validate_delivery(snapshot: &mut DeliverySnapshot) -> Result<(), DeliveryVali
             .filter_map(|binding| binding.lease_id.as_ref())
             .map(|lease_id| lease_id.0.as_str()),
         "delivery.sessionBindings.leaseId",
-    )?;
-    duplicate_ids(
-        snapshot
-            .session_bindings
-            .iter()
-            .filter_map(|binding| binding.fencing_token.as_ref())
-            .map(|fencing_token| fencing_token.0.as_str()),
-        "delivery.sessionBindings.fencingToken",
     )?;
     duplicate_ids(
         snapshot

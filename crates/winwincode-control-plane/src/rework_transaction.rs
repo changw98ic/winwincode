@@ -52,6 +52,8 @@ pub(crate) fn execute(
         &delivery_id,
         transition.delivery.revision(),
         DeliveryChangeKind::Reworked,
+        crate::instant_from_millis(transition.delivery.snapshot().updated_at_millis)?,
+        "delivery-rework-transaction",
     )?;
     let mut commit = storage_commit(
         command,

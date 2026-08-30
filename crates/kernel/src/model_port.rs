@@ -21,12 +21,22 @@ use tokio::sync::mpsc;
 const MODEL_STREAM_CHANNEL_CAPACITY: usize = 256;
 
 /// One secret-free request crossing from the Rust kernel to the host model runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ModelPortRequest {
     /// Stable identity shared by cancellation, diagnostics, and every stream message.
     pub request_id: String,
     /// Serialized [`ModelStreamRequest`] using the public host wire contract.
     pub payload_json: String,
+}
+
+impl fmt::Debug for ModelPortRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModelPortRequest")
+            .field("request_id", &self.request_id)
+            .field("payload_json", &"<private>")
+            .finish()
+    }
 }
 
 /// Serializable failure facts retained across the host/native boundary.

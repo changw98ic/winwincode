@@ -4,6 +4,7 @@ mod session_binding_fixture {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use sha2::{Digest, Sha256};
     use winwincode_api::generated::{
         Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
     };
@@ -45,8 +46,8 @@ mod session_binding_fixture {
     };
     use winwincode_storage::{
         AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-        ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-        StateCommit,
+        ProductStateStorage, PublicEventScope, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey,
+        SqliteStorage, StateCommit, receipt_scope_key,
     };
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -61,6 +62,20 @@ mod session_binding_fixture {
 
     fn canonical_id(prefix: &str, value: u64) -> String {
         format!("{prefix}_{value:026}")
+    }
+
+    fn product_session_catalog_stream_id(scope: &RepositoryScope) -> String {
+        let scope_key = receipt_scope_key(&PublicEventScope::Repository {
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+        })
+        .expect("repository receipt scope");
+        format!(
+            "product-sessions:{:x}",
+            Sha256::digest(scope_key.as_bytes())
+        )
     }
 
     fn delivery_before_advance(seed: u64) -> Delivery {
@@ -121,6 +136,7 @@ mod session_binding_fixture {
             result,
             DeliveryExecutionConfig {
                 payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                candidate_ref: None,
                 workspace: ExecutionWorkspace {
                     checkout_revision: "original-checkout".into(),
                     repository_id: RepositoryId(canonical_id("rep", seed)),
@@ -221,7 +237,7 @@ mod session_binding_fixture {
                 worker_instance_id,
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id,
+            stage_run_id: Some(stage_run_id),
             worker_id,
             worker_session_id,
         };
@@ -565,7 +581,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "foreign-runtime-codex-thread");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let before = durable_binding_counts(&root, pending.delivery().id());
 
@@ -576,7 +592,7 @@ mod session_binding_fixture {
 
         let scope = repository_scope(seed);
         let ack = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("semantic rejection must return a generated RuntimeAck");
 
         assert_eq!(ack.status, LeaseWriteStatus::RejectedConflict);
@@ -599,21 +615,21 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-replay");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
         let before = durable_binding_counts(&root, pending.delivery().id());
 
         let first = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("first runtime event");
         assert_eq!(first.status, LeaseWriteStatus::Accepted);
         assert_eq!(first.ack_sequence, ExecutionAckSequence(1));
         assert!(first.error.is_none());
 
         let duplicate = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("exact runtime event replay");
         assert_eq!(duplicate.status, LeaseWriteStatus::Duplicate);
         assert_eq!(duplicate.ack_sequence, ExecutionAckSequence(1));
@@ -623,7 +639,7 @@ mod session_binding_fixture {
         changed_body.event.summary = "worker session changed".into();
         let before_conflict = durable_runtime_counts(&root);
         let conflict = control_plane
-            .accept_runtime_event(&scope, &changed_body, &authority)
+            .accept_runtime_event(&scope, &changed_body, &authority, &changed_body.sent_at)
             .expect("changed runtime event body conflict acknowledgement");
         assert_eq!(conflict.status, LeaseWriteStatus::RejectedConflict);
         assert_eq!(conflict.ack_sequence, ExecutionAckSequence(1));
@@ -634,7 +650,7 @@ mod session_binding_fixture {
         assert_eq!(error.code, ExecutionPortErrorCode::MessageConflict);
         assert!(!error.retryable);
         let repeated_conflict = control_plane
-            .accept_runtime_event(&scope, &changed_body, &authority)
+            .accept_runtime_event(&scope, &changed_body, &authority, &changed_body.sent_at)
             .expect("repeated changed runtime event body conflict acknowledgement");
         assert_eq!(repeated_conflict, conflict);
         assert_eq!(durable_runtime_counts(&root), before_conflict);
@@ -652,20 +668,20 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-replay-new-envelope");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
 
         let first = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("first runtime event");
         assert_eq!(first.status, LeaseWriteStatus::Accepted);
 
         let mut replay = runtime.clone();
         replay.message_id = ExecutionMessageId(canonical_id("xmsg", seed + 1_000));
         let duplicate = control_plane
-            .accept_runtime_event(&scope, &replay, &authority)
+            .accept_runtime_event(&scope, &replay, &authority, &replay.sent_at)
             .expect("same event digest with a new envelope must be duplicate");
         assert_eq!(duplicate.status, LeaseWriteStatus::Duplicate);
         assert_eq!(duplicate.ack_sequence, ExecutionAckSequence(1));
@@ -673,7 +689,7 @@ mod session_binding_fixture {
 
         replay.event.summary = "changed body must remain a conflict".into();
         let conflict = control_plane
-            .accept_runtime_event(&scope, &replay, &authority)
+            .accept_runtime_event(&scope, &replay, &authority, &replay.sent_at)
             .expect("changed event body must be a conflict");
         assert_eq!(conflict.status, LeaseWriteStatus::RejectedConflict);
         assert_eq!(conflict.ack_sequence, ExecutionAckSequence(1));
@@ -696,7 +712,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-eight-connections");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
@@ -716,7 +732,7 @@ mod session_binding_fixture {
                     )
                     .map_err(|error| error.to_string())?;
                     let ack = control_plane
-                        .accept_runtime_event(&scope, &runtime, &authority)
+                        .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
                         .map_err(|error| error.to_string())?;
                     control_plane
                         .shutdown()
@@ -755,7 +771,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-rejection-unrelated-pending");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         control_plane.shutdown().expect("fixture shutdown");
 
@@ -805,7 +821,12 @@ mod session_binding_fixture {
         foreign_runtime.codex_thread_id = foreign_codex.clone();
         foreign_runtime.session_identity.codex_thread_id = foreign_codex;
         let rejected = control_plane
-            .accept_runtime_event(&scope, &foreign_runtime, &authority)
+            .accept_runtime_event(
+                &scope,
+                &foreign_runtime,
+                &authority,
+                &foreign_runtime.sent_at,
+            )
             .expect("semantic runtime rejection must return its generated ack directly");
         assert_eq!(rejected.status, LeaseWriteStatus::RejectedConflict);
         assert_eq!(rejected.ack_sequence, ExecutionAckSequence(0));
@@ -831,7 +852,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-changed-body-race");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         control_plane.shutdown().expect("fixture shutdown");
 
@@ -858,7 +879,7 @@ mod session_binding_fixture {
                     )
                     .map_err(|error| error.to_string())?;
                     let ack = control_plane
-                        .accept_runtime_event(&scope, &runtime, &authority)
+                        .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
                         .map_err(|error| error.to_string())?;
                     control_plane
                         .shutdown()
@@ -915,12 +936,12 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-replay-corrupt-current-facts");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
         let accepted = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("first runtime event");
         assert_eq!(accepted.status, LeaseWriteStatus::Accepted);
         control_plane.shutdown().expect("fixture shutdown");
@@ -960,7 +981,7 @@ mod session_binding_fixture {
         )
         .expect("Control Plane restart with corrupt current facts");
         let replay = restarted
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("exact receipt replay must not reread current facts");
         assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
         assert_eq!(replay.ack_sequence, ExecutionAckSequence(1));
@@ -975,7 +996,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-gap");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let scope = repository_scope(seed);
         let before = durable_binding_counts(&root, pending.delivery().id());
@@ -983,7 +1004,7 @@ mod session_binding_fixture {
         let mut gap = runtime_message(&pending, &binding, seed);
         gap.event.sequence = ExecutionSequence(2);
         let gap_ack = control_plane
-            .accept_runtime_event(&scope, &gap, &authority)
+            .accept_runtime_event(&scope, &gap, &authority, &gap.sent_at)
             .expect("sequence gap acknowledgement");
         assert_eq!(gap_ack.status, LeaseWriteStatus::Gap);
         assert_eq!(gap_ack.ack_sequence, ExecutionAckSequence(0));
@@ -998,7 +1019,7 @@ mod session_binding_fixture {
 
         let first = runtime_message(&pending, &binding, seed);
         let first_ack = control_plane
-            .accept_runtime_event(&scope, &first, &authority)
+            .accept_runtime_event(&scope, &first, &authority, &first.sent_at)
             .expect("missing first runtime event");
         assert_eq!(first_ack.status, LeaseWriteStatus::Accepted);
         assert_eq!(first_ack.ack_sequence, ExecutionAckSequence(1));
@@ -1006,7 +1027,7 @@ mod session_binding_fixture {
         let mut second_gap = runtime_message(&pending, &binding, seed + 1);
         second_gap.event.sequence = ExecutionSequence(3);
         let second_gap_ack = control_plane
-            .accept_runtime_event(&scope, &second_gap, &authority)
+            .accept_runtime_event(&scope, &second_gap, &authority, &second_gap.sent_at)
             .expect("second sequence gap acknowledgement");
         assert_eq!(second_gap_ack.status, LeaseWriteStatus::Gap);
         assert_eq!(second_gap_ack.ack_sequence, ExecutionAckSequence(1));
@@ -1125,10 +1146,10 @@ mod session_binding_fixture {
         let (authority_a, binding_a) = lease_and_message(&pending_a, seed_a);
         let (authority_b, binding_b) = lease_and_message(&pending_b, seed_b);
         control_plane
-            .commit_delivery_session_binding(&binding_a, &authority_a)
+            .commit_delivery_session_binding(&binding_a, &authority_a, &binding_a.sent_at)
             .expect("first SessionBinding");
         control_plane
-            .commit_delivery_session_binding(&binding_b, &authority_b)
+            .commit_delivery_session_binding(&binding_b, &authority_b, &binding_b.sent_at)
             .expect("second SessionBinding");
         let scope_a = repository_scope(seed_a);
         let scope_b = repository_scope(seed_b);
@@ -1138,7 +1159,7 @@ mod session_binding_fixture {
         let before_b = durable_binding_counts(&root, pending_b.delivery().id());
 
         let accepted_a = control_plane
-            .accept_runtime_event(&scope_a, &runtime_a, &authority_a)
+            .accept_runtime_event(&scope_a, &runtime_a, &authority_a, &runtime_a.sent_at)
             .expect("first Delivery runtime event");
         assert_eq!(accepted_a.status, LeaseWriteStatus::Accepted);
 
@@ -1214,7 +1235,7 @@ mod session_binding_fixture {
         }));
 
         let replay_a = restarted
-            .accept_runtime_event(&scope_a, &runtime_a, &authority_a)
+            .accept_runtime_event(&scope_a, &runtime_a, &authority_a, &runtime_a.sent_at)
             .expect("first Delivery runtime replay after restart");
         assert_eq!(replay_a.status, LeaseWriteStatus::Duplicate);
         assert_eq!(replay_a.ack_sequence, ExecutionAckSequence(1));
@@ -1229,7 +1250,7 @@ mod session_binding_fixture {
         );
 
         let accepted_b = restarted
-            .accept_runtime_event(&scope_b, &runtime_b, &authority_b)
+            .accept_runtime_event(&scope_b, &runtime_b, &authority_b, &runtime_b.sent_at)
             .expect("second Delivery runtime event after restart");
         assert_eq!(accepted_b.status, LeaseWriteStatus::Accepted);
         assert_eq!(accepted_b.ack_sequence, ExecutionAckSequence(1));
@@ -1244,7 +1265,7 @@ mod session_binding_fixture {
         );
 
         let replay_a_again = restarted
-            .accept_runtime_event(&scope_a, &runtime_a, &authority_a)
+            .accept_runtime_event(&scope_a, &runtime_a, &authority_a, &runtime_a.sent_at)
             .expect("first Delivery replay remains isolated");
         assert_eq!(replay_a_again.status, LeaseWriteStatus::Duplicate);
         assert_eq!(
@@ -1283,14 +1304,14 @@ mod session_binding_fixture {
             .expect("Delivery execution commit");
         let (authority, binding) = lease_and_message(&pending, seed);
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("SessionBinding");
         events.lock().expect("captured events lock").clear();
 
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
         let ack = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("runtime event");
         assert_eq!(ack.status, LeaseWriteStatus::Accepted);
 
@@ -1316,7 +1337,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-publication-failure");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         control_plane.shutdown().expect("fixture shutdown");
 
@@ -1326,7 +1347,7 @@ mod session_binding_fixture {
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
         let error = failing
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect_err("publication failure must leave the accepted runtime event pending");
         let committed_ack = error
             .committed_ack()
@@ -1367,7 +1388,7 @@ mod session_binding_fixture {
         assert_eq!(pending_runtime_notifications(&root), Vec::<String>::new());
 
         let duplicate = restarted
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("exact runtime receipt replay after publication restart");
         assert_eq!(duplicate.status, LeaseWriteStatus::Duplicate);
         restarted.shutdown().expect("restarted shutdown");
@@ -1426,6 +1447,7 @@ mod session_binding_fixture {
                 kind: ProductSessionExecutionScopeKind::ProductSession,
                 product_session_id: product_session_id.clone(),
             }),
+            stage_input: None,
             workspace: ExecutionWorkspace {
                 checkout_revision: "product-session-checkout".into(),
                 repository_id: scope.repository_id.clone(),
@@ -1455,7 +1477,7 @@ mod session_binding_fixture {
             .commit(
                 &command,
                 StateChange::new(
-                    format!("product-session:{}", product_session_id.0),
+                    product_session_catalog_stream_id(&scope),
                     b"product-session-state".to_vec(),
                     vec![NewOutboxEvent::internal(
                         format!("execution-job:{}", job_id.0),
@@ -1492,9 +1514,14 @@ mod session_binding_fixture {
             worker_session_id,
         };
         let accepted = control_plane
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("ProductSession runtime event");
-        assert_eq!(accepted.status, LeaseWriteStatus::Accepted);
+        assert_eq!(
+            accepted.status,
+            LeaseWriteStatus::Accepted,
+            "{:?}",
+            accepted.error
+        );
         assert_eq!(accepted.ack_sequence, ExecutionAckSequence(1));
         assert!(accepted.session_identity.stage_run_id.is_none());
 
@@ -1532,7 +1559,7 @@ mod session_binding_fixture {
         )
         .expect("Control Plane restart");
         let replay = restarted
-            .accept_runtime_event(&scope, &runtime, &authority)
+            .accept_runtime_event(&scope, &runtime, &authority, &runtime.sent_at)
             .expect("ProductSession runtime replay");
         assert_eq!(replay.status, LeaseWriteStatus::Duplicate);
         assert_eq!(replay.ack_sequence, ExecutionAckSequence(1));
@@ -1548,7 +1575,7 @@ mod session_binding_fixture {
         let (root, mut control_plane, pending, authority, binding) =
             running_fixture(seed, "runtime-generic-bypass");
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("exact SessionBinding must be accepted before runtime ingress");
         let before = durable_binding_counts(&root, pending.delivery().id());
         let mut command = delivery_advance_command(seed);

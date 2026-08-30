@@ -6,10 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{OrganizationId, Sha256Digest};
 
-use crate::event::{AuditAccess, AuditEvent, AuditRetention, validate_digest};
+use crate::event::{
+    AuditAccess, AuditEvent, AuditEventId, AuditRetention, AuditScope, validate_digest,
+};
 
 const DATABASE_FILE_NAME: &str = "audit.sqlite3";
 const SCHEMA_VERSION: i64 = 1;
@@ -99,6 +102,35 @@ pub struct AuditRecord {
     previous_digest: Option<Sha256Digest>,
     event_digest: Sha256Digest,
     event: Option<AuditEvent>,
+}
+
+/// Verified tail of one complete organization audit chain.
+///
+/// A checkpoint is derived by reading and validating every immutable header
+/// and every retained payload. It can be persisted by an export boundary as a
+/// compact completeness proof without copying any event payload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuditChainCheckpoint {
+    organization_id: OrganizationId,
+    last_sequence: u64,
+    last_digest: Option<Sha256Digest>,
+}
+
+impl AuditChainCheckpoint {
+    #[must_use]
+    pub const fn organization_id(&self) -> &OrganizationId {
+        &self.organization_id
+    }
+
+    #[must_use]
+    pub const fn last_sequence(&self) -> u64 {
+        self.last_sequence
+    }
+
+    #[must_use]
+    pub const fn last_digest(&self) -> Option<&Sha256Digest> {
+        self.last_digest.as_ref()
+    }
 }
 
 impl AuditRecord {
@@ -355,6 +387,35 @@ impl AuditStore {
         })
     }
 
+    /// Reads one immutable event by its stable identity when it is visible to
+    /// the already-authorized scope. This lookup is bounded and validates the
+    /// retained payload against the immutable header before returning it.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid scope or timestamp and returns a corruption error
+    /// when the stored header, payload, or retention tombstone is damaged.
+    pub fn read_exact(
+        &self,
+        access: &AuditAccess,
+        event_id: &AuditEventId,
+        as_of_millis: u64,
+    ) -> Result<Option<AuditRecord>, AuditError> {
+        access.scope.validate()?;
+        if as_of_millis > i64::MAX as u64 {
+            return Err(AuditError::invalid(
+                "audit read timestamp is outside the SQLite range",
+            ));
+        }
+        let Some(header) = load_header_by_event_id(self.connection()?, event_id.as_str())? else {
+            return Ok(None);
+        };
+        if !header_is_visible_to_scope(&header, access.scope()) {
+            return Ok(None);
+        }
+        record_from_header(&header, as_of_millis).map(Some)
+    }
+
     /// Deletes only canonical payload bytes whose finite retention deadline
     /// has passed. Immutable event headers and their hash chain remain.
     ///
@@ -420,66 +481,79 @@ impl AuditStore {
     ///
     /// # Errors
     ///
-    /// Returns a corruption error at the first missing, changed, or reordered
-    /// header/payload.
-    pub fn verify_organization(&self, organization_id: &OrganizationId) -> Result<(), AuditError> {
+    /// Returns the verified chain checkpoint, or a corruption error at the
+    /// first missing, changed, or reordered header/payload.
+    pub fn verify_organization(
+        &self,
+        organization_id: &OrganizationId,
+    ) -> Result<AuditChainCheckpoint, AuditError> {
         validate_organization_id(organization_id)?;
-        let mut statement = self
-            .connection()?
+        let connection = self.connection()?;
+        let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+        let checkpoint = verify_checkpoint(&transaction, organization_id, None)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(checkpoint)
+    }
+
+    pub(crate) fn export_snapshot_headers(
+        &self,
+        organization_id: &OrganizationId,
+        expected_checkpoint: Option<&AuditChainCheckpoint>,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<(AuditChainCheckpoint, Vec<StoredHeader>), AuditError> {
+        validate_organization_id(organization_id)?;
+        if !(1..=200).contains(&limit) || after_sequence > i64::MAX as u64 {
+            return Err(AuditError::invalid(
+                "audit export cursor or scan limit is out of range",
+            ));
+        }
+        let connection = self.connection()?;
+        let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+        let checkpoint = verify_checkpoint(&transaction, organization_id, expected_checkpoint)?;
+        if after_sequence > checkpoint.last_sequence {
+            return Err(AuditError::invalid(
+                "audit export cursor is beyond its fixed snapshot",
+            ));
+        }
+        let mut statement = transaction
             .prepare(
                 "SELECT e.organization_id, e.sequence, e.event_id, e.occurred_at_millis, \
                     e.workspace_id, e.project_id, e.repository_id, e.retention_kind, \
                     e.retention_until_millis, e.previous_digest, e.event_digest, \
                     e.payload_digest, p.payload, t.pruned_at_millis, t.event_digest \
-             FROM audit_events e LEFT JOIN audit_payloads p \
-               ON p.organization_id = e.organization_id AND p.sequence = e.sequence \
-             LEFT JOIN audit_payload_tombstones t \
-               ON t.organization_id = e.organization_id AND t.sequence = e.sequence \
-             WHERE e.organization_id = ?1 ORDER BY e.sequence",
+                 FROM audit_events e LEFT JOIN audit_payloads p \
+                   ON p.organization_id = e.organization_id AND p.sequence = e.sequence \
+                 LEFT JOIN audit_payload_tombstones t \
+                   ON t.organization_id = e.organization_id AND t.sequence = e.sequence \
+                 WHERE e.organization_id = ?1 AND e.sequence > ?2 AND e.sequence <= ?3 \
+                 ORDER BY e.sequence LIMIT ?4",
             )
             .map_err(sql_error)?;
         let rows = statement
-            .query_map([&organization_id.0], stored_header_row)
+            .query_map(
+                params![
+                    organization_id.0,
+                    i64::try_from(after_sequence).map_err(|_| {
+                        AuditError::invalid("audit export cursor exceeds the SQLite range")
+                    })?,
+                    i64::try_from(checkpoint.last_sequence).map_err(|_| {
+                        AuditError::corrupt("audit export checkpoint exceeds the SQLite range")
+                    })?,
+                    i64::try_from(limit).map_err(|_| {
+                        AuditError::invalid("audit export scan limit exceeds the SQLite range")
+                    })?,
+                ],
+                stored_header_row,
+            )
             .map_err(sql_error)?;
         let headers = rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?;
-        let mut expected_sequence = 1_u64;
-        let mut previous_digest: Option<Sha256Digest> = None;
         for header in &headers {
-            if header.sequence != expected_sequence
-                || header.previous_digest.as_ref() != previous_digest.as_ref()
-            {
-                return Err(AuditError::corrupt(
-                    "audit organization chain sequence or previous digest changed",
-                ));
-            }
-            let record = record_from_header(header, u64::MAX)?;
-            previous_digest = Some(record.event_digest.clone());
-            expected_sequence = expected_sequence
-                .checked_add(1)
-                .ok_or_else(|| AuditError::corrupt("audit sequence overflow"))?;
+            record_from_header(header, u64::MAX)?;
         }
-        let stored_head = self
-            .connection()?
-            .query_row(
-                "SELECT last_sequence, last_digest FROM audit_chain_heads \
-                 WHERE organization_id = ?1",
-                [&organization_id.0],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?;
-        match (headers.last(), stored_head) {
-            (None, None) => Ok(()),
-            (Some(last), Some((sequence, digest)))
-                if i64::try_from(last.sequence).ok() == Some(sequence)
-                    && last.event_digest.0 == digest =>
-            {
-                Ok(())
-            }
-            _ => Err(AuditError::corrupt(
-                "audit organization chain head does not match its immutable tail",
-            )),
-        }
+        drop(statement);
+        transaction.commit().map_err(sql_error)?;
+        Ok((checkpoint, headers))
     }
 
     /// Closes the local adapter.
@@ -503,6 +577,94 @@ impl AuditStore {
     }
 }
 
+fn verify_checkpoint(
+    connection: &Connection,
+    organization_id: &OrganizationId,
+    expected: Option<&AuditChainCheckpoint>,
+) -> Result<AuditChainCheckpoint, AuditError> {
+    if expected.is_some_and(|value| value.organization_id() != organization_id) {
+        return Err(AuditError::invalid(
+            "audit export checkpoint belongs to another organization",
+        ));
+    }
+    let upper_sequence = expected.map_or(i64::MAX, |value| {
+        i64::try_from(value.last_sequence()).unwrap_or(i64::MAX)
+    });
+    let (last_sequence, last_digest) = {
+        let mut statement = connection
+            .prepare(
+                "SELECT e.organization_id, e.sequence, e.event_id, e.occurred_at_millis, \
+                    e.workspace_id, e.project_id, e.repository_id, e.retention_kind, \
+                    e.retention_until_millis, e.previous_digest, e.event_digest, \
+                    e.payload_digest, p.payload, t.pruned_at_millis, t.event_digest \
+                 FROM audit_events e LEFT JOIN audit_payloads p \
+                   ON p.organization_id = e.organization_id AND p.sequence = e.sequence \
+                 LEFT JOIN audit_payload_tombstones t \
+                   ON t.organization_id = e.organization_id AND t.sequence = e.sequence \
+                 WHERE e.organization_id = ?1 AND e.sequence <= ?2 ORDER BY e.sequence",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(
+                params![organization_id.0, upper_sequence],
+                stored_header_row,
+            )
+            .map_err(sql_error)?;
+        let mut expected_sequence = 1_u64;
+        let mut previous_digest: Option<Sha256Digest> = None;
+        for stored in rows {
+            let header = stored.map_err(sql_error)?;
+            if header.sequence != expected_sequence
+                || header.previous_digest.as_ref() != previous_digest.as_ref()
+            {
+                return Err(AuditError::corrupt(
+                    "audit organization chain sequence or previous digest changed",
+                ));
+            }
+            let record = record_from_header(&header, u64::MAX)?;
+            previous_digest = Some(record.event_digest);
+            expected_sequence = expected_sequence
+                .checked_add(1)
+                .ok_or_else(|| AuditError::corrupt("audit sequence overflow"))?;
+        }
+        (expected_sequence - 1, previous_digest)
+    };
+    if let Some(expected) = expected {
+        if last_sequence != expected.last_sequence || last_digest.as_ref() != expected.last_digest()
+        {
+            return Err(AuditError::corrupt(
+                "audit export snapshot no longer matches its verified checkpoint",
+            ));
+        }
+    } else {
+        let stored_head = connection
+            .query_row(
+                "SELECT last_sequence, last_digest FROM audit_chain_heads \
+                 WHERE organization_id = ?1",
+                [&organization_id.0],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        match (&last_digest, stored_head) {
+            (None, None) if last_sequence == 0 => {}
+            (Some(last_digest), Some((sequence, digest)))
+                if i64::try_from(last_sequence).ok() == Some(sequence)
+                    && last_digest.0 == digest => {}
+            _ => {
+                return Err(AuditError::corrupt(
+                    "audit organization chain head does not match its immutable tail",
+                ));
+            }
+        }
+    }
+    Ok(AuditChainCheckpoint {
+        organization_id: organization_id.clone(),
+        last_sequence,
+        last_digest,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EventHeaderFacts {
     event_id: String,
@@ -515,22 +677,22 @@ struct EventHeaderFacts {
 }
 
 #[derive(Clone, Debug)]
-struct StoredHeader {
-    organization_id: String,
-    sequence: u64,
-    event_id: String,
-    occurred_at_millis: i64,
-    workspace_id: Option<String>,
-    project_id: Option<String>,
-    repository_id: Option<String>,
-    retention_kind: String,
-    retention_until_millis: Option<i64>,
-    previous_digest: Option<Sha256Digest>,
-    event_digest: Sha256Digest,
-    payload_digest: Sha256Digest,
-    payload: Option<Vec<u8>>,
-    payload_pruned_at_millis: Option<i64>,
-    tombstone_event_digest: Option<Sha256Digest>,
+pub(crate) struct StoredHeader {
+    pub(crate) organization_id: String,
+    pub(crate) sequence: u64,
+    pub(crate) event_id: String,
+    pub(crate) occurred_at_millis: i64,
+    pub(crate) workspace_id: Option<String>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) repository_id: Option<String>,
+    pub(crate) retention_kind: String,
+    pub(crate) retention_until_millis: Option<i64>,
+    pub(crate) previous_digest: Option<Sha256Digest>,
+    pub(crate) event_digest: Sha256Digest,
+    pub(crate) payload_digest: Sha256Digest,
+    pub(crate) payload: Option<Vec<u8>>,
+    pub(crate) payload_pruned_at_millis: Option<i64>,
+    pub(crate) tombstone_event_digest: Option<Sha256Digest>,
 }
 
 fn event_header_facts(event: &AuditEvent) -> Result<EventHeaderFacts, AuditError> {
@@ -762,6 +924,19 @@ fn load_header_by_event_id(
         .map_err(sql_error)
 }
 
+fn header_is_visible_to_scope(header: &StoredHeader, scope: &AuditScope) -> bool {
+    header.organization_id == scope.organization_id().0
+        && scope
+            .workspace_id()
+            .is_none_or(|id| header.workspace_id.as_deref() == Some(id.0.as_str()))
+        && scope
+            .project_id()
+            .is_none_or(|id| header.project_id.as_deref() == Some(id.0.as_str()))
+        && scope
+            .repository_id()
+            .is_none_or(|id| header.repository_id.as_deref() == Some(id.0.as_str()))
+}
+
 fn stored_header_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredHeader> {
     let sequence = row.get::<_, i64>(1)?;
     Ok(StoredHeader {
@@ -846,6 +1021,19 @@ fn apply_schema(connection: &mut Connection) -> Result<(), AuditError> {
              CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
                BEFORE DELETE ON audit_events BEGIN
                  SELECT RAISE(ABORT, 'audit event headers are immutable');
+               END;
+             CREATE TRIGGER IF NOT EXISTS audit_payloads_no_update
+               BEFORE UPDATE ON audit_payloads BEGIN
+                 SELECT RAISE(ABORT, 'audit event payloads are immutable');
+               END;
+             CREATE TRIGGER IF NOT EXISTS audit_payloads_delete_requires_tombstone
+               BEFORE DELETE ON audit_payloads
+               WHEN NOT EXISTS (
+                 SELECT 1 FROM audit_payload_tombstones t
+                 WHERE t.organization_id = OLD.organization_id
+                   AND t.sequence = OLD.sequence
+               ) BEGIN
+                 SELECT RAISE(ABORT, 'audit payload deletion requires a retention tombstone');
                END;
              CREATE TRIGGER IF NOT EXISTS audit_payload_tombstones_no_update
                BEFORE UPDATE ON audit_payload_tombstones BEGIN

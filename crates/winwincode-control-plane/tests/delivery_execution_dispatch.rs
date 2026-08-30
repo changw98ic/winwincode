@@ -91,11 +91,11 @@ fn stage_advance(seed: u64, with_task: bool) -> StageAdvanceResult {
 fn execution_config(seed: u64) -> DeliveryExecutionConfig {
     DeliveryExecutionConfig {
         payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        candidate_ref: None,
         workspace: ExecutionWorkspace {
             checkout_revision: "0123456789abcdef".into(),
             repository_id: RepositoryId(canonical_id("rep", seed)),
-            write_mode:
-                winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate,
+            write_mode: winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::ReadOnly,
         },
         limits: ExecutionLimits {
             deadline_at: Instant("2026-08-25T12:00:00.000Z".into()),
@@ -106,10 +106,15 @@ fn execution_config(seed: u64) -> DeliveryExecutionConfig {
 }
 
 fn pending_execution(seed: u64, with_task: bool) -> PendingDeliveryExecution {
+    let mut config = execution_config(seed);
+    if with_task {
+        config.workspace.write_mode =
+            winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate;
+    }
     prepare_delivery_advance(
         RequestId(canonical_id("req", seed)),
         stage_advance(seed, with_task),
-        execution_config(seed),
+        config,
     )
     .expect("pending execution")
 }
@@ -520,7 +525,21 @@ fn delivery_dispatch_does_not_persist_codex_plan_agent_or_tool_state() {
             "forbidden key: {forbidden}"
         );
     }
-    assert_eq!(object.len(), 8);
+    assert_eq!(object.len(), 9);
+    let stage_input = object["stageInput"]
+        .as_object()
+        .expect("typed Delivery stage input");
+    assert_eq!(stage_input["deliverySpecId"], "delivery-spec-v1");
+    assert_eq!(stage_input["deliverySpecRevision"], 1);
+    assert_eq!(
+        stage_input["acceptanceCriteria"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        stage_input["task"]["taskId"],
+        "dtk_00000000000000000000000005"
+    );
+    assert!(stage_input.get("candidateRef").is_none());
     assert_eq!(pending.delivery().snapshot().session_bindings.len(), 1);
 }
 
@@ -632,11 +651,14 @@ fn assert_invalid_intent_values(seed: u64, request_id: &RequestId) {
     let mut task_result = stage_advance(seed, true);
     dispatch_intent_mut(&mut task_result).delivery_task_id =
         Some(DeliveryTaskId("task-legacy".into()));
+    let mut writer_config = execution_config(seed);
+    writer_config.workspace.write_mode =
+        winwincode_execution_port::generated::ExecutionWorkspaceWriteMode::Candidate;
     assert_prepare_rejected(
         "deliveryTaskId",
         request_id.clone(),
         task_result,
-        execution_config(seed),
+        writer_config,
     );
     let mut long_profile = stage_advance(seed, false);
     dispatch_intent_mut(&mut long_profile).role = "r".repeat(101);

@@ -1,0 +1,27 @@
+[package]
+name = "winwincode-object-store"
+description = "Verified S3-compatible Artifact object adapter for WinWinCode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq = { version = "=3.1.4", default-features = false, features = ["rustls"] }
+winwincode-audit.workspace = true
+winwincode-backup.workspace = true
+winwincode-domain.workspace = true
+winwincode-storage.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+
+[lints]
+workspace = true

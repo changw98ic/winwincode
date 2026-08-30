@@ -26,8 +26,6 @@ const filesystemInventoryExcludedNames = new Set([
   '.git',
   'dist',
   'node_modules',
-  'prebuild',
-  'prebuilds',
   'target',
 ])
 const textExtensions = new Set([

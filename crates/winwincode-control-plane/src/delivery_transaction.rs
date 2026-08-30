@@ -5,6 +5,7 @@
 use std::sync::Mutex;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use winwincode_api::generated::{CommandEnvelope, CommandName, DeliveryAdvancePayload};
 use winwincode_delivery::domain::Delivery;
 use winwincode_delivery::store::{
@@ -12,13 +13,15 @@ use winwincode_delivery::store::{
     JournalBackendError, JournalBackendErrorCode, JournalEntryState, JournalRecordBytes,
     LoadedDeliveryJournal, StartDeliveryStage,
 };
-use winwincode_domain::{DeliveryId, ExecutionJobId};
+use winwincode_domain::{DeliveryId, ExecutionJobId, Sha256Digest};
 use winwincode_execution_port::generated::{
     DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionScope,
+    ProductSessionExecutionScope, ProductSessionExecutionScopeKind,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, DurableOutboxEvent,
-    LoadedAggregateJournal, NewOutboxEvent, ProductStateStorage, StorageError, StorageErrorKind,
+    ExecutionJobRecord, LoadedAggregateJournal, NewOutboxEvent, ProductStateStorage, StorageError,
+    StorageErrorKind,
 };
 
 use crate::delivery_execution::{
@@ -41,14 +44,20 @@ pub(crate) fn execute(
     command: &CommandEnvelope,
     pending: &PendingDeliveryExecution,
     dispatcher: &mut dyn ExecutionJobDispatcher,
+    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 ) -> Result<DeliveryExecutionDispatchReceipt, DeliveryExecutionError> {
-    let mut transaction = AtomicDeliveryExecutionTransaction { storage, command };
+    let mut transaction = AtomicDeliveryExecutionTransaction {
+        storage,
+        command,
+        handoff,
+    };
     commit_and_dispatch(pending, &mut transaction, dispatcher)
 }
 
 struct AtomicDeliveryExecutionTransaction<'storage, 'command> {
     storage: &'storage mut dyn ProductStateStorage,
     command: &'command CommandEnvelope,
+    handoff: Option<&'command crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 }
 
 impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_> {
@@ -64,6 +73,9 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             pending.delivery().id(),
             pending.delivery().revision(),
             DeliveryChangeKind::Advanced,
+            crate::instant_from_millis(pending.delivery().snapshot().updated_at_millis)
+                .map_err(port_error)?,
+            "delivery-execution-transaction",
         )
         .map_err(port_error)?;
         let stream_id = delivery_stream_id(pending.delivery().id());
@@ -117,6 +129,9 @@ impl DeliveryExecutionTransaction for AtomicDeliveryExecutionTransaction<'_, '_>
             return Err(DeliveryExecutionPortError::new(
                 "new Delivery mutation did not stage a journal publication",
             ));
+        }
+        if let Some(handoff) = self.handoff {
+            commit = commit.with_state_mutation(handoff.consumption());
         }
 
         let receipt = self.storage.commit(&commit).map_err(port_error)?;
@@ -287,6 +302,49 @@ pub(crate) fn load_durable_execution_job(
     storage: &dyn ProductStateStorage,
     job_id: &ExecutionJobId,
 ) -> Result<(DurableOutboxEvent, ExecutionJob), StorageError> {
+    let (durable, original) = load_durable_execution_intent(storage, job_id)?;
+    let Some(record) = storage.load_execution_job_record(job_id)? else {
+        return Ok((durable, original));
+    };
+    let current = strict_scheduled_execution_job(&record)?;
+    if current.attempt == original.attempt {
+        if current != original {
+            return Err(StorageError::adapter(
+                "scheduled ExecutionJob differs from its immutable durable intent",
+            ));
+        }
+        return Ok((durable, current));
+    }
+    let replacement = storage
+        .load_execution_scope_replacement_authority(job_id)?
+        .ok_or_else(|| StorageError::adapter("scheduled replacement has no sealed authority"))?;
+    let current_attempt = u64::try_from(current.attempt)
+        .map_err(|_| StorageError::adapter("scheduled replacement attempt is invalid"))?;
+    if replacement.replacement_attempt() != current_attempt
+        || replacement.job_id() != job_id
+        || replacement.logical_job_digest() != &logical_job_digest(&record.dispatch_payload)?
+    {
+        return Err(StorageError::adapter(
+            "scheduled replacement differs from its sealed authority",
+        ));
+    }
+    let mut immutable = current.clone();
+    immutable.attempt = original.attempt;
+    if immutable != original {
+        return Err(StorageError::adapter(
+            "scheduled replacement changed immutable ExecutionJob fields",
+        ));
+    }
+    Ok((durable, current))
+}
+
+/// Loads only the immutable `ExecutionJob` intent event. This read is kept
+/// separate from [`load_durable_execution_job`] so a complete phase-receipt
+/// replay can resolve before consulting mutable queue/replacement state.
+pub(crate) fn load_durable_execution_intent(
+    storage: &dyn ProductStateStorage,
+    job_id: &ExecutionJobId,
+) -> Result<(DurableOutboxEvent, ExecutionJob), StorageError> {
     let event_id = format!("execution-job:{}", job_id.0);
     let durable = storage
         .load_outbox_event(&event_id)?
@@ -300,14 +358,103 @@ pub(crate) fn load_durable_execution_job(
             "durable event is not the exact internal ExecutionJob intent",
         ));
     }
-    let job = strict_execution_job(&event.payload)
+    let original = strict_any_execution_job(&event.payload)
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;
-    if &job.job_id != job_id {
+    if &original.job_id != job_id {
         return Err(StorageError::invalid_input(
             "durable ExecutionJob event identity does not match its payload",
         ));
     }
-    Ok((durable, job))
+    Ok((durable, original))
+}
+
+fn strict_scheduled_execution_job(
+    record: &ExecutionJobRecord,
+) -> Result<ExecutionJob, StorageError> {
+    let job = strict_any_execution_job(&record.dispatch_payload)
+        .map_err(|error| StorageError::adapter(error.to_string()))?;
+    let attempt = u64::try_from(job.attempt)
+        .map_err(|_| StorageError::adapter("scheduled ExecutionJob attempt is invalid"))?;
+    if job.job_id != record.job_id
+        || job.payload_digest != record.payload_digest
+        || attempt != record.attempt
+        || job.workspace.repository_id != record.scope.repository_id
+    {
+        return Err(StorageError::adapter(
+            "scheduled ExecutionJob row differs from its canonical payload",
+        ));
+    }
+    let scope_matches = match &job.scope {
+        ExecutionScope::ProductSessionExecutionScope(scope) => {
+            scope.product_session_id == record.scope.product_session_id
+                && record.scope.delivery_id.is_none()
+                && record.stage_run_id.is_none()
+        }
+        ExecutionScope::DeliveryStageExecutionScope(scope) => {
+            scope.product_session_id == record.scope.product_session_id
+                && Some(&scope.delivery_id) == record.scope.delivery_id.as_ref()
+                && Some(&scope.stage_run_id) == record.stage_run_id.as_ref()
+        }
+    };
+    if !scope_matches {
+        return Err(StorageError::adapter(
+            "scheduled ExecutionJob scope differs from its canonical payload",
+        ));
+    }
+    Ok(job)
+}
+
+fn logical_job_digest(payload: &[u8]) -> Result<Sha256Digest, StorageError> {
+    let mut value: Value = serde_json::from_slice(payload)
+        .map_err(|_| StorageError::adapter("scheduled ExecutionJob is not valid JSON"))?;
+    value
+        .as_object_mut()
+        .and_then(|object| object.remove("attempt"))
+        .ok_or_else(|| StorageError::adapter("scheduled ExecutionJob attempt is missing"))?;
+    let encoded = serde_json::to_vec(&value)
+        .map_err(|_| StorageError::adapter("scheduled logical Job cannot encode"))?;
+    Ok(Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(encoded)
+    )))
+}
+
+fn strict_any_execution_job(payload: &[u8]) -> Result<ExecutionJob, DeliveryExecutionPortError> {
+    let value: Value = serde_json::from_slice(payload).map_err(port_error)?;
+    let mut job: ExecutionJob = serde_json::from_value(value.clone())
+        .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
+    let scope_value = value
+        .get("scope")
+        .ok_or_else(|| DeliveryExecutionPortError::new("durable execution job scope is missing"))?
+        .clone();
+    let kind = scope_value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
+    job.scope = match kind {
+        "delivery-stage" => {
+            let scope: DeliveryStageExecutionScope = serde_json::from_value(scope_value)
+                .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
+            if scope.kind != DeliveryStageExecutionScopeKind::DeliveryStage {
+                return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB));
+            }
+            ExecutionScope::DeliveryStageExecutionScope(scope)
+        }
+        "product-session" => {
+            let scope: ProductSessionExecutionScope = serde_json::from_value(scope_value)
+                .map_err(|_| DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB))?;
+            if scope.kind != ProductSessionExecutionScopeKind::ProductSession {
+                return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB));
+            }
+            ExecutionScope::ProductSessionExecutionScope(scope)
+        }
+        _ => return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB)),
+    };
+    let canonical = serde_json::to_value(&job).map_err(port_error)?;
+    if value != canonical {
+        return Err(DeliveryExecutionPortError::new(NON_CANONICAL_EXECUTION_JOB));
+    }
+    Ok(job)
 }
 
 pub(crate) fn delivery_stream_id(delivery_id: &DeliveryId) -> String {

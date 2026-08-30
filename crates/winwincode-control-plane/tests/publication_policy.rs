@@ -295,6 +295,7 @@ fn allowed_publication_records_the_exact_policy_rule_before_persisting_intent() 
         .commit_publication_publish(
             &command,
             &foreign_authorization,
+            fixture.attribution(),
             &policy,
             &foreign_evidence,
             &origin,
@@ -307,6 +308,7 @@ fn allowed_publication_records_the_exact_policy_rule_before_persisting_intent() 
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &policy,
             &evidence,
             &origin,
@@ -430,6 +432,7 @@ fn explicit_requester_deny_wins_and_records_the_rule_without_intent_or_provider_
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &denied_policy,
             &denied_evidence,
             &origin,
@@ -498,6 +501,7 @@ fn explicit_requester_deny_wins_and_records_the_rule_without_intent_or_provider_
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &allowed_policy,
             &allowed_evidence,
             &origin,
@@ -663,6 +667,7 @@ fn repository_verification_artifact_and_approval_denials_are_exact_and_side_effe
             .commit_publication_publish(
                 &command,
                 fixture.authorization(),
+                fixture.attribution(),
                 &policy,
                 &evidence,
                 &origin,
@@ -733,6 +738,7 @@ fn missing_audit_store_fails_closed_but_exact_receipt_replay_needs_no_current_po
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &allowed_policy,
             &evidence,
             &origin,
@@ -753,6 +759,7 @@ fn missing_audit_store_fails_closed_but_exact_receipt_replay_needs_no_current_po
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &allowed_policy,
             &evidence,
             &origin,
@@ -783,6 +790,7 @@ fn missing_audit_store_fails_closed_but_exact_receipt_replay_needs_no_current_po
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &denied_policy,
             &replacement_facts,
             &origin,
@@ -850,6 +858,7 @@ fn resume_records_current_policy_before_any_provider_lookup_or_state_transition(
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &publish_policy,
             &policy_evidence(&fixture, true, true, 1_100),
             &origin,
@@ -980,6 +989,7 @@ fn policy_guarded_success_preserves_provider_order_and_command_replay() {
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &policy,
             &evidence,
             &origin,
@@ -1033,6 +1043,7 @@ fn policy_guarded_success_preserves_provider_order_and_command_replay() {
         .commit_publication_publish(
             &command,
             fixture.authorization(),
+            fixture.attribution(),
             &policy,
             &evidence,
             &origin,
@@ -1098,6 +1109,7 @@ fn permission_and_rate_limit_keep_terminal_and_retryable_outcomes_distinct() {
         .commit_publication_publish(
             &denied_command,
             fixture.authorization(),
+            fixture.attribution(),
             &denied_policy,
             &policy_evidence(&fixture, true, true, 1_100),
             &denied_origin,
@@ -1177,6 +1189,7 @@ fn permission_and_rate_limit_keep_terminal_and_retryable_outcomes_distinct() {
         .commit_publication_publish(
             &limited_command,
             fixture.authorization(),
+            fixture.attribution(),
             &limited_policy,
             &policy_evidence(&fixture, true, true, 1_100),
             &limited_origin,
@@ -1276,6 +1289,7 @@ fn pull_request_race_reconciles_and_comment_rejection_stops_status() {
             .commit_publication_publish(
                 &command,
                 fixture.authorization(),
+                fixture.attribution(),
                 &policy,
                 &policy_evidence(&fixture, true, true, 1_100),
                 &origin,

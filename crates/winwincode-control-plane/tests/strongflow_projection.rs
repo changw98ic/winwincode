@@ -60,8 +60,7 @@ use winwincode_domain::{
 };
 use winwincode_execution_port::generated::{ExecutionEventCategory, ExecutionEventRecord};
 use winwincode_storage::{
-    ProjectionReadCut, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit,
+    ProjectionReadCut, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
 };
 
 // PublicationAuthorizationSnapshot is deliberately not constructible from HTTP input.
@@ -76,7 +75,7 @@ struct JournalStorage {
     advance_event_after_runtime_read: bool,
 }
 impl ProductStateStorage for JournalStorage {
-    fn commit(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
+    fn commit_adapter(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         Err(StorageError::adapter("read-only test storage"))
     }
     fn load_receipt(
@@ -118,6 +117,11 @@ impl ProductStateStorage for JournalStorage {
             1
         };
         let event_id = match key.stream() {
+            ProjectionEventStream::Scope | ProjectionEventStream::Lease { .. } => {
+                return Err(StorageError::invalid_input(
+                    "StrongFlow fixture received a non-StrongFlow event stream",
+                ));
+            }
             ProjectionEventStream::Delivery(_) => {
                 format!("evt_delivery_fixture_{sequence:04}")
             }
@@ -132,6 +136,11 @@ impl ProductStateStorage for JournalStorage {
         )?;
         if let Some(expected) = expected {
             let expected_id = match key.stream() {
+                ProjectionEventStream::Scope | ProjectionEventStream::Lease { .. } => {
+                    return Err(StorageError::invalid_input(
+                        "StrongFlow fixture received a non-StrongFlow event stream",
+                    ));
+                }
                 ProjectionEventStream::Delivery(_) => {
                     format!("evt_delivery_fixture_{:04}", expected.sequence())
                 }
@@ -382,7 +391,12 @@ fn fixture(runtime_unavailable: bool, publication_unavailable: bool, race: bool)
 }
 
 fn runtime_projection_for(delivery: &Delivery) -> RuntimeProjection {
-    let Some(session) = delivery.snapshot().session_bindings.first() else {
+    let Some(session) = delivery
+        .snapshot()
+        .session_bindings
+        .first()
+        .filter(|binding| binding.worker_session_id.is_some())
+    else {
         return RuntimeProjection::new(delivery, Vec::new()).expect("empty runtime");
     };
     let binding = accepted_binding(
@@ -508,7 +522,13 @@ fn fixture_with_delivery_and_event_behavior(
             .map(|record| AggregateJournalRecord::new(record.sequence, record.digest, record.bytes))
             .collect(),
     };
-    let accepted_sequence = u64::from(!delivery.snapshot().session_bindings.is_empty());
+    let accepted_sequence = u64::from(
+        delivery
+            .snapshot()
+            .session_bindings
+            .first()
+            .is_some_and(|binding| binding.worker_session_id.is_some()),
+    );
     let projection = runtime_projection_for(&delivery);
     let runtime = Arc::new(Mutex::new(
         TrustedRuntimeProjectionRead::try_new(
@@ -950,10 +970,11 @@ fn commit_product_runtime_state(
     event_count: u64,
 ) {
     let stream_id = format!("product-session:{}", product_session_id.0);
-    let actor_key = ReceiptActorKey::from_encoded(
-        format!("product-runtime-actor-{label}-{event_count}").into_bytes(),
-    )
-    .expect("receipt actor key");
+    let public_actor = winwincode_storage::PublicEventActor::System {
+        id: winwincode_domain::SystemActorId("sys_01J00000000000000000000000".into()),
+    };
+    let actor_key =
+        winwincode_storage::receipt_actor_key(&public_actor).expect("receipt actor key");
     let receipt_identity = ReceiptIdentity::new(
         actor_key,
         product_scope_key(scope),
@@ -971,12 +992,26 @@ fn commit_product_runtime_state(
             stream_id,
             event_count.saturating_sub(1),
             product_runtime_state(product_session_id, label, event_count),
-            vec![NewOutboxEvent::projection(
-                ControlPlaneEventId(format!("evt_product_runtime_{label}_{event_count}")),
-                "runtime-projection.invalidated.v1",
-                b"{}".to_vec(),
-                ProjectionEventStream::ProductSession(product_session_id.clone()),
-            )],
+            vec![
+                NewOutboxEvent::public_projection(
+                    ControlPlaneEventId(format!("evt_product_runtime_{label}_{event_count}")),
+                    "runtime-projection.invalidated.v1",
+                    b"{}".to_vec(),
+                    ProjectionEventStream::ProductSession(product_session_id.clone()),
+                    winwincode_storage::PublicEventScope::Repository {
+                        organization_id: scope.organization_id.clone(),
+                        workspace_id: scope.workspace_id.clone(),
+                        project_id: scope.project_id.clone(),
+                        repository_id: scope.repository_id.clone(),
+                    },
+                    Instant("2026-08-27T00:00:00.000Z".into()),
+                    winwincode_storage::PublicEventSource::ControlPlane {
+                        actor: public_actor,
+                        component: "strongflow-projection-test".into(),
+                    },
+                )
+                .expect("public runtime projection event"),
+            ],
         ))
         .expect("commit product runtime state");
 }
@@ -1012,6 +1047,36 @@ fn product_runtime_snapshot(
         panic!("runtime projection response")
     };
     response.result
+}
+
+fn assert_product_runtime_snapshot(
+    snapshot: &winwincode_api::generated::RuntimeProjectionSnapshot,
+    product_session_id: &ProductSessionId,
+    label: &str,
+    sequence: i64,
+) {
+    assert_eq!(&snapshot.product_session_id, product_session_id);
+    assert_eq!(snapshot.revision, Revision(sequence));
+    assert_eq!(snapshot.last_projection_sequence, sequence);
+    assert!(snapshot.delivery_id.is_none());
+    assert!(snapshot.stage_run_id.is_none());
+    assert!(snapshot.read_cursor.is_none());
+    let [session] = snapshot.sessions.as_slice() else {
+        panic!("one {label} ProductSession runtime")
+    };
+    assert_eq!(&session.product_session_id, product_session_id);
+    assert_eq!(session.execution_job_id.0, format!("job_product_{label}"));
+    assert_eq!(session.worker_session_id.0, format!("wsn_product_{label}"));
+    assert_eq!(session.codex_thread_id.0, format!("cdx_product_{label}"));
+    assert_eq!(session.lease_id.0, format!("lse_product_{label}"));
+    assert_eq!(
+        session.session_binding_id,
+        format!("product-session-runtime:job_product_{label}")
+    );
+    assert_eq!(session.as_of_sequence, sequence);
+    assert_eq!(session.attempt, 1);
+    assert!(session.stage_run_id.is_none());
+    assert!(session.delivery_task_id.is_none());
 }
 
 #[test]
@@ -1141,6 +1206,58 @@ fn delivery_and_runtime_get_share_one_bounded_snapshot_cursor() {
 }
 
 #[test]
+fn pending_worker_attachment_exposes_an_empty_stage_runtime_snapshot() {
+    let mut snapshot = delivery_fixture(false).into_snapshot();
+    let binding = snapshot
+        .session_bindings
+        .first_mut()
+        .expect("fixture SessionBinding");
+    binding.worker_session_id = None;
+    binding.codex_thread_id = None;
+    binding.worker_id = None;
+    binding.worker_instance_id = None;
+    binding.lease_id = None;
+    binding.fencing_token = None;
+    binding.source_provenance =
+        winwincode_delivery::domain::SessionBindingSourceProvenance::delivery_advance(
+            "delivery.advance",
+        );
+    let pending = Delivery::try_from_snapshot(snapshot).expect("pending Worker attachment");
+    let f = fixture_with_delivery(pending, false, false, false, None);
+    let empty = RuntimeProjection::new(&f.delivery, Vec::new()).expect("empty runtime projection");
+    *f.runtime.lock().expect("runtime") = TrustedRuntimeProjectionRead::try_new(
+        f.scope.clone(),
+        f.delivery.revision(),
+        Revision(0),
+        0,
+        Instant("1970-01-01T00:00:00.000Z".into()),
+        &empty,
+        Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+    )
+    .expect("trusted empty runtime");
+
+    let (detail, cursor) = detail_and_cursor(&f);
+    let stage = detail.stages.first().expect("Codex StageRun");
+    let binding = stage
+        .session_binding
+        .as_ref()
+        .expect("pending ProductSession binding");
+    assert_eq!(binding.stage_run_id, None);
+    let response = StrongFlowProjectionQueryPort::runtime_projection_get(
+        &f.control_plane,
+        &runtime_query(&f, cursor.clone(), 20),
+    )
+    .expect("pending runtime snapshot");
+    let QueryResultResponse::RuntimeProjectionGetResultResponse(response) = response else {
+        panic!("runtime")
+    };
+    assert!(response.result.sessions.is_empty());
+    assert_eq!(response.result.stage_run_id, Some(stage.id.clone()));
+    assert_eq!(response.result.read_cursor, Some(cursor));
+    assert_eq!(response.result.rebuilt_at.0, "1970-01-01T00:00:00.000Z");
+}
+
+#[test]
 fn delivery_snapshot_does_not_skip_an_event_committed_after_its_source_read() {
     let f = fixture_with_delivery_and_event_behavior(
         delivery_fixture(false),
@@ -1252,20 +1369,8 @@ fn public_sqlite_product_session_read_cut_isolated_and_restartable() {
 
     let first = product_runtime_snapshot(&control_plane, scope.clone(), first_id.clone());
     let second = product_runtime_snapshot(&control_plane, scope.clone(), second_id.clone());
-    assert_eq!(first.product_session_id, first_id);
-    assert_eq!(first.revision, Revision(1));
-    assert_eq!(first.last_projection_sequence, 1);
-    assert!(first.delivery_id.is_none());
-    assert!(first.stage_run_id.is_none());
-    assert!(first.read_cursor.is_none());
-    assert!(first.sessions.is_empty());
-    assert_eq!(second.product_session_id, second_id);
-    assert_eq!(second.revision, Revision(2));
-    assert_eq!(second.last_projection_sequence, 2);
-    assert!(second.delivery_id.is_none());
-    assert!(second.stage_run_id.is_none());
-    assert!(second.read_cursor.is_none());
-    assert!(second.sessions.is_empty());
+    assert_product_runtime_snapshot(&first, &first_id, "first", 1);
+    assert_product_runtime_snapshot(&second, &second_id, "second", 2);
     let _: winwincode_api::generated::RuntimeProjectionSnapshot = serde_json::from_value(
         serde_json::to_value(&first).expect("first ProductSession snapshot JSON"),
     )
@@ -1305,14 +1410,10 @@ fn public_sqlite_product_session_read_cut_isolated_and_restartable() {
     let first_after_restart = product_runtime_snapshot(&restarted, scope, first_id.clone());
     let second_after_restart =
         product_runtime_snapshot(&restarted, canonical_product_scope(), second_id.clone());
-    assert_eq!(first_after_restart.product_session_id, first_id);
-    assert_eq!(first_after_restart.revision, Revision(1));
-    assert_eq!(first_after_restart.last_projection_sequence, 1);
-    assert!(first_after_restart.sessions.is_empty());
-    assert_eq!(second_after_restart.product_session_id, second_id);
-    assert_eq!(second_after_restart.revision, Revision(2));
-    assert_eq!(second_after_restart.last_projection_sequence, 2);
-    assert!(second_after_restart.sessions.is_empty());
+    assert_product_runtime_snapshot(&first_after_restart, &first_id, "first", 1);
+    assert_eq!(first_after_restart.sessions, first.sessions);
+    assert_product_runtime_snapshot(&second_after_restart, &second_id, "second", 2);
+    assert_eq!(second_after_restart.sessions, second.sessions);
     restarted
         .shutdown()
         .expect("restarted Control Plane shutdown");

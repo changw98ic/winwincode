@@ -6,13 +6,19 @@ use std::thread;
 
 use rusqlite::Connection;
 use winwincode_domain::{
-    ControlPlaneEventId, DeliveryId, ProductSessionId, RequestId, Sha256Digest,
+    CodexThreadId, ControlPlaneEventId, DeliveryId, Instant, LeaseId, OrganizationId,
+    ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId, WorkerId,
+    WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
-    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
-    PendingAuditEvent, ProductStateStorage, ProjectionEventCursor, ProjectionEventStream,
-    ProjectionEventStreamKey, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
-    StateCommit, StateRevisionGuard, StorageError, StorageErrorKind,
+    AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
+    LoadedAggregateJournal, MAX_STATE_MUTATION_BYTES_PER_COMMIT, MAX_STATE_MUTATION_PAYLOAD_BYTES,
+    MAX_STATE_MUTATIONS_PER_COMMIT, NewOutboxEvent, OutboxEvent, PendingAuditEvent,
+    ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
+    ProjectionReadCut, PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey,
+    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, StateMutation,
+    StateRevisionGuard, StorageError, StorageErrorKind, StoredState, receipt_actor_key,
+    receipt_scope_key,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -32,6 +38,64 @@ fn receipt_identity(actor: &str, scope: &str, request_id: &str) -> ReceiptIdenti
         RequestId(request_id.to_owned()),
     )
     .expect("receipt identity")
+}
+
+fn projection_actor() -> PublicEventActor {
+    PublicEventActor::User {
+        id: UserId("usr_01J00000000000000000000000".into()),
+    }
+}
+
+fn projection_scope() -> PublicEventScope {
+    PublicEventScope::Repository {
+        organization_id: OrganizationId("org_01J00000000000000000000000".into()),
+        workspace_id: WorkspaceId("wsp_01J00000000000000000000000".into()),
+        project_id: ProjectId("prj_01J00000000000000000000000".into()),
+        repository_id: RepositoryId("rep_01J00000000000000000000000".into()),
+    }
+}
+
+fn projection_receipt_identity(request_id: &str) -> ReceiptIdentity {
+    projection_receipt_identity_for_scope(request_id, &projection_scope())
+}
+
+fn projection_receipt_identity_for_scope(
+    request_id: &str,
+    scope: &PublicEventScope,
+) -> ReceiptIdentity {
+    ReceiptIdentity::new(
+        receipt_actor_key(&projection_actor()).expect("canonical actor key"),
+        receipt_scope_key(scope).expect("canonical scope key"),
+        RequestId(request_id.to_owned()),
+    )
+    .expect("projection receipt identity")
+}
+
+fn public_projection_event(
+    event_id: impl Into<String>,
+    stream: ProjectionEventStream,
+) -> NewOutboxEvent {
+    public_projection_event_for_scope(event_id, stream, projection_scope())
+}
+
+fn public_projection_event_for_scope(
+    event_id: impl Into<String>,
+    stream: ProjectionEventStream,
+    scope: PublicEventScope,
+) -> NewOutboxEvent {
+    NewOutboxEvent::public_projection(
+        ControlPlaneEventId(event_id.into()),
+        "projection.invalidated",
+        b"{}".to_vec(),
+        stream,
+        scope,
+        Instant("2026-08-27T00:00:00.000Z".into()),
+        PublicEventSource::ControlPlane {
+            actor: projection_actor(),
+            component: "storage-test".into(),
+        },
+    )
+    .expect("canonical public projection")
 }
 
 fn state_commit(
@@ -62,27 +126,42 @@ fn projection_commit(
     event_id: &str,
     stream: ProjectionEventStream,
 ) -> StateCommit {
+    projection_commit_for_scope(
+        request_id,
+        state_stream,
+        event_id,
+        stream,
+        projection_scope(),
+    )
+}
+
+fn projection_commit_for_scope(
+    request_id: &str,
+    state_stream: &str,
+    event_id: &str,
+    stream: ProjectionEventStream,
+    scope: PublicEventScope,
+) -> StateCommit {
     StateCommit::new(
-        receipt_identity("actor:projection", "scope:repository-one", request_id),
+        projection_receipt_identity_for_scope(request_id, &scope),
         Sha256Digest(format!("sha256:{}", "d".repeat(64))),
         state_stream,
         0,
         b"projection-state".to_vec(),
-        vec![NewOutboxEvent::projection(
-            ControlPlaneEventId(event_id.to_owned()),
-            "projection.invalidated",
-            b"{}".to_vec(),
-            stream,
-        )],
+        vec![public_projection_event_for_scope(event_id, stream, scope)],
     )
 }
 
 fn projection_key(stream: ProjectionEventStream) -> ProjectionEventStreamKey {
-    ProjectionEventStreamKey::new(
-        ReceiptScopeKey::from_encoded(b"scope:repository-one".to_vec()).expect("scope key"),
-        stream,
-    )
-    .expect("projection stream key")
+    projection_key_for_scope(stream, &projection_scope())
+}
+
+fn projection_key_for_scope(
+    stream: ProjectionEventStream,
+    scope: &PublicEventScope,
+) -> ProjectionEventStreamKey {
+    ProjectionEventStreamKey::new(receipt_scope_key(scope).expect("scope key"), stream)
+        .expect("projection stream key")
 }
 
 #[test]
@@ -95,15 +174,13 @@ fn sqlite_projection_read_cut_reads_state_and_cursor_from_one_durable_cut() {
     let state_stream = "runtime:fixture-read-cut".to_owned();
     storage
         .commit(&StateCommit::new(
-            receipt_identity("actor:read-cut", "scope:repository-one", "request:read-cut"),
+            projection_receipt_identity("request:read-cut"),
             Sha256Digest(format!("sha256:{}", "a".repeat(64))),
             &state_stream,
             0,
             b"runtime-state-v1".to_vec(),
-            vec![NewOutboxEvent::projection(
-                ControlPlaneEventId("evt_read_cut_00000001".into()),
-                "projection.invalidated",
-                b"{}".to_vec(),
+            vec![public_projection_event(
+                "evt_read_cut_00000001",
                 key.stream().clone(),
             )],
         ))
@@ -138,6 +215,115 @@ fn sqlite_projection_read_cut_reads_state_and_cursor_from_one_durable_cut() {
 }
 
 #[test]
+fn public_context_is_atomic_exact_and_survives_restart() {
+    let root = temporary_directory("public-context-restart");
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    let stream = ProjectionEventStream::ProductSession(ProductSessionId(
+        "psn_01J00000000000000000000000".into(),
+    ));
+    storage
+        .commit(&projection_commit(
+            "req_public_context_restart",
+            "product-session:fixture",
+            "evt_public_context_restart",
+            stream.clone(),
+        ))
+        .expect("public context should commit");
+    Box::new(storage).close().expect("storage should close");
+
+    let storage = SqliteStorage::open(&root).expect("storage should restart");
+    let event = storage
+        .load_outbox_event("evt_public_context_restart")
+        .expect("durable event lookup")
+        .expect("durable event");
+    let context = event
+        .event()
+        .public_context
+        .as_ref()
+        .expect("durable public context");
+    assert_eq!(context.scope(), &projection_scope());
+    assert_eq!(context.stream(), &stream);
+    assert_eq!(context.occurred_at().0, "2026-08-27T00:00:00.000Z");
+    assert_eq!(
+        context.source(),
+        &PublicEventSource::ControlPlane {
+            actor: projection_actor(),
+            component: "storage-test".into(),
+        }
+    );
+    Box::new(storage)
+        .close()
+        .expect("restarted storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn public_context_scope_and_actor_must_match_the_atomic_receipt() {
+    let root = temporary_directory("public-context-authority");
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    let event = public_projection_event(
+        "evt_public_context_authority",
+        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into())),
+    );
+    let other_actor = PublicEventActor::User {
+        id: UserId("usr_01J00000000000000000000001".into()),
+    };
+    let receipt = ReceiptIdentity::new(
+        receipt_actor_key(&other_actor).expect("other actor key"),
+        receipt_scope_key(&projection_scope()).expect("scope key"),
+        RequestId("req_public_context_authority".into()),
+    )
+    .expect("foreign receipt");
+    let error = storage
+        .commit(&StateCommit::new(
+            receipt,
+            Sha256Digest(format!("sha256:{}", "f".repeat(64))),
+            "public-context-authority",
+            0,
+            b"must-not-commit".to_vec(),
+            vec![event],
+        ))
+        .expect_err("public actor and receipt actor must match");
+    assert_eq!(error.kind(), StorageErrorKind::InvalidInput);
+    let other_scope = PublicEventScope::Repository {
+        organization_id: OrganizationId("org_01J00000000000000000000000".into()),
+        workspace_id: WorkspaceId("wsp_01J00000000000000000000000".into()),
+        project_id: ProjectId("prj_01J00000000000000000000000".into()),
+        repository_id: RepositoryId("rep_01J00000000000000000000001".into()),
+    };
+    let scope_error = storage
+        .commit(&StateCommit::new(
+            ReceiptIdentity::new(
+                receipt_actor_key(&projection_actor()).expect("actor key"),
+                receipt_scope_key(&other_scope).expect("other scope key"),
+                RequestId("req_public_context_other_scope".into()),
+            )
+            .expect("foreign scope receipt"),
+            Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            "public-context-authority",
+            0,
+            b"must-not-commit".to_vec(),
+            vec![public_projection_event(
+                "evt_public_context_other_scope",
+                ProjectionEventStream::Delivery(DeliveryId(
+                    "dlv_01J00000000000000000000000".into(),
+                )),
+            )],
+        ))
+        .expect_err("public scope and receipt scope must match");
+    assert_eq!(scope_error.kind(), StorageErrorKind::InvalidInput);
+    assert!(
+        storage
+            .load_state("public-context-authority")
+            .expect("state lookup")
+            .is_none()
+    );
+    assert!(storage.pending_events().expect("pending events").is_empty());
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
 fn sqlite_projection_read_cut_never_pairs_a_state_with_a_concurrent_cursor() {
     let root = temporary_directory("projection-read-cut-race");
     let stream =
@@ -146,19 +332,13 @@ fn sqlite_projection_read_cut_never_pairs_a_state_with_a_concurrent_cursor() {
     let state_stream = "runtime:fixture-read-cut-race".to_owned();
     let mut seed = SqliteStorage::open(&root).expect("storage should open");
     seed.commit(&StateCommit::new(
-        receipt_identity(
-            "actor:read-cut-race",
-            "scope:repository-one",
-            "request:seed",
-        ),
+        projection_receipt_identity("request:seed"),
         Sha256Digest(format!("sha256:{}", "0".repeat(64))),
         &state_stream,
         0,
         b"revision:1".to_vec(),
-        vec![NewOutboxEvent::projection(
-            ControlPlaneEventId("evt_read_cut_race_0000000000000001".into()),
-            "projection.invalidated",
-            b"{}".to_vec(),
+        vec![public_projection_event(
+            "evt_read_cut_race_0000000000000001",
             stream.clone(),
         )],
     ))
@@ -172,19 +352,13 @@ fn sqlite_projection_read_cut_never_pairs_a_state_with_a_concurrent_cursor() {
         for revision in 2..=101_u64 {
             writer
                 .commit(&StateCommit::new(
-                    receipt_identity(
-                        "actor:read-cut-race",
-                        "scope:repository-one",
-                        &format!("request:revision-{revision}"),
-                    ),
+                    projection_receipt_identity(&format!("request:revision-{revision}")),
                     Sha256Digest(format!("sha256:{revision:064x}")),
                     &writer_state_stream,
                     revision - 1,
                     format!("revision:{revision}").into_bytes(),
-                    vec![NewOutboxEvent::projection(
-                        ControlPlaneEventId(format!("evt_read_cut_race_{revision:016}")),
-                        "projection.invalidated",
-                        b"{}".to_vec(),
+                    vec![public_projection_event(
+                        format!("evt_read_cut_race_{revision:016}"),
                         stream.clone(),
                     )],
                 ))
@@ -700,7 +874,7 @@ fn assert_current_receipt_schema(database_path: &Path) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version should be readable");
-    assert_eq!(version, 4);
+    assert_eq!(version, 6);
     let receipt_columns = {
         let mut statement = connection
             .prepare("PRAGMA table_info(command_receipts)")
@@ -741,7 +915,7 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
     let database_path = root.join("control-plane.sqlite3");
     let connection = Connection::open(&database_path).expect("test database should open");
     connection
-        .pragma_update(None, "user_version", 5)
+        .pragma_update(None, "user_version", 7)
         .expect("test schema version should be written");
     connection.close().expect("test database should close");
 
@@ -749,8 +923,61 @@ fn startup_rejects_a_database_from_a_newer_schema_version() {
         panic!("a newer schema must not be silently downgraded");
     };
 
-    assert!(error.to_string().contains("unsupported schema version 5"));
+    assert!(error.to_string().contains("unsupported schema version 7"));
     fs::remove_dir_all(root).expect("rejected database should have no open connection");
+}
+
+#[test]
+fn v4_public_rows_without_envelope_context_fail_closed_and_rollback_migration() {
+    let root = temporary_directory("v4-unbound-public-event");
+    fs::create_dir_all(&root).expect("test directory should exist");
+    let database_path = root.join("control-plane.sqlite3");
+    create_v2_fixture(&database_path);
+    let connection = Connection::open(&database_path).expect("v4 fixture database");
+    connection
+        .execute_batch(
+            "ALTER TABLE outbox ADD COLUMN projection_stream_kind TEXT;\
+             ALTER TABLE outbox ADD COLUMN projection_resource_id TEXT;\
+             ALTER TABLE outbox ADD COLUMN projection_stream_sequence INTEGER;\
+             CREATE TABLE projection_event_stream_heads (\
+               scope_key BLOB NOT NULL,stream_kind TEXT NOT NULL,resource_id TEXT NOT NULL,\
+               sequence INTEGER NOT NULL,event_id TEXT NOT NULL,\
+               PRIMARY KEY(scope_key,stream_kind,resource_id));\
+             UPDATE outbox SET projection_stream_kind='delivery',\
+               projection_resource_id='dlv_01J00000000000000000000000',\
+               projection_stream_sequence=1 WHERE event_id='v2-event';\
+             PRAGMA user_version=4;",
+        )
+        .expect("v4 public fixture should be created");
+    connection.close().expect("v4 fixture should close");
+
+    let Err(error) = SqliteStorage::open(&root) else {
+        panic!("unbound public row must fail closed");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("legacy public outbox rows have no durable envelope context")
+    );
+    let connection = Connection::open(&database_path).expect("failed migration database");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("rolled-back schema version");
+    assert_eq!(version, 4);
+    let context_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('outbox') \
+             WHERE name IN ('public_scope_json','public_stream_json',\
+                            'public_occurred_at_json','public_source_json')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("context column count");
+    assert_eq!(context_columns, 0);
+    connection
+        .close()
+        .expect("failed migration connection close");
+    fs::remove_dir_all(root).expect("remove v4 fixture");
 }
 
 #[test]
@@ -771,12 +998,13 @@ fn startup_migrates_v1_receipts_once_without_a_legacy_runtime_lookup_path() {
     );
     assert_eq!(
         storage.pending_events().expect("migrated outbox read"),
-        [winwincode_storage::OutboxEvent {
+        [OutboxEvent {
             sequence: 2,
             event_id: "legacy-event".to_owned(),
             topic: "control-plane.state.changed".to_owned(),
             payload: b"event".to_vec(),
             projection_cursor: None,
+            public_context: None,
         }]
     );
 
@@ -832,7 +1060,7 @@ fn startup_migrates_v2_to_the_single_journal_schema_before_serving() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("schema version");
-    assert_eq!(version, 4);
+    assert_eq!(version, 6);
     for table in ["aggregate_journals", "aggregate_journal_records"] {
         let exists: i64 = connection
             .query_row(
@@ -896,6 +1124,498 @@ fn interrupted_v2_migration_rolls_back_before_serving() {
         .close()
         .expect("inspection connection should close");
     fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn all_four_public_event_streams_round_trip_across_restart() {
+    let root = temporary_directory("four-public-streams");
+    let streams = [
+        ProjectionEventStream::Scope,
+        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into())),
+        ProjectionEventStream::ProductSession(ProductSessionId(
+            "psn_01J00000000000000000000000".into(),
+        )),
+        ProjectionEventStream::Lease {
+            worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+            lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+        },
+    ];
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    for (index, stream) in streams.iter().enumerate() {
+        storage
+            .commit(&projection_commit(
+                &format!("req_four_streams_{index:02}"),
+                &format!("state:four-streams:{index}"),
+                &format!("evt_four_streams_event_{index:02}"),
+                stream.clone(),
+            ))
+            .expect("each generated stream kind should commit");
+    }
+    Box::new(storage).close().expect("first storage close");
+
+    let storage = SqliteStorage::open(&root).expect("storage should restart");
+    for (index, stream) in streams.iter().enumerate() {
+        let cursor = storage
+            .load_projection_event_cursor(&projection_key(stream.clone()), None)
+            .expect("restarted stream cursor");
+        assert_eq!(cursor.sequence(), 1);
+        assert_eq!(
+            cursor.event_id().expect("stream event id").0,
+            format!("evt_four_streams_event_{index:02}")
+        );
+        let event = storage
+            .load_outbox_event(&format!("evt_four_streams_event_{index:02}"))
+            .expect("event lookup")
+            .expect("durable event");
+        assert_eq!(
+            event
+                .event()
+                .public_context
+                .as_ref()
+                .expect("public context")
+                .stream(),
+            stream
+        );
+    }
+    Box::new(storage).close().expect("restarted storage close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+fn write_scope_and_lease_authority_events(
+    storage: &mut SqliteStorage,
+    first_scope: &PublicEventScope,
+    second_scope: &PublicEventScope,
+    first_lease: &ProjectionEventStream,
+    second_lease: &ProjectionEventStream,
+) {
+    let writes = [
+        (
+            "req_scope_first_01",
+            "state:scope:first:1",
+            "evt_scope_first_event_01",
+            ProjectionEventStream::Scope,
+            first_scope.clone(),
+        ),
+        (
+            "req_scope_second_01",
+            "state:scope:second:1",
+            "evt_scope_second_event_01",
+            ProjectionEventStream::Scope,
+            second_scope.clone(),
+        ),
+        (
+            "req_scope_first_02",
+            "state:scope:first:2",
+            "evt_scope_first_event_02",
+            ProjectionEventStream::Scope,
+            first_scope.clone(),
+        ),
+        (
+            "req_lease_first_01",
+            "state:lease:first:1",
+            "evt_lease_first_event_01",
+            first_lease.clone(),
+            first_scope.clone(),
+        ),
+        (
+            "req_lease_second_01",
+            "state:lease:second:1",
+            "evt_lease_second_event_01",
+            second_lease.clone(),
+            first_scope.clone(),
+        ),
+        (
+            "req_lease_first_02",
+            "state:lease:first:2",
+            "evt_lease_first_event_02",
+            first_lease.clone(),
+            first_scope.clone(),
+        ),
+    ];
+    for (request_id, state_stream, event_id, stream, scope) in writes {
+        storage
+            .commit(&projection_commit_for_scope(
+                request_id,
+                state_stream,
+                event_id,
+                stream,
+                scope,
+            ))
+            .expect("authority-bound stream event should commit");
+    }
+}
+
+#[test]
+fn scope_and_lease_stream_positions_are_bound_to_exact_authority() {
+    let root = temporary_directory("scope-lease-authority");
+    let first_scope = projection_scope();
+    let second_scope = PublicEventScope::Repository {
+        organization_id: OrganizationId("org_01J00000000000000000000000".into()),
+        workspace_id: WorkspaceId("wsp_01J00000000000000000000000".into()),
+        project_id: ProjectId("prj_01J00000000000000000000000".into()),
+        repository_id: RepositoryId("rep_01J00000000000000000000001".into()),
+    };
+    let first_lease = ProjectionEventStream::Lease {
+        worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+        lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+    };
+    let second_lease = ProjectionEventStream::Lease {
+        worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+        lease_id: LeaseId("lse_01J00000000000000000000001".into()),
+    };
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    write_scope_and_lease_authority_events(
+        &mut storage,
+        &first_scope,
+        &second_scope,
+        &first_lease,
+        &second_lease,
+    );
+    let assertions = [
+        (
+            projection_key_for_scope(ProjectionEventStream::Scope, &first_scope),
+            2,
+            "evt_scope_first_event_02",
+        ),
+        (
+            projection_key_for_scope(ProjectionEventStream::Scope, &second_scope),
+            1,
+            "evt_scope_second_event_01",
+        ),
+        (
+            projection_key_for_scope(first_lease, &first_scope),
+            2,
+            "evt_lease_first_event_02",
+        ),
+        (
+            projection_key_for_scope(second_lease, &first_scope),
+            1,
+            "evt_lease_second_event_01",
+        ),
+    ];
+    for (key, sequence, event_id) in assertions {
+        let cursor = storage
+            .load_projection_event_cursor(&key, None)
+            .expect("exact authority stream cursor");
+        assert_eq!(cursor.sequence(), sequence);
+        assert_eq!(cursor.event_id().expect("event id").0, event_id);
+    }
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn malformed_scope_and_lease_stream_storage_fails_closed() {
+    let invalid = NewOutboxEvent::public_projection(
+        ControlPlaneEventId("evt_invalid_lease_stream".into()),
+        "projection.invalidated",
+        b"{}".to_vec(),
+        ProjectionEventStream::Lease {
+            worker_id: WorkerId("worker-not-canonical".into()),
+            lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+        },
+        projection_scope(),
+        Instant("2026-08-27T00:00:00.000Z".into()),
+        PublicEventSource::ControlPlane {
+            actor: projection_actor(),
+            component: "storage-test".into(),
+        },
+    )
+    .expect_err("non-canonical Lease stream must be rejected");
+    assert_eq!(invalid.kind(), StorageErrorKind::InvalidInput);
+    let mismatched_worker = NewOutboxEvent::public_projection(
+        ControlPlaneEventId("evt_mismatched_lease_authority".into()),
+        "projection.invalidated",
+        b"{}".to_vec(),
+        ProjectionEventStream::Lease {
+            worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+            lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+        },
+        projection_scope(),
+        Instant("2026-08-27T00:00:00.000Z".into()),
+        PublicEventSource::ExecutionWorker {
+            worker_id: WorkerId("wrk_01J00000000000000000000001".into()),
+            worker_session_id: WorkerSessionId("wsn_01J00000000000000000000000".into()),
+            lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+            codex_thread_id: CodexThreadId("cdx_01J00000000000000000000000".into()),
+        },
+    )
+    .expect_err("Lease stream must equal its Worker authority");
+    assert_eq!(mismatched_worker.kind(), StorageErrorKind::InvalidInput);
+
+    let root = temporary_directory("malformed-lease-storage");
+    let stream = ProjectionEventStream::Lease {
+        worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+        lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+    };
+    let mut storage = SqliteStorage::open(&root).expect("storage should open");
+    storage
+        .commit(&projection_commit(
+            "req_malformed_lease_storage",
+            "state:malformed-lease",
+            "evt_malformed_lease_storage",
+            stream,
+        ))
+        .expect("valid Lease stream should commit");
+    Box::new(storage).close().expect("storage should close");
+    let connection = Connection::open(root.join("control-plane.sqlite3")).expect("raw database");
+    connection
+        .execute(
+            "UPDATE outbox SET projection_resource_id = 'wrk_bad/lse_bad/extra'
+             WHERE event_id = 'evt_malformed_lease_storage'",
+            [],
+        )
+        .expect("corrupt stored Lease identity");
+    connection.close().expect("raw database close");
+    let storage = SqliteStorage::open(&root).expect("storage should reopen");
+    let error = storage
+        .load_outbox_event("evt_malformed_lease_storage")
+        .expect_err("corrupt stored Lease stream must fail closed");
+    assert_eq!(error.kind(), StorageErrorKind::Adapter);
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+type ProjectionHeadRow = (String, String, String, i64, String);
+type OutboxSequenceRow = (i64, String, Option<i64>);
+
+fn install_v5_projection_stream_fixture(
+    root: &Path,
+) -> (Vec<ProjectionHeadRow>, Vec<OutboxSequenceRow>) {
+    let delivery =
+        ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into()));
+    let product_session = ProjectionEventStream::ProductSession(ProductSessionId(
+        "psn_01J00000000000000000000000".into(),
+    ));
+    let mut storage = SqliteStorage::open(root).expect("fresh v6 storage should open");
+    storage
+        .commit(&projection_commit(
+            "req_v5_delivery_01",
+            "state:v5:delivery:1",
+            "evt_v5_delivery_event_01",
+            delivery.clone(),
+        ))
+        .expect("Delivery head seed");
+    storage
+        .commit(&projection_commit(
+            "req_v5_delivery_02",
+            "state:v5:delivery:2",
+            "evt_v5_delivery_event_02",
+            delivery,
+        ))
+        .expect("Delivery head advance");
+    storage
+        .commit(&projection_commit(
+            "req_v5_product_session_01",
+            "state:v5:product-session:1",
+            "evt_v5_product_session_01",
+            product_session,
+        ))
+        .expect("ProductSession head seed");
+    Box::new(storage).close().expect("seed storage close");
+
+    let database_path = root.join("control-plane.sqlite3");
+    let connection = Connection::open(&database_path).expect("migration fixture database");
+    let before_heads = projection_head_rows(&connection);
+    let before_outbox_sequences = outbox_sequences(&connection);
+    connection
+        .execute_batch(
+            "ALTER TABLE projection_event_stream_heads
+                 RENAME TO projection_event_stream_heads_v6_fixture;
+             CREATE TABLE projection_event_stream_heads (
+                 scope_key BLOB NOT NULL,
+                 stream_kind TEXT NOT NULL CHECK (
+                     stream_kind IN ('delivery', 'product-session')
+                 ),
+                 resource_id TEXT NOT NULL,
+                 sequence INTEGER NOT NULL CHECK (sequence > 0),
+                 event_id TEXT NOT NULL,
+                 PRIMARY KEY (scope_key, stream_kind, resource_id),
+                 UNIQUE (scope_key, stream_kind, resource_id, sequence),
+                 FOREIGN KEY (event_id) REFERENCES outbox (event_id)
+             );
+             INSERT INTO projection_event_stream_heads
+                 (scope_key, stream_kind, resource_id, sequence, event_id)
+                 SELECT scope_key, stream_kind, resource_id, sequence, event_id
+                 FROM projection_event_stream_heads_v6_fixture;
+             DROP TABLE projection_event_stream_heads_v6_fixture;
+             PRAGMA user_version = 5;",
+        )
+        .expect("v5 heads fixture should be installed");
+    connection.close().expect("migration fixture close");
+    (before_heads, before_outbox_sequences)
+}
+
+#[test]
+fn v5_to_v6_migration_preserves_existing_heads_and_enables_scope_and_lease() {
+    let root = temporary_directory("v5-to-v6-streams");
+    let (before_heads, before_outbox_sequences) = install_v5_projection_stream_fixture(&root);
+    let database_path = root.join("control-plane.sqlite3");
+
+    let mut storage = SqliteStorage::open(&root).expect("v5 storage should migrate to v6");
+    let connection = Connection::open(&database_path).expect("migrated database inspection");
+    assert_eq!(projection_head_rows(&connection), before_heads);
+    assert_eq!(outbox_sequences(&connection), before_outbox_sequences);
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("migrated schema version");
+    assert_eq!(version, 6);
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type='table' AND name='projection_event_stream_heads'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migrated heads schema");
+    assert!(schema.contains("'scope'"));
+    assert!(schema.contains("'lease'"));
+    connection.close().expect("migration inspection close");
+
+    for (request_id, state_stream, event_id, stream) in [
+        (
+            "req_v6_scope_01",
+            "state:v6:scope:1",
+            "evt_v6_scope_event_01",
+            ProjectionEventStream::Scope,
+        ),
+        (
+            "req_v6_lease_01",
+            "state:v6:lease:1",
+            "evt_v6_lease_event_01",
+            ProjectionEventStream::Lease {
+                worker_id: WorkerId("wrk_01J00000000000000000000000".into()),
+                lease_id: LeaseId("lse_01J00000000000000000000000".into()),
+            },
+        ),
+    ] {
+        storage
+            .commit(&projection_commit(
+                request_id,
+                state_stream,
+                event_id,
+                stream,
+            ))
+            .expect("new v6 stream should commit after migration");
+    }
+    Box::new(storage).close().expect("migrated storage close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn empty_v4_projection_schema_migrates_through_public_context_to_v6() {
+    let root = temporary_directory("empty-v4-to-v6");
+    fs::create_dir_all(&root).expect("fixture directory");
+    let database_path = root.join("control-plane.sqlite3");
+    create_v2_fixture(&database_path);
+    let connection = Connection::open(&database_path).expect("v4 fixture database");
+    connection
+        .execute_batch(
+            "CREATE TABLE aggregate_journals (
+                 aggregate_type TEXT NOT NULL,
+                 aggregate_id TEXT NOT NULL,
+                 manifest BLOB NOT NULL,
+                 PRIMARY KEY (aggregate_type, aggregate_id)
+             );
+             CREATE TABLE aggregate_journal_records (
+                 aggregate_type TEXT NOT NULL,
+                 aggregate_id TEXT NOT NULL,
+                 sequence INTEGER NOT NULL CHECK (sequence > 0),
+                 digest TEXT NOT NULL,
+                 payload BLOB NOT NULL,
+                 PRIMARY KEY (aggregate_type, aggregate_id, sequence),
+                 FOREIGN KEY (aggregate_type, aggregate_id)
+                     REFERENCES aggregate_journals (aggregate_type, aggregate_id)
+                     ON DELETE CASCADE
+             );
+             ALTER TABLE outbox ADD COLUMN projection_stream_kind TEXT;
+             ALTER TABLE outbox ADD COLUMN projection_resource_id TEXT;
+             ALTER TABLE outbox ADD COLUMN projection_stream_sequence INTEGER;
+             CREATE TABLE projection_event_stream_heads (
+                 scope_key BLOB NOT NULL,
+                 stream_kind TEXT NOT NULL CHECK (
+                     stream_kind IN ('delivery', 'product-session')
+                 ),
+                 resource_id TEXT NOT NULL,
+                 sequence INTEGER NOT NULL CHECK (sequence > 0),
+                 event_id TEXT NOT NULL,
+                 PRIMARY KEY (scope_key, stream_kind, resource_id),
+                 UNIQUE (scope_key, stream_kind, resource_id, sequence),
+                 FOREIGN KEY (event_id) REFERENCES outbox (event_id)
+             );
+             CREATE UNIQUE INDEX outbox_projection_stream_sequence
+                 ON outbox (receipt_scope_key, projection_stream_kind,
+                            projection_resource_id, projection_stream_sequence)
+                 WHERE projection_stream_kind IS NOT NULL;
+             PRAGMA user_version = 4;",
+        )
+        .expect("empty v4 projection schema fixture");
+    connection.close().expect("v4 fixture close");
+
+    let storage = SqliteStorage::open(&root).expect("empty v4 should migrate to v6");
+    assert_eq!(
+        storage
+            .load_state("v2-stream")
+            .expect("legacy state read")
+            .expect("legacy state")
+            .payload,
+        b"v2-state"
+    );
+    Box::new(storage).close().expect("migrated storage close");
+    let connection = Connection::open(&database_path).expect("migrated v6 database");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("migrated version");
+    assert_eq!(version, 6);
+    let context_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('outbox')
+             WHERE name IN ('public_scope_json','public_stream_json',
+                            'public_occurred_at_json','public_source_json')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("public context columns");
+    assert_eq!(context_columns, 4);
+    connection.close().expect("migration inspection close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+fn projection_head_rows(connection: &Connection) -> Vec<ProjectionHeadRow> {
+    let mut statement = connection
+        .prepare(
+            "SELECT hex(scope_key), stream_kind, resource_id, sequence, event_id
+             FROM projection_event_stream_heads
+             ORDER BY scope_key, stream_kind, resource_id",
+        )
+        .expect("projection head query");
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("projection head rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("projection head collection")
+}
+
+fn outbox_sequences(connection: &Connection) -> Vec<OutboxSequenceRow> {
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence, event_id, projection_stream_sequence
+             FROM outbox ORDER BY sequence",
+        )
+        .expect("outbox sequence query");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("outbox sequence rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("outbox sequence collection")
 }
 
 #[test]
@@ -1508,6 +2228,630 @@ fn sqlite_state_revision_guard_replay_wins_before_a_later_guard_revision_change(
     fs::remove_dir_all(root).expect("database directory should be released");
 }
 
+#[test]
+fn sqlite_state_commit_persists_primary_two_secondary_states_and_members_across_restart() {
+    let root = temporary_directory("state-mutation-atomic-restart");
+    let identity = receipt_identity(
+        "mutation-actor",
+        "mutation-scope",
+        "mutation-atomic-request",
+    );
+    let digest = Sha256Digest(format!("sha256:{}", "7".repeat(64)));
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    storage
+        .commit(&state_commit(
+            (
+                "mutation-update-seed",
+                "mutation-scope",
+                "mutation-update-seed-request",
+            ),
+            &format!("sha256:{}", "6".repeat(64)),
+            "mutation-secondary-one",
+            0,
+            b"secondary-one-v1",
+            "mutation-update-seed-event",
+        ))
+        .expect("secondary update seed should commit");
+    let commit = StateCommit::new(
+        identity.clone(),
+        digest.clone(),
+        "mutation-primary",
+        0,
+        b"primary-v1".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "mutation-atomic-event",
+            "control-plane.state.changed",
+            b"event-v1".to_vec(),
+        )],
+    )
+    .with_state_mutation(
+        StateMutation::new("mutation-secondary-one", 1, b"secondary-one-v2".to_vec())
+            .expect("first mutation"),
+    )
+    .with_state_mutation(
+        StateMutation::new("mutation-secondary-two", 0, b"secondary-two-v1".to_vec())
+            .expect("second mutation"),
+    )
+    .with_journal_publication(journal_create(
+        "mutation-record-one",
+        b"mutation-journal-record",
+    ))
+    .with_pending_audit_event(
+        PendingAuditEvent::new("mutation-audit", b"mutation-audit-v1".to_vec())
+            .expect("pending audit event"),
+    );
+
+    let receipt = storage
+        .commit(&commit)
+        .expect("all transaction members should commit");
+    assert_eq!(receipt.revision, 1);
+    assert!(!receipt.idempotent_replay);
+    Box::new(storage).close().expect("storage should close");
+
+    let storage = SqliteStorage::open(&root).expect("storage should reopen");
+    for (stream_id, revision, payload) in [
+        ("mutation-primary", 1, b"primary-v1".as_slice()),
+        ("mutation-secondary-one", 2, b"secondary-one-v2".as_slice()),
+        ("mutation-secondary-two", 1, b"secondary-two-v1".as_slice()),
+    ] {
+        let state = storage
+            .load_state(stream_id)
+            .expect("state read")
+            .expect("committed state");
+        assert_eq!(
+            (state.revision, state.payload.as_slice()),
+            (revision, payload)
+        );
+    }
+    let replay = storage
+        .load_receipt(&identity, &digest)
+        .expect("receipt read")
+        .expect("durable receipt");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.events, receipt.events);
+    assert_eq!(
+        storage
+            .load_pending_audit_event(&identity)
+            .expect("audit read")
+            .expect("durable audit")
+            .payload(),
+        b"mutation-audit-v1"
+    );
+    assert_eq!(
+        storage
+            .load_journal(&journal_key())
+            .expect("journal read")
+            .expect("durable journal")
+            .records[0]
+            .payload,
+        b"mutation-journal-record"
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn stale_state_mutation_rejects_every_transaction_member_before_any_write() {
+    let root = temporary_directory("state-mutation-conflict");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    storage
+        .commit(&state_commit(
+            ("mutation-seed", "mutation-scope", "mutation-seed-request"),
+            &format!("sha256:{}", "8".repeat(64)),
+            "mutation-stale-secondary",
+            0,
+            b"secondary-v1",
+            "mutation-seed-event",
+        ))
+        .expect("secondary seed should commit");
+
+    let database_path = root.join("control-plane.sqlite3");
+    let before_counts = atomic_member_counts(&database_path);
+    let identity = receipt_identity(
+        "mutation-conflict-actor",
+        "mutation-conflict-scope",
+        "mutation-conflict-request",
+    );
+    let digest = Sha256Digest(format!("sha256:{}", "9".repeat(64)));
+    let commit = StateCommit::new(
+        identity.clone(),
+        digest.clone(),
+        "mutation-conflict-primary",
+        0,
+        b"must-not-write-primary".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "mutation-conflict-event",
+            "control-plane.state.changed",
+            b"must-not-write-event".to_vec(),
+        )],
+    )
+    .with_state_mutation(
+        StateMutation::new(
+            "mutation-missing-secondary",
+            0,
+            b"must-not-write-secondary".to_vec(),
+        )
+        .expect("valid missing secondary"),
+    )
+    .with_state_mutation(
+        StateMutation::new(
+            "mutation-stale-secondary",
+            0,
+            b"must-not-overwrite-secondary".to_vec(),
+        )
+        .expect("valid stale secondary"),
+    )
+    .with_journal_publication(journal_create(
+        "mutation-conflict-record",
+        b"must-not-write-journal",
+    ))
+    .with_pending_audit_event(
+        PendingAuditEvent::new("mutation-conflict-audit", b"must-not-write-audit".to_vec())
+            .expect("pending audit event"),
+    );
+
+    let error = storage
+        .commit(&commit)
+        .expect_err("a stale secondary mutation must reject the transaction");
+    assert_eq!(error.kind(), StorageErrorKind::RevisionConflict);
+    assert!(!error.is_state_guard_conflict());
+    assert_eq!(
+        atomic_member_counts(&database_path),
+        before_counts,
+        "all revisions must be checked before the first write"
+    );
+    assert!(
+        storage
+            .load_state("mutation-conflict-primary")
+            .expect("primary state read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .load_state("mutation-missing-secondary")
+            .expect("secondary state read")
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .load_state("mutation-stale-secondary")
+            .expect("stale state read")
+            .expect("seed state")
+            .payload,
+        b"secondary-v1"
+    );
+    assert!(
+        storage
+            .load_receipt(&identity, &digest)
+            .expect("receipt read")
+            .is_none()
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn corrupt_secondary_revision_is_detected_before_any_state_upsert() {
+    let root = temporary_directory("state-mutation-corrupt-revision");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    storage
+        .commit(&state_commit(
+            (
+                "mutation-corrupt-seed",
+                "mutation-corrupt",
+                "mutation-corrupt-seed-request",
+            ),
+            &format!("sha256:{}", "0".repeat(64)),
+            "mutation-corrupt-secondary",
+            0,
+            b"secondary-v1",
+            "mutation-corrupt-seed-event",
+        ))
+        .expect("secondary seed should commit");
+    let database_path = root.join("control-plane.sqlite3");
+    let connection = Connection::open(&database_path).expect("corruption fixture database");
+    connection
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON; \
+             UPDATE product_state SET revision = -1 \
+             WHERE stream_id = 'mutation-corrupt-secondary';",
+        )
+        .expect("corrupt revision fixture should install");
+    connection.close().expect("corruption fixture should close");
+    let before_counts = state_receipt_outbox_counts(&database_path);
+
+    let commit = state_commit(
+        (
+            "mutation-corrupt",
+            "mutation-corrupt",
+            "mutation-corrupt-request",
+        ),
+        &format!("sha256:{}", "1".repeat(64)),
+        "mutation-corrupt-primary",
+        0,
+        b"must-not-write-primary",
+        "mutation-corrupt-event",
+    )
+    .with_state_mutation(
+        StateMutation::new(
+            "mutation-corrupt-missing",
+            0,
+            b"must-not-write-first-secondary".to_vec(),
+        )
+        .expect("first mutation"),
+    )
+    .with_state_mutation(
+        StateMutation::new(
+            "mutation-corrupt-secondary",
+            1,
+            b"must-not-write-corrupt-secondary".to_vec(),
+        )
+        .expect("corrupt mutation"),
+    );
+    assert_eq!(
+        storage
+            .commit(&commit)
+            .expect_err("a corrupt stored revision must fail closed")
+            .kind(),
+        StorageErrorKind::Adapter
+    );
+    assert_eq!(state_receipt_outbox_counts(&database_path), before_counts);
+    assert!(
+        storage
+            .load_state("mutation-corrupt-primary")
+            .expect("primary read")
+            .is_none()
+    );
+    assert!(
+        storage
+            .load_state("mutation-corrupt-missing")
+            .expect("secondary read")
+            .is_none()
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn state_mutation_rejects_invalid_duplicate_and_reserved_stream_inputs() {
+    assert_eq!(
+        StateMutation::new("", 0, Vec::new())
+            .expect_err("an empty mutation stream must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+    assert_eq!(
+        StateMutation::new("mutation-range", i64::MAX as u64, Vec::new())
+            .expect_err("an out-of-range mutation revision must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let root = temporary_directory("state-mutation-validation");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let base = || {
+        state_commit(
+            (
+                "mutation-validation",
+                "mutation-validation",
+                "mutation-validation-request",
+            ),
+            &format!("sha256:{}", "a".repeat(64)),
+            "mutation-primary-reserved",
+            0,
+            b"must-not-write",
+            "mutation-validation-event",
+        )
+    };
+    let mutation = |stream: String, payload: Vec<u8>| {
+        StateMutation::new(stream, 0, payload).expect("valid mutation")
+    };
+
+    let duplicate = base()
+        .with_state_mutation(mutation("mutation-duplicate".into(), b"one".to_vec()))
+        .with_state_mutation(mutation("mutation-duplicate".into(), b"two".to_vec()));
+    assert_eq!(
+        storage
+            .commit(&duplicate)
+            .expect_err("duplicate mutation streams must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let primary_collision = base().with_state_mutation(mutation(
+        "mutation-primary-reserved".into(),
+        b"collision".to_vec(),
+    ));
+    assert_eq!(
+        storage
+            .commit(&primary_collision)
+            .expect_err("the primary stream is reserved for its primary state")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let guard_collision = base()
+        .with_state_guard(StateRevisionGuard::new("mutation-guarded", 0).expect("guard"))
+        .with_state_mutation(mutation("mutation-guarded".into(), b"collision".to_vec()));
+    assert_eq!(
+        storage
+            .commit(&guard_collision)
+            .expect_err("a guarded stream cannot also be mutated")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let database_path = root.join("control-plane.sqlite3");
+    for table in [
+        "product_state",
+        "command_receipts",
+        "outbox",
+        "audit_outbox",
+    ] {
+        assert_eq!(table_count(&database_path, table), 0);
+    }
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn state_mutation_enforces_count_single_payload_and_total_payload_bounds() {
+    let root = temporary_directory("state-mutation-bounds");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let base = || {
+        state_commit(
+            (
+                "mutation-bounds",
+                "mutation-bounds",
+                "mutation-bounds-request",
+            ),
+            &format!("sha256:{}", "a".repeat(64)),
+            "mutation-bounds-primary",
+            0,
+            b"must-not-write",
+            "mutation-bounds-event",
+        )
+    };
+    let mutation = |stream: String, payload: Vec<u8>| {
+        StateMutation::new(stream, 0, payload).expect("valid mutation")
+    };
+
+    let mut too_many = base();
+    for index in 0..=MAX_STATE_MUTATIONS_PER_COMMIT {
+        too_many = too_many.with_state_mutation(mutation(
+            format!("mutation-count-{index}"),
+            vec![u8::try_from(index).expect("bounded mutation index")],
+        ));
+    }
+    assert_eq!(
+        storage
+            .commit(&too_many)
+            .expect_err("too many mutations must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let oversized_single = base().with_state_mutation(mutation(
+        "mutation-oversized-single".into(),
+        vec![0; MAX_STATE_MUTATION_PAYLOAD_BYTES + 1],
+    ));
+    assert_eq!(
+        storage
+            .commit(&oversized_single)
+            .expect_err("one oversized mutation must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let oversized_total = base()
+        .with_state_mutation(mutation(
+            "mutation-total-one".into(),
+            vec![0; MAX_STATE_MUTATION_BYTES_PER_COMMIT / 2 + 1],
+        ))
+        .with_state_mutation(mutation(
+            "mutation-total-two".into(),
+            vec![0; MAX_STATE_MUTATION_BYTES_PER_COMMIT / 2],
+        ));
+    assert_eq!(
+        storage
+            .commit(&oversized_total)
+            .expect_err("oversized combined mutations must be rejected")
+            .kind(),
+        StorageErrorKind::InvalidInput
+    );
+
+    let database_path = root.join("control-plane.sqlite3");
+    assert_eq!(atomic_member_counts(&database_path), [0; 6]);
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn exact_receipt_replay_does_not_recheck_or_rewrite_secondary_state() {
+    let root = temporary_directory("state-mutation-replay");
+    let mut storage = SqliteStorage::open(&root).expect("SQLite storage should open");
+    let identity = receipt_identity(
+        "mutation-replay-actor",
+        "mutation-replay-scope",
+        "mutation-replay-request",
+    );
+    let digest = Sha256Digest(format!("sha256:{}", "b".repeat(64)));
+    let original = StateCommit::new(
+        identity.clone(),
+        digest.clone(),
+        "mutation-replay-primary",
+        0,
+        b"primary-v1".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "mutation-replay-event",
+            "control-plane.state.changed",
+            b"event-v1".to_vec(),
+        )],
+    )
+    .with_state_mutation(
+        StateMutation::new("mutation-replay-secondary", 0, b"secondary-v1".to_vec())
+            .expect("secondary mutation"),
+    );
+    let first = storage.commit(&original).expect("first commit");
+
+    storage
+        .commit(&state_commit(
+            (
+                "mutation-replay-advance",
+                "mutation-replay-scope",
+                "mutation-replay-advance-request",
+            ),
+            &format!("sha256:{}", "c".repeat(64)),
+            "mutation-replay-secondary",
+            1,
+            b"secondary-v2",
+            "mutation-replay-advance-event",
+        ))
+        .expect("secondary stream should advance independently");
+    let database_path = root.join("control-plane.sqlite3");
+    let connection = Connection::open(&database_path).expect("failure injection database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_replay_secondary_update \
+             BEFORE UPDATE ON product_state \
+             WHEN OLD.stream_id = 'mutation-replay-secondary' \
+             BEGIN SELECT RAISE(ABORT, 'replay attempted secondary update'); END;",
+        )
+        .expect("secondary update trigger should install");
+    connection.close().expect("failure injector should close");
+    let before_counts = state_receipt_outbox_counts(&database_path);
+
+    let replay = storage
+        .commit(&original)
+        .expect("exact receipt replay must precede mutation CAS checks");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.events, first.events);
+    assert_eq!(
+        storage
+            .load_state("mutation-replay-secondary")
+            .expect("secondary state read")
+            .expect("advanced secondary")
+            .payload,
+        b"secondary-v2"
+    );
+    assert_eq!(
+        state_receipt_outbox_counts(&database_path),
+        before_counts,
+        "exact replay must not perform secondary writes"
+    );
+
+    let changed = StateCommit::new(
+        identity,
+        Sha256Digest(format!("sha256:{}", "d".repeat(64))),
+        "mutation-replay-primary",
+        1,
+        b"changed".to_vec(),
+        vec![NewOutboxEvent::internal(
+            "mutation-replay-changed-event",
+            "control-plane.state.changed",
+            b"changed".to_vec(),
+        )],
+    )
+    .with_state_mutation(
+        StateMutation::new("mutation-replay-secondary", 2, b"changed".to_vec())
+            .expect("changed mutation"),
+    );
+    assert_eq!(
+        storage
+            .commit(&changed)
+            .expect_err("changed digest must conflict before state writes")
+            .kind(),
+        StorageErrorKind::RequestConflict
+    );
+
+    Box::new(storage).close().expect("storage should close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn default_single_state_adapter_rejects_secondary_mutations_before_delegation() {
+    struct SingleStateOnly {
+        delegated: bool,
+    }
+
+    impl ProductStateStorage for SingleStateOnly {
+        fn commit_adapter(&mut self, _commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
+            self.delegated = true;
+            Err(StorageError::adapter("single-state test adapter"))
+        }
+
+        fn load_receipt(
+            &self,
+            _identity: &ReceiptIdentity,
+            _command_digest: &Sha256Digest,
+        ) -> Result<Option<CommitReceipt>, StorageError> {
+            Ok(None)
+        }
+
+        fn load_state(&self, _stream_id: &str) -> Result<Option<StoredState>, StorageError> {
+            Ok(None)
+        }
+
+        fn load_projection_read_cut(
+            &self,
+            _state_stream_ids: &[String],
+            _key: &ProjectionEventStreamKey,
+            _expected: Option<&ProjectionEventCursor>,
+        ) -> Result<ProjectionReadCut, StorageError> {
+            Err(StorageError::adapter("single-state test adapter"))
+        }
+
+        fn load_journal(
+            &self,
+            _key: &AggregateJournalKey,
+        ) -> Result<Option<LoadedAggregateJournal>, StorageError> {
+            Ok(None)
+        }
+
+        fn pending_events(&self) -> Result<Vec<OutboxEvent>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        fn mark_published(&mut self, _event_id: &str) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        fn close(self: Box<Self>) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
+
+    let mut storage = SingleStateOnly { delegated: false };
+    let commit = state_commit(
+        (
+            "single-state-adapter",
+            "single-state-adapter",
+            "single-state-adapter-request",
+        ),
+        &format!("sha256:{}", "e".repeat(64)),
+        "single-state-primary",
+        0,
+        b"primary",
+        "single-state-event",
+    )
+    .with_state_mutation(
+        StateMutation::new("single-state-secondary", 0, b"secondary".to_vec())
+            .expect("secondary mutation"),
+    );
+
+    assert_eq!(
+        storage
+            .commit(&commit)
+            .expect_err("default adapter must fail closed")
+            .kind(),
+        StorageErrorKind::Adapter
+    );
+    assert!(!storage.delegated);
+}
+
 fn install_failing_insert_trigger(database_path: &Path, table: &str) {
     let connection = Connection::open(database_path).expect("failure injection database");
     let trigger = match table {
@@ -1555,6 +2899,25 @@ fn table_count(database_path: &Path, table: &str) -> i64 {
         .close()
         .expect("inspection connection should close");
     count
+}
+
+fn atomic_member_counts(database_path: &Path) -> [i64; 6] {
+    [
+        table_count(database_path, "product_state"),
+        table_count(database_path, "aggregate_journals"),
+        table_count(database_path, "aggregate_journal_records"),
+        table_count(database_path, "command_receipts"),
+        table_count(database_path, "outbox"),
+        table_count(database_path, "audit_outbox"),
+    ]
+}
+
+fn state_receipt_outbox_counts(database_path: &Path) -> [i64; 3] {
+    [
+        table_count(database_path, "product_state"),
+        table_count(database_path, "command_receipts"),
+        table_count(database_path, "outbox"),
+    ]
 }
 
 #[test]
@@ -1617,6 +2980,87 @@ fn failure_at_each_atomic_member_rolls_back_every_member() {
 }
 
 #[test]
+fn failure_on_a_later_secondary_state_rolls_back_primary_and_every_member() {
+    let root = temporary_directory("rollback-secondary-state");
+    let storage = SqliteStorage::open(&root).expect("schema should be created");
+    let database_path = storage.database_path().to_path_buf();
+    Box::new(storage)
+        .close()
+        .expect("bootstrap storage should close");
+    let connection = Connection::open(&database_path).expect("failure injection database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_second_state_mutation \
+             BEFORE INSERT ON product_state \
+             WHEN NEW.stream_id = 'rollback-secondary-two' \
+             BEGIN SELECT RAISE(ABORT, 'injected secondary state failure'); END;",
+        )
+        .expect("secondary failure trigger should install");
+    connection.close().expect("failure injector should close");
+
+    let mut storage = SqliteStorage::open(&root).expect("storage with trigger should open");
+    let commit = state_commit(
+        (
+            "mutation-rollback",
+            "mutation-rollback",
+            "mutation-rollback-request",
+        ),
+        &format!("sha256:{}", "f".repeat(64)),
+        "rollback-primary",
+        0,
+        b"must-not-commit-primary",
+        "rollback-mutation-event",
+    )
+    .with_state_mutation(
+        StateMutation::new(
+            "rollback-secondary-one",
+            0,
+            b"must-not-commit-secondary-one".to_vec(),
+        )
+        .expect("first mutation"),
+    )
+    .with_state_mutation(
+        StateMutation::new(
+            "rollback-secondary-two",
+            0,
+            b"must-not-commit-secondary-two".to_vec(),
+        )
+        .expect("second mutation"),
+    )
+    .with_journal_publication(journal_create(
+        "rollback-mutation-record",
+        b"must-not-commit-journal",
+    ))
+    .with_pending_audit_event(
+        PendingAuditEvent::new("rollback-mutation-audit", b"must-not-commit-audit".to_vec())
+            .expect("pending audit event"),
+    );
+
+    let error = storage
+        .commit(&commit)
+        .expect_err("later secondary failure must abort the transaction");
+    assert_eq!(error.kind(), StorageErrorKind::Adapter);
+    Box::new(storage)
+        .close()
+        .expect("failed storage should close");
+    for table in [
+        "product_state",
+        "aggregate_journals",
+        "aggregate_journal_records",
+        "command_receipts",
+        "outbox",
+        "audit_outbox",
+    ] {
+        assert_eq!(
+            table_count(&database_path, table),
+            0,
+            "secondary mutation failure left a partial row in {table}"
+        );
+    }
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
 fn later_outbox_failure_rolls_back_the_first_projection_cursor() {
     let root = temporary_directory("projection-cursor-rollback");
     let storage = SqliteStorage::open(&root).expect("schema should be created");
@@ -1638,28 +3082,14 @@ fn later_outbox_failure_rolls_back_the_first_projection_cursor() {
     let stream = delivery_projection_stream("dlv_7Q71DWFHAZN7S6NPCS27WTTX4V");
     let mut storage = SqliteStorage::open(&root).expect("storage with trigger should open");
     let commit = StateCommit::new(
-        receipt_identity(
-            "actor:projection-rollback",
-            "scope:repository-one",
-            "req_projection_rollback_0001",
-        ),
+        projection_receipt_identity("req_projection_rollback_0001"),
         Sha256Digest(format!("sha256:{}", "e".repeat(64))),
         "state:projection-rollback",
         0,
         b"must-not-commit".to_vec(),
         vec![
-            NewOutboxEvent::projection(
-                ControlPlaneEventId("evt_projection_rollback_0001".into()),
-                "projection.invalidated",
-                b"{}".to_vec(),
-                stream.clone(),
-            ),
-            NewOutboxEvent::projection(
-                ControlPlaneEventId("evt_projection_rollback_0002".into()),
-                "projection.invalidated",
-                b"{}".to_vec(),
-                stream.clone(),
-            ),
+            public_projection_event("evt_projection_rollback_0001", stream.clone()),
+            public_projection_event("evt_projection_rollback_0002", stream.clone()),
         ],
     );
     let error = storage

@@ -27,19 +27,29 @@ use codex_core_api::CodexThread;
 use codex_core_api::Config;
 use codex_core_api::ConfigBuilder;
 use codex_core_api::Constrained;
+use codex_core_api::DurableTurnInspection;
+use codex_core_api::DurableTurnTerminal;
 use codex_core_api::EnvironmentManager;
 use codex_core_api::ExecServerRuntimePaths;
+use codex_core_api::Feature;
 use codex_core_api::ForkSnapshot;
 use codex_core_api::NewThread;
 use codex_core_api::Op;
 use codex_core_api::PermissionProfile;
 use codex_core_api::Permissions;
+use codex_core_api::RecoverTurnRequest;
 use codex_core_api::SessionSource;
+use codex_core_api::StartIfIdleSubmission;
 use codex_core_api::StartThreadOptions;
 use codex_core_api::StateDbHandle;
 use codex_core_api::SteerSubmission;
 use codex_core_api::ThreadId;
 use codex_core_api::ThreadManager;
+use codex_core_api::ToolCallGate;
+use codex_core_api::ToolCallGateFileOperation;
+use codex_core_api::ToolCallGatePayload;
+use codex_core_api::ToolCallGateRejection;
+use codex_core_api::ToolCallGateRequest;
 use codex_core_api::TurnInputRequest;
 use codex_core_api::TurnInputSubmission;
 use codex_core_api::UserInput;
@@ -54,6 +64,8 @@ use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::protocol::Event as CodexEvent;
 use codex_protocol::protocol::EventMsg as CodexEventMsg;
 use codex_protocol::protocol::ReviewDecision as CodexReviewDecision;
+use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
@@ -66,18 +78,215 @@ use tokio::task::JoinHandle;
 
 use crate::model_port::KernelModelStreamTransport;
 
+/// Host-owned tool request observed before Codex Core enters the tool handler.
+#[derive(Clone, Eq, PartialEq)]
+pub struct KernelActionRequest {
+    pub session_id: String,
+    pub turn_id: String,
+    pub operation_id: String,
+    pub namespace: Option<String>,
+    pub tool_name: String,
+    pub payload: KernelActionPayload,
+}
+
+/// Exact Codex tool payload retained only for in-process pre-action authorization.
+#[derive(Clone, Eq, PartialEq)]
+pub enum KernelActionPayload {
+    Function {
+        arguments: String,
+    },
+    ToolSearch {
+        arguments_json: String,
+    },
+    Custom {
+        input: String,
+    },
+    Shell {
+        program: String,
+        args: Vec<String>,
+        working_directory: String,
+    },
+    Files {
+        changes: Vec<KernelFileChange>,
+    },
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct KernelFileChange {
+    pub operation: KernelFileOperation,
+    pub path: String,
+    pub move_path: Option<String>,
+}
+
+impl fmt::Debug for KernelFileChange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KernelFileChange")
+            .field("operation", &self.operation)
+            .field("path", &"<private>")
+            .field("move_path", &self.move_path.as_ref().map(|_| "<private>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KernelFileOperation {
+    Create,
+    Write,
+    Delete,
+}
+
+impl fmt::Debug for KernelActionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KernelActionRequest")
+            .field("session_id", &self.session_id)
+            .field("turn_id", &self.turn_id)
+            .field("operation_id", &self.operation_id)
+            .field("namespace", &self.namespace)
+            .field("tool_name", &self.tool_name)
+            .field("payload", &self.payload)
+            .finish()
+    }
+}
+
+impl fmt::Debug for KernelActionPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Function { .. } => "Function(<private>)",
+            Self::ToolSearch { .. } => "ToolSearch(<private>)",
+            Self::Custom { .. } => "Custom(<private>)",
+            Self::Shell { .. } => "Shell(<private>)",
+            Self::Files { .. } => "Files(<private>)",
+        })
+    }
+}
+
+/// Required host admission boundary for every embedded Codex tool call.
+pub trait KernelActionGate: Send + Sync {
+    fn authorize(&self, request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>>;
+    fn revalidate(&self, request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>>;
+}
+
+/// Explicit fail-closed gate for surfaces that have not installed an action authority.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RejectingKernelActionGate;
+
+impl KernelActionGate for RejectingKernelActionGate {
+    fn authorize(&self, _request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>> {
+        Box::pin(async {
+            Err(KernelFailure::new(
+                "ACTION_GATE_UNAVAILABLE",
+                "embedded tool action authority is unavailable",
+            ))
+        })
+    }
+
+    fn revalidate(&self, _request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>> {
+        Box::pin(async {
+            Err(KernelFailure::new(
+                "ACTION_GATE_UNAVAILABLE",
+                "embedded tool action authority is unavailable",
+            ))
+        })
+    }
+}
+
+struct CoreToolCallGate {
+    host: Arc<dyn KernelActionGate>,
+}
+
+impl ToolCallGate for CoreToolCallGate {
+    fn authorize(
+        &self,
+        request: ToolCallGateRequest,
+    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
+        let host = Arc::clone(&self.host);
+        Box::pin(async move {
+            host.authorize(kernel_action_request(request))
+                .await
+                .map_err(|_| {
+                    ToolCallGateRejection::new(
+                        "HOST_ACTION_REJECTED",
+                        "host action authority rejected the tool call",
+                    )
+                })
+        })
+    }
+
+    fn revalidate(
+        &self,
+        request: ToolCallGateRequest,
+    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
+        let host = Arc::clone(&self.host);
+        Box::pin(async move {
+            host.revalidate(kernel_action_request(request))
+                .await
+                .map_err(|_| {
+                    ToolCallGateRejection::new(
+                        "HOST_ACTION_STALE",
+                        "host action authority is no longer current",
+                    )
+                })
+        })
+    }
+}
+
+fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
+    KernelActionRequest {
+        session_id: request.thread_id,
+        turn_id: request.turn_id,
+        operation_id: request.call_id,
+        namespace: request.namespace,
+        tool_name: request.tool_name,
+        payload: match request.payload {
+            ToolCallGatePayload::Function { arguments } => {
+                KernelActionPayload::Function { arguments }
+            }
+            ToolCallGatePayload::ToolSearch { arguments_json } => {
+                KernelActionPayload::ToolSearch { arguments_json }
+            }
+            ToolCallGatePayload::Custom { input } => KernelActionPayload::Custom { input },
+            ToolCallGatePayload::Shell {
+                program,
+                args,
+                working_directory,
+            } => KernelActionPayload::Shell {
+                program,
+                args,
+                working_directory,
+            },
+            ToolCallGatePayload::Files { changes } => KernelActionPayload::Files {
+                changes: changes
+                    .into_iter()
+                    .map(|change| KernelFileChange {
+                        operation: match change.operation {
+                            ToolCallGateFileOperation::Create => KernelFileOperation::Create,
+                            ToolCallGateFileOperation::Write => KernelFileOperation::Write,
+                            ToolCallGateFileOperation::Delete => KernelFileOperation::Delete,
+                        },
+                        path: change.path,
+                        move_path: change.move_path,
+                    })
+                    .collect(),
+            },
+        },
+    }
+}
+
 /// Exact embedded Codex source commit.
 pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 /// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
 /// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 5;
+pub const INTERFACE_VERSION: u32 = 6;
 /// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
     "upstream/patches/codex/0002-inject-model-stream-transport.patch",
     "upstream/patches/codex/0003-export-config-builder.patch",
     "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
+    "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
 ];
 
 const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 1;
@@ -272,6 +481,19 @@ pub struct SubmissionInfo {
     pub reason: Option<String>,
 }
 
+/// Typed result of reconciling one host-reserved turn against durable rollout state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactTurnReconciliation {
+    /// Core accepted the exact turn identity for execution or recovery.
+    Started { turn_id: String, recovered: bool },
+    /// Core remained idle because the exact turn could not be started now.
+    NotSubmitted { reason: String },
+    /// The rollout already contains the original successful terminal facts.
+    Completed(DurableTurnTerminal),
+    /// The rollout already contains the original unsuccessful terminal facts.
+    Failed(DurableTurnTerminal),
+}
+
 /// Result of an all-session shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShutdownInfo {
@@ -296,6 +518,16 @@ impl KernelFailure {
             code,
             message: message.into(),
         }
+    }
+
+    /// Creates the fixed failure returned when the host action authority does
+    /// not permit a tool call before its handler starts.
+    #[must_use]
+    pub fn action_rejected() -> Self {
+        Self::new(
+            "ACTION_ENFORCEMENT_REJECTED",
+            "Control Plane action enforcement rejected the tool call",
+        )
     }
 
     /// Stable machine-readable error code.
@@ -366,6 +598,7 @@ fn canonical_role_policy(role_id: &str) -> Option<CanonicalRolePolicy> {
 pub struct Kernel {
     options: KernelOptions,
     model_port: Arc<dyn ModelPort>,
+    action_gate: Arc<dyn KernelActionGate>,
     runtime: Arc<Mutex<Option<Arc<Runtime>>>>,
     closed: AtomicBool,
 }
@@ -377,7 +610,11 @@ impl Kernel {
     ///
     /// Returns a typed failure when the home path is not absolute, the shutdown timeout is zero,
     /// the helper path is unusable, or the home directory cannot be created.
-    pub fn new(mut options: KernelOptions, model_port: Arc<dyn ModelPort>) -> KernelResult<Self> {
+    pub fn new(
+        mut options: KernelOptions,
+        model_port: Arc<dyn ModelPort>,
+        action_gate: Arc<dyn KernelActionGate>,
+    ) -> KernelResult<Self> {
         if !options.home.is_absolute() {
             return Err(KernelFailure::new(
                 "INVALID_HOME",
@@ -393,7 +630,17 @@ impl Kernel {
                 ),
             ));
         }
-        if !options.helper_executable.is_file() {
+        let helper_metadata =
+            std::fs::symlink_metadata(&options.helper_executable).map_err(|_| {
+                KernelFailure::new(
+                    "HELPER_NOT_FOUND",
+                    format!(
+                        "kernel helper executable does not exist: {}",
+                        options.helper_executable.display()
+                    ),
+                )
+            })?;
+        if helper_metadata.file_type().is_symlink() || !helper_metadata.is_file() {
             return Err(KernelFailure::new(
                 "HELPER_NOT_FOUND",
                 format!(
@@ -401,6 +648,16 @@ impl Kernel {
                     options.helper_executable.display()
                 ),
             ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if helper_metadata.permissions().mode() & 0o111 == 0 {
+                return Err(KernelFailure::new(
+                    "HELPER_NOT_EXECUTABLE",
+                    "kernel helper executable is not executable",
+                ));
+            }
         }
         options.event_capacity = options
             .event_capacity
@@ -417,9 +674,16 @@ impl Kernel {
                 format!("{}: {error}", options.home.display()),
             )
         })?;
+        restrict_private_tree(&options.home).map_err(|_| {
+            KernelFailure::new(
+                "HOME_PERMISSION_FAILED",
+                "kernel home permissions could not be restricted",
+            )
+        })?;
         Ok(Self {
             options,
             model_port,
+            action_gate,
             runtime: Arc::new(Mutex::new(None)),
             closed: AtomicBool::new(false),
         })
@@ -441,6 +705,23 @@ impl Kernel {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// Re-applies the private runtime permissions after Core creates rollout,
+    /// state, or child-thread files.  This is intentionally explicit so the
+    /// Worker can invoke it at every externally visible turn boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `KernelFailure` when a runtime-owned path cannot be
+    /// restricted to the private permission policy.
+    pub fn enforce_private_permissions(&self) -> KernelResult<()> {
+        restrict_private_tree(&self.options.home).map_err(|_| {
+            KernelFailure::new(
+                "HOME_PERMISSION_FAILED",
+                "kernel runtime permissions could not be restricted",
+            )
+        })
     }
 
     fn runtime(&self) -> BoxFuture<'_, KernelResult<Arc<Runtime>>> {
@@ -489,6 +770,21 @@ impl Kernel {
             // DSH exposes portable JSON-schema tools, not provider-native Responses web search.
             // Search remains available through ordinary host/MCP function tools.
             config.web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
+            // The product ExecutionPort contract exposes RequestUserInput in
+            // the default collaboration mode.  Codex keeps this feature
+            // disabled by default, so the embedded Kernel must pin it on at
+            // runtime instead of allowing the model to receive an
+            // "unavailable" tool result with no CP interaction.
+            config
+                .features
+                .enable(Feature::DefaultModeRequestUserInput)
+                .map_err(|error| {
+                    KernelFailure::new(
+                        "CONFIG_FEATURE_FAILED",
+                        format!("request_user_input feature could not be enabled: {error}"),
+                    )
+                })?;
+            config.experimental_request_user_input_enabled = true;
             config.codex_self_exe = Some(self.options.helper_executable.clone());
             config.codex_linux_sandbox_exe = self.options.linux_sandbox_executable.clone();
 
@@ -539,10 +835,19 @@ impl Kernel {
                     /* attestation_provider */ None,
                     /* external_time_provider */ None,
                 )
-                .with_model_stream_transport(Arc::new(
-                    KernelModelStreamTransport::new(Arc::clone(&self.model_port)),
-                )),
+                .with_model_stream_transport(Arc::new(KernelModelStreamTransport::new(Arc::clone(
+                    &self.model_port,
+                ))))
+                .with_tool_call_gate(Arc::new(CoreToolCallGate {
+                    host: Arc::clone(&self.action_gate),
+                })),
             );
+            restrict_private_tree(&self.options.home).map_err(|_| {
+                KernelFailure::new(
+                    "HOME_PERMISSION_FAILED",
+                    "kernel runtime permissions could not be restricted",
+                )
+            })?;
             Ok(Arc::new(Runtime {
                 manager,
                 auth_manager,
@@ -755,12 +1060,88 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
+            self.enforce_private_permissions()?;
             let submission = session
                 .thread
                 .start_or_steer_turn(user_text_request(text))
                 .await
                 .map_err(|error| KernelFailure::new("TURN_SUBMIT_FAILED", error.to_string()))?;
+            self.enforce_private_permissions()?;
             Ok(submission_info(submission))
+        })
+        .await
+    }
+
+    /// Reconciles one host-reserved turn identity against durable rollout state.
+    /// The original user input is submitted only when the identity is absent;
+    /// an already-persisted interrupted turn resumes without a duplicate input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded failure when the session or durable history is
+    /// unavailable, the exact identity is invalid, or Codex Core rejects the
+    /// create-or-recover submission.
+    pub async fn reconcile_turn_exact(
+        &self,
+        session_id: &str,
+        turn_id: String,
+        text: String,
+    ) -> KernelResult<ExactTurnReconciliation> {
+        Self::guard(async {
+            if turn_id.trim().is_empty() || text.trim().is_empty() {
+                return Err(KernelFailure::new(
+                    "INVALID_EXACT_TURN",
+                    "exact turn identity and input must be non-empty",
+                ));
+            }
+            let runtime = self.runtime().await?;
+            let session = self.session(&runtime, session_id).await?;
+            self.enforce_private_permissions()?;
+            let durable = session
+                .thread
+                .inspect_durable_turn(&turn_id)
+                .await
+                .map_err(|_| {
+                    KernelFailure::new(
+                        "TURN_HISTORY_LOOKUP_FAILED",
+                        "durable turn history lookup failed",
+                    )
+                })?;
+            let result = match durable {
+                DurableTurnInspection::Completed(terminal) => {
+                    Ok(ExactTurnReconciliation::Completed(terminal))
+                }
+                DurableTurnInspection::Failed(terminal) => {
+                    Ok(ExactTurnReconciliation::Failed(terminal))
+                }
+                DurableTurnInspection::Absent | DurableTurnInspection::InProgress => {
+                    let recovered = matches!(durable, DurableTurnInspection::InProgress);
+                    let submission = if recovered {
+                        session
+                            .thread
+                            .recover_turn_if_idle(RecoverTurnRequest {
+                                turn_id,
+                                thread_settings: ThreadSettingsOverrides::default(),
+                                trace: None,
+                            })
+                            .await
+                    } else {
+                        session
+                            .thread
+                            .start_turn_with_id_if_idle(user_text_request(text), turn_id)
+                            .await
+                    }
+                    .map_err(|_| {
+                        KernelFailure::new(
+                            "TURN_RECONCILE_SUBMIT_FAILED",
+                            "exact turn reconciliation submission failed",
+                        )
+                    })?;
+                    Ok(exact_turn_submission(submission, recovered))
+                }
+            };
+            self.enforce_private_permissions()?;
+            result
         })
         .await
     }
@@ -786,11 +1167,13 @@ impl Kernel {
             }
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
+            self.enforce_private_permissions()?;
             let submission = session
                 .thread
                 .steer_turn(user_text_request(text), expected_turn_id)
                 .await
                 .map_err(|error| KernelFailure::new("TURN_STEER_FAILED", error.to_string()))?;
+            self.enforce_private_permissions()?;
             Ok(steer_info(submission))
         })
         .await
@@ -806,11 +1189,16 @@ impl Kernel {
         Self::guard(async {
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, session_id).await?;
+            self.enforce_private_permissions()?;
             session
                 .thread
                 .submit(Op::Interrupt)
                 .await
                 .map_err(|error| KernelFailure::new("INTERRUPT_FAILED", error.to_string()))
+                .and_then(|result| {
+                    self.enforce_private_permissions()?;
+                    Ok(result)
+                })
         })
         .await
     }
@@ -832,6 +1220,7 @@ impl Kernel {
             let decision = codex_review_decision(response.decision)?;
             let runtime = self.runtime().await?;
             let session = self.session(&runtime, &response.session_id).await?;
+            self.enforce_private_permissions()?;
             let operation = match response.kind {
                 ApprovalKind::Exec => Op::ExecApproval {
                     id: response.operation_id,
@@ -850,6 +1239,57 @@ impl Kernel {
                 .submit(operation)
                 .await
                 .map_err(|error| KernelFailure::new("APPROVAL_SUBMIT_FAILED", error.to_string()))
+                .and_then(|result| {
+                    self.enforce_private_permissions()?;
+                    Ok(result)
+                })
+        })
+        .await
+    }
+
+    /// Resolve one pending Codex user-input request by its source turn identity.
+    ///
+    /// The response is submitted through the embedded thread rather than through a host-side
+    /// callback. This keeps the kernel as the sole owner of the live Codex session and makes the
+    /// operation safe to replay after a durable execution-port acknowledgement is lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the session or request identity is invalid, the kernel is
+    /// closed, or Codex rejects the response submission.
+    pub async fn resolve_user_input(
+        &self,
+        session_id: &str,
+        turn_id: String,
+        response: RequestUserInputResponse,
+    ) -> KernelResult<String> {
+        Self::guard(async {
+            if session_id.trim().is_empty() || turn_id.trim().is_empty() {
+                return Err(KernelFailure::new(
+                    "INVALID_INPUT_RESPONSE",
+                    "input response session and turn identities must be non-empty",
+                ));
+            }
+            let runtime = self.runtime().await?;
+            let session = self.session(&runtime, session_id).await?;
+            self.enforce_private_permissions()?;
+            session
+                .thread
+                .submit(Op::UserInputAnswer {
+                    id: turn_id,
+                    response,
+                })
+                .await
+                .map_err(|_| {
+                    KernelFailure::new(
+                        "INPUT_RESPONSE_SUBMIT_FAILED",
+                        "embedded Codex input response submission failed",
+                    )
+                })
+                .and_then(|result| {
+                    self.enforce_private_permissions()?;
+                    Ok(result)
+                })
         })
         .await
     }
@@ -866,12 +1306,13 @@ impl Kernel {
         timeout: Option<Duration>,
     ) -> KernelResult<EventPoll> {
         Self::guard(async {
+            self.enforce_private_permissions()?;
             let runtime = self.runtime().await?;
             let Some(session) = runtime.sessions.read().await.get(session_id).cloned() else {
                 return Ok(EventPoll::Closed);
             };
             let mut events = session.events.lock().await;
-            match timeout {
+            let result = match timeout {
                 Some(timeout) => match tokio::time::timeout(timeout, events.recv()).await {
                     Ok(Some(event)) => Ok(EventPoll::Event(event)),
                     Ok(None) => Ok(EventPoll::Closed),
@@ -881,7 +1322,10 @@ impl Kernel {
                     Some(event) => EventPoll::Event(event),
                     None => EventPoll::Closed,
                 }),
-            }
+            };
+            drop(events);
+            self.enforce_private_permissions()?;
+            result
         })
         .await
     }
@@ -939,6 +1383,7 @@ impl Kernel {
                 let _ = runtime.manager.remove_thread(&thread_id).await;
             }
             join_event_task(&session).await;
+            self.enforce_private_permissions()?;
             Ok(())
         })
         .await
@@ -985,6 +1430,7 @@ impl Kernel {
             if let Some(state_db) = &runtime.state_db {
                 state_db.close().await;
             }
+            self.enforce_private_permissions()?;
             Ok(ShutdownInfo {
                 completed: report
                     .completed
@@ -1017,6 +1463,12 @@ impl Kernel {
             .thread
             .rollout_path()
             .map(|path| path.to_string_lossy().into_owned());
+        restrict_private_tree(&self.options.home).map_err(|_| {
+            KernelFailure::new(
+                "HOME_PERMISSION_FAILED",
+                "kernel rollout permissions could not be restricted",
+            )
+        })?;
         let (event_tx, event_rx) = mpsc::channel(self.options.event_capacity);
         let (stop, stop_rx) = watch::channel(false);
         let thread = Arc::clone(&new_thread.thread);
@@ -1101,6 +1553,7 @@ impl Kernel {
         }
         let runtime = Arc::clone(&self.runtime);
         let timeout = self.options.shutdown_timeout;
+        let home = self.options.home.clone();
         Some(Box::pin(async move {
             let Some(runtime) = runtime.lock().await.take() else {
                 return;
@@ -1122,8 +1575,35 @@ impl Kernel {
             if let Some(state_db) = &runtime.state_db {
                 state_db.close().await;
             }
+            let _ = restrict_private_tree(&home);
         }))
     }
+}
+
+#[cfg(unix)]
+fn restrict_private_tree(root: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = std::fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("private runtime path is a symlink"));
+    }
+    if metadata.is_dir() {
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        for entry in std::fs::read_dir(root)? {
+            restrict_private_tree(&entry?.path())?;
+        }
+    } else if metadata.is_file() {
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o600))?;
+    } else {
+        return Err(std::io::Error::other("private runtime path is not a file"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_private_tree(_root: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Return the static kernel descriptor.
@@ -1158,6 +1638,20 @@ fn submission_info(submission: TurnInputSubmission) -> SubmissionInfo {
             status: "not_submitted",
             turn_id: None,
             reason: Some(format!("{reason:?}")),
+        },
+    }
+}
+
+fn exact_turn_submission(
+    submission: StartIfIdleSubmission,
+    recovered: bool,
+) -> ExactTurnReconciliation {
+    match submission {
+        StartIfIdleSubmission::Started { turn_id } => {
+            ExactTurnReconciliation::Started { turn_id, recovered }
+        }
+        StartIfIdleSubmission::NotSubmitted { reason } => ExactTurnReconciliation::NotSubmitted {
+            reason: format!("{reason:?}"),
         },
     }
 }
@@ -1352,12 +1846,17 @@ mod tests {
     use super::ConfigBuilder;
     use super::INTERFACE_VERSION;
     use super::Kernel;
+    use super::KernelActionPayload;
+    use super::KernelActionRequest;
+    use super::KernelFileChange;
+    use super::KernelFileOperation;
     use super::KernelOptions;
     use super::ModelPort;
     use super::ModelPortFailure;
     use super::ModelPortRequest;
     use super::ModelPortStream;
     use super::PermissionProfile;
+    use super::RejectingKernelActionGate;
     use super::RoleSessionPolicy;
     use super::canonical_role_policy;
     use super::codex_review_decision;
@@ -1396,10 +1895,86 @@ mod tests {
     }
 
     #[test]
+    fn private_model_and_action_payloads_are_redacted_from_debug() {
+        let model = ModelPortRequest {
+            request_id: "request".to_owned(),
+            payload_json: "TOKEN=TOKEN_VALUE PAYLOAD=PAYLOAD_VALUE".to_owned(),
+        };
+        let action = KernelActionRequest {
+            session_id: "session".to_owned(),
+            turn_id: "turn".to_owned(),
+            operation_id: "operation".to_owned(),
+            namespace: Some("functions".to_owned()),
+            tool_name: "shell_command".to_owned(),
+            payload: KernelActionPayload::Function {
+                arguments: "TOKEN=TOKEN_VALUE PAYLOAD=PAYLOAD_VALUE".to_owned(),
+            },
+        };
+        for rendered in [format!("{model:?}"), format!("{action:?}")] {
+            assert!(!rendered.contains("TOKEN_VALUE"));
+            assert!(!rendered.contains("PAYLOAD_VALUE"));
+        }
+        let change = KernelFileChange {
+            operation: KernelFileOperation::Write,
+            path: "/private/TOKEN_VALUE".to_owned(),
+            move_path: Some("/private/PAYLOAD_VALUE".to_owned()),
+        };
+        let rendered = format!("{change:?}");
+        assert!(!rendered.contains("TOKEN_VALUE"));
+        assert!(!rendered.contains("PAYLOAD_VALUE"));
+    }
+
+    #[test]
     fn declares_one_execution_authority() {
         let descriptor = descriptor();
         assert_eq!(descriptor.name, "codex-core");
         assert_eq!(descriptor.execution_authorities, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kernel_home_and_preexisting_state_are_restricted() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = std::env::temp_dir().join(format!(
+            "winwincode-kernel-private-home-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create kernel home");
+        let state = home.join("state.sqlite3");
+        std::fs::write(&state, b"state").expect("create state file");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777))
+            .expect("widen home");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o666))
+            .expect("widen state");
+        let kernel = Kernel::new(
+            KernelOptions::new(
+                home.clone(),
+                std::env::current_exe().expect("current executable"),
+            ),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .expect("construct private kernel");
+        assert_eq!(
+            std::fs::metadata(&home)
+                .expect("home metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&state)
+                .expect("state metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(kernel);
+        std::fs::remove_dir_all(home).expect("remove kernel home");
     }
 
     #[test]
@@ -1410,10 +1985,15 @@ mod tests {
         let mut options = KernelOptions::new(home.clone(), helper);
         options.event_capacity = 1;
         options.shutdown_timeout = Duration::from_millis(10);
-        let kernel = Kernel::new(options, Arc::new(UnusedModelPort)).expect("construct kernel");
+        let kernel = Kernel::new(
+            options,
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 5);
+        assert_eq!(build.interface_version, 6);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,
@@ -1422,6 +2002,7 @@ mod tests {
                 "upstream/patches/codex/0002-inject-model-stream-transport.patch",
                 "upstream/patches/codex/0003-export-config-builder.patch",
                 "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
+                "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);
@@ -1438,8 +2019,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&home).expect("create kernel home");
         let helper = std::env::current_exe().expect("current test executable");
-        let kernel = Kernel::new(KernelOptions::new(home, helper), Arc::new(UnusedModelPort))
-            .expect("construct kernel");
+        let kernel = Kernel::new(
+            KernelOptions::new(home, helper),
+            Arc::new(UnusedModelPort),
+            Arc::new(RejectingKernelActionGate),
+        )
+        .expect("construct kernel");
         let runtime = kernel.runtime().await.expect("initialize runtime");
         let runtime_owner = Arc::downgrade(&runtime);
         drop(runtime);

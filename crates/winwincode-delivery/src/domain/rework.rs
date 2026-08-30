@@ -47,26 +47,32 @@ pub struct ReworkTargetFact {
 }
 
 impl ReworkTargetFact {
+    #[must_use]
     pub fn delivery_task_id(&self) -> &DeliveryTaskId {
         &self.delivery_task_id
     }
 
+    #[must_use]
     pub fn diagram_id(&self) -> &str {
         &self.diagram_id
     }
 
+    #[must_use]
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
 
+    #[must_use]
     pub fn file_path(&self) -> &str {
         &self.file_path
     }
 
+    #[must_use]
     pub fn hunk_sha256(&self) -> &str {
         &self.hunk_sha256
     }
 
+    #[must_use]
     pub fn evidence_ref_ids(&self) -> &[EvidenceId] {
         &self.evidence_ref_ids
     }
@@ -152,6 +158,7 @@ struct ReworkClarificationIdentity<'clarification> {
 }
 
 impl ReworkClarification {
+    #[must_use]
     pub const fn reason(&self) -> ReworkClarificationReason {
         self.reason
     }
@@ -206,42 +213,52 @@ struct ReworkAuthorizationIdentity<'authorization> {
 }
 
 impl ReworkAuthorization {
+    #[must_use]
     pub fn writer_actor(&self) -> StageRunActorType {
         StageRunActorType::Codex
     }
 
+    #[must_use]
     pub fn writer_role(&self) -> &'static str {
         "remediator"
     }
 
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
 
+    #[must_use]
     pub fn previous_candidate(&self) -> &FrozenDeliveryCandidate {
         &self.previous_candidate
     }
 
+    #[must_use]
     pub fn diff_sha256(&self) -> &str {
         &self.diff_sha256
     }
 
+    #[must_use]
     pub fn delivery_task_id(&self) -> &DeliveryTaskId {
         &self.delivery_task_id
     }
 
+    #[must_use]
     pub fn next_attempt(&self) -> u64 {
         self.next_attempt
     }
 
+    #[must_use]
     pub fn targets(&self) -> &[ReworkTargetFact] {
         &self.targets
     }
 
+    #[must_use]
     pub fn authorization_digest(&self) -> &Sha256Digest {
         &self.authorization_digest
     }
 
+    #[must_use]
     pub fn requires_full_reverification(&self) -> bool {
         true
     }

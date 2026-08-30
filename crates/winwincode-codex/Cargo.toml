@@ -1,0 +1,33 @@
+[package]
+name = "winwincode-codex"
+description = "Production embedded Codex Core adapter for the WinWinCode Execution Worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+test-support = []
+
+[dependencies]
+base64.workspace = true
+codex-protocol.workspace = true
+ed25519-dalek.workspace = true
+futures.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+uuid.workspace = true
+winwincode-domain.workspace = true
+winwincode-execution-port.workspace = true
+winwincode-kernel = { path = "../kernel" }
+
+[build-dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

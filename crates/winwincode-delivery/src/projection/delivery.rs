@@ -30,18 +30,22 @@ pub struct AcceptanceCriterionProjection {
 }
 
 impl AcceptanceCriterionProjection {
+    #[must_use]
     pub fn id(&self) -> &AcceptanceCriterionId {
         &self.id
     }
 
+    #[must_use]
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    #[must_use]
     pub fn verification_method(&self) -> Option<&str> {
         self.verification_method.as_deref()
     }
 
+    #[must_use]
     pub const fn required(&self) -> bool {
         self.required
     }
@@ -66,54 +70,67 @@ pub struct SpecProjection {
 }
 
 impl SpecProjection {
+    #[must_use]
     pub fn id(&self) -> &DeliverySpecId {
         &self.id
     }
 
+    #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
+    #[must_use]
     pub fn goal(&self) -> &str {
         &self.goal
     }
 
+    #[must_use]
     pub fn scope(&self) -> &[String] {
         &self.scope
     }
 
+    #[must_use]
     pub fn out_of_scope(&self) -> &[String] {
         &self.out_of_scope
     }
 
+    #[must_use]
     pub fn constraints(&self) -> &[String] {
         &self.constraints
     }
 
+    #[must_use]
     pub fn acceptance_criteria(&self) -> &[AcceptanceCriterionProjection] {
         &self.acceptance_criteria
     }
 
+    #[must_use]
     pub const fn source_ref(&self) -> Option<&DeliverySourceRef> {
         self.source_ref.as_ref()
     }
 
+    #[must_use]
     pub const fn publication_target(&self) -> Option<&DeliveryPublicationTarget> {
         self.publication_target.as_ref()
     }
 
+    #[must_use]
     pub const fn repository(&self) -> &RepositoryRef {
         &self.repository
     }
 
+    #[must_use]
     pub fn base_revision(&self) -> &str {
         &self.base_revision
     }
 
+    #[must_use]
     pub const fn max_rework_attempts(&self) -> u64 {
         self.max_rework_attempts
     }
@@ -126,6 +143,7 @@ pub struct RequirementsProjection {
 }
 
 impl RequirementsProjection {
+    #[must_use]
     pub const fn spec(&self) -> &SpecProjection {
         &self.spec
     }
@@ -149,50 +167,62 @@ pub struct SessionBindingProjection {
 }
 
 impl SessionBindingProjection {
+    #[must_use]
     pub fn binding_id(&self) -> &SessionBindingId {
         &self.binding_id
     }
 
+    #[must_use]
     pub fn product_session_id(&self) -> &ProductSessionId {
         &self.product_session_id
     }
 
+    #[must_use]
     pub fn execution_job_id(&self) -> &ExecutionJobId {
         &self.execution_job_id
     }
 
+    #[must_use]
     pub fn worker_session_id(&self) -> Option<&WorkerSessionId> {
         self.worker_session_id.as_ref()
     }
 
+    #[must_use]
     pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
         self.codex_thread_id.as_ref()
     }
 
+    #[must_use]
     pub fn worker_id(&self) -> Option<&WorkerId> {
         self.worker_id.as_ref()
     }
 
+    #[must_use]
     pub fn worker_instance_id(&self) -> Option<&WorkerInstanceId> {
         self.worker_instance_id.as_ref()
     }
 
+    #[must_use]
     pub fn lease_id(&self) -> Option<&LeaseId> {
         self.lease_id.as_ref()
     }
 
+    #[must_use]
     pub const fn attempt(&self) -> u64 {
         self.attempt
     }
 
+    #[must_use]
     pub fn fencing_token(&self) -> Option<&FencingToken> {
         self.fencing_token.as_ref()
     }
 
+    #[must_use]
     pub const fn source_provenance(&self) -> &SessionBindingSourceProvenance {
         &self.source_provenance
     }
 
+    #[must_use]
     pub const fn bound_at(&self) -> u64 {
         self.bound_at
     }
@@ -214,42 +244,52 @@ pub struct StageProjection {
 }
 
 impl StageProjection {
+    #[must_use]
     pub fn id(&self) -> &StageRunId {
         &self.id
     }
 
+    #[must_use]
     pub fn delivery_task_id(&self) -> Option<&DeliveryTaskId> {
         self.delivery_task_id.as_ref()
     }
 
+    #[must_use]
     pub const fn stage(&self) -> DeliveryStage {
         self.stage
     }
 
+    #[must_use]
     pub const fn actor_type(&self) -> StageRunActorType {
         self.actor_type
     }
 
+    #[must_use]
     pub fn role(&self) -> &str {
         &self.role
     }
 
+    #[must_use]
     pub const fn status(&self) -> StageRunStatus {
         self.status
     }
 
+    #[must_use]
     pub const fn attempt(&self) -> u64 {
         self.attempt
     }
 
+    #[must_use]
     pub const fn started_at(&self) -> u64 {
         self.started_at
     }
 
+    #[must_use]
     pub const fn finished_at(&self) -> Option<u64> {
         self.finished_at
     }
 
+    #[must_use]
     pub const fn session_binding(&self) -> Option<&SessionBindingProjection> {
         self.session_binding.as_ref()
     }
@@ -270,38 +310,47 @@ pub struct DeliveryTaskProjection {
 }
 
 impl DeliveryTaskProjection {
+    #[must_use]
     pub fn id(&self) -> &DeliveryTaskId {
         &self.id
     }
 
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
+    #[must_use]
     pub fn goal(&self) -> &str {
         &self.goal
     }
 
+    #[must_use]
     pub fn acceptance_criterion_ids(&self) -> &[AcceptanceCriterionId] {
         &self.acceptance_criterion_ids
     }
 
+    #[must_use]
     pub fn blocked_by_task_ids(&self) -> &[DeliveryTaskId] {
         &self.blocked_by_task_ids
     }
 
+    #[must_use]
     pub fn owner(&self) -> Option<&str> {
         self.owner.as_deref()
     }
 
+    #[must_use]
     pub const fn status(&self) -> DeliveryTaskStatus {
         self.status
     }
 
+    #[must_use]
     pub fn stage_run_ids(&self) -> &[StageRunId] {
         &self.stage_run_ids
     }
 
+    #[must_use]
     pub fn evidence_refs(&self) -> &[EvidenceId] {
         &self.evidence_refs
     }
@@ -316,14 +365,17 @@ pub struct AttentionOptionProjection {
 }
 
 impl AttentionOptionProjection {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
 
+    #[must_use]
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -349,54 +401,67 @@ pub struct AttentionItemProjection {
 }
 
 impl AttentionItemProjection {
+    #[must_use]
     pub fn id(&self) -> &AttentionItemId {
         &self.id
     }
 
+    #[must_use]
     pub fn delivery_spec_id(&self) -> &DeliverySpecId {
         &self.delivery_spec_id
     }
 
+    #[must_use]
     pub fn stage_run_id(&self) -> Option<&StageRunId> {
         self.stage_run_id.as_ref()
     }
 
+    #[must_use]
     pub const fn item_type(&self) -> AttentionItemType {
         self.item_type
     }
 
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
+    #[must_use]
     pub fn options(&self) -> &[AttentionOptionProjection] {
         &self.options
     }
 
+    #[must_use]
     pub fn assigned_to(&self) -> Option<&str> {
         self.assigned_to.as_deref()
     }
 
+    #[must_use]
     pub const fn blocking(&self) -> bool {
         self.blocking
     }
 
+    #[must_use]
     pub const fn status(&self) -> AttentionItemStatus {
         self.status
     }
 
+    #[must_use]
     pub fn resolution_summary(&self) -> Option<&str> {
         self.resolution_summary.as_deref()
     }
 
+    #[must_use]
     pub fn resolved_by(&self) -> Option<&str> {
         self.resolved_by.as_deref()
     }
 
+    #[must_use]
     pub const fn created_at(&self) -> u64 {
         self.created_at
     }
 
+    #[must_use]
     pub const fn resolved_at(&self) -> Option<u64> {
         self.resolved_at
     }
@@ -418,38 +483,47 @@ pub struct EvidenceProjection {
 }
 
 impl EvidenceProjection {
+    #[must_use]
     pub fn id(&self) -> &EvidenceId {
         &self.id
     }
 
+    #[must_use]
     pub fn delivery_spec_id(&self) -> &DeliverySpecId {
         &self.delivery_spec_id
     }
 
+    #[must_use]
     pub const fn delivery_spec_revision(&self) -> u64 {
         self.delivery_spec_revision
     }
 
+    #[must_use]
     pub fn stage_run_id(&self) -> &StageRunId {
         &self.stage_run_id
     }
 
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
 
+    #[must_use]
     pub fn session_binding_id(&self) -> &SessionBindingId {
         &self.session_binding_id
     }
 
+    #[must_use]
     pub const fn evidence_type(&self) -> EvidenceRefType {
         self.evidence_type
     }
 
+    #[must_use]
     pub fn source_ref(&self) -> &str {
         &self.source_ref
     }
 
+    #[must_use]
     pub const fn created_at(&self) -> u64 {
         self.created_at
     }
@@ -470,38 +544,47 @@ pub struct CurrentCandidateProjection {
 }
 
 impl CurrentCandidateProjection {
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
 
+    #[must_use]
     pub fn delivery_spec_id(&self) -> &DeliverySpecId {
         &self.delivery_spec_id
     }
 
+    #[must_use]
     pub const fn delivery_spec_revision(&self) -> u64 {
         self.delivery_spec_revision
     }
 
+    #[must_use]
     pub fn producer_stage_run_id(&self) -> &StageRunId {
         &self.producer_stage_run_id
     }
 
+    #[must_use]
     pub fn producer_session_binding_id(&self) -> &SessionBindingId {
         &self.producer_session_binding_id
     }
 
+    #[must_use]
     pub fn candidate_commit_id(&self) -> &str {
         &self.candidate_commit_id
     }
 
+    #[must_use]
     pub fn candidate_tree_id(&self) -> &str {
         &self.candidate_tree_id
     }
 
+    #[must_use]
     pub fn diff_sha256(&self) -> &str {
         &self.diff_sha256
     }
 
+    #[must_use]
     pub const fn frozen_at(&self) -> u64 {
         self.frozen_at
     }
@@ -519,26 +602,32 @@ pub struct VerdictCriterionProjection {
 }
 
 impl VerdictCriterionProjection {
+    #[must_use]
     pub fn result_id(&self) -> &CriterionResultId {
         &self.result_id
     }
 
+    #[must_use]
     pub fn criterion_id(&self) -> &AcceptanceCriterionId {
         &self.criterion_id
     }
 
+    #[must_use]
     pub const fn verdict(&self) -> CriterionVerdict {
         self.verdict
     }
 
+    #[must_use]
     pub fn evidence_refs(&self) -> &[EvidenceId] {
         &self.evidence_refs
     }
 
+    #[must_use]
     pub fn explanation(&self) -> &str {
         &self.explanation
     }
 
+    #[must_use]
     pub const fn evaluated_at(&self) -> u64 {
         self.evaluated_at
     }
@@ -558,34 +647,42 @@ pub struct VerdictProjection {
 }
 
 impl VerdictProjection {
+    #[must_use]
     pub fn id(&self) -> &DeliveryVerdictId {
         &self.id
     }
 
+    #[must_use]
     pub fn delivery_spec_id(&self) -> &DeliverySpecId {
         &self.delivery_spec_id
     }
 
+    #[must_use]
     pub const fn delivery_spec_revision(&self) -> u64 {
         self.delivery_spec_revision
     }
 
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
 
+    #[must_use]
     pub const fn status(&self) -> DeliveryVerdictStatus {
         self.status
     }
 
+    #[must_use]
     pub fn criteria(&self) -> &[VerdictCriterionProjection] {
         &self.criteria
     }
 
+    #[must_use]
     pub fn unresolved_findings(&self) -> &[String] {
         &self.unresolved_findings
     }
 
+    #[must_use]
     pub const fn produced_at(&self) -> u64 {
         self.produced_at
     }

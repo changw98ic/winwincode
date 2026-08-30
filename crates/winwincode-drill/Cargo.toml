@@ -1,0 +1,22 @@
+[package]
+name = "winwincode-drill"
+description = "Deterministic rolling-upgrade and disaster-recovery evidence runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+winwincode-audit.workspace = true
+winwincode-backup.workspace = true
+winwincode-domain.workspace = true
+winwincode-storage.workspace = true
+
+[lints]
+workspace = true

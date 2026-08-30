@@ -16,15 +16,15 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{
-    ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, StageRunId,
+    ArtifactId, AttentionItemId, ExecutionMessageId, RequestId, Sha256Digest, StageRunId, UserId,
 };
 use winwincode_publication::{
     PublicationAuthorization, PublicationFactBinding, PublicationSourceIssue, PublicationTarget,
     RepositoryPolicyScope,
 };
 use winwincode_storage::{
-    ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactOpen, ArtifactProvenance,
-    ArtifactRetention, ArtifactStore, ReceiptScopeKey, StorageError,
+    ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactMeteringAttribution, ArtifactOpen,
+    ArtifactProvenance, ArtifactRetention, ArtifactStore, ReceiptScopeKey, StorageError,
 };
 
 use crate::{
@@ -313,6 +313,7 @@ impl ControlPlane {
         &mut self,
         scope: &RepositoryScope,
         candidate: &FrozenDeliveryCandidate,
+        requester: &UserId,
     ) -> Result<PreparedPublication, PublicationPreparationError> {
         let delivery = load_current(self, candidate.delivery_id())?;
         let detail =
@@ -334,6 +335,15 @@ impl ControlPlane {
             artifacts,
             facts.scope_key,
             candidate,
+            ArtifactMeteringAttribution {
+                organization_id: scope.organization_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                project_id: scope.project_id.clone(),
+                repository_id: scope.repository_id.clone(),
+                delivery_id: Some(candidate.delivery_id().clone()),
+                product_session_id: Some(candidate.producer_product_session_id().clone()),
+                user_id: requester.clone(),
+            },
             facts.approved_at_millis,
             package_bytes,
         )?;
@@ -362,6 +372,7 @@ fn store_review_package(
     artifacts: &mut ArtifactStore,
     scope_key: ReceiptScopeKey,
     candidate: &FrozenDeliveryCandidate,
+    metering_attribution: ArtifactMeteringAttribution,
     prepared_at_millis: u64,
     package_bytes: Vec<u8>,
 ) -> Result<StoredReviewPackage, PublicationPreparationError> {
@@ -411,6 +422,7 @@ fn store_review_package(
         size_bytes,
         Some("winwincode-review-package.json".into()),
         provenance.clone(),
+        metering_attribution,
         ArtifactRetention::Indefinite,
         prepared_at_millis,
     ))?;

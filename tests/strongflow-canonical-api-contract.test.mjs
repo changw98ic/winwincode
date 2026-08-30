@@ -823,7 +823,7 @@ test('canonical schemas carry generated-client route and event metadata', () => 
   const generated = readFileSync(join(
     root,
     'apps',
-    'web',
+    'client',
     'src',
     'generated',
     'contracts.ts',

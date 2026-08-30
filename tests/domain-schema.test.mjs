@@ -11,6 +11,7 @@ const schemaPath = join(root, 'schema/winwincode/v1/domain.schema.json')
 const samplesPath = join(root, 'schema/winwincode/v1/domain.samples.json')
 
 const ID_DEFINITIONS = Object.freeze({
+  ApiTokenId: 'tok_',
   ApprovalId: 'apr_',
   AttentionItemId: 'att_',
   ChatMessageId: 'msg_',
@@ -20,6 +21,7 @@ const ID_DEFINITIONS = Object.freeze({
   DeliveryTaskId: 'dtk_',
   EvidenceId: 'evd_',
   ExecutionJobId: 'job_',
+  ExternalIdentityId: 'xid_',
   InputRequestId: 'inp_',
   LeaseId: 'lse_',
   OrganizationId: 'org_',
@@ -50,12 +52,25 @@ const COMMAND_NAMES = Object.freeze([
   'delivery.submit_verdict',
   'settings.update',
   'credential.reference.create',
+  'credential.reference.rotate',
+  'credential.reference.revoke',
   'credential.reference.delete',
   'approval.decide',
   'worker.drain',
   'worker.enable',
   'publication.publish',
   'publication.cancel',
+  'enterprise.organization.update',
+  'enterprise.membership.update',
+  'enterprise.team.update',
+  'enterprise.role.update',
+  'enterprise.project_repository.update',
+  'enterprise.policy.update',
+  'enterprise.fleet.update',
+  'enterprise.integration.update',
+  'enterprise.identity.update',
+  'collaboration.notification.ack',
+  'collaboration.presence.update',
 ])
 const DELIVERY_STATUSES = Object.freeze([
   'draft',

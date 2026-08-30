@@ -1,0 +1,480 @@
+{
+  "schemaVersion": "winwincode.session-worker-fault-differential.v1",
+  "issueId": "winwincode-9c4.16.4.7",
+  "inventoryPath": "docs/decisions/0028-control-plane-worker-migration.inventory.json",
+  "executionPolicy": {
+    "approvedDifferencePolicy": "exact-list-only",
+    "attemptsPerCommand": 1,
+    "baselineRunner": {
+      "arguments": [
+        "scripts/run-dsh-migration-baseline.mjs"
+      ],
+      "program": "NODE_EXECUTABLE"
+    },
+    "commandOrder": "baseline-then-evidence-as-listed",
+    "exactCargoFilterRequired": true,
+    "ignoredTestsAllowed": false,
+    "staleResultPolicy": "reject-before-authority-write",
+    "unexpectedDifferencePolicy": "reject",
+    "wildcardAllowed": false
+  },
+  "behaviorMappings": [
+    {
+      "canonicalEvidenceIds": [
+        "real-codex-worker-fault-fixture",
+        "product-session-lifecycle",
+        "product-session-model-route",
+        "worker-local-remote-parity",
+        "worker-duplicate-dispatch"
+      ],
+      "id": "chat-turn-success",
+      "legacyBaseline": {
+        "expectedFacts": [
+          "one product session maps to one distinct kernel session",
+          "runtime events remain ordered",
+          "provider and model selection remain visible",
+          "dispose removes the product session"
+        ],
+        "scenario": "success",
+        "testFile": "tests/dsh-agent-factory.test.mjs",
+        "testName": "DSH AgentFactory runs a stock chat turn through one embedded kernel session"
+      }
+    },
+    {
+      "canonicalEvidenceIds": [
+        "worker-codex-failure",
+        "provider-failure-redaction"
+      ],
+      "id": "model-failure",
+      "legacyBaseline": {
+        "expectedFacts": [
+          "provider failure code and retry facts survive translation",
+          "provider diagnostics and credentials stay redacted",
+          "the model stream has one typed terminal failure"
+        ],
+        "scenario": "failure",
+        "testFile": "tests/dsh-model-port.test.mjs",
+        "testName": "retains safe DSH error facts while redacting provider diagnostics and cancellation"
+      }
+    },
+    {
+      "canonicalEvidenceIds": [
+        "product-session-cancellation",
+        "worker-session-cancellation",
+        "real-codex-worker-fault-fixture"
+      ],
+      "id": "stage-cancel",
+      "legacyBaseline": {
+        "expectedFacts": [
+          "a cancellation reaches the active execution",
+          "the caller receives AbortError",
+          "session persistence remains readable after cancellation"
+        ],
+        "scenario": "cancel",
+        "testFile": "tests/dsh-agent-factory.test.mjs",
+        "testName": "StrongFlow DSH runtime creates, persists, resumes, and cancels role Sessions"
+      }
+    },
+    {
+      "canonicalEvidenceIds": [
+        "transferable-thread-recovery",
+        "old-worker-fencing",
+        "expired-lease-zero-write",
+        "replacement-worker-reacquire",
+        "dispatch-result-receipt-replay",
+        "worker-placement-reroute",
+        "worker-duplicate-dispatch"
+      ],
+      "id": "restart-recovery",
+      "legacyBaseline": {
+        "expectedFacts": [
+          "restart rebuilds equivalent projections",
+          "the same bound execution resumes",
+          "unrelated sessions are ignored"
+        ],
+        "scenario": "recovery",
+        "testFile": "tests/delivery-recovery.test.mjs",
+        "testName": "restart recovery rebuilds the same DSH and StrongFlow views and continues a live stage"
+      }
+    },
+    {
+      "canonicalEvidenceIds": [
+        "approval-restart-replay",
+        "approval-stale-authority-zero-write"
+      ],
+      "id": "approval-block",
+      "legacyBaseline": {
+        "expectedFacts": [
+          "runtime approval and business Attention stay distinct",
+          "only the current blocking action is returned",
+          "approval identity stays bound to its session and stage"
+        ],
+        "scenario": "approval",
+        "testFile": "tests/delivery-recovery.test.mjs",
+        "testName": "unresolved Codex approval and business Attention remain the one blocking action"
+      }
+    },
+    {
+      "canonicalEvidenceIds": [
+        "real-codex-worker-fault-fixture",
+        "worker-graceful-shutdown"
+      ],
+      "id": "native-close",
+      "legacyBaseline": {
+        "expectedFacts": [
+          "close returns without process failure",
+          "owned native resources are released before fixture cleanup"
+        ],
+        "scenario": "close",
+        "testFile": "tests/native-lifecycle.test.mjs",
+        "testName": "a created native session closes without crashing its host process"
+      }
+    }
+  ],
+  "canonicalEvidence": [
+    {
+      "binary": "codex_core_fixture",
+      "coversFacts": {
+        "chat-turn-success": [
+          "one product session maps to one distinct kernel session"
+        ],
+        "native-close": [
+          "close returns without process failure",
+          "owned native resources are released before fixture cleanup"
+        ],
+        "stage-cancel": [
+          "a cancellation reaches the active execution"
+        ]
+      },
+      "id": "real-codex-worker-fault-fixture",
+      "package": "winwincode-worker",
+      "requiredSourceFragments": [
+        "model_port.request_count(),",
+        "assert_eq!(outcomes.len(), 2",
+        "ExecutionOutcomeStatus::Succeeded",
+        "ExecutionOutcomeStatus::Cancelled",
+        "JobDispatchResultMessageStatus::Duplicate",
+        "assert_eq!(adapter.stats.created_sessions, 2)",
+        "assert_eq!(adapter.stats.submit_calls, 2)",
+        "distinct executions keep distinct Worker sessions",
+        "distinct executions keep distinct Codex threads",
+        "std::fs::remove_dir_all(&self.0)"
+      ],
+      "sourcePath": "crates/winwincode-worker/tests/codex_core_fixture.rs",
+      "testName": "worker_runs_real_local_codex_once_across_disconnect_duplicate_cancel_and_cleanup"
+    },
+    {
+      "binary": "product_session_service",
+      "coversFacts": {
+        "chat-turn-success": [
+          "dispose removes the product session"
+        ]
+      },
+      "id": "product-session-lifecycle",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "ProductSessionState::Closed",
+        "SqliteStorage::open(&directory.0)"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/product_session_service.rs",
+      "testName": "multiple_sessions_create_fork_query_close_replay_and_restart_deterministically"
+    },
+    {
+      "binary": "product_session_service",
+      "coversFacts": {
+        "chat-turn-success": [
+          "provider and model selection remain visible"
+        ]
+      },
+      "id": "product-session-model-route",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "assert_eq!(created.record.model_route(), &model_route())",
+        "assert_eq!(accepted.turn_intent.model_route, model_route())"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/product_session_service.rs",
+      "testName": "chat_submit_retains_route_replays_exactly_and_rejects_changed_body_or_public_identity"
+    },
+    {
+      "binary": "worker_lifecycle",
+      "coversFacts": {
+        "chat-turn-success": [
+          "runtime events remain ordered"
+        ]
+      },
+      "id": "worker-local-remote-parity",
+      "package": "winwincode-worker",
+      "requiredSourceFragments": [
+        "let local = script(false).await",
+        "let remote = script(true).await",
+        "assert_eq!(local, remote)"
+      ],
+      "sourcePath": "crates/winwincode-worker/tests/worker_lifecycle.rs",
+      "testName": "local_and_remote_frames_drive_value_identical_worker_semantics"
+    },
+    {
+      "binary": "worker_lifecycle",
+      "coversFacts": {
+        "chat-turn-success": [
+          "one product session maps to one distinct kernel session"
+        ],
+        "restart-recovery": [
+          "unrelated sessions are ignored"
+        ]
+      },
+      "id": "worker-duplicate-dispatch",
+      "package": "winwincode-worker",
+      "requiredSourceFragments": [
+        "assert_eq!(worker.active_jobs().len(), 1)",
+        ".filter(|call| call.starts_with(\"submit:\"))"
+      ],
+      "sourcePath": "crates/winwincode-worker/tests/worker_lifecycle.rs",
+      "testName": "duplicate_or_conflicting_dispatch_never_creates_a_second_thread"
+    },
+    {
+      "binary": "worker_lifecycle",
+      "coversFacts": {
+        "model-failure": [
+          "provider failure code and retry facts survive translation",
+          "the model stream has one typed terminal failure"
+        ]
+      },
+      "id": "worker-codex-failure",
+      "package": "winwincode-worker",
+      "requiredSourceFragments": [
+        "ExecutionOutcomeStatus::InfrastructureError",
+        "embedded Codex runtime became unavailable"
+      ],
+      "sourcePath": "crates/winwincode-worker/tests/worker_lifecycle.rs",
+      "testName": "codex_poll_failure_has_a_fixed_infrastructure_outcome_without_error_text"
+    },
+    {
+      "binary": "provider_stream",
+      "coversFacts": {
+        "model-failure": [
+          "provider diagnostics and credentials stay redacted",
+          "the model stream has one typed terminal failure"
+        ]
+      },
+      "id": "provider-failure-redaction",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "let split = PROVIDER_SECRET.len() / 2",
+        "ProviderStreamConversionErrorKind::CredentialLeak",
+        "ProviderStreamFailureKind::RateLimit"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_stream.rs",
+      "testName": "cancellation_disconnect_failure_and_split_secret_are_fail_closed"
+    },
+    {
+      "binary": "product_session_service",
+      "coversFacts": {
+        "stage-cancel": [
+          "the caller receives AbortError",
+          "session persistence remains readable after cancellation"
+        ]
+      },
+      "id": "product-session-cancellation",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "RouteWriteStatus::Applied",
+        "cancel replay",
+        "SqliteStorage::open(&directory.0)"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/product_session_service.rs",
+      "testName": "cancellation_routes_exact_current_authority_replays_and_remains_distinct_from_close"
+    },
+    {
+      "binary": "worker_lifecycle",
+      "coversFacts": {
+        "stage-cancel": [
+          "a cancellation reaches the active execution"
+        ]
+      },
+      "id": "worker-session-cancellation",
+      "package": "winwincode-worker",
+      "requiredSourceFragments": [
+        ".filter(|call| call.starts_with(\"interrupt:\"))",
+        "JobCancelAckMessageStatus::AlreadyCancelling"
+      ],
+      "sourcePath": "crates/winwincode-worker/tests/worker_lifecycle.rs",
+      "testName": "cancellation_is_session_scoped_and_interrupts_exactly_once"
+    },
+    {
+      "binary": "recovery_router",
+      "coversFacts": {
+        "restart-recovery": [
+          "restart rebuilds equivalent projections",
+          "the same bound execution resumes"
+        ]
+      },
+      "id": "transferable-thread-recovery",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "SessionRecoveryPlan::ResumeTransferableThread",
+        "RecoveryWriteStatus::Duplicate",
+        "RecoveryRouter::restore"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/recovery_router.rs",
+      "testName": "transferable_thread_resumes_from_confirmed_cursor_and_replays_after_restart"
+    },
+    {
+      "binary": "recovery_router",
+      "coversFacts": {
+        "restart-recovery": [
+          "restart rebuilds equivalent projections",
+          "unrelated sessions are ignored"
+        ]
+      },
+      "id": "old-worker-fencing",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "RecoveryReplayAuthorityError::OldWorkerFenced",
+        "ReplayDecision::Duplicate",
+        "assert_eq!(store.writes, 1)"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/recovery_router.rs",
+      "testName": "old_worker_is_fenced_and_runtime_event_duplicates_survive_control_plane_restart"
+    },
+    {
+      "binary": "execution_port_service",
+      "coversFacts": {
+        "restart-recovery": [
+          "unrelated sessions are ignored"
+        ]
+      },
+      "id": "expired-lease-zero-write",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "JobDispatchResultMessageStatus::RejectedExpiredLease",
+        "expired dispatch result must not create a durable receipt"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/execution_port_service.rs",
+      "testName": "expired_lease_is_rejected_without_a_registry_write"
+    },
+    {
+      "binary": "execution_port_service",
+      "coversFacts": {
+        "restart-recovery": [
+          "unrelated sessions are ignored"
+        ]
+      },
+      "id": "replacement-worker-reacquire",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "WorkerRegistrationResultMessageLeaseRecovery::ReacquireRequired",
+        "JobDispatchResultMessageStatus::RejectedWorkerInstance"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/execution_port_service.rs",
+      "testName": "a_new_worker_instance_reports_reacquire_and_old_lease_writes_remain_zero_write"
+    },
+    {
+      "binary": "execution_port_service",
+      "coversFacts": {
+        "restart-recovery": [
+          "restart rebuilds equivalent projections"
+        ]
+      },
+      "id": "dispatch-result-receipt-replay",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "assert_dispatch_result_replay_and_conflict",
+        "assert_dispatch_result_restart_replay_and_conflict"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/execution_port_service.rs",
+      "testName": "dispatch_result_receipt_replays_as_duplicate_and_conflicts_on_changed_body_after_restart"
+    },
+    {
+      "binary": "worker_placement",
+      "coversFacts": {
+        "restart-recovery": [
+          "the same bound execution resumes",
+          "unrelated sessions are ignored"
+        ]
+      },
+      "id": "worker-placement-reroute",
+      "package": "winwincode-storage",
+      "requiredSourceFragments": [
+        "WorkerAffinityFailure::WorkerInstanceReplaced",
+        "assert!(!selected.reused_affinity)"
+      ],
+      "sourcePath": "crates/winwincode-storage/tests/worker_placement.rs",
+      "testName": "valid_affinity_wins_and_replaced_instance_reroutes_deterministically"
+    },
+    {
+      "binary": "gate_interaction_service",
+      "coversFacts": {
+        "approval-block": [
+          "runtime approval and business Attention stay distinct",
+          "only the current blocking action is returned"
+        ]
+      },
+      "id": "approval-restart-replay",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "GateInteractionState::Pending",
+        "GateInteractionState::Approved",
+        "response replay"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/gate_interaction_service.rs",
+      "testName": "plan_delta_routes_to_approval_and_replays_across_restart"
+    },
+    {
+      "binary": "gate_interaction_service",
+      "coversFacts": {
+        "approval-block": [
+          "approval identity stays bound to its session and stage"
+        ]
+      },
+      "id": "approval-stale-authority-zero-write",
+      "package": "winwincode-control-plane",
+      "requiredSourceFragments": [
+        "GateInteractionServiceErrorCode::AuthorityMismatch",
+        "GateInteractionServiceErrorCode::ActorMismatch"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/gate_interaction_service.rs",
+      "testName": "stale_scope_action_candidate_and_fence_fail_before_a_write"
+    },
+    {
+      "binary": "worker_lifecycle",
+      "coversFacts": {
+        "native-close": [
+          "close returns without process failure",
+          "owned native resources are released before fixture cleanup"
+        ]
+      },
+      "id": "worker-graceful-shutdown",
+      "package": "winwincode-worker",
+      "requiredSourceFragments": [
+        "worker.shutdown(now()).await.unwrap()",
+        "WorkerLifecycleState::Stopped",
+        "report.cancelled_jobs.len(), 2"
+      ],
+      "sourcePath": "crates/winwincode-worker/tests/worker_lifecycle.rs",
+      "testName": "graceful_shutdown_drains_jobs_and_reports_codex_shutdown_failures"
+    }
+  ],
+  "approvedDifferences": [
+    {
+      "behaviorBaselineId": "chat-turn-success",
+      "canonicalFact": "ProductSession, WorkerSession, and CodexThread are separate canonical identities; the real fixture still creates one embedded Codex session per accepted job.",
+      "id": "session-identity-split",
+      "legacyFact": "DSH exposed one product session mapped to one kernel session.",
+      "userVisibleImpact": "none"
+    },
+    {
+      "behaviorBaselineId": "stage-cancel",
+      "canonicalFact": "Rust records one typed, session-bound cancellation; the DSH baseline still verifies AbortError at the caller boundary.",
+      "id": "typed-cancellation-boundary",
+      "legacyFact": "The DSH caller observed AbortError directly.",
+      "userVisibleImpact": "none"
+    },
+    {
+      "behaviorBaselineId": "native-close",
+      "canonicalFact": "Worker shutdown owns embedded Codex cleanup and the local fixture proves cleanup before temporary files are removed.",
+      "id": "worker-owned-codex-cleanup",
+      "legacyFact": "The Node native bridge owned kernel session close and cleanup.",
+      "userVisibleImpact": "none"
+    }
+  ]
+}

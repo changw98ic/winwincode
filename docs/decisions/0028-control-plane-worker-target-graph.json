@@ -3,7 +3,7 @@
   "status": "accepted-target",
   "decision": "docs/decisions/0028-control-plane-worker-migration.md",
   "verification": {
-    "plannedModulesMayBeAbsent": true,
+    "plannedModulesMayBeAbsent": false,
     "enforceCargoDependenciesWhenManifestExists": true,
     "implementationCompletionSource": "beads-and-release-gates"
   },
@@ -15,38 +15,58 @@
       "phase": "1",
       "zone": "contract",
       "responsibilities": [
-        "define-public-identifiers",
-        "define-command-and-query-dtos",
-        "define-http-and-websocket-contracts",
-        "define-execution-port-contracts"
+        "own-versioned-domain-and-transport-schemas"
       ],
       "allowedInternalDependencies": []
     },
     {
       "id": "typescript-generated-client",
       "kind": "generated",
-      "path": "apps/web/src/generated",
+      "path": "apps/client/src/generated",
       "phase": "1",
       "zone": "presentation",
       "responsibilities": [
-        "expose-generated-http-client",
-        "expose-generated-websocket-client",
-        "expose-generated-projection-types"
+        "provide-generated-http-websocket-types-and-client"
       ],
       "allowedInternalDependencies": [
         "canonical-schema"
       ]
     },
     {
-      "id": "typescript-web",
-      "kind": "typescript-app",
-      "path": "apps/web",
+      "id": "typescript-contracts",
+      "kind": "typescript-package",
+      "path": "packages/contracts",
+      "packageName": "@winwincode/contracts",
+      "phase": "6",
+      "zone": "contract",
+      "responsibilities": [
+        "provide-shared-typescript-delivery-and-presentation-contracts"
+      ],
+      "allowedInternalDependencies": []
+    },
+    {
+      "id": "typescript-strongflow",
+      "kind": "typescript-package",
+      "path": "packages/strongflow",
+      "packageName": "@winwincode/strongflow",
       "phase": "6",
       "zone": "presentation",
       "responsibilities": [
-        "render-chat-and-strongflow",
-        "collect-user-input",
-        "consume-generated-client"
+        "provide-delivery-domain-and-projection-contracts-without-network-or-runtime-authority"
+      ],
+      "allowedInternalDependencies": [
+        "typescript-contracts"
+      ]
+    },
+    {
+      "id": "typescript-web",
+      "kind": "typescript-app",
+      "path": "apps/client",
+      "phase": "6",
+      "zone": "presentation",
+      "responsibilities": [
+        "render-chat-delivery-settings-approval-and-enterprise-surfaces",
+        "hold-browser-state-and-route-user-actions-through-generated-client"
       ],
       "allowedInternalDependencies": [
         "typescript-generated-client"
@@ -54,7 +74,8 @@
       "allowedBackends": [
         "control-plane-http",
         "control-plane-websocket"
-      ]
+      ],
+      "packageName": "@winwincode/client"
     },
     {
       "id": "winwincode-domain",
@@ -64,25 +85,9 @@
       "phase": "1",
       "zone": "shared",
       "responsibilities": [
-        "define-domain-identifiers",
-        "define-shared-value-objects"
+        "define-generated-identifiers-and-value-objects"
       ],
       "allowedInternalDependencies": []
-    },
-    {
-      "id": "winwincode-events",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-events",
-      "packageName": "winwincode-events",
-      "phase": "1",
-      "zone": "shared",
-      "responsibilities": [
-        "define-domain-event-envelopes",
-        "define-runtime-event-envelopes"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-domain"
-      ]
     },
     {
       "id": "winwincode-api",
@@ -90,15 +95,12 @@
       "path": "crates/winwincode-api",
       "packageName": "winwincode-api",
       "phase": "1",
-      "zone": "control-plane",
+      "zone": "shared",
       "responsibilities": [
-        "serve-generated-http-contracts",
-        "serve-generated-websocket-contracts",
-        "map-stable-public-errors"
+        "expose-generated-http-and-websocket-rust-types"
       ],
       "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events"
+        "winwincode-domain"
       ]
     },
     {
@@ -109,14 +111,10 @@
       "phase": "1",
       "zone": "shared",
       "responsibilities": [
-        "define-worker-registration-and-heartbeat",
-        "define-job-lease-and-fencing",
-        "define-runtime-input-approval-cancel-and-outcome",
-        "define-model-stream-relay"
+        "define-versioned-worker-control-and-runtime-frames"
       ],
       "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events"
+        "winwincode-domain"
       ]
     },
     {
@@ -127,44 +125,37 @@
       "phase": "2",
       "zone": "shared",
       "responsibilities": [
-        "provide-control-plane-storage-adapters",
-        "provide-transaction-and-revision-primitives"
+        "provide-atomic-product-state-receipts-and-outbox-storage"
       ],
       "allowedInternalDependencies": [
         "winwincode-domain"
       ]
     },
     {
+      "id": "winwincode-repository-context",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-repository-context",
+      "packageName": "winwincode-repository-context",
+      "phase": "2",
+      "zone": "control-plane",
+      "responsibilities": [
+        "inspect-baseline-bound-repository-facts",
+        "report-local-code-index-capabilities",
+        "remain-read-only-and-own-no-product-state"
+      ],
+      "allowedInternalDependencies": []
+    },
+    {
       "id": "winwincode-observability",
       "kind": "rust-crate",
       "path": "crates/winwincode-observability",
       "packageName": "winwincode-observability",
-      "phase": "1",
+      "phase": "2",
       "zone": "shared",
       "responsibilities": [
-        "provide-metrics-and-tracing-adapters",
-        "redact-sensitive-diagnostics"
+        "carry-secret-safe-runtime-trace-facts"
       ],
-      "allowedInternalDependencies": [
-        "winwincode-events"
-      ]
-    },
-    {
-      "id": "winwincode-approval",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-approval",
-      "packageName": "winwincode-approval",
-      "phase": "2",
-      "zone": "control-plane",
-      "responsibilities": [
-        "own-execution-approval-decisions",
-        "own-business-attention-decisions"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-storage"
-      ]
+      "allowedInternalDependencies": []
     },
     {
       "id": "winwincode-delivery",
@@ -174,14 +165,10 @@
       "phase": "2",
       "zone": "control-plane",
       "responsibilities": [
-        "own-canonical-delivery-state",
-        "advance-delivery-state-machine",
-        "bind-evidence-and-verdicts"
+        "own-delivery-state-stage-runs-and-candidate-verdict-rules"
       ],
       "allowedInternalDependencies": [
-        "winwincode-approval",
         "winwincode-domain",
-        "winwincode-events",
         "winwincode-storage"
       ]
     },
@@ -193,50 +180,10 @@
       "phase": "3",
       "zone": "control-plane",
       "responsibilities": [
-        "record-actor-command-and-result",
-        "enforce-audit-retention"
+        "own-tamper-evident-audit-and-retention-facts"
       ],
       "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-storage"
-      ]
-    },
-    {
-      "id": "winwincode-credential",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-credential",
-      "packageName": "winwincode-credential",
-      "phase": "5",
-      "zone": "control-plane",
-      "responsibilities": [
-        "resolve-long-lived-provider-credentials",
-        "integrate-keychain-vault-and-kms"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-storage"
-      ]
-    },
-    {
-      "id": "winwincode-provider",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-provider",
-      "packageName": "winwincode-provider",
-      "phase": "5",
-      "zone": "control-plane",
-      "responsibilities": [
-        "own-provider-and-model-catalog",
-        "enforce-model-budget-and-rate-limits",
-        "relay-model-streams-through-execution-port"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-credential",
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-execution-port",
-        "winwincode-observability"
+        "winwincode-domain"
       ]
     },
     {
@@ -247,50 +194,10 @@
       "phase": "3",
       "zone": "control-plane",
       "responsibilities": [
-        "own-publication-state-and-policy",
-        "publish-frozen-candidate-references"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-credential",
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-storage"
-      ]
-    },
-    {
-      "id": "winwincode-github",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-github",
-      "packageName": "winwincode-github",
-      "phase": "3",
-      "zone": "control-plane",
-      "responsibilities": [
-        "adapt-publication-port-to-github",
-        "adapt-review-package-to-github"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-credential",
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-publication"
-      ]
-    },
-    {
-      "id": "winwincode-scheduler",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-scheduler",
-      "packageName": "winwincode-scheduler",
-      "phase": "4",
-      "zone": "control-plane",
-      "responsibilities": [
-        "own-job-queue-and-priority",
-        "own-lease-fencing-and-worker-placement",
-        "coordinate-retry-cancel-and-budget-limits"
+        "own-approval-bound-external-publication-effects"
       ],
       "allowedInternalDependencies": [
         "winwincode-domain",
-        "winwincode-events",
-        "winwincode-execution-port",
         "winwincode-storage"
       ]
     },
@@ -302,71 +209,25 @@
       "phase": "4",
       "zone": "control-plane",
       "responsibilities": [
-        "own-product-session-lifecycle",
-        "bind-product-worker-codex-and-stage-identities"
+        "own-product-session-and-execution-identity-binding-facts"
       ],
       "allowedInternalDependencies": [
-        "winwincode-approval",
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-scheduler",
-        "winwincode-storage"
+        "winwincode-domain"
       ]
     },
     {
-      "id": "winwincode-identity",
+      "id": "winwincode-kernel",
       "kind": "rust-crate",
-      "path": "crates/winwincode-identity",
-      "packageName": "winwincode-identity",
-      "phase": "enterprise",
-      "zone": "control-plane",
+      "path": "crates/kernel",
+      "packageName": "winwincode-kernel",
+      "phase": "4",
+      "zone": "execution-worker",
       "responsibilities": [
-        "own-users-service-accounts-and-external-identities",
-        "enforce-organization-membership-and-rbac"
+        "own-codex-thread-turn-tool-shell-sandbox-and-recovery-authority",
+        "expose-secret-free-model-port-and-typed-runtime-events",
+        "remain-free-of-worker-lifecycle-product-state-and-provider-credential-ownership"
       ],
-      "allowedInternalDependencies": [
-        "winwincode-audit",
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-storage"
-      ]
-    },
-    {
-      "id": "winwincode-project",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-project",
-      "packageName": "winwincode-project",
-      "phase": "enterprise",
-      "zone": "control-plane",
-      "responsibilities": [
-        "own-workspaces-projects-and-repositories",
-        "bind-project-policy-and-integrations"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-identity",
-        "winwincode-storage"
-      ]
-    },
-    {
-      "id": "winwincode-collaboration",
-      "kind": "rust-crate",
-      "path": "crates/winwincode-collaboration",
-      "packageName": "winwincode-collaboration",
-      "phase": "enterprise",
-      "zone": "control-plane",
-      "responsibilities": [
-        "own-assignment-review-and-approval-queues",
-        "own-subscriptions-notifications-and-activity"
-      ],
-      "allowedInternalDependencies": [
-        "winwincode-domain",
-        "winwincode-events",
-        "winwincode-identity",
-        "winwincode-project",
-        "winwincode-storage"
-      ]
+      "allowedInternalDependencies": []
     },
     {
       "id": "winwincode-codex",
@@ -376,14 +237,13 @@
       "phase": "4",
       "zone": "execution-worker",
       "responsibilities": [
-        "adapt-execution-port-to-embedded-codex-core",
-        "translate-codex-runtime-events-and-outcomes"
+        "adapt-execution-port-to-the-embedded-codex-kernel",
+        "authenticate-and-seal-the-kernel-helper"
       ],
       "allowedInternalDependencies": [
         "winwincode-domain",
-        "winwincode-events",
         "winwincode-execution-port",
-        "winwincode-observability"
+        "winwincode-kernel"
       ]
     },
     {
@@ -394,16 +254,13 @@
       "phase": "4",
       "zone": "execution-worker",
       "responsibilities": [
-        "own-worker-session-and-heartbeat",
-        "own-checkout-worktree-candidate-and-artifacts",
-        "run-embedded-codex-through-one-adapter"
+        "own-worker-session-job-lease-fencing-workspace-and-outcome-facts",
+        "send-and-receive-all-execution-port-frames"
       ],
       "allowedInternalDependencies": [
         "winwincode-codex",
         "winwincode-domain",
-        "winwincode-events",
-        "winwincode-execution-port",
-        "winwincode-observability"
+        "winwincode-execution-port"
       ]
     },
     {
@@ -411,32 +268,148 @@
       "kind": "rust-crate",
       "path": "crates/winwincode-control-plane",
       "packageName": "winwincode-control-plane",
-      "phase": "4",
+      "phase": "5",
       "zone": "control-plane",
       "responsibilities": [
-        "compose-control-plane-application-modules",
-        "serve-http-websocket-and-execution-port",
-        "remain-the-only-product-state-writer"
+        "own-product-state-command-query-and-event-projection",
+        "own-provider-credential-policy-scheduler-and-cancellation-coordination",
+        "validate-worker-fencing-before-persisting-facts"
       ],
       "allowedInternalDependencies": [
         "winwincode-api",
-        "winwincode-approval",
         "winwincode-audit",
-        "winwincode-collaboration",
-        "winwincode-credential",
         "winwincode-delivery",
         "winwincode-domain",
-        "winwincode-events",
         "winwincode-execution-port",
-        "winwincode-github",
-        "winwincode-identity",
-        "winwincode-observability",
-        "winwincode-project",
-        "winwincode-provider",
         "winwincode-publication",
-        "winwincode-scheduler",
+        "winwincode-repository-context",
         "winwincode-session",
         "winwincode-storage"
+      ]
+    },
+    {
+      "id": "winwincode-backup",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-backup",
+      "packageName": "winwincode-backup",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-tenant-scoped-backup-manifests-restore-verification-and-governed-deletion"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-audit",
+        "winwincode-domain"
+      ]
+    },
+    {
+      "id": "winwincode-cli",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-cli",
+      "packageName": "winwincode-cli",
+      "phase": "enterprise",
+      "zone": "composition",
+      "responsibilities": [
+        "provide-the-canonical-local-repository-setup-attachment-and-diagnostics-command"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-delivery",
+        "winwincode-evidence-export",
+        "winwincode-repository-context",
+        "winwincode-test-assets"
+      ]
+    },
+    {
+      "id": "winwincode-drill",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-drill",
+      "packageName": "winwincode-drill",
+      "phase": "enterprise",
+      "zone": "composition",
+      "responsibilities": [
+        "run-deterministic-rolling-upgrade-and-disaster-recovery-evidence-drills"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-domain",
+        "winwincode-storage"
+      ]
+    },
+    {
+      "id": "winwincode-evidence-export",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-evidence-export",
+      "packageName": "winwincode-evidence-export",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "build-byte-stable-secret-safe-offline-delivery-evidence-packages"
+      ],
+      "allowedInternalDependencies": []
+    },
+    {
+      "id": "winwincode-integration",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-integration",
+      "packageName": "winwincode-integration",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "own-tenant-scoped-connector-webhook-and-durable-external-delivery-authority"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-audit",
+        "winwincode-domain",
+        "winwincode-publication"
+      ]
+    },
+    {
+      "id": "winwincode-object-store",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-object-store",
+      "packageName": "winwincode-object-store",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "provide-verified-s3-compatible-artifact-object-storage"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-domain",
+        "winwincode-storage"
+      ]
+    },
+    {
+      "id": "winwincode-postgres",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-postgres",
+      "packageName": "winwincode-postgres",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "provide-postgresql-migration-and-transaction-protocols-for-product-storage"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-audit",
+        "winwincode-backup",
+        "winwincode-domain",
+        "winwincode-storage"
+      ]
+    },
+    {
+      "id": "winwincode-test-assets",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-test-assets",
+      "packageName": "winwincode-test-assets",
+      "phase": "enterprise",
+      "zone": "control-plane",
+      "responsibilities": [
+        "analyze-baseline-and-candidate-test-assets-deterministically-without-policy-authority"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-delivery"
       ]
     },
     {
@@ -457,12 +430,47 @@
         "winwincode-observability",
         "winwincode-worker"
       ]
+    },
+    {
+      "id": "winwincode-server",
+      "kind": "rust-crate",
+      "path": "crates/winwincode-server",
+      "packageName": "winwincode-server",
+      "phase": "6",
+      "zone": "composition",
+      "responsibilities": [
+        "serve-the-single-http-websocket-and-health-origin",
+        "compose-control-plane-and-execution-worker-for-production",
+        "bind-authentication-and-repository-scope-before-listening"
+      ],
+      "allowedInternalDependencies": [
+        "winwincode-api",
+        "winwincode-codex",
+        "winwincode-control-plane",
+        "winwincode-domain",
+        "winwincode-execution-port",
+        "winwincode-local",
+        "winwincode-storage",
+        "winwincode-worker"
+      ]
+    },
+    {
+      "id": "winwincode-kernel-helper",
+      "kind": "rust-crate",
+      "path": "crates/helper",
+      "packageName": "winwincode-kernel-helper",
+      "phase": "6",
+      "zone": "execution-worker",
+      "responsibilities": [
+        "provide-the-authenticated-helper-executable-for-codex-sandbox-operations"
+      ],
+      "allowedInternalDependencies": []
     }
   ],
   "interfaces": [
     {
       "id": "control-plane-http",
-      "provider": "winwincode-api",
+      "provider": "winwincode-server",
       "consumers": [
         "typescript-generated-client"
       ],
@@ -470,7 +478,7 @@
     },
     {
       "id": "control-plane-websocket",
-      "provider": "winwincode-api",
+      "provider": "winwincode-server",
       "consumers": [
         "typescript-generated-client"
       ],
@@ -481,20 +489,27 @@
       "provider": "winwincode-execution-port",
       "consumers": [
         "winwincode-control-plane",
-        "winwincode-provider",
-        "winwincode-scheduler",
+        "winwincode-codex",
         "winwincode-worker",
-        "winwincode-codex"
+        "winwincode-server"
       ],
       "purpose": "control-plane-worker-protocol"
+    },
+    {
+      "id": "kernel-helper-release",
+      "provider": "winwincode-kernel-helper",
+      "consumers": [
+        "winwincode-codex"
+      ],
+      "purpose": "authenticated-helper-binary"
     }
   ],
   "providerGateway": {
-    "owner": "winwincode-provider",
-    "credentialOwner": "winwincode-credential",
+    "owner": "winwincode-control-plane",
+    "credentialOwner": "winwincode-control-plane",
     "workerInterface": "execution-port-model-stream",
     "longLivedCredentialConsumers": [
-      "winwincode-provider"
+      "winwincode-control-plane"
     ]
   },
   "guardrails": {
@@ -503,24 +518,20 @@
     ],
     "controlPlaneForbiddenPackagePatterns": [
       "codex-*",
-      "winwincode-codex"
+      "winwincode-codex",
+      "winwincode-kernel"
     ],
     "workerRoots": [
       "winwincode-worker"
     ],
     "workerForbiddenPackages": [
-      "winwincode-approval",
+      "winwincode-api",
       "winwincode-audit",
-      "winwincode-collaboration",
       "winwincode-control-plane",
-      "winwincode-credential",
       "winwincode-delivery",
-      "winwincode-github",
-      "winwincode-identity",
-      "winwincode-project",
-      "winwincode-provider",
       "winwincode-publication",
-      "winwincode-session"
+      "winwincode-session",
+      "winwincode-storage"
     ],
     "webAllowedBackends": [
       "control-plane-http",
@@ -536,52 +547,84 @@
       "winwincode-control-plane",
       "winwincode-observability",
       "winwincode-worker"
-    ]
+    ],
+    "serverEntrypoint": "winwincode-server",
+    "serverAllowedProductDependencies": [
+      "winwincode-api",
+      "winwincode-codex",
+      "winwincode-control-plane",
+      "winwincode-domain",
+      "winwincode-execution-port",
+      "winwincode-local",
+      "winwincode-storage",
+      "winwincode-worker"
+    ],
+    "helperExecutable": "winwincode-kernel-helper"
   },
   "migrationPhases": [
     {
       "phase": "1",
       "surfaceIds": [
-        "canonical-typescript-contracts"
+        "canonical-schema",
+        "client-generated-contracts",
+        "api-types",
+        "domain-types",
+        "execution-port"
       ]
     },
     {
       "phase": "2",
       "surfaceIds": [
-        "strongflow-delivery-domain"
+        "storage",
+        "repository-context",
+        "delivery-domain",
+        "observability"
       ]
     },
     {
       "phase": "3",
-      "surfaceIds": []
+      "surfaceIds": [
+        "audit",
+        "publication"
+      ]
     },
     {
       "phase": "4",
       "surfaceIds": [
-        "dsh-agent-session-bridge",
-        "strongflow-worker-workspace",
-        "strongflow-dsh-stage-runtime",
-        "embedded-codex-kernel"
+        "session-binding",
+        "codex-kernel",
+        "execution-worker"
       ]
     },
     {
       "phase": "5",
       "surfaceIds": [
-        "dsh-provider-model-port",
-        "strongflow-credential-boundary"
+        "control-plane-application",
+        "provider-gateway"
       ]
     },
     {
       "phase": "6",
       "surfaceIds": [
-        "host-bootstrap-cli",
-        "strongflow-cli",
-        "dsh-profile-composition",
-        "strongflow-cordis-remote",
-        "strongflow-typescript-web",
-        "node-native-selector",
-        "napi-kernel-bridge",
-        "strongflow-publication"
+        "shared-typescript-contracts",
+        "strongflow-contracts",
+        "client-application",
+        "server-network-boundary",
+        "local-composition",
+        "kernel-helper"
+      ]
+    },
+    {
+      "phase": "enterprise",
+      "surfaceIds": [
+        "enterprise-backup",
+        "local-cli",
+        "recovery-drill",
+        "evidence-export",
+        "enterprise-integration",
+        "enterprise-object-store",
+        "enterprise-postgres",
+        "test-asset-analysis"
       ]
     }
   ]

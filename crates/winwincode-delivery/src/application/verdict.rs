@@ -40,10 +40,12 @@ pub struct ComputedVerdictTransition {
 }
 
 impl ComputedVerdictTransition {
+    #[must_use]
     pub fn delivery(&self) -> &Delivery {
         &self.delivery
     }
 
+    #[must_use]
     pub fn event(&self) -> &DeliveryVerdictSubmittedEvent {
         &self.event
     }
@@ -795,10 +797,12 @@ pub mod test_support {
     }
 
     impl VerdictFactsFixture {
+        #[must_use]
         pub fn verification(&self) -> &IndependentVerification {
             &self.verification
         }
 
+        #[must_use]
         pub fn evidence(&self) -> &[ResolvedDeliveryEvidence] {
             &self.evidence
         }

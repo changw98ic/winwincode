@@ -42,6 +42,18 @@ pub struct RuntimeReplayIdentity {
 }
 
 impl RuntimeReplayIdentity {
+    /// Returns the canonical Worker-owned runtime stream for this exact lease
+    /// and source identity.
+    #[must_use]
+    pub fn stream_key(&self) -> ReplayStreamKey {
+        runtime_stream_key(
+            &self.lease,
+            &self.session_identity,
+            &self.worker_session_id,
+            &self.codex_thread_id,
+        )
+    }
+
     fn from_request(request: &RuntimeReplayRequestMessage) -> Self {
         Self {
             lease: request.lease.clone(),

@@ -16,7 +16,9 @@ use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, RequestId, SchemaVersion, SessionIdentity,
     WorkerSessionId,
 };
+use winwincode_execution_port::action_enforcement::ActionEnforcementIssuer;
 use winwincode_execution_port::generated::{
+    ActionEnforcementReceiptMessage, ActionEnforcementRequestMessage,
     ActiveLeaseSummary as WireActiveLeaseSummary, ExecutionJob, ExecutionLeaseStamp,
     ExecutionPortError, ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope,
     JobDispatchMessage, JobDispatchMessageKind, JobDispatchResultMessage,
@@ -29,16 +31,20 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_execution_port::transport::{ExecutionPortCore, FrameDirection, TypedFrame};
 use winwincode_storage::{
-    ActiveLeaseSummary, DispatchResultError, DispatchResultErrorCode, DispatchResultRequest,
-    DispatchResultStatus, ExecutionLeaseClaim, ExecutionLeaseRecord, ExecutionRegistry,
-    LeaseRecovery, LeaseWriteStatus, ProductStateStorage, SqliteStorage, StorageError,
-    WorkerHeartbeatReceipt, WorkerHeartbeatRequest, WorkerRegistrationReceipt,
-    WorkerRegistrationRequest, WorkerRegistrationStatus,
+    ActiveLeaseSummary, AuthenticatedWorkerPlacement, DispatchResultError, DispatchResultErrorCode,
+    DispatchResultStatus, EXECUTION_PROTOCOL_VERSION, ExecutionLeaseClaim, ExecutionLeaseRecord,
+    ExecutionRegistry, LeaseRecovery, LeaseWriteStatus, ProductStateStorage, SqliteStorage,
+    StorageError, WorkerAuthenticationIdentity, WorkerHeartbeatReceipt, WorkerHeartbeatRequest,
+    WorkerPlatform, WorkerPoolId, WorkerRegistrationErrorCode, WorkerRegistrationReceipt,
+    WorkerRegistrationRequest, WorkerRegistrationStatus, WorkerRegistryScope,
 };
 
-use crate::ControlPlane;
 use crate::delivery_transaction::{delivery_stream_id, load_durable_execution_job};
 use crate::runtime_event_transaction::runtime_ack_sequence_for_replay;
+use crate::{
+    ControlPlane, DurableWorkerExecutionLifecycle, RepositoryExecutionScheduler,
+    RepositoryExecutionSchedulerError, WorkerEnterpriseQuotaClaim, WorkerExecutionLifecycleError,
+};
 
 /// Default interval advertised to a registered Worker.
 pub const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 5_000;
@@ -70,6 +76,12 @@ pub enum ExecutionPortServiceError {
     AuthorityRejected(&'static str),
     /// The registry rejected a scheduler claim; no dispatch was created.
     ClaimRejected(LeaseWriteStatus),
+    /// Enterprise quota rejected the authenticated Worker claim before Registry write.
+    EnterpriseQuotaRejected,
+    /// The durable Worker quota lifecycle failed before a dispatch could be built.
+    WorkerLifecycle(WorkerExecutionLifecycleError),
+    /// Action Policy evaluation or receipt issuance failed closed.
+    ActionPolicy(crate::ActionPolicyEnforcementError),
     /// The requested message direction is handled by another Control Plane seam.
     UnsupportedMessage,
 }
@@ -91,6 +103,11 @@ impl fmt::Display for ExecutionPortServiceError {
             Self::ClaimRejected(status) => {
                 write!(formatter, "execution lease claim rejected: {status:?}")
             }
+            Self::EnterpriseQuotaRejected => {
+                formatter.write_str("authenticated Worker enterprise quota rejected the claim")
+            }
+            Self::WorkerLifecycle(error) => write!(formatter, "{error}"),
+            Self::ActionPolicy(error) => write!(formatter, "{error}"),
             Self::UnsupportedMessage => {
                 formatter.write_str("ExecutionPort message is not handled by the Worker service")
             }
@@ -156,10 +173,45 @@ impl<'storage> ExecutionPortService<'storage> {
         self.storage.execution_registry()
     }
 
+    /// Handles an action enforcement request using an explicitly installed
+    /// Control Plane issuer. Other messages retain the ordinary service path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same protocol/storage errors as [`Self::handle`], or a
+    /// fail-closed action Policy issuance error.
+    pub fn handle_with_action_enforcement(
+        &mut self,
+        message: ExecutionPortMessage,
+        issuer: &ActionEnforcementIssuer,
+    ) -> Result<ExecutionPortMessage, ExecutionPortServiceError> {
+        match message {
+            ExecutionPortMessage::ActionEnforcementRequestMessage(request) => self
+                .enforce_action(issuer, &request)
+                .map(ExecutionPortMessage::ActionEnforcementReceiptMessage),
+            other => self.handle(other),
+        }
+    }
+
+    /// Issues or exactly replays one immutable action enforcement receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid action facts or stale durable execution authority before
+    /// signing, and returns durable Policy/storage failures unchanged.
+    pub fn enforce_action(
+        &mut self,
+        issuer: &ActionEnforcementIssuer,
+        request: &ActionEnforcementRequestMessage,
+    ) -> Result<ActionEnforcementReceiptMessage, ExecutionPortServiceError> {
+        crate::issue_action_enforcement_receipt(self.storage, issuer, &self.server_time, request)
+            .map_err(ExecutionPortServiceError::ActionPolicy)
+    }
+
     /// Handles the Worker-to-Control-Plane messages owned by this slice.
     ///
     /// Registration, heartbeat, and dispatch-result handling all consult the
-    /// same durable registry.  Job dispatch creation is exposed separately as
+    /// same durable registry. Job dispatch creation is exposed separately as
     /// [`Self::claim_execution_job`] because it is a scheduler-side operation.
     ///
     /// # Errors
@@ -184,7 +236,12 @@ impl<'storage> ExecutionPortService<'storage> {
         }
     }
 
-    /// Converts and durably registers one Worker process instance.
+    /// Converts and durably registers one embedded Community Worker process
+    /// in the canonical `LocalDefaultScope`.
+    ///
+    /// Fleet transports carry authenticated tenant scope at a different
+    /// platform boundary and must call
+    /// [`ExecutionRegistry::register_worker_for_scope`] explicitly.
     ///
     /// # Errors
     ///
@@ -194,22 +251,106 @@ impl<'storage> ExecutionPortService<'storage> {
         &mut self,
         message: &WorkerRegisterMessage,
     ) -> Result<WorkerRegistrationResultMessage, ExecutionPortServiceError> {
-        validate_worker_register(message)?;
-        let request = WorkerRegistrationRequest {
-            capabilities: message
-                .capabilities
-                .features
-                .iter()
-                .map(capability_name)
-                .collect::<Result<Vec<_>, _>>()?,
-            message_id: message.message_id.clone(),
-            request_id: message.request_id.clone(),
-            sent_at: message.sent_at.clone(),
-            started_at: message.started_at.clone(),
-            worker_id: message.worker_id.clone(),
-            worker_instance_id: message.worker_instance_id.clone(),
-        };
+        let request = worker_registration_request(
+            message,
+            WorkerAuthenticationIdentity::LocalEmbedded {
+                control_plane_principal: "embedded-control-plane".to_owned(),
+            },
+            "local".to_owned(),
+        )?;
         let receipt = self.registry()?.register_worker(&request)?;
+        Ok(registration_response(
+            message,
+            receipt,
+            &self.server_time,
+            self.heartbeat_interval_ms,
+        ))
+    }
+
+    /// Registers an embedded local Worker in the Server's configured
+    /// repository scope. The scope is supplied by the canonical ingress
+    /// composition rather than inferred from the Worker message.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same protocol and durable registry errors as
+    /// [`Self::register_worker`].
+    pub fn register_local_worker_for_scope(
+        &mut self,
+        message: &WorkerRegisterMessage,
+        scope: &RepositoryScope,
+    ) -> Result<WorkerRegistrationResultMessage, ExecutionPortServiceError> {
+        let request = worker_registration_request(
+            message,
+            WorkerAuthenticationIdentity::LocalEmbedded {
+                control_plane_principal: "embedded-control-plane".to_owned(),
+            },
+            "local".to_owned(),
+        )?;
+        let scope = WorkerRegistryScope::Repository {
+            organization_id: scope.organization_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+        };
+        let receipt = self
+            .registry()?
+            .register_worker_for_scope(&request, &scope)?;
+        Ok(registration_response(
+            message,
+            receipt,
+            &self.server_time,
+            self.heartbeat_interval_ms,
+        ))
+    }
+
+    /// Registers one remote Worker using transport-authenticated identity and
+    /// tenant scope supplied by the remote pool adapter.
+    ///
+    /// The Worker message contributes capabilities and process identity only;
+    /// it cannot choose the authentication principal, scope, or security zone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error for malformed Worker facts or the storage
+    /// error produced by the single durable Worker Registry.
+    pub(crate) fn register_authenticated_remote_worker(
+        &mut self,
+        message: &WorkerRegisterMessage,
+        authentication_identity: WorkerAuthenticationIdentity,
+        scope: &WorkerRegistryScope,
+        worker_pool_id: &WorkerPoolId,
+        security_zone: String,
+    ) -> Result<WorkerRegistrationResultMessage, ExecutionPortServiceError> {
+        if !matches!(
+            authentication_identity,
+            WorkerAuthenticationIdentity::TransportPrincipal { .. }
+        ) {
+            return Err(ExecutionPortServiceError::Protocol(
+                "authenticationIdentity",
+            ));
+        }
+        let request = worker_registration_request(message, authentication_identity, security_zone)?;
+        let receipt = self
+            .registry()?
+            .register_worker_for_scope(&request, scope)?;
+        if matches!(
+            receipt.status,
+            WorkerRegistrationStatus::Accepted | WorkerRegistrationStatus::Duplicate
+        ) {
+            let placed_at = self.server_time.clone();
+            self.registry()?.record_authenticated_worker_placement(
+                &AuthenticatedWorkerPlacement {
+                    worker_id: receipt.worker.worker_id.clone(),
+                    worker_instance_id: receipt.worker.worker_instance_id.clone(),
+                    worker_pool_id: worker_pool_id.clone(),
+                    management_scope: receipt.worker.management_scope.clone(),
+                    authentication_identity: receipt.worker.authentication_identity.clone(),
+                    registration_request_id: request.request_id.clone(),
+                    placed_at,
+                },
+            )?;
+        }
         Ok(registration_response(
             message,
             receipt,
@@ -246,6 +387,7 @@ impl<'storage> ExecutionPortService<'storage> {
             available_slots,
             heartbeat_sequence: message.heartbeat_sequence.clone(),
             max_slots,
+            running_slots: running_jobs,
             message_id: message.message_id.clone(),
             observed_at: message.observed_at.clone(),
             sent_at: message.sent_at.clone(),
@@ -301,7 +443,43 @@ impl<'storage> ExecutionPortService<'storage> {
                 "durableExecutionJob",
             ));
         }
-        let receipt = self.registry()?.claim_execution_job(&claim)?;
+        let worker = self.registry()?.load_worker(&claim.worker_id)?.ok_or(
+            ExecutionPortServiceError::AuthorityRejected("Worker registration is missing"),
+        )?;
+        let authenticated_remote = match &worker.authentication_identity {
+            WorkerAuthenticationIdentity::LocalEmbedded { .. } => false,
+            WorkerAuthenticationIdentity::TransportPrincipal { .. } => true,
+        };
+        if authenticated_remote
+            && self
+                .registry()?
+                .load_authenticated_worker_placement(&claim.worker_id, &claim.worker_instance_id)?
+                .is_none()
+        {
+            return Err(ExecutionPortServiceError::AuthorityRejected(
+                "authenticated Worker placement is missing",
+            ));
+        }
+        let receipt = if authenticated_remote {
+            let data_directory = self
+                .storage
+                .database_path()
+                .parent()
+                .ok_or(ExecutionPortServiceError::Protocol("storage.databasePath"))?;
+            match DurableWorkerExecutionLifecycle::open(data_directory)
+                .map_err(ExecutionPortServiceError::WorkerLifecycle)?
+                .claim(&claim)
+                .map_err(ExecutionPortServiceError::WorkerLifecycle)?
+            {
+                WorkerEnterpriseQuotaClaim::Claimed { operational, .. } => operational,
+                WorkerEnterpriseQuotaClaim::Denied
+                | WorkerEnterpriseQuotaClaim::TerminalReplay(_) => {
+                    return Err(ExecutionPortServiceError::EnterpriseQuotaRejected);
+                }
+            }
+        } else {
+            self.registry()?.claim_execution_job(&claim)?
+        };
         let status = receipt.status;
         let Some(lease) = receipt.lease else {
             return Err(ExecutionPortServiceError::ClaimRejected(status));
@@ -317,6 +495,7 @@ impl<'storage> ExecutionPortService<'storage> {
             kind: JobDispatchMessageKind::JobDispatch,
             lease: lease_stamp(&lease),
             message_id: claim.message_id,
+            replacement_authority: None,
             request_id: claim.request_id,
             schema_version: SchemaVersion::WinwincodeV1,
             sent_at: lease.issued_at.clone(),
@@ -386,35 +565,11 @@ impl<'storage> ExecutionPortService<'storage> {
         mut message: JobDispatchResultMessage,
     ) -> Result<JobDispatchResultMessage, ExecutionPortServiceError> {
         validate_dispatch_result(&message)?;
-        let attempt = u64::try_from(message.lease.attempt)
-            .map_err(|_| ExecutionPortServiceError::Protocol("lease.attempt"))?;
-        let error = message
-            .error
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|_| ExecutionPortServiceError::Protocol("error"))?;
-        let request = DispatchResultRequest {
-            checked_at: self.server_time.clone(),
-            expires_at: message.lease.expires_at.clone(),
-            fencing_token: message.lease.fencing_token.clone(),
-            issued_at: message.lease.issued_at.clone(),
-            job_id: message.job_id.clone(),
-            lease_id: message.lease.lease_id.clone(),
-            message_id: message.message_id.clone(),
-            payload_digest: message.payload_digest.clone(),
-            request_id: message.request_id.clone(),
-            sent_at: message.sent_at.clone(),
-            status: dispatch_result_status(&message.status),
-            attempt,
-            error,
-            worker_id: message.lease.worker_id.clone(),
-            worker_instance_id: message.lease.worker_instance_id.clone(),
-            worker_session_id: message.worker_session_id.clone(),
-        };
-        let receipt = self.registry()?.record_dispatch_result(&request)?;
-        message.status = wire_dispatch_result_status(receipt.status);
-        message.error = receipt.error.map(dispatch_result_error);
+        let receipt = RepositoryExecutionScheduler::new(self.storage)
+            .record_dispatch_result_for_job(&message, &self.server_time)
+            .map_err(repository_scheduler_error)?;
+        message.status = wire_dispatch_result_status(receipt.dispatch.status);
+        message.error = receipt.dispatch.error.map(dispatch_result_error);
         Ok(message)
     }
 }
@@ -557,15 +712,21 @@ impl<ResolverError: std::error::Error + 'static> std::error::Error
 pub struct RuntimeEventPortRouter<'control_plane, Resolver> {
     control_plane: &'control_plane mut ControlPlane,
     resolver: Resolver,
+    server_time: Instant,
 }
 
 impl<'control_plane, Resolver> RuntimeEventPortRouter<'control_plane, Resolver> {
     /// Creates a runtime-event router over one running Control Plane.
     #[must_use]
-    pub fn new(control_plane: &'control_plane mut ControlPlane, resolver: Resolver) -> Self {
+    pub fn new(
+        control_plane: &'control_plane mut ControlPlane,
+        resolver: Resolver,
+        server_time: Instant,
+    ) -> Self {
         Self {
             control_plane,
             resolver,
+            server_time,
         }
     }
 }
@@ -589,7 +750,7 @@ where
             .resolve(&*self.control_plane, message)
             .map_err(RuntimeEventPortError::Resolution)?;
         self.control_plane
-            .accept_runtime_event(route.scope(), message, route.authority())
+            .accept_runtime_event(route.scope(), message, route.authority(), &self.server_time)
             .map_err(RuntimeEventPortError::ControlPlane)
     }
 }
@@ -610,10 +771,10 @@ where
     }
 }
 
-struct DurableRuntimeReplayAuthority {
-    lease: ExecutionLeaseRecord,
-    session_identity: SessionIdentity,
-    worker_session_id: WorkerSessionId,
+pub(crate) struct DurableRuntimeReplayAuthority {
+    pub(crate) lease: ExecutionLeaseRecord,
+    pub(crate) session_identity: SessionIdentity,
+    pub(crate) worker_session_id: WorkerSessionId,
 }
 
 fn validate_runtime_replay_command(
@@ -638,7 +799,7 @@ fn validate_runtime_replay_command(
     clippy::too_many_lines,
     reason = "the durable identity join stays one fail-closed seam"
 )]
-fn load_runtime_replay_authority(
+pub(crate) fn load_runtime_replay_authority(
     storage: &mut SqliteStorage,
     job: &ExecutionJob,
     now: &Instant,
@@ -837,6 +998,11 @@ fn validate_worker_register(
     if message.schema_version != SchemaVersion::WinwincodeV1 {
         return Err(ExecutionPortServiceError::Protocol("schemaVersion"));
     }
+    if !(1..=1_024).contains(&message.capabilities.max_concurrent_jobs) {
+        return Err(ExecutionPortServiceError::Protocol(
+            "capabilities.maxConcurrentJobs",
+        ));
+    }
     Ok(())
 }
 
@@ -907,6 +1073,19 @@ fn capability_name(
         .ok_or(ExecutionPortServiceError::Protocol("capabilities.features"))
 }
 
+fn worker_platform(
+    platform: &winwincode_execution_port::generated::WorkerCapabilitySetPlatform,
+) -> WorkerPlatform {
+    use winwincode_execution_port::generated::WorkerCapabilitySetPlatform as WirePlatform;
+
+    match platform {
+        WirePlatform::Aarch64AppleDarwin => WorkerPlatform::Aarch64AppleDarwin,
+        WirePlatform::X8664AppleDarwin => WorkerPlatform::X86_64AppleDarwin,
+        WirePlatform::Aarch64UnknownLinuxGnu => WorkerPlatform::Aarch64UnknownLinuxGnu,
+        WirePlatform::X8664UnknownLinuxGnu => WorkerPlatform::X86_64UnknownLinuxGnu,
+    }
+}
+
 fn active_lease_summary(
     summary: &WireActiveLeaseSummary,
 ) -> Result<ActiveLeaseSummary, ExecutionPortServiceError> {
@@ -920,6 +1099,36 @@ fn active_lease_summary(
         lease_id: summary.lease_id.clone(),
         attempt,
         fencing_token: summary.fencing_token.clone(),
+    })
+}
+
+fn worker_registration_request(
+    message: &WorkerRegisterMessage,
+    authentication_identity: WorkerAuthenticationIdentity,
+    security_zone: String,
+) -> Result<WorkerRegistrationRequest, ExecutionPortServiceError> {
+    validate_worker_register(message)?;
+    let max_slots = u64::try_from(message.capabilities.max_concurrent_jobs)
+        .map_err(|_| ExecutionPortServiceError::Protocol("capabilities.maxConcurrentJobs"))?;
+    Ok(WorkerRegistrationRequest {
+        authentication_identity,
+        protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
+        platform: worker_platform(&message.capabilities.platform),
+        capabilities: message
+            .capabilities
+            .features
+            .iter()
+            .map(capability_name)
+            .collect::<Result<Vec<_>, _>>()?,
+        capability_digest: message.capabilities.capability_digest.clone(),
+        security_zone,
+        max_slots,
+        message_id: message.message_id.clone(),
+        request_id: message.request_id.clone(),
+        sent_at: message.sent_at.clone(),
+        started_at: message.started_at.clone(),
+        worker_id: message.worker_id.clone(),
+        worker_instance_id: message.worker_instance_id.clone(),
     })
 }
 
@@ -938,11 +1147,11 @@ fn registration_response(
         }
         WorkerRegistrationStatus::RejectedConflict => (
             WorkerRegistrationResultMessageStatus::Rejected,
-            Some(ExecutionPortError {
-                code: ExecutionPortErrorCode::MessageConflict,
-                message: "registration request conflicts with its durable receipt".to_owned(),
-                retryable: false,
-            }),
+            Some(registration_error(
+                receipt
+                    .error
+                    .unwrap_or(WorkerRegistrationErrorCode::MessageConflict),
+            )),
         ),
     };
     WorkerRegistrationResultMessage {
@@ -958,6 +1167,40 @@ fn registration_response(
         status,
         worker_id: receipt.worker.worker_id,
         worker_instance_id: receipt.worker.worker_instance_id,
+    }
+}
+
+fn registration_error(code: WorkerRegistrationErrorCode) -> ExecutionPortError {
+    let (code, message) = match code {
+        WorkerRegistrationErrorCode::ProtocolVersionUnsupported => (
+            ExecutionPortErrorCode::ProtocolVersionUnsupported,
+            "Worker protocol version is unsupported",
+        ),
+        WorkerRegistrationErrorCode::CapabilityMismatch => (
+            ExecutionPortErrorCode::CapabilityMismatch,
+            "Worker capability profile conflicts with its registration",
+        ),
+        WorkerRegistrationErrorCode::AuthenticationMismatch => (
+            ExecutionPortErrorCode::MessageConflict,
+            "Worker authentication identity conflicts with its registration",
+        ),
+        WorkerRegistrationErrorCode::SecurityZoneMismatch => (
+            ExecutionPortErrorCode::MessageConflict,
+            "Worker security zone conflicts with its registration",
+        ),
+        WorkerRegistrationErrorCode::ScopeMismatch => (
+            ExecutionPortErrorCode::MessageConflict,
+            "Worker scope conflicts with its registration",
+        ),
+        WorkerRegistrationErrorCode::MessageConflict => (
+            ExecutionPortErrorCode::MessageConflict,
+            "registration request conflicts with its durable receipt",
+        ),
+    };
+    ExecutionPortError {
+        code,
+        message: message.to_owned(),
+        retryable: false,
     }
 }
 
@@ -983,7 +1226,7 @@ fn heartbeat_response(
     }
 }
 
-fn lease_stamp(record: &ExecutionLeaseRecord) -> ExecutionLeaseStamp {
+pub(crate) fn lease_stamp(record: &ExecutionLeaseRecord) -> ExecutionLeaseStamp {
     ExecutionLeaseStamp {
         attempt: i64::try_from(record.attempt).unwrap_or(i64::MAX),
         expires_at: record.expires_at.clone(),
@@ -1056,23 +1299,18 @@ fn lease_status_response(
     }
 }
 
-fn dispatch_result_status(status: &JobDispatchResultMessageStatus) -> DispatchResultStatus {
-    match status {
-        JobDispatchResultMessageStatus::Accepted => DispatchResultStatus::Accepted,
-        JobDispatchResultMessageStatus::Duplicate => DispatchResultStatus::Duplicate,
-        JobDispatchResultMessageStatus::Conflict => DispatchResultStatus::Conflict,
-        JobDispatchResultMessageStatus::RejectedCapacity => DispatchResultStatus::RejectedCapacity,
-        JobDispatchResultMessageStatus::RejectedCapability => {
-            DispatchResultStatus::RejectedCapability
+fn repository_scheduler_error(
+    error: RepositoryExecutionSchedulerError,
+) -> ExecutionPortServiceError {
+    match error {
+        RepositoryExecutionSchedulerError::Storage(error) => {
+            ExecutionPortServiceError::Storage(error)
         }
-        JobDispatchResultMessageStatus::RejectedExpiredLease => {
-            DispatchResultStatus::RejectedExpiredLease
+        RepositoryExecutionSchedulerError::InvalidExecutionJob(field) => {
+            ExecutionPortServiceError::Protocol(field)
         }
-        JobDispatchResultMessageStatus::RejectedStaleFencingToken => {
-            DispatchResultStatus::RejectedStaleFencingToken
-        }
-        JobDispatchResultMessageStatus::RejectedWorkerInstance => {
-            DispatchResultStatus::RejectedWorkerInstance
+        RepositoryExecutionSchedulerError::MissingCancellationAuthority(field) => {
+            ExecutionPortServiceError::AuthorityRejected(field)
         }
     }
 }

@@ -25,7 +25,7 @@ import {
   createStrongFlowPlanReviewDecision,
   createStrongFlowDeliveryLocalProofAuthenticator,
 } from '../packages/strongflow/dist/index.js'
-import { runStrongFlowCli } from '../apps/host/dist/index.js'
+import { runStrongFlowCli } from '../tests/fixtures/strongflow-cli.mjs'
 
 const baseTime = 2_200_000_000_000
 const uiProof = 'ui-proof-for-delivery-fixture'

@@ -253,7 +253,7 @@ test('checked-in contract artifacts carry Apache-2.0 release metadata and one ca
   assert.equal(checked.status, 0, commandFailure(checked))
 
   const rustPath = join(root, 'crates', 'winwincode-api', 'src', 'generated.rs')
-  const typescriptPath = join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts')
+  const typescriptPath = join(root, 'apps', 'client', 'src', 'generated', 'contracts.ts')
   const domainRustPath = join(root, 'crates', 'winwincode-domain', 'src', 'generated.rs')
   const executionPortRustPath = join(
     root,

@@ -100,6 +100,19 @@ impl ToolOrchestrator {
                 .as_ref()
                 .map(ActiveNetworkApproval::execution_proxy),
         };
+        if let Some(payload) = tool.action_gate_payload(req)
+            && let Some(attachment) = tool_ctx
+                .session
+                .services
+                .thread_extension_data
+                .get::<crate::ToolCallGateAttachment>()
+            && let Err(error) = attachment
+                .gate()
+                .revalidate(action_gate_request(tool_ctx, payload))
+                .await
+        {
+            return (Err(ToolError::Rejected(error.to_string())), None);
+        }
         let run_result = tool
             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
             .await;
@@ -223,6 +236,20 @@ impl ToolOrchestrator {
                     .await?;
                 already_approved = true;
             }
+        }
+
+        if let Some(payload) = tool.action_gate_payload(req)
+            && let Some(attachment) = tool_ctx
+                .session
+                .services
+                .thread_extension_data
+                .get::<crate::ToolCallGateAttachment>()
+        {
+            attachment
+                .gate()
+                .authorize(action_gate_request(tool_ctx, payload))
+                .await
+                .map_err(|error| ToolError::Rejected(error.to_string()))?;
         }
 
         // 2) First attempt under the selected sandbox.
@@ -509,6 +536,20 @@ impl ToolOrchestrator {
                 Err(err)
             }
         }
+    }
+}
+
+fn action_gate_request(
+    tool_ctx: &ToolCtx,
+    payload: crate::ToolCallGatePayload,
+) -> crate::ToolCallGateRequest {
+    crate::ToolCallGateRequest {
+        thread_id: tool_ctx.session.thread_id.to_string(),
+        turn_id: tool_ctx.step_context.turn.sub_id.clone(),
+        call_id: tool_ctx.call_id.clone(),
+        namespace: tool_ctx.tool_name.namespace.clone(),
+        tool_name: tool_ctx.tool_name.name.clone(),
+        payload,
     }
 }
 

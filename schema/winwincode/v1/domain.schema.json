@@ -637,12 +637,25 @@
         "delivery.submit_verdict",
         "settings.update",
         "credential.reference.create",
+        "credential.reference.rotate",
+        "credential.reference.revoke",
         "credential.reference.delete",
         "approval.decide",
         "worker.drain",
         "worker.enable",
         "publication.publish",
-        "publication.cancel"
+        "publication.cancel",
+        "enterprise.organization.update",
+        "enterprise.membership.update",
+        "enterprise.team.update",
+        "enterprise.role.update",
+        "enterprise.project_repository.update",
+        "enterprise.policy.update",
+        "enterprise.fleet.update",
+        "enterprise.integration.update",
+        "enterprise.identity.update",
+        "collaboration.notification.ack",
+        "collaboration.presence.update"
       ]
     },
     "CommandEnvelope": {
@@ -1902,6 +1915,14 @@
         }
       ],
       "description": "Transport-neutral exact stream position carried from a complete snapshot into event subscription."
+    },
+    "ApiTokenId": {
+      "type": "string",
+      "pattern": "^tok_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "ExternalIdentityId": {
+      "type": "string",
+      "pattern": "^xid_[0-9A-HJKMNP-TV-Z]{26}$"
     }
   }
 }

@@ -56,6 +56,7 @@ pub struct RuntimeProjectionError {
 }
 
 impl RuntimeProjectionError {
+    #[must_use]
     pub const fn code(&self) -> RuntimeProjectionErrorCode {
         self.code
     }
@@ -377,6 +378,7 @@ impl RuntimeProjection {
         })
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> &RuntimeFoldSnapshot {
         &self.snapshot
     }

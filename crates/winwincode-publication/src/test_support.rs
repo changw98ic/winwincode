@@ -3,12 +3,13 @@
 //! Deterministic sealed publication fixtures for Rust integration tests.
 
 use winwincode_domain::{
-    AttentionItemId, DeliveryId, OrganizationId, ProjectId, PublicationId, RepositoryId, RequestId,
-    Sha256Digest, UserId, WorkspaceId,
+    AttentionItemId, DeliveryId, OrganizationId, ProductSessionId, ProjectId, PublicationId,
+    RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
 };
 use winwincode_storage::ProductStateStorage;
 use winwincode_storage::{ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey};
 
+use crate::PublicationEnterpriseAttribution;
 use crate::coordinator::{
     Publication, PublicationCancelCommand, PublicationCommandContext, PublicationCoordinator,
     PublicationError, PublicationLedger, PublicationPublishCommand,
@@ -28,6 +29,7 @@ use crate::policy::{
 
 pub struct CurrentPublicationFixture {
     authorization: PublicationAuthorization,
+    attribution: PublicationEnterpriseAttribution,
     publish_command: PublicationPublishCommand,
     publish_context: PublicationCommandContext,
     resume_time_millis: u64,
@@ -37,6 +39,11 @@ impl CurrentPublicationFixture {
     #[must_use]
     pub const fn authorization(&self) -> &PublicationAuthorization {
         &self.authorization
+    }
+
+    #[must_use]
+    pub const fn attribution(&self) -> &PublicationEnterpriseAttribution {
+        &self.attribution
     }
 
     #[must_use]
@@ -122,8 +129,16 @@ pub fn current_publication_fixture() -> CurrentPublicationFixture {
         1_100,
     )
     .expect("publish command context");
+    let attribution = PublicationEnterpriseAttribution::try_new(
+        &current_policy_scope(),
+        authorization.binding().delivery_id().clone(),
+        ProductSessionId("psn_00000000000000000000000001".to_owned()),
+        UserId("usr_00000000000000000000000002".to_owned()),
+    )
+    .expect("current publication enterprise attribution");
     CurrentPublicationFixture {
         authorization,
+        attribution,
         publish_command,
         publish_context,
         resume_time_millis: 2_000,
@@ -165,14 +180,36 @@ impl CurrentPublicationCoordinator<'_, '_> {
         command: &PublicationPublishCommand,
         authorization: &PublicationAuthorization,
     ) -> Result<Publication, PublicationError> {
+        let fixture = current_publication_fixture();
+        self.publish_with_attribution(context, command, authorization, fixture.attribution())
+    }
+
+    /// Applies the fixed policy while allowing tests to prove an attribution mismatch fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the production coordinator error unchanged.
+    pub fn publish_with_attribution(
+        &mut self,
+        context: &PublicationCommandContext,
+        command: &PublicationPublishCommand,
+        authorization: &PublicationAuthorization,
+        attribution: &PublicationEnterpriseAttribution,
+    ) -> Result<Publication, PublicationError> {
         let policy = current_repository_policy(authorization);
         let policy_context = current_policy_context(
             authorization,
             context.receipt_identity().request_id().clone(),
             context.occurred_at_millis(),
         );
-        self.coordinator
-            .publish(context, command, authorization, &policy_context, &policy)
+        self.coordinator.publish(
+            context,
+            command,
+            authorization,
+            attribution,
+            &policy_context,
+            &policy,
+        )
     }
 
     /// Applies the fixed repository policy before the next provider operation.

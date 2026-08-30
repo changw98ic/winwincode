@@ -20,18 +20,32 @@ const COMMANDS = Object.freeze([
   'delivery.submit_verdict',
   'settings.update',
   'credential.reference.create',
+  'credential.reference.rotate',
+  'credential.reference.revoke',
   'credential.reference.delete',
   'approval.decide',
   'worker.drain',
   'worker.enable',
   'publication.publish',
   'publication.cancel',
+  'enterprise.organization.update',
+  'enterprise.membership.update',
+  'enterprise.team.update',
+  'enterprise.role.update',
+  'enterprise.project_repository.update',
+  'enterprise.policy.update',
+  'enterprise.fleet.update',
+  'enterprise.integration.update',
+  'enterprise.identity.update',
+  'collaboration.notification.ack',
+  'collaboration.presence.update',
 ])
 
 const QUERIES = Object.freeze([
   'session.list',
   'session.get',
   'session.messages.list',
+  'session.interactions.list',
   'runtime.projection.get',
   'delivery.list',
   'delivery.get',
@@ -44,6 +58,20 @@ const QUERIES = Object.freeze([
   'worker.get',
   'publication.list',
   'publication.get',
+  'enterprise.organization.list',
+  'enterprise.membership.list',
+  'enterprise.team.list',
+  'enterprise.role.list',
+  'enterprise.project.list',
+  'enterprise.policy.list',
+  'enterprise.fleet.list',
+  'enterprise.usage.list',
+  'enterprise.audit.list',
+  'enterprise.integration.list',
+  'enterprise.identity.list',
+  'collaboration.activity.list',
+  'collaboration.notification.list',
+  'collaboration.presence.list',
 ])
 
 const ERROR_STATUS = Object.freeze({
@@ -105,6 +133,7 @@ test('HTTP contract specializes every accepted command without copying domain pr
   assert.deepEqual(specializationNames(schema, 'CommandRequest', 'command'), COMMANDS)
 
   const forbiddenCopies = [
+    'ApiTokenId',
     'RequestId',
     'Revision',
     'Actor',
@@ -115,8 +144,10 @@ test('HTTP contract specializes every accepted command without copying domain pr
     'RepositoryId',
     'DeliveryId',
     'ExecutionJobId',
+    'ExternalIdentityId',
     'InputRequestId',
     'ProductSessionId',
+    'ServiceAccountId',
     'WorkerId',
   ]
   for (const name of forbiddenCopies) assert.equal(schema.$defs[name], undefined)
@@ -174,6 +205,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'session.list': '#/$defs/ProductSessionPage',
     'session.get': '#/$defs/ProductSessionProjection',
     'session.messages.list': '#/$defs/ChatMessagePage',
+    'session.interactions.list': '#/$defs/ChatInteractionPage',
     'runtime.projection.get': './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
     'delivery.list': '#/$defs/DeliveryPage',
     'delivery.get': '#/$defs/DeliveryDetailProjection',
@@ -186,23 +218,63 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'worker.get': '#/$defs/WorkerProjection',
     'publication.list': '#/$defs/PublicationPage',
     'publication.get': '#/$defs/PublicationProjection',
+    'enterprise.organization.list': '#/$defs/EnterpriseOrganizationPage',
+    'enterprise.membership.list': '#/$defs/EnterpriseMembershipPage',
+    'enterprise.team.list': '#/$defs/EnterpriseTeamPage',
+    'enterprise.role.list': '#/$defs/EnterpriseRolePage',
+    'enterprise.project.list': '#/$defs/EnterpriseProjectRepositoryPage',
+    'enterprise.policy.list': '#/$defs/EnterprisePolicyPage',
+    'enterprise.fleet.list': '#/$defs/EnterpriseFleetPage',
+    'enterprise.usage.list': '#/$defs/EnterpriseUsagePage',
+    'enterprise.audit.list': '#/$defs/EnterpriseAuditPage',
+    'enterprise.integration.list': '#/$defs/EnterpriseIntegrationPage',
+    'enterprise.identity.list': '#/$defs/EnterpriseIdentityPage',
+    'collaboration.activity.list': '#/$defs/CollaborationActivityPage',
+    'collaboration.notification.list': '#/$defs/CollaborationNotificationPage',
+    'collaboration.presence.list': '#/$defs/CollaborationPresencePage',
   })
   assert.deepEqual(
     [
       'ProductSessionPage',
+      'ChatInteractionPage',
       'DeliveryPage',
       'CredentialReferencePage',
       'ApprovalPage',
       'WorkerPage',
       'PublicationPage',
+      'EnterpriseOrganizationPage',
+      'EnterpriseMembershipPage',
+      'EnterpriseProjectRepositoryPage',
+      'EnterprisePolicyPage',
+      'EnterpriseFleetPage',
+      'EnterpriseUsagePage',
+      'EnterpriseAuditPage',
+      'EnterpriseIntegrationPage',
+      'EnterpriseIdentityPage',
+      'CollaborationActivityPage',
+      'CollaborationNotificationPage',
+      'CollaborationPresencePage',
     ].map(name => schema.$defs[name].properties.kind.const),
     [
       'product_session_page',
+      'chat_interaction_page',
       'delivery_page',
       'credential_reference_page',
       'approval_page',
       'worker_page',
       'publication_page',
+      'enterprise_organization_page',
+      'enterprise_membership_page',
+      'enterprise_project_repository_page',
+      'enterprise_policy_page',
+      'enterprise_fleet_page',
+      'enterprise_usage_page',
+      'enterprise_audit_page',
+      'enterprise_integration_page',
+      'enterprise_identity_page',
+      'collaboration_activity_page',
+      'collaboration_notification_page',
+      'collaboration_presence_page',
     ],
   )
 
@@ -265,6 +337,67 @@ test('HTTP input responses are bound and cannot inject an ExecutionPort message'
   assert.equal(JSON.stringify(input).includes('kind'), false)
 })
 
+test('enterprise identity contract returns metadata without API Token material', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const semantics = schema['x-winwincode-semantics'].enterpriseIdentity
+  const issue = schema.$defs.EnterpriseApiTokenIssuePayload
+  const projection = schema.$defs.EnterpriseApiTokenProjection
+
+  assert.deepEqual(semantics, {
+    authority: 'one_durable_identity_ledger',
+    externalIdentityActor: 'external_subject_maps_to_exact_user_actor',
+    tokenFormat:
+      'wwc_api_<26-character ApiTokenId suffix>.<43-character unpadded base64url encoding of exactly 32 random bytes>',
+    tokenPersistence: 'sha256_verifier_only',
+    secretSubmission:
+      'raw_token_generated_and_retained_by_caller; only verifier enters command',
+    replayIdentity: 'actor+organization_scope+requestId',
+    rotation: 'expectedRevision_and_exact_request_replay',
+    revocation: 'checked_on_every_HTTP_and_WebSocket_authentication',
+    crossTenant: 'every_authorized_scope_must_share_the_command_organization',
+    audit: 'identity_lifecycle_mutations_are_durable_and_secret_free',
+  })
+  assert.ok(issue.required.includes('tokenSha256'))
+  assert.equal(
+    issue.properties.tokenSha256.$ref,
+    './domain.schema.json#/$defs/Sha256Digest',
+  )
+  assert.equal(projection.properties.tokenSha256, undefined)
+  assert.equal(projection.properties.rawToken, undefined)
+  assert.equal(projection.properties.secret, undefined)
+  assert.equal(schema.$defs.EnterpriseIdentityPage.properties.items.maxItems, 100)
+})
+
+test('Chat interaction snapshots expose one complete secret-safe binding contract', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  assert.deepEqual(schema.$defs.ChatInteractionBindingProjection.required, [
+    'productSessionId',
+    'executionJobId',
+    'workerSessionId',
+    'sessionIdentity',
+  ])
+  assert.deepEqual(schema.$defs.ApprovalProjection.required, [
+    'id',
+    'revision',
+    'state',
+    'requestedAt',
+    'expiresAt',
+    'subject',
+    'binding',
+  ])
+  assert.ok(schema.$defs.ApprovalDecidePayload.required.includes('binding'))
+  assert.equal(schema.$defs.ChatInputInteractionProjection.properties.details, undefined)
+  assert.equal(schema.$defs.ChatInputInteractionProjection.properties.payload, undefined)
+  assert.equal(schema.$defs.ChatInputInteractionProjection.properties.credential, undefined)
+  assert.deepEqual(
+    schema.$defs.ChatInteractionProjection.oneOf.map(branch => branch.$ref),
+    [
+      '#/$defs/ChatInputInteractionProjection',
+      '#/$defs/ChatApprovalInteractionProjection',
+    ],
+  )
+})
+
 test('HTTP command retry, revision conflict, and errors have stable machine semantics', async () => {
   const schema = await json('control-plane-http.schema.json')
   const semantics = schema['x-winwincode-semantics']
@@ -314,7 +447,7 @@ test('HTTP command retry, revision conflict, and errors have stable machine sema
   ))) assert.equal(semantics.errors[code].retryable, false)
 })
 
-test('OpenAPI 3.1 fragment exposes one command route and one query route with no legacy aliases', async () => {
+test('OpenAPI 3.1 exposes one browser-session route and the canonical business routes', async () => {
   const schema = await json('control-plane-http.schema.json')
   const generatedOpenApi = await json('openapi.generated.json')
   const openapi = schema['x-winwincode-openapi']
@@ -333,9 +466,32 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
       bearerFormat: 'JWT',
       description: 'Service-account and enterprise access token.',
     },
+    bootstrapProof: {
+      type: 'http',
+      scheme: 'bearer',
+      bearerFormat: 'opaque',
+      description: 'Short-window, write-only browser bootstrap proof accepted only by session creation.',
+    },
   })
   assert.deepEqual(generatedOpenApi.components.securitySchemes, openapi.securitySchemes)
-  assert.deepEqual(Object.keys(openapi.paths), ['/api/v1/commands', '/api/v1/queries'])
+  assert.deepEqual(Object.keys(openapi.paths), [
+    '/api/v1/auth/session',
+    '/api/v1/commands',
+    '/api/v1/queries',
+  ])
+  const authSession = openapi.paths['/api/v1/auth/session']
+  assert.deepEqual(Object.keys(authSession), ['get', 'post', 'delete'])
+  assert.deepEqual(authSession.get.security, [{ sessionCookie: [] }])
+  assert.deepEqual(authSession.post.security, [{ bootstrapProof: [] }])
+  assert.deepEqual(authSession.delete.security, [{ sessionCookie: [] }])
+  assert.equal(
+    authSession.get.responses['200'].content['application/json'].schema.$ref,
+    './control-plane-http.schema.json#/$defs/AuthSessionResponse',
+  )
+  assert.equal(
+    authSession.post.responses['201'].content['application/json'].schema.$ref,
+    './control-plane-http.schema.json#/$defs/AuthSessionResponse',
+  )
   assert.equal(
     openapi.paths['/api/v1/commands'].post.requestBody.content['application/json'].schema.$ref,
     './control-plane-http.schema.json#/$defs/CommandRequest',
@@ -370,7 +526,10 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
     '500',
     '503',
   ])
-  for (const route of Object.values(openapi.paths)) {
+  for (const route of [
+    openapi.paths['/api/v1/commands'],
+    openapi.paths['/api/v1/queries'],
+  ]) {
     assert.deepEqual(route.post.security, [
       { sessionCookie: [] },
       { bearerAuth: [] },
@@ -381,7 +540,10 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
       assert.equal(response.content['application/problem+json'], undefined)
     }
   }
-  for (const route of Object.values(generatedOpenApi.paths)) {
+  for (const route of [
+    generatedOpenApi.paths['/api/v1/commands'],
+    generatedOpenApi.paths['/api/v1/queries'],
+  ]) {
     assert.deepEqual(route.post.security, [
       { sessionCookie: [] },
       { bearerAuth: [] },
@@ -395,6 +557,26 @@ test('OpenAPI 3.1 fragment exposes one command route and one query route with no
     credentialsInQueryAllowed: false,
     credentialsInBodyAllowed: false,
   })
+  assert.deepEqual(schema['x-winwincode-semantics'].browserSessionContext, {
+    source: 'authenticated_cookie_session_only',
+    bootstrapResponse: 'AuthSessionResponse',
+    reloadResponse: 'AuthSessionResponse',
+    actorBinding: 'response_actor_equals_authenticated_principal',
+    scopeBinding: 'response_scopes_are_the_current_bounded_authorization_set',
+    scopeOrder: 'canonical_scope_identity',
+    scopeShrink: 'subsequent_context_reads_return_only_current_scopes',
+    scopeRevocation: 'empty_authorization_revokes_the_session',
+    clientReadableCredentials: false,
+  })
+  assert.deepEqual(schema.$defs.AuthSessionResponse.required, [
+    'schemaVersion',
+    'expiresAt',
+    'actor',
+    'authorizedScopes',
+  ])
+  assert.equal(schema.$defs.AuthSessionResponse.additionalProperties, false)
+  assert.equal(schema.$defs.AuthSessionResponse.properties.authorizedScopes.minItems, 1)
+  assert.equal(schema.$defs.AuthSessionResponse.properties.authorizedScopes.maxItems, 100)
 
   const taskApproval = schema.$defs.DeliveryApproveTaskBreakdownPayload
   assert.deepEqual(taskApproval.required, ['deliveryId', 'reviewSetSha256'])

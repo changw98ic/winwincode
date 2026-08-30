@@ -24,7 +24,8 @@ use crate::{
         CoordinationError, CoordinationErrorCode,
         attention::ResolvedAttentionTransition,
         session_binding::{
-            SessionBindingAuthority, SessionBindingIdentity, accept_worker_session_with_authority,
+            DeliveryExecutionAttemptReplacement, SessionBindingAuthority, SessionBindingIdentity,
+            accept_worker_session_with_authority, replace_execution_attempt_with_authority,
             report_codex_thread_with_authority,
         },
         solution_review::resolve_current_solution_review,
@@ -59,6 +60,8 @@ pub enum DeliveryMutationOperation {
     StageTerminal,
     #[serde(rename = "session.bound")]
     SessionBound,
+    #[serde(rename = "execution.attempt.replaced")]
+    ExecutionAttemptReplaced,
     #[serde(rename = "attention.resolved")]
     AttentionResolved,
     #[serde(rename = "verdict.submitted")]
@@ -79,6 +82,7 @@ impl FromStr for DeliveryMutationOperation {
             "stage.started" => Ok(Self::StageStarted),
             "stage.terminal" => Ok(Self::StageTerminal),
             "session.bound" => Ok(Self::SessionBound),
+            "execution.attempt.replaced" => Ok(Self::ExecutionAttemptReplaced),
             "attention.resolved" => Ok(Self::AttentionResolved),
             "verdict.submitted" => Ok(Self::VerdictSubmitted),
             "rework.clarified" => Ok(Self::ReworkClarified),
@@ -113,21 +117,25 @@ pub struct DeliveryStoreError {
 }
 
 impl DeliveryStoreError {
+    #[must_use]
     pub fn code(&self) -> DeliveryStoreErrorCode {
         self.code
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
     /// Revision supplied by the rejected command, when the failure is a
     /// concurrency conflict.
+    #[must_use]
     pub const fn expected_revision(&self) -> Option<u64> {
         self.expected_revision
     }
 
     /// Authoritative revision observed while rejecting a stale command.
+    #[must_use]
     pub const fn current_revision(&self) -> Option<u64> {
         self.current_revision
     }
@@ -257,6 +265,15 @@ pub struct ReportDeliveryCodexThread {
     pub now_millis: u64,
 }
 
+/// Scheduler-sealed replacement of one fully bound running Delivery attempt.
+#[derive(Debug, Clone)]
+pub struct ReplaceDeliveryExecutionAttempt {
+    pub expected_revision: u64,
+    pub identity: SessionBindingIdentity,
+    pub replacement: DeliveryExecutionAttemptReplacement,
+    pub now_millis: u64,
+}
+
 /// Specialized task-promotion append. The command contains only durable
 /// request identity and the approved review digest; the Store rebuilds the
 /// exact task graph from the current canonical Delivery.
@@ -328,6 +345,7 @@ pub enum DeliveryCommand {
     Append(AppendDelivery),
     AcceptWorkerSession(Box<AcceptDeliveryWorkerSession>),
     ReportCodexThread(Box<ReportDeliveryCodexThread>),
+    ReplaceExecutionAttempt(Box<ReplaceDeliveryExecutionAttempt>),
     StartStage(Box<StartDeliveryStage>),
     ApplyTerminalOutcome(Box<ApplyDeliveryTerminalOutcome>),
     ResolveAttention(Box<ResolveDeliveryAttention>),
@@ -737,7 +755,7 @@ impl<'journal> DeliveryStore<'journal> {
         })?;
         self.append_authorized(
             AppendDelivery {
-                delivery_id: command.identity.delivery_id.clone(),
+                delivery_id: stored.snapshot.id().clone(),
                 request_id: command.request_id,
                 request_digest: command.request_digest,
                 operation: DeliveryMutationOperation::SessionBound,
@@ -798,7 +816,7 @@ impl<'journal> DeliveryStore<'journal> {
         })?;
         self.append_authorized(
             AppendDelivery {
-                delivery_id: command.identity.delivery_id.clone(),
+                delivery_id: stored.snapshot.id().clone(),
                 request_id: command.request_id,
                 request_digest: command.request_digest,
                 operation: DeliveryMutationOperation::SessionBound,
@@ -809,6 +827,76 @@ impl<'journal> DeliveryStore<'journal> {
                 identity: command.identity,
                 authority: command.authority,
                 codex_thread_id: command.codex_thread_id,
+                now_millis: command.now_millis,
+            },
+        )
+    }
+
+    fn replace_execution_attempt(
+        &self,
+        command: ReplaceDeliveryExecutionAttempt,
+    ) -> Result<DeliveryStoreMutationResult, DeliveryStoreError> {
+        let request_id = command.replacement.receipt_id().clone();
+        let request_digest = command
+            .replacement
+            .store_request_digest()
+            .map_err(|error| {
+                store_error(
+                    DeliveryStoreErrorCode::InvalidStoreOptions,
+                    error.to_string(),
+                )
+            })?;
+        validate_request(&request_id, &request_digest)?;
+        let stored = self.read(&command.identity.delivery_id)?;
+        if let Some(replayed) = replayed_append(
+            &stored,
+            &request_id,
+            &request_digest,
+            DeliveryMutationOperation::ExecutionAttemptReplaced,
+            command.expected_revision,
+        )? {
+            return Ok(replayed);
+        }
+        if command.expected_revision != stored.snapshot.revision() {
+            return Err(revision_conflict(
+                command.expected_revision,
+                stored.snapshot.revision(),
+                "delivery revision changed before execution attempt replacement",
+            ));
+        }
+        let next = replace_execution_attempt_with_authority(
+            &stored.snapshot,
+            command.expected_revision,
+            &command.identity,
+            &command.replacement,
+            command.now_millis,
+        )
+        .map_err(|error| {
+            map_transition_error(
+                &error,
+                &AppendDelivery {
+                    delivery_id: command.identity.delivery_id.clone(),
+                    request_id: request_id.clone(),
+                    request_digest: request_digest.clone(),
+                    operation: DeliveryMutationOperation::ExecutionAttemptReplaced,
+                    expected_revision: command.expected_revision,
+                    snapshot: stored.snapshot.clone(),
+                },
+                &stored.snapshot,
+            )
+        })?;
+        self.append_authorized(
+            AppendDelivery {
+                delivery_id: command.identity.delivery_id.clone(),
+                request_id,
+                request_digest,
+                operation: DeliveryMutationOperation::ExecutionAttemptReplaced,
+                expected_revision: command.expected_revision,
+                snapshot: next,
+            },
+            AppendAuthority::ExecutionAttemptReplacement {
+                identity: command.identity,
+                replacement: Box::new(command.replacement),
                 now_millis: command.now_millis,
             },
         )
@@ -1113,6 +1201,31 @@ impl<'journal> DeliveryStore<'journal> {
                     ));
                 }
             }
+            AppendAuthority::ExecutionAttemptReplacement {
+                identity,
+                replacement,
+                now_millis,
+            } => {
+                validate_authorized_operation(
+                    command.operation,
+                    DeliveryMutationOperation::ExecutionAttemptReplaced,
+                    "execution.attempt.replaced",
+                )?;
+                let expected = replace_execution_attempt_with_authority(
+                    &stored.snapshot,
+                    command.expected_revision,
+                    &identity,
+                    &replacement,
+                    now_millis,
+                )
+                .map_err(|error| map_transition_error(&error, &command, &stored.snapshot))?;
+                if expected != command.snapshot {
+                    return Err(store_error(
+                        DeliveryStoreErrorCode::InvalidStoreOptions,
+                        "execution replacement command differs from its sealed transition",
+                    ));
+                }
+            }
             AppendAuthority::Stage(transition) => {
                 validate_authorized_operation(
                     command.operation,
@@ -1334,6 +1447,11 @@ enum AppendAuthority<'transition> {
         codex_thread_id: winwincode_domain::CodexThreadId,
         now_millis: u64,
     },
+    ExecutionAttemptReplacement {
+        identity: SessionBindingIdentity,
+        replacement: Box<DeliveryExecutionAttemptReplacement>,
+        now_millis: u64,
+    },
     Stage(&'transition StageAdvanceResult),
     Terminal(&'transition DeliveryTerminalOutcomeFacts),
     Attention(&'transition ResolvedAttentionTransition),
@@ -1349,6 +1467,7 @@ impl AppendAuthority<'_> {
             Self::Generic
             | Self::WorkerSession { .. }
             | Self::CodexThread { .. }
+            | Self::ExecutionAttemptReplacement { .. }
             | Self::Stage(_)
             | Self::Terminal(_)
             | Self::Attention(_)
@@ -1431,6 +1550,10 @@ fn validate_generic_append_delta(
         DeliveryMutationOperation::SessionBound => Err(store_error(
             DeliveryStoreErrorCode::InvalidStoreOptions,
             "session.bound requires its typed authority-aware Delivery command",
+        )),
+        DeliveryMutationOperation::ExecutionAttemptReplaced => Err(store_error(
+            DeliveryStoreErrorCode::InvalidStoreOptions,
+            "execution.attempt.replaced requires its scheduler-sealed Delivery command",
         )),
         DeliveryMutationOperation::DeliveryCreated
         | DeliveryMutationOperation::StageStarted
@@ -1515,6 +1638,9 @@ impl DeliveryCommandPort for DeliveryStore<'_> {
             DeliveryCommand::Append(append) => self.append(append),
             DeliveryCommand::AcceptWorkerSession(command) => self.accept_worker_session(*command),
             DeliveryCommand::ReportCodexThread(command) => self.report_codex_thread(*command),
+            DeliveryCommand::ReplaceExecutionAttempt(command) => {
+                self.replace_execution_attempt(*command)
+            }
             DeliveryCommand::StartStage(start) => self.start_stage(*start),
             DeliveryCommand::ApplyTerminalOutcome(outcome) => self.apply_terminal_outcome(*outcome),
             DeliveryCommand::ResolveAttention(resolve) => self.resolve_attention(*resolve),
@@ -1857,6 +1983,7 @@ pub struct InMemoryDeliveryJournal {
 }
 
 impl InMemoryDeliveryJournal {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

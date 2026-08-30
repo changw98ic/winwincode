@@ -47,10 +47,12 @@ pub struct ResolvedAttentionTransition {
 }
 
 impl ResolvedAttentionTransition {
+    #[must_use]
     pub fn delivery(&self) -> &Delivery {
         &self.delivery
     }
 
+    #[must_use]
     pub fn into_delivery(self) -> Delivery {
         self.delivery
     }

@@ -7,7 +7,7 @@ import {
   createControlPlaneWebSocketClient,
   createProductSessionRuntimeProjectionSubscription,
   createStrongFlowProjectionSubscription,
-} from '../apps/web/src/generated/control-plane-client.ts'
+} from '../apps/client/src/generated/control-plane-client.ts'
 
 const schemaVersion = 'winwincode/v1'
 const actor = { id: 'usr_00000000000000000000000001', kind: 'user' }
@@ -208,6 +208,11 @@ class FakeWebSocket {
   }
 
   close(code, reason) {
+    assert.equal(
+      code === 1000 || (code >= 3000 && code <= 4999),
+      true,
+      'browser WebSocket clients may only initiate normal or private-use close codes',
+    )
     this.clientCloses.push({ code, reason })
     this.readyState = 3
   }
@@ -1160,7 +1165,7 @@ test('WebSocket rejects sequence gaps instead of acknowledging past missing fact
     [1],
   )
   assert.equal(errors.at(-1)?.code, 'INVALID_WEBSOCKET_FRAME')
-  assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 1011)
+  assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 4000)
 })
 
 test('WebSocket validates every event payload against its exact stream resource', async t => {
@@ -1313,7 +1318,7 @@ test('WebSocket validates every event payload against its exact stream resource'
       await flush()
       assert.equal(applied.length, 0)
       assert.equal(errors.at(-1)?.code, 'INVALID_WEBSOCKET_FRAME')
-      assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 1011)
+      assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 4000)
     })
   }
 })
@@ -1524,6 +1529,33 @@ test('HTTP rejects a response result that belongs to another request discriminat
     }),
     error => error instanceof ControlPlaneClientError && error.code === 'INVALID_CLIENT_REQUEST',
   )
+  await assert.rejects(
+    requestClient.submitCommand({
+      schemaVersion,
+      requestId: requestId(803),
+      actor,
+      scope,
+      command: 'enterprise.integration.update',
+      expectedRevision: 7,
+      payload: {
+        integrationId: canonicalId('int', 1),
+        kind: 'github',
+        displayName: 'GitHub Enterprise',
+        state: 'enabled',
+        configuration: {
+          endpointOrigin: 'https://github.example',
+          tenant: null,
+          repository: 'winwincode/core',
+          audience: null,
+          secretMaterial: 'must-not-cross-the-client-boundary',
+        },
+        configurationSha256:
+          'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+        credentialReferenceId: canonicalId('crd', 1),
+      },
+    }),
+    error => error instanceof ControlPlaneClientError && error.code === 'INVALID_CLIENT_REQUEST',
+  )
   assert.equal(fetchCalls, 0)
 })
 
@@ -1600,7 +1632,7 @@ test('WebSocket binds acceptance to the HTTP cursor and authorization baseline',
     ))
     await flush()
     assert.equal(errors.at(-1)?.code, 'INVALID_WEBSOCKET_FRAME')
-    assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 1011)
+    assert.equal(factory.sockets[0].clientCloses.at(-1)?.code, 4000)
   })
 
   await t.test('first event follows the accepted cursor and may use a newer epoch', async () => {

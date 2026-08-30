@@ -17,6 +17,10 @@ use winwincode_execution_port::transport::{
 
 const VALID_FIXTURE: &str =
     include_str!("../../../tests/fixtures/contracts/execution-port.valid.json");
+const PRODUCT_SESSION_BINDING_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/contracts/session-binding.product-session.valid.json");
+const DELIVERY_STAGE_BINDING_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/contracts/session-binding.delivery-stage.valid.json");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScriptedOutcome {
@@ -101,7 +105,7 @@ fn worker_frame() -> TypedFrame {
 #[test]
 fn all_canonical_fixture_messages_round_trip_through_remote_json() {
     let messages = fixture_messages();
-    assert_eq!(messages.len(), 26);
+    assert_eq!(messages.len(), 28);
 
     for (direction, message) in messages {
         let frame = TypedFrame::new(direction, message).expect("typed frame is valid");
@@ -110,6 +114,55 @@ fn all_canonical_fixture_messages_round_trip_through_remote_json() {
         let decoded = RemoteTransportAdapter::<ScriptedCore>::decode(&encoded)
             .expect("canonical frame decoding");
         assert_eq!(decoded, frame);
+    }
+}
+
+#[test]
+fn product_session_and_delivery_stage_bindings_round_trip_identically_locally_and_remotely() {
+    for (fixture, expected_stage_run) in [
+        (PRODUCT_SESSION_BINDING_FIXTURE, None),
+        (
+            DELIVERY_STAGE_BINDING_FIXTURE,
+            Some("run_00000000000000000000000009"),
+        ),
+    ] {
+        let message: ExecutionPortMessage =
+            serde_json::from_str(fixture).expect("canonical SessionBinding fixture");
+        let ExecutionPortMessage::SessionBindingMessage(binding) = &message else {
+            panic!("fixture must decode as SessionBindingMessage");
+        };
+        assert_eq!(
+            binding.stage_run_id.as_ref().map(|id| id.0.as_str()),
+            expected_stage_run
+        );
+        assert_eq!(
+            binding
+                .session_identity
+                .stage_run_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
+            expected_stage_run,
+        );
+
+        let frame = TypedFrame::new(FrameDirection::WorkerToControlPlane, message)
+            .expect("SessionBinding direction");
+        let encoded = RemoteTransportAdapter::<ScriptedCore>::encode(&frame)
+            .expect("canonical remote SessionBinding frame");
+        let decoded = RemoteTransportAdapter::<ScriptedCore>::decode(&encoded)
+            .expect("canonical remote SessionBinding decoding");
+        assert_eq!(decoded, frame);
+
+        let mut local_core = ScriptedCore::new([ScriptedOutcome::Accepted]);
+        let mut local = LocalWorkerAdapter::new(&mut local_core, EndpointSide::ControlPlane);
+        let local_result = local.accept(&frame);
+
+        let mut remote_core = ScriptedCore::new([ScriptedOutcome::Accepted]);
+        let mut remote = RemoteTransportAdapter::new(&mut remote_core, EndpointSide::ControlPlane);
+        let remote_result = remote.accept(&encoded);
+
+        assert_eq!(local_result, remote_result);
+        assert_eq!(local_core.seen, remote_core.seen);
+        assert_eq!(local_core.seen, ["session.binding"]);
     }
 }
 

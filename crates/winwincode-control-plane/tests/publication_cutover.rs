@@ -67,10 +67,10 @@ use winwincode_domain::{
     WorkspaceId,
 };
 use winwincode_publication::{
-    GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission, PublicationPolicyContext,
-    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationRequester,
-    PublicationResourceFact, PublicationResourceKind, PublicationState, RepositoryPolicyScope,
-    RepositoryPublicationPolicy,
+    GitHubAdapterConfig, GitHubPublicationAdapter, PolicyPermission,
+    PublicationEnterpriseAttribution, PublicationPolicyContext, PublicationPolicyEvidence,
+    PublicationPolicyOrigin, PublicationRequester, PublicationResourceFact,
+    PublicationResourceKind, PublicationState, RepositoryPolicyScope, RepositoryPublicationPolicy,
 };
 use winwincode_storage::{
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
@@ -729,12 +729,13 @@ fn delivered_github_candidate_prepares_one_exact_secret_safe_review_package_arti
         Box::new(RecordingPublisher),
     )
     .expect("start Control Plane");
+    let requester = UserId(canonical_id("usr", 306));
 
     let prepared = control_plane
-        .prepare_publication(&scope, &candidate)
+        .prepare_publication(&scope, &candidate, &requester)
         .expect("prepare review package and Publication authority");
     let replay = control_plane
-        .prepare_publication(&scope, &candidate)
+        .prepare_publication(&scope, &candidate, &requester)
         .expect("exact preparation replay");
 
     assert_eq!(prepared, replay);
@@ -791,9 +792,10 @@ fn publication_preparation_rejects_an_unapproved_delivery_before_creating_an_art
         Box::new(RecordingPublisher),
     )
     .expect("start Control Plane");
+    let requester = UserId(canonical_id("usr", 306));
 
     let error = control_plane
-        .prepare_publication(&scope, &candidate)
+        .prepare_publication(&scope, &candidate, &requester)
         .expect_err("ReadyToDeliver is not a settled human publication approval");
     assert!(
         error.to_string().contains("no exact publishable approval"),
@@ -831,7 +833,7 @@ fn approved_delivery_recovers_one_partial_github_publication_and_audits_each_res
     )
     .expect("start Control Plane");
     let prepared = control_plane
-        .prepare_publication(&scope, &candidate)
+        .prepare_publication(&scope, &candidate, &requester)
         .expect("prepare approved review package");
     let policy = publication_policy(&scope, &prepared, &requester);
     let command = publish_command(
@@ -850,11 +852,19 @@ fn approved_delivery_recovers_one_partial_github_publication_and_audits_each_res
     )
     .expect("loopback GitHub adapter config");
     let mut adapter = GitHubPublicationAdapter::new(config, FixtureCredentialResolver);
+    let attribution = PublicationEnterpriseAttribution::try_new(
+        &repository_policy_scope(&scope),
+        prepared.authorization().binding().delivery_id().clone(),
+        candidate.producer_product_session_id().clone(),
+        requester.clone(),
+    )
+    .expect("sealed Publication enterprise attribution");
 
     let pending = control_plane
         .commit_publication_publish(
             &command,
             prepared.authorization(),
+            &attribution,
             &policy,
             &policy_evidence(&prepared, first_observed_at),
             &origin,

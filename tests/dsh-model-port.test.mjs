@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { DshModelPort } from '../packages/dsh-profile/dist/index.js'
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
+
+import { DshModelPort } from '../packages/dsh-profile/dist/model-port.js'
 
 function modelRequest(overrides = {}) {
   return {
@@ -97,7 +100,7 @@ for (const route of [
   test(`streams Codex output through the DSH ${route.provider} provider family`, async () => {
     const fixture = fixtureRuntime(streamedAnswer)
     const port = new DshModelPort(fixture.runtime)
-    const request = modelRequest({ model: route.model })
+    const request = modelRequest({ model: route.model, reasoning: { effort: 'high' } })
     request.provider = route.provider
     const signal = new AbortController().signal
     const messages = await collect(port.stream(request, signal))
@@ -105,13 +108,16 @@ for (const route of [
     assert.deepEqual(fixture.prepared.map(call => call.config), [{
       provider: route.provider,
       model: route.model,
+      reasoningEffort: 'high',
     }])
     assert.equal(fixture.prepared[0].signal, signal)
     assert.equal(fixture.generated.length, 1)
     assert.equal(fixture.generated[0].provider, route.provider)
     assert.equal(fixture.generated[0].model, route.model)
+    assert.equal(fixture.generated[0].reasoningEffort, 'high')
     assert.equal(fixture.generated[0].system, 'Use the available tools when needed.')
     assert.equal(fixture.generated[0].tools[0].name, 'inspect')
+    assert.equal(request.request.tool_choice, 'auto')
     assert.ok(messages.some(message => (
       message.type === 'reasoning_summary_delta' && message.delta === 'checked'
     )))
@@ -276,6 +282,168 @@ test('wraps Codex custom tools in DSH JSON-schema functions and restores freefor
   })
 })
 
+test('round-trips namespaced parallel tools through the DSH flattened provider boundary', async () => {
+  const fixture = fixtureRuntime(async function* namespaceCalls(options) {
+    assert.deepEqual(
+      options.tools.map(tool => tool.name),
+      ['repo__inspect', 'repo__apply_patch'],
+    )
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+    yield {
+      type: 'tool-call-delta',
+      index: 0,
+      id: 'call-inspect',
+      name: options.tools[0].name,
+      argumentsDelta: '{"path":"src/lib.rs"}',
+    }
+    yield {
+      type: 'tool-call-delta',
+      index: 1,
+      id: 'call-patch',
+      name: options.tools[1].name,
+      argumentsDelta: '{"input":"*** Begin Patch\\n*** End Patch"}',
+    }
+    yield {
+      type: 'block-end',
+      index: 0,
+      block: {
+        type: 'tool-call',
+        id: 'call-inspect',
+        name: options.tools[0].name,
+        arguments: '{"path":"src/lib.rs"}',
+      },
+    }
+    yield {
+      type: 'block-end',
+      index: 1,
+      block: {
+        type: 'tool-call',
+        id: 'call-patch',
+        name: options.tools[1].name,
+        arguments: '{"input":"*** Begin Patch\\n*** End Patch"}',
+      },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  })
+  const request = modelRequest({
+    input: [{
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'inspect and patch the repository' }],
+    }, {
+      type: 'function_call',
+      id: 'history-inspect',
+      call_id: 'history-call-inspect',
+      namespace: 'repo',
+      name: 'inspect',
+      arguments: '{"path":"README.md"}',
+    }, {
+      type: 'custom_tool_call',
+      id: 'history-patch',
+      call_id: 'history-call-patch',
+      namespace: 'repo',
+      name: 'apply_patch',
+      input: '*** Begin Patch\n*** End Patch',
+    }, {
+      type: 'function_call_output',
+      call_id: 'history-call-inspect',
+      output: 'read',
+    }, {
+      type: 'custom_tool_call_output',
+      call_id: 'history-call-patch',
+      output: 'patched',
+    }],
+    tools: [{
+      type: 'namespace',
+      name: 'repo',
+      description: 'Repository operations.',
+      tools: [{
+        type: 'function',
+        name: 'inspect',
+        description: 'Inspect a repository path.',
+        strict: false,
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+        },
+      }, {
+        type: 'custom',
+        name: 'apply_patch',
+        description: 'Apply a patch.',
+        format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' },
+      }],
+    }],
+  })
+  const messages = await collect(new DshModelPort(fixture.runtime).stream(
+    request,
+    new AbortController().signal,
+  ))
+
+  const assistant = fixture.generated[0].messages.find(message => message.role === 'assistant')
+  assert.deepEqual(
+    assistant.content.map(block => ({ id: block.id, name: block.name })),
+    [
+      { id: 'history-call-inspect', name: 'repo__inspect' },
+      { id: 'history-call-patch', name: 'repo__apply_patch' },
+    ],
+  )
+  assert.deepEqual(
+    messages.filter(message => message.type === 'output_item_done').map(message => message.item),
+    [{
+      type: 'function_call',
+      id: 'fc_thread-1-0',
+      namespace: 'repo',
+      name: 'inspect',
+      arguments: '{"path":"src/lib.rs"}',
+      call_id: 'call-inspect',
+    }, {
+      type: 'custom_tool_call',
+      id: 'fc_thread-1-1',
+      call_id: 'call-patch',
+      namespace: 'repo',
+      name: 'apply_patch',
+      input: '*** Begin Patch\n*** End Patch',
+    }],
+  )
+})
+
+test('records DSH normalization of invalid and colliding namespace tool names', async () => {
+  const fixture = fixtureRuntime(async function* normalizedNames(options) {
+    assert.deepEqual(
+      options.tools.map(tool => tool.name),
+      ['repo___inspect_', 'repo___inspect__2', 'x'.repeat(56)],
+    )
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const request = modelRequest({
+    tools: [{
+      type: 'namespace',
+      name: 'repo!',
+      tools: [{
+        type: 'function',
+        name: 'inspect?',
+        parameters: { type: 'object' },
+      }],
+    }, {
+      type: 'function',
+      name: 'repo___inspect_',
+      parameters: { type: 'object' },
+    }, {
+      type: 'function',
+      name: 'x'.repeat(60),
+      parameters: { type: 'object' },
+    }],
+  })
+
+  const messages = await collect(new DshModelPort(fixture.runtime).stream(
+    request,
+    new AbortController().signal,
+  ))
+  assert.equal(messages.at(-1).type, 'completed')
+})
+
 test('rejects unsupported capabilities before DSH preparation or provider I/O', async () => {
   const fixture = fixtureRuntime(streamedAnswer)
   const request = modelRequest({
@@ -342,6 +510,100 @@ test('retains safe DSH error facts while redacting provider diagnostics and canc
     },
   })
   assert.equal(JSON.stringify((await terminal).value).includes(secret), false)
+})
+
+test('classifies a DSH stream without a finish chunk as STREAM_CLOSED', async () => {
+  const fixture = fixtureRuntime(async function* disconnected() {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'partial' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'partial' } }
+  })
+  const messages = await collect(new DshModelPort(fixture.runtime).stream(
+    modelRequest(),
+    new AbortController().signal,
+  ))
+  assert.deepEqual(messages.at(-1), {
+    type: 'error',
+    error: {
+      code: 'STREAM_CLOSED',
+      message: 'DSH model stream ended without a finish chunk',
+    },
+  })
+  assert.equal(messages.filter(message => message.type === 'error').length, 1)
+  assert.equal(messages.some(message => message.type === 'completed'), false)
+})
+
+test('DSH registry hot update pins prepared calls and rejects removed routes before provider I/O', async () => {
+  const ctx = new Context()
+  const updates = []
+  const streamCalls = []
+  let registration
+  let defaultMaxTokens = 64
+  ctx.on('llm/adapters-updated', () => updates.push(ctx.llm.listProviders().map(item => item.id)))
+  try {
+    await ctx.plugin(LlmRuntime)
+    class HotUpdateAdapter extends LlmAdapter {
+      listModels(provider) {
+        return Promise.resolve([{ provider, id: 'listed-model', name: 'Listed model' }])
+      }
+
+      resolveModel(provider, model) {
+        return Promise.resolve({ provider, id: model, name: model, defaultMaxTokens })
+      }
+
+      async *stream(options) {
+        streamCalls.push({
+          maxTokens: options.maxTokens,
+          model: options.model,
+          provider: options.provider,
+        })
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    const adapter = new HotUpdateAdapter()
+    const register = pluginCtx => {
+      registration = pluginCtx.llm.registerAdapter(['alpha', 'removed'], adapter)
+    }
+    register.inject = ['llm']
+    await ctx.plugin(register)
+
+    assert.deepEqual(await ctx.llm.listModels('alpha'), [{
+      provider: 'alpha',
+      id: 'listed-model',
+      name: 'Listed model',
+    }])
+    const pinned = await ctx.llm.prepareCall({ provider: 'alpha', model: 'listed-model' })
+    assert.equal(pinned.config.maxTokens, 64)
+
+    defaultMaxTokens = 128
+    registration.replace(['alpha', 'added'])
+    await collect(pinned.stream({ ...pinned.config, messages: [] }))
+    const next = await ctx.llm.prepareCall({ provider: 'alpha', model: 'next-unlisted-model' })
+    await collect(next.stream({ ...next.config, messages: [] }))
+
+    assert.deepEqual(streamCalls, [{
+      maxTokens: 64,
+      model: 'listed-model',
+      provider: 'alpha',
+    }, {
+      maxTokens: 128,
+      model: 'next-unlisted-model',
+      provider: 'alpha',
+    }])
+    assert.deepEqual(updates, [
+      ['alpha', 'removed'],
+      ['alpha', 'added'],
+    ])
+    for (const provider of ['removed', 'unknown']) {
+      await assert.rejects(
+        ctx.llm.prepareCall({ provider, model: 'listed-model' }),
+        error => error?.code === 'NO_ADAPTER',
+      )
+    }
+    assert.equal(streamCalls.length, 2)
+  } finally {
+    await ctx.fiber.dispose()
+  }
 })
 
 test('rejects credential-bearing prepared config before adapter dispatch', async () => {

@@ -1,0 +1,706 @@
+{
+  "schemaVersion": "winwincode.provider-dsh-rust-differential-rules.v1",
+  "issueId": "winwincode-9c4.16.5.6",
+  "fixturePath": "tests/fixtures/provider-dsh-rust-differential.v1.json",
+  "executionPolicy": {
+    "attemptsPerCommand": 1,
+    "commandOrder": "dsh-baseline-then-rust-evidence-as-listed",
+    "exactCargoFilterRequired": true,
+    "ignoredTestsAllowed": false,
+    "networkAllowed": false,
+    "unexpectedDifferencePolicy": "reject",
+    "wildcardAllowed": false
+  },
+  "productionIsolation": {
+    "inventoryRoots": [
+      "apps",
+      "crates",
+      "packages",
+      "scripts",
+      "tests"
+    ],
+    "legacyTokens": [
+      "DshModelPort",
+      "DshLlmRuntime"
+    ],
+    "allowedLegacySourcePaths": [
+      "crates/winwincode-control-plane/tests/native_model_port_cutover.rs",
+      "packages/dsh-profile/src/model-port.ts",
+      "tests/dsh-model-port.test.mjs",
+      "tests/dsh-rust-model-port-production-cutover.test.mjs",
+      "tests/fixtures/native-dsh-model-turn.mjs"
+    ],
+    "sourceRequirements": [
+      {
+        "path": "packages/dsh-profile/src/agent-factory.ts",
+        "requiredFragments": [
+          "static inject = WinWinCodeAgentFactoryCore.inject",
+          "constructor(ctx: Context, config: Config)",
+          "options => new WinWinCodeKernel(options)"
+        ],
+        "forbiddenFragments": [
+          "DshModelPort",
+          "DshLlmRuntime",
+          "ctx.llm",
+          "modelPort:"
+        ]
+      },
+      {
+        "path": "packages/dsh-profile/src/agent-factory-core.ts",
+        "requiredFragments": [
+          "static inject = ['agents', 'sessions', 'systemPrompt', 'approval']",
+          "createKernel: EmbeddedKernelFactory",
+          "this.kernel = createKernel({"
+        ],
+        "forbiddenFragments": [
+          "DshModelPort",
+          "DshLlmRuntime",
+          "ctx.llm",
+          "modelPort:"
+        ]
+      },
+      {
+        "path": "packages/dsh-profile/src/index.ts",
+        "requiredFragments": [
+          "export * from './agent-factory.js'"
+        ],
+        "forbiddenFragments": [
+          "export * from './model-port.js'"
+        ]
+      },
+      {
+        "path": "packages/dsh-profile/package.json",
+        "requiredFragments": [
+          "\"./agent-factory\""
+        ],
+        "forbiddenFragments": [
+          "\"./agent-factory-core\"",
+          "\"./agent-factory-test-support\"",
+          "\"./model-port\""
+        ]
+      },
+      {
+        "path": "packages/native/src/index.ts",
+        "requiredFragments": [
+          "this.#binding = new binding.NativeKernel(nativeOptions)"
+        ],
+        "forbiddenFragments": [
+          "ModelPort",
+          "modelPort"
+        ]
+      },
+      {
+        "path": "crates/native/src/lib.rs",
+        "requiredFragments": [
+          "CanonicalNativeModelPort::open(&home)",
+          "Kernel::new(kernel_options, model_port)"
+        ],
+        "forbiddenFragments": [
+          "ThreadsafeFunction",
+          "struct NativeModelPort",
+          "NativeModelStreamCallback",
+          "model stream and cancellation callbacks"
+        ]
+      },
+      {
+        "path": "crates/native/src/canonical_model_port.rs",
+        "requiredFragments": [
+          "StandaloneModelExecutionApplication::open",
+          "ExecutionPortMessage::ModelOpenMessage",
+          "ExecutionPortMessage::ModelAckMessage",
+          ".accept_local("
+        ],
+        "forbiddenFragments": [
+          "std::process::Command",
+          "Command::new("
+        ]
+      }
+    ]
+  },
+  "normalization": [
+    {
+      "field": "providerRequestIdentity",
+      "rule": "compare only the one-way SHA-256 value exposed at the public error boundary"
+    },
+    {
+      "field": "chunkBoundaries",
+      "rule": "concatenate adjacent deltas inside one block before comparison"
+    }
+  ],
+  "approvedDifferences": [
+    {
+      "id": "versioned-catalog-authority",
+      "scenarioId": "catalog-routing",
+      "dshBehavior": "provider route replacement is atomic and pins prepared calls, while model lists remain advisory and unlisted exact model IDs may still dispatch",
+      "rustBehavior": "the scoped versioned catalog rejects unknown or disabled exact model IDs before provider I/O and emits one durable invalidation per accepted update",
+      "userVisibleImpact": "none"
+    },
+    {
+      "id": "reference-only-credential-authority",
+      "scenarioId": "credential-failure",
+      "dshBehavior": "credential-bearing prepared configuration is rejected at the ModelPort boundary",
+      "rustBehavior": "the Gateway resolves a scoped credential reference and rejects revoked or leaked material before adapter dispatch",
+      "userVisibleImpact": "none"
+    },
+    {
+      "id": "canonical-unknown-provider-error",
+      "scenarioId": "typed-errors",
+      "dshBehavior": "unclassified pi-ai failures use PI_AI_ERROR",
+      "rustBehavior": "unclassified adapter failures use PROVIDER_STREAM_FAILED",
+      "userVisibleImpact": "none"
+    },
+    {
+      "id": "typed-worker-cancellation",
+      "scenarioId": "cancel-and-disconnect",
+      "dshBehavior": "an aborted stream preserves the safe upstream failure code when present",
+      "rustBehavior": "an explicit Worker cancellation uses the canonical CANCELLED terminal code",
+      "userVisibleImpact": "none"
+    },
+    {
+      "id": "canonical-namespace-identity-validation",
+      "scenarioId": "namespaced-parallel-tools",
+      "dshBehavior": "invalid, colliding, and overlong names are normalized into bounded provider aliases before round-trip mapping",
+      "rustBehavior": "only canonical tool identities are accepted and explicit alias bindings preserve namespace without parsing provider aliases",
+      "userVisibleImpact": "none"
+    },
+    {
+      "id": "visible-reasoning-without-forged-provider-signature",
+      "scenarioId": "reasoning-and-parallel-tools",
+      "dshBehavior": "visible historical reasoning remains a DSH reasoning block before both parallel tool calls",
+      "rustBehavior": "the Anthropic adapter retains visible historical reasoning as assistant text before both tool_use blocks because canonical history has no provider-signed thinking block and no signature is forged",
+      "userVisibleImpact": "none"
+    },
+    {
+      "id": "provider-auto-tool-choice-shape",
+      "scenarioId": "request-translation",
+      "dshBehavior": "only auto is accepted and provider auto-selection is represented by the absence of a forced tool choice in generated options",
+      "rustBehavior": "the Anthropic adapter sends the equivalent explicit tool_choice object with type auto",
+      "userVisibleImpact": "none"
+    }
+  ],
+  "dshBaseline": {
+    "arguments": [
+      "--test",
+      "tests/dsh-model-port.test.mjs"
+    ],
+    "program": "NODE_EXECUTABLE",
+    "sourcePath": "tests/dsh-model-port.test.mjs",
+    "tests": [
+      {
+        "scenarioIds": [
+          "catalog-routing",
+          "request-translation",
+          "stream-success"
+        ],
+        "testName": "streams Codex output through the DSH deepseek provider family"
+      },
+      {
+        "scenarioIds": [
+          "catalog-routing",
+          "request-translation",
+          "stream-success"
+        ],
+        "testName": "streams Codex output through the DSH anthropic provider family"
+      },
+      {
+        "scenarioIds": [
+          "reasoning-and-parallel-tools"
+        ],
+        "testName": "replays reasoning and parallel Codex tool calls as one DSH assistant message"
+      },
+      {
+        "scenarioIds": [
+          "request-translation"
+        ],
+        "testName": "rejects unsupported capabilities before DSH preparation or provider I/O"
+      },
+      {
+        "scenarioIds": [
+          "typed-errors",
+          "cancel-and-disconnect"
+        ],
+        "testName": "retains safe DSH error facts while redacting provider diagnostics and cancellation"
+      },
+      {
+        "scenarioIds": [
+          "credential-failure"
+        ],
+        "testName": "rejects credential-bearing prepared config before adapter dispatch"
+      },
+      {
+        "scenarioIds": [
+          "credential-failure"
+        ],
+        "testName": "does not copy DSH credentials or unknown thrown text into kernel messages"
+      },
+      {
+        "scenarioIds": [
+          "namespaced-parallel-tools"
+        ],
+        "testName": "round-trips namespaced parallel tools through the DSH flattened provider boundary"
+      },
+      {
+        "scenarioIds": [
+          "namespaced-parallel-tools"
+        ],
+        "testName": "records DSH normalization of invalid and colliding namespace tool names"
+      },
+      {
+        "scenarioIds": [
+          "cancel-and-disconnect"
+        ],
+        "testName": "classifies a DSH stream without a finish chunk as STREAM_CLOSED"
+      },
+      {
+        "scenarioIds": [
+          "catalog-routing",
+          "hot-update"
+        ],
+        "testName": "DSH registry hot update pins prepared calls and rejects removed routes before provider I/O"
+      }
+    ]
+  },
+  "dshSourceEvidence": [
+    {
+      "packageDirectoryPrefix": "@deepseek-ai+dsh-llm@0.1.0-rc.8_",
+      "relativePath": "node_modules/@deepseek-ai/dsh-llm/lib/index.js",
+      "requiredFragments": [
+        "async prepareCall(config, signal) {",
+        "const registration = this.registration(config.provider);",
+        "const resolvedConfig = deepFreeze(structuredClone(resolved.config));",
+        "registration,\n\t\t\t\t\tconfig: resolvedConfig",
+        "llm/adapters-updated"
+      ],
+      "scenarioIds": [
+        "catalog-routing",
+        "hot-update"
+      ]
+    },
+    {
+      "packageDirectoryPrefix": "@deepseek-ai+dsh-credentials-local@0.1.0-rc.8_",
+      "relativePath": "node_modules/@deepseek-ai/dsh-credentials-local/lib/index.js",
+      "requiredFragments": [
+        "an unreadable document keeps the\n\t* last good snapshot",
+        "credentials-local: reload failed at %s; keeping the last good document"
+      ],
+      "scenarioIds": [
+        "credential-failure",
+        "hot-update"
+      ]
+    },
+    {
+      "packageDirectoryPrefix": "@deepseek-ai+dsh-llm-pi-ai@0.1.0-rc.8_",
+      "relativePath": "node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+      "requiredFragments": [
+        "if (/\\b(?:401|403)\\b/.test(message)) return \"AUTH\";",
+        "if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE;",
+        "if (/\\b429\\b|rate.?limit/i.test(message)) return \"RATE_LIMIT\";",
+        "payload too large|request body too large/i.test(message)) return \"INVALID_REQUEST\";",
+        "if (/\\b5\\d\\d\\b/.test(message)) return \"SERVER\";",
+        "if (/\\btime(?:d)?\\s*out\\b|timeout/i.test(message)) return \"TIMEOUT\";",
+        "return \"TRANSPORT\";",
+        "code: CONTEXT_WINDOW_EXCEEDED_CODE",
+        "return \"PI_AI_ERROR\";",
+        "if (message.content.length === 0) return {",
+        "code: EMPTY_RESPONSE_CODE"
+      ],
+      "scenarioIds": [
+        "typed-errors"
+      ]
+    }
+  ],
+  "rustEvidence": [
+    {
+      "binary": "provider_dsh_cancel_recovery",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "cancel-and-disconnect"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_dsh_cancel_recovery.rs",
+      "testName": "cancel_and_provider_finish_race_linearizes_to_one_terminal_and_one_release"
+    },
+    {
+      "binary": "provider_dsh_cancel_recovery",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "cancel-and-disconnect"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_dsh_cancel_recovery.rs",
+      "testName": "disconnect_settlement_restarts_as_exact_replay_without_second_adapter_call"
+    },
+    {
+      "binary": "provider_dsh_cancel_recovery",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "typed-errors"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_dsh_cancel_recovery.rs",
+      "testName": "rate_limit_and_timeout_keep_status_retry_and_exact_terminal_replay"
+    },
+    {
+      "binary": "provider_dsh_cancel_recovery",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "credential-failure"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_dsh_cancel_recovery.rs",
+      "testName": "revoked_credential_preserves_frozen_open_and_blocks_next_before_secret_or_adapter"
+    },
+    {
+      "binary": "provider_dsh_behavior_matrix",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "typed-errors"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_dsh_behavior_matrix.rs",
+      "testName": "provider_failure_matrix_preserves_all_ten_canonical_error_codes"
+    },
+    {
+      "binary": "provider_dsh_behavior_matrix",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "catalog-routing",
+        "hot-update",
+        "credential-failure"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_dsh_behavior_matrix.rs",
+      "testName": "open_snapshot_survives_catalog_and_credential_rotation_while_next_open_uses_new_authority"
+    },
+    {
+      "binary": "provider_catalog",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "catalog-routing",
+        "hot-update"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_catalog.rs",
+      "testName": "hot_update_disable_scope_query_and_replay_are_deterministic"
+    },
+    {
+      "binary": "provider_stream",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "stream-success"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_stream.rs",
+      "testName": "fragmentation_replay_reasoning_usage_and_sequence_are_deterministic"
+    },
+    {
+      "binary": "provider_stream",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "reasoning-and-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_stream.rs",
+      "testName": "parallel_tool_identities_are_stable_and_identity_drift_is_terminal"
+    },
+    {
+      "binary": "provider_stream",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "typed-errors",
+        "cancel-and-disconnect",
+        "credential-failure"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_stream.rs",
+      "testName": "cancellation_disconnect_failure_and_split_secret_are_fail_closed"
+    },
+    {
+      "binary": "provider_stream",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "typed-errors",
+        "cancel-and-disconnect"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_stream.rs",
+      "testName": "empty_stop_matches_dsh_retryable_failure_and_terminal_is_exact_once"
+    },
+    {
+      "binary": "provider_production",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "request-translation",
+        "stream-success",
+        "credential-failure"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_production.rs",
+      "testName": "anthropic_messages_translation_stream_usage_and_secret_gate_share_the_durable_runtime"
+    },
+    {
+      "binary": "credential_reference_lifecycle",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "credential-failure",
+        "hot-update"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/credential_reference_lifecycle.rs",
+      "testName": "lifecycle_is_scope_bound_replayable_and_revocation_stops_new_resolution"
+    },
+    {
+      "binary": "provider_tool_namespace",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_tool_namespace.rs",
+      "testName": "canonical_tool_identity_has_stable_json_and_exact_boundaries"
+    },
+    {
+      "binary": "provider_tool_namespace",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_tool_namespace.rs",
+      "testName": "canonical_tool_identity_rejects_illegal_empty_and_overlong_components"
+    },
+    {
+      "binary": "provider_tool_namespace",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/provider_tool_namespace.rs",
+      "testName": "namespaced_parallel_tool_calls_round_trip_in_added_and_done_items"
+    },
+    {
+      "binary": "native_model_port_cutover",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "request-translation",
+        "stream-success",
+        "hot-update"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/native_model_port_cutover.rs",
+      "testName": "native_rust_loopback_streams_canonical_chunks_and_replays_exactly_after_restart"
+    },
+    {
+      "binary": "native_model_port_cutover",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "cancel-and-disconnect"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/native_model_port_cutover.rs",
+      "testName": "native_rust_drop_cancellation_remains_terminal_after_restart"
+    },
+    {
+      "binary": "native_model_port_cutover",
+      "package": "winwincode-control-plane",
+      "scenarioIds": [
+        "request-translation"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/tests/native_model_port_cutover.rs",
+      "testName": "native_composition_has_one_rust_model_path_without_a_typescript_callback"
+    }
+  ],
+  "rustUnitEvidence": [
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "Inspect both files first.\\nKeep the calls parallel.",
+        "body[\"messages\"][1][\"content\"][1][\"id\"]",
+        "body[\"messages\"][1][\"content\"][2][\"id\"]",
+        "body[\"messages\"][1][\"content\"][0][\"type\"]"
+      ],
+      "scenarioIds": [
+        "request-translation",
+        "reasoning-and-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic.rs",
+      "testName": "provider_anthropic::tests::canonical_codex_request_translates_to_exact_upstream_model_and_anthropic_tools"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "repository-tools__read-file",
+        "Some(\"repository-tools\")"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_tests::namespaced_request_and_history_use_bound_aliases_without_losing_identity"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "parallel_tool_sse()",
+        "ProviderGatewayTerminal::Completed"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_tests::parallel_namespaced_sse_round_trips_the_bound_canonical_identities"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "repository.tools",
+        "\"n\".repeat(65)"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_tests::invalid_conflicting_and_oversized_namespaces_fail_closed"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "repository-tools__read-file_2",
+        "AnthropicCodecErrorKind::Protocol"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_tests::alias_collisions_are_deterministic_and_never_parsed_as_identity"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "other-tools",
+        "call-missing-namespace"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_tests::namespaced_history_must_match_the_exact_declared_binding"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "a__b__c_2",
+        "Some(\"a__b\")"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_safety_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_safety_tests::colliding_cross_namespace_aliases_round_trip_through_explicit_bindings"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "safety-marker-custom",
+        "safety-marker-function"
+      ],
+      "scenarioIds": [
+        "namespaced-parallel-tools"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic_namespace_safety_tests.rs",
+      "testName": "provider_anthropic::provider_anthropic_namespace_safety_tests::history_kind_cannot_rebind_an_exact_name_and_namespace"
+    },
+    {
+      "package": "winwincode-control-plane",
+      "requiredFragments": [
+        "body[\"thinking\"], json!({\"type\": \"adaptive\"})",
+        "body[\"output_config\"], json!({\"effort\": effort})",
+        "\"low\", \"medium\", \"high\", \"xhigh\", \"max\""
+      ],
+      "scenarioIds": [
+        "request-translation"
+      ],
+      "sourcePath": "crates/winwincode-control-plane/src/provider_anthropic.rs",
+      "testName": "provider_anthropic::tests::reasoning_effort_is_explicit_on_the_anthropic_wire_and_invalid_values_fail_closed"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "idempotent_replay",
+        "input_tokens",
+        "assert_terminal_resources(&root.0, &message, false)"
+      ],
+      "scenarioIds": [
+        "request-translation",
+        "stream-success",
+        "hot-update"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::loopback_stream_restarts_before_provider_and_preserves_usage"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "assert_eq!(error.code, \"MODEL_PORT_CANCELLED\")",
+        "assert_terminal_resources(&root.0, &message, true)"
+      ],
+      "scenarioIds": [
+        "cancel-and-disconnect"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::dropping_unpolled_stream_records_worker_cancellation"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "kernel-request-partial",
+        "ExecutionReservationState::Settled",
+        "WorkerSlotState::Completed"
+      ],
+      "scenarioIds": [
+        "stream-success",
+        "cancel-and-disconnect",
+        "hot-update"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::dropping_partially_consumed_stream_acknowledges_and_releases_capacity_after_restart"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "TerminalFault::Settlement",
+        "TerminalFault::SlotClose",
+        "TerminalFault::LeaseTerminal",
+        "TerminalFault::ResourceMarker"
+      ],
+      "scenarioIds": [
+        "stream-success",
+        "hot-update"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::terminal_resource_saga_recovers_each_sqlite_failure_after_restart"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "injected release failure",
+        "assert_eq!(error.code, \"MODEL_PORT_CANCELLED\")"
+      ],
+      "scenarioIds": [
+        "cancel-and-disconnect",
+        "hot-update"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::cancelled_release_failure_recovers_exactly_after_restart"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "injected slot open failure",
+        "exact replay resumes before Provider invocation"
+      ],
+      "scenarioIds": [
+        "request-translation",
+        "stream-success",
+        "hot-update"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::pending_intent_replays_after_slot_open_failure_without_duplicate_capacity"
+    },
+    {
+      "package": "winwincode-native",
+      "requiredFragments": [
+        "0..=MAX_RESOURCE_RECORDS",
+        "terminal_history_does_not_exhaust_the_pending_restart_scan"
+      ],
+      "scenarioIds": [
+        "hot-update"
+      ],
+      "sourcePath": "crates/native/src/canonical_model_port.rs",
+      "testName": "canonical_model_port::tests::terminal_history_does_not_exhaust_the_pending_restart_scan"
+    }
+  ]
+}

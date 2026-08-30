@@ -51,6 +51,14 @@ use winwincode_domain::{
 };
 use winwincode_storage::{GitSourcePathState, ValidatedGitSourceArtifact};
 
+mod verdict_authority;
+
+pub use verdict_authority::{
+    ProductionRuntimeEvent, ProductionRuntimeEventCategory, ProductionRuntimePayload,
+    ProductionVerdictFacts, ProductionVerdictResolutionError, ProductionVerificationRuntime,
+    resolve_production_verdict,
+};
+
 const MAX_CHANGED_PATHS: usize = 100_000;
 const MAX_PATH_LENGTH: usize = 4_096;
 
@@ -283,122 +291,152 @@ pub struct FrozenDeliveryCandidate {
 }
 
 impl FrozenDeliveryCandidate {
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
 
+    #[must_use]
     pub fn delivery_id(&self) -> &DeliveryId {
         &self.delivery_id
     }
 
+    #[must_use]
     pub fn delivery_spec_id(&self) -> &super::DeliverySpecId {
         &self.delivery_spec_id
     }
 
+    #[must_use]
     pub const fn delivery_spec_revision(&self) -> u64 {
         self.delivery_spec_revision
     }
 
+    #[must_use]
     pub fn repository(&self) -> &RepositoryRef {
         &self.repository
     }
 
+    #[must_use]
     pub fn base_revision(&self) -> &str {
         &self.base_revision
     }
 
+    #[must_use]
     pub fn producer_delivery_task_id(&self) -> Option<&DeliveryTaskId> {
         self.producer_delivery_task_id.as_ref()
     }
 
+    #[must_use]
     pub fn producer_stage_run_id(&self) -> &StageRunId {
         &self.producer_stage_run_id
     }
 
+    #[must_use]
     pub const fn producer_stage(&self) -> DeliveryStage {
         self.producer_stage
     }
 
+    #[must_use]
     pub fn producer_role(&self) -> &str {
         &self.producer_role
     }
 
+    #[must_use]
     pub const fn producer_attempt(&self) -> u64 {
         self.producer_attempt
     }
 
+    #[must_use]
     pub fn producer_session_binding_id(&self) -> &SessionBindingId {
         &self.producer_session_binding_id
     }
 
+    #[must_use]
     pub fn producer_product_session_id(&self) -> &ProductSessionId {
         &self.producer_product_session_id
     }
 
+    #[must_use]
     pub fn producer_execution_job_id(&self) -> &ExecutionJobId {
         &self.producer_execution_job_id
     }
 
+    #[must_use]
     pub fn producer_worker_session_id(&self) -> &WorkerSessionId {
         &self.producer_worker_session_id
     }
 
+    #[must_use]
     pub fn producer_codex_thread_id(&self) -> &CodexThreadId {
         &self.producer_codex_thread_id
     }
 
+    #[must_use]
     pub fn producer_lease_id(&self) -> &LeaseId {
         &self.producer_lease_id
     }
 
+    #[must_use]
     pub fn producer_fencing_token(&self) -> &FencingToken {
         &self.producer_fencing_token
     }
 
+    #[must_use]
     pub fn producer_worker_id(&self) -> &WorkerId {
         &self.producer_worker_id
     }
 
+    #[must_use]
     pub fn producer_worker_instance_id(&self) -> &WorkerInstanceId {
         &self.producer_worker_instance_id
     }
 
+    #[must_use]
     pub fn producer_artifact_ref(&self) -> &str {
         &self.producer_artifact_ref
     }
 
+    #[must_use]
     pub fn producer_artifact_digest(&self) -> &Sha256Digest {
         &self.producer_artifact_digest
     }
 
+    #[must_use]
     pub const fn producer_last_event_sequence(&self) -> u64 {
         self.producer_last_event_sequence
     }
 
+    #[must_use]
     pub const fn producer_finished_at_millis(&self) -> u64 {
         self.producer_finished_at_millis
     }
 
+    #[must_use]
     pub fn base_commit_id(&self) -> &str {
         &self.base_commit_id
     }
 
+    #[must_use]
     pub fn base_tree_id(&self) -> &str {
         &self.base_tree_id
     }
 
+    #[must_use]
     pub fn candidate_commit_id(&self) -> &str {
         &self.candidate_commit_id
     }
 
+    #[must_use]
     pub fn candidate_tree_id(&self) -> &str {
         &self.candidate_tree_id
     }
 
+    #[must_use]
     pub fn diff_sha256(&self) -> &str {
         &self.diff_sha256
     }
 
+    #[must_use]
     pub fn changed_paths(&self) -> &[CandidatePathFact] {
         &self.changed_paths
     }
@@ -504,6 +542,22 @@ pub fn freeze_delivery_candidate_from_source(
     source: &ValidatedGitSourceArtifact,
     terminal_facts: &DeliveryTerminalOutcomeFacts,
 ) -> Result<FrozenDeliveryCandidate, DeliveryValidationError> {
+    let (git_snapshot, terminal_outcome) =
+        validated_git_snapshot_from_source(delivery, source, terminal_facts)?;
+    freeze_delivery_candidate(
+        delivery,
+        &FreezeCandidateFacts {
+            git_snapshot,
+            terminal_outcome,
+        },
+    )
+}
+
+pub(super) fn validated_git_snapshot_from_source(
+    delivery: &Delivery,
+    source: &ValidatedGitSourceArtifact,
+    terminal_facts: &DeliveryTerminalOutcomeFacts,
+) -> Result<(ValidatedGitSnapshotFact, VerifiedTerminalOutcome), DeliveryValidationError> {
     if delivery.snapshot().spec.repository.kind != super::RepositoryKind::LocalGit
         || delivery.snapshot().spec.repository.locator != source.repository_locator()
         || delivery.snapshot().spec.base_revision != source.requested_base_revision()
@@ -581,13 +635,81 @@ pub fn freeze_delivery_candidate_from_source(
         validation_seal: [0; 32],
     };
     git_snapshot.validation_seal = seal_git_snapshot(&git_snapshot)?;
-    freeze_delivery_candidate(
-        delivery,
-        &FreezeCandidateFacts {
-            git_snapshot,
-            terminal_outcome,
-        },
-    )
+    Ok((git_snapshot, terminal_outcome))
+}
+
+/// Rebinds the already-frozen writer Git facts to one read-only verification
+/// Job. Verification Workers consume the writer candidate checkout; they do
+/// not create a second candidate Artifact. The terminal identity still comes
+/// from the verification Job's sealed outcome and lease.
+pub(super) fn validated_git_snapshot_from_candidate(
+    delivery: &Delivery,
+    candidate: &FrozenDeliveryCandidate,
+    terminal_facts: &DeliveryTerminalOutcomeFacts,
+) -> Result<(ValidatedGitSnapshotFact, VerifiedTerminalOutcome), DeliveryValidationError> {
+    assert_frozen_candidate_current(delivery, candidate)?;
+    let terminal_outcome = terminal_facts
+        .verify_settled_success(delivery)
+        .map_err(|error| stale_candidate(&error.to_string()))?;
+    let verification_run = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == *terminal_outcome.stage_run_id())
+        .ok_or_else(|| stale_candidate("verification StageRun is missing"))?;
+    if verification_run.stage != DeliveryStage::Verifying
+        || verification_run.actor_type != StageRunActorType::Codex
+    {
+        return Err(stale_candidate(
+            "read-only candidate snapshot requires a Codex verification StageRun",
+        ));
+    }
+    let verification_binding = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .find(|binding| binding.stage_run_id == verification_run.id)
+        .ok_or_else(|| stale_candidate("verification SessionBinding is missing"))?;
+    let binding = exact_producer_binding(delivery, verification_run, &verification_binding.id)?;
+    let codex_thread_id = terminal_outcome
+        .codex_thread_id()
+        .cloned()
+        .ok_or_else(|| stale_candidate("verification CodexThread is missing"))?;
+    let last_event_sequence = u64::try_from(terminal_outcome.last_event_sequence().0)
+        .map_err(|_| invalid_candidate("verification terminal event sequence is invalid"))?;
+    let mut git_snapshot = ValidatedGitSnapshotFact {
+        stage_run_id: verification_run.id.clone(),
+        session_binding_id: binding.id.clone(),
+        product_session_id: binding.product_session_id.clone(),
+        execution_job_id: binding.execution_job_id.clone(),
+        attempt: verification_run.attempt,
+        lease_id: terminal_outcome.lease_id().clone(),
+        fencing_token: terminal_outcome.fencing_token().clone(),
+        worker_id: terminal_outcome.worker_id().clone(),
+        worker_instance_id: terminal_outcome.worker_instance_id().clone(),
+        worker_session_id: terminal_outcome.worker_session_id().clone(),
+        codex_thread_id,
+        repository: candidate.repository.clone(),
+        base_commit_id: candidate.base_commit_id.clone(),
+        base_tree_id: candidate.base_tree_id.clone(),
+        candidate_commit_id: candidate.candidate_commit_id.clone(),
+        candidate_tree_id: candidate.candidate_tree_id.clone(),
+        diff_sha256: candidate.diff_sha256.clone(),
+        changed_paths: candidate.changed_paths.clone(),
+        changed_hunks: candidate.changed_hunks.clone(),
+        // This is the writer's candidate Artifact identity, carried as the
+        // checkout source attestation rather than as a verifier-produced
+        // Artifact reference.
+        artifact_ref: candidate.producer_artifact_ref.clone(),
+        artifact_digest: candidate.producer_artifact_digest.clone(),
+        last_event_sequence,
+        finished_at_millis: terminal_outcome.finished_at_millis(),
+        validation_seal: [0; 32],
+    };
+    validate_git_snapshot(delivery, &git_snapshot)?;
+    validate_git_snapshot_shape(&git_snapshot)?;
+    git_snapshot.validation_seal = seal_git_snapshot(&git_snapshot)?;
+    Ok((git_snapshot, terminal_outcome))
 }
 
 fn source_path_facts(source: &ValidatedGitSourceArtifact) -> Vec<CandidatePathFact> {

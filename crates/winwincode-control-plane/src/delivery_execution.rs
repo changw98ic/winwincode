@@ -23,17 +23,20 @@ use winwincode_delivery::{
         Delivery, DeliveryStage, StageRunActorType, StageRunStatus, rework::ReworkAuthorization,
     },
 };
-use winwincode_domain::{RequestId, Sha256Digest};
+use winwincode_domain::{RequestId, SchemaVersion, Sha256Digest};
 use winwincode_execution_port::generated::{
-    DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope, DeliveryStageExecutionScope,
-    DeliveryStageExecutionScopeKind, ExecutionJob, ExecutionLimits, ExecutionScope,
-    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobCancelAckMessage, JobCancelAckMessageKind,
-    JobCancelAckMessageStatus,
+    DeliveryReworkAuthorizationScope, DeliveryReworkTargetScope,
+    DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
+    DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, ExecutionJob,
+    ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    JobCancelAckMessage, JobCancelAckMessageKind, JobCancelAckMessageStatus,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryExecutionConfig {
     pub payload_digest: Sha256Digest,
+    /// Exact frozen writer candidate supplied only to verification Jobs.
+    pub candidate_ref: Option<String>,
     pub workspace: ExecutionWorkspace,
     pub limits: ExecutionLimits,
 }
@@ -47,18 +50,22 @@ pub struct PendingDeliveryExecution {
 }
 
 impl PendingDeliveryExecution {
+    #[must_use]
     pub fn request_id(&self) -> &RequestId {
         &self.request_id
     }
 
+    #[must_use]
     pub fn delivery(&self) -> &Delivery {
         &self.stage_transition.delivery
     }
 
+    #[must_use]
     pub fn stage_transition(&self) -> &StageAdvanceResult {
         &self.stage_transition
     }
 
+    #[must_use]
     pub fn job(&self) -> &ExecutionJob {
         &self.job
     }
@@ -115,7 +122,7 @@ pub trait DeliveryExecutionTransaction {
 }
 
 /// `ExecutionPort` adapter called only after the outer transaction commits.
-pub trait ExecutionJobDispatcher {
+pub trait ExecutionJobDispatcher: Send {
     /// Sends or offers one immutable generated `ExecutionJob`.
     ///
     /// # Errors
@@ -162,6 +169,7 @@ pub enum DeliveryExecutionError {
 }
 
 impl DeliveryExecutionError {
+    #[must_use]
     pub fn committed_receipt(&self) -> Option<&DeliveryExecutionCommitReceipt> {
         match self {
             Self::CommittedPayloadInvalid { commit, .. }
@@ -229,7 +237,9 @@ pub fn prepare_delivery_advance(
             "Delivery stage attempt exceeds the ExecutionPort range".to_owned(),
         )
     })?;
-    let (goal, payload_digest, rework_authorization) = execution_payload(intent, &config)?;
+    let stage_input = delivery_stage_input(&result.delivery, intent, &config)?;
+    let (goal, payload_digest, rework_authorization) =
+        execution_payload(intent, &config, &stage_input)?;
     let job = ExecutionJob {
         attempt,
         execution_profile: intent.role.clone(),
@@ -245,6 +255,7 @@ pub fn prepare_delivery_advance(
             rework_authorization,
             stage_run_id: intent.stage_run_id.clone(),
         }),
+        stage_input: Some(stage_input),
         workspace: config.workspace,
     };
     validate_request_id(&request_id)?;
@@ -406,6 +417,7 @@ fn validate_dispatch_intent(
 fn execution_payload(
     intent: &ExecutionIntent,
     config: &DeliveryExecutionConfig,
+    stage_input: &DeliveryStageInput,
 ) -> Result<
     (
         String,
@@ -418,10 +430,11 @@ fn execution_payload(
         (DeliveryStage::Reworking, Some(authorization)) => {
             validate_rework_dispatch_scope(intent, config, authorization)?;
             let authorization_scope = execution_rework_scope(authorization);
-            let payload_digest = authorized_payload_digest(
+            let payload_digest = stage_payload_digest(
                 &intent.goal,
                 &config.payload_digest,
-                &authorization_scope,
+                stage_input,
+                Some(&authorization_scope),
             )?;
             Ok((
                 intent.goal.clone(),
@@ -435,8 +448,111 @@ fn execution_payload(
         (_, Some(_)) => Err(DeliveryExecutionError::InvalidEffect(
             "non-reworking ExecutionJob cannot carry a rework authorization".to_owned(),
         )),
-        (_, None) => Ok((intent.goal.clone(), config.payload_digest.clone(), None)),
+        (_, None) => Ok((
+            intent.goal.clone(),
+            stage_payload_digest(&intent.goal, &config.payload_digest, stage_input, None)?,
+            None,
+        )),
     }
+}
+
+fn delivery_stage_input(
+    delivery: &Delivery,
+    intent: &ExecutionIntent,
+    config: &DeliveryExecutionConfig,
+) -> Result<DeliveryStageInput, DeliveryExecutionError> {
+    let snapshot = delivery.snapshot();
+    let spec = &snapshot.spec;
+    let delivery_spec_revision = i64::try_from(spec.revision).map_err(|_| {
+        DeliveryExecutionError::InvalidEffect(
+            "DeliverySpec revision exceeds the ExecutionPort range".to_owned(),
+        )
+    })?;
+    let task = intent
+        .delivery_task_id
+        .as_ref()
+        .map(|task_id| {
+            snapshot
+                .tasks
+                .iter()
+                .find(|task| &task.id == task_id)
+                .ok_or_else(|| {
+                    DeliveryExecutionError::InvalidEffect(
+                        "Delivery stage input task is missing from the sealed Delivery".to_owned(),
+                    )
+                })
+                .map(|task| DeliveryStageTaskInput {
+                    acceptance_criterion_ids: task
+                        .acceptance_criterion_ids
+                        .iter()
+                        .map(|id| id.0.clone())
+                        .collect(),
+                    goal: task.goal.clone(),
+                    task_id: task.id.clone(),
+                    title: task.title.clone(),
+                })
+        })
+        .transpose()?;
+    let candidate_ref = match intent.stage {
+        DeliveryStage::Clarifying | DeliveryStage::Planning | DeliveryStage::Executing => {
+            if config.candidate_ref.is_some() {
+                return Err(DeliveryExecutionError::InvalidEffect(
+                    "non-verification stage cannot receive a frozen candidate".to_owned(),
+                ));
+            }
+            None
+        }
+        DeliveryStage::Verifying => Some(config.candidate_ref.clone().ok_or_else(|| {
+            DeliveryExecutionError::InvalidEffect(
+                "verification stage is missing its exact frozen candidate".to_owned(),
+            )
+        })?),
+        DeliveryStage::Reworking => {
+            if config.candidate_ref.is_some() {
+                return Err(DeliveryExecutionError::InvalidEffect(
+                    "rework candidate must come from its sealed authorization".to_owned(),
+                ));
+            }
+            Some(
+                intent
+                    .rework_authorization()
+                    .ok_or_else(|| {
+                        DeliveryExecutionError::InvalidEffect(
+                            "rework stage is missing its sealed candidate".to_owned(),
+                        )
+                    })?
+                    .candidate_ref()
+                    .to_owned(),
+            )
+        }
+        DeliveryStage::PlanReview | DeliveryStage::DeliveryReview => {
+            return Err(DeliveryExecutionError::InvalidEffect(
+                "human review stage cannot create a Delivery ExecutionJob".to_owned(),
+            ));
+        }
+    };
+    Ok(DeliveryStageInput {
+        acceptance_criteria: spec
+            .acceptance_criteria
+            .iter()
+            .map(|criterion| DeliveryStageAcceptanceCriterionInput {
+                criterion_id: criterion.id.0.clone(),
+                description: criterion.description.clone(),
+                required: criterion.required,
+                verification_method: criterion.verification_method.clone(),
+            })
+            .collect(),
+        candidate_ref,
+        constraints: spec.constraints.clone(),
+        delivery_spec_id: spec.id.0.clone(),
+        delivery_spec_revision,
+        goal: spec.goal.clone(),
+        out_of_scope: spec.out_of_scope.clone(),
+        schema_version: SchemaVersion::WinwincodeV1,
+        scope: spec.scope.clone(),
+        task,
+        title: spec.title.clone(),
+    })
 }
 
 fn execution_rework_scope(authorization: &ReworkAuthorization) -> DeliveryReworkAuthorizationScope {
@@ -472,19 +588,23 @@ fn execution_rework_scope(authorization: &ReworkAuthorization) -> DeliveryRework
     }
 }
 
-fn authorized_payload_digest(
+fn stage_payload_digest(
     base_goal: &str,
     base_payload_digest: &Sha256Digest,
-    authorization: &DeliveryReworkAuthorizationScope,
+    stage_input: &DeliveryStageInput,
+    authorization: Option<&DeliveryReworkAuthorizationScope>,
 ) -> Result<Sha256Digest, DeliveryExecutionError> {
-    let encoded =
-        serde_json::to_vec(&(base_goal, base_payload_digest, authorization)).map_err(|error| {
+    if !sha256_digest(&base_payload_digest.0) {
+        return Err(invalid_execution_value("executionJob.payloadDigest"));
+    }
+    let encoded = serde_json::to_vec(&(base_goal, base_payload_digest, stage_input, authorization))
+        .map_err(|error| {
             DeliveryExecutionError::InvalidEffect(format!(
-                "rework authorization cannot be encoded: {error}"
+                "Delivery stage input cannot be encoded: {error}"
             ))
         })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"winwincode/rework-execution-payload/v1\0");
+    hasher.update(b"winwincode/delivery-stage-execution-payload/v1\0");
     hasher.update(encoded);
     Ok(Sha256Digest(format!("sha256:{:x}", hasher.finalize())))
 }
@@ -602,7 +722,7 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
         ),
         (
             "executionJob.workspace.writeMode",
-            job.workspace.write_mode == ExecutionWorkspaceWriteMode::Candidate,
+            delivery_role_write_mode_valid(job),
         ),
         (
             "executionJob.executionProfile",
@@ -629,13 +749,185 @@ fn validate_execution_job(job: &ExecutionJob) -> Result<(), DeliveryExecutionErr
     if let Some(field) = rework_scope_error {
         return Err(invalid_execution_value(field));
     }
+    validate_delivery_stage_input(job)?;
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "every structured authorization field stays visibly fail-closed at the Worker boundary"
-)]
+fn validate_delivery_stage_input(job: &ExecutionJob) -> Result<(), DeliveryExecutionError> {
+    let ExecutionScope::DeliveryStageExecutionScope(scope) = &job.scope else {
+        return Err(invalid_execution_value("executionJob.scope.kind"));
+    };
+    let input = job
+        .stage_input
+        .as_ref()
+        .ok_or_else(|| invalid_execution_value("executionJob.stageInput"))?;
+    let criterion_ids = input
+        .acceptance_criteria
+        .iter()
+        .map(|criterion| criterion.criterion_id.as_str())
+        .collect::<HashSet<_>>();
+    let criteria_valid = delivery_stage_criteria_valid(input, &criterion_ids);
+    let task_valid = delivery_stage_task_valid(input, scope, &criterion_ids);
+    let candidate_valid = delivery_stage_candidate_valid(input);
+    let shape_valid = delivery_stage_role_shape_valid(job, input, scope);
+    for (field, valid) in [
+        (
+            "executionJob.stageInput.schemaVersion",
+            input.schema_version == SchemaVersion::WinwincodeV1,
+        ),
+        (
+            "executionJob.stageInput.deliverySpecId",
+            portable_execution_identifier(&input.delivery_spec_id),
+        ),
+        (
+            "executionJob.stageInput.deliverySpecRevision",
+            (1..=9_007_199_254_740_991).contains(&input.delivery_spec_revision),
+        ),
+        (
+            "executionJob.stageInput.title",
+            bounded_length(&input.title, 1, 256),
+        ),
+        (
+            "executionJob.stageInput.goal",
+            bounded_length(&input.goal, 1, 20_000),
+        ),
+        (
+            "executionJob.stageInput.scope",
+            nonempty_unique_texts(&input.scope),
+        ),
+        (
+            "executionJob.stageInput.outOfScope",
+            unique_texts(&input.out_of_scope),
+        ),
+        (
+            "executionJob.stageInput.constraints",
+            unique_texts(&input.constraints),
+        ),
+        ("executionJob.stageInput.acceptanceCriteria", criteria_valid),
+        ("executionJob.stageInput.task", task_valid),
+        ("executionJob.stageInput.candidateRef", candidate_valid),
+        ("executionJob.stageInput.roleShape", shape_valid),
+    ] {
+        if !valid {
+            return Err(invalid_execution_value(field));
+        }
+    }
+    Ok(())
+}
+
+fn delivery_stage_criteria_valid(
+    input: &DeliveryStageInput,
+    criterion_ids: &HashSet<&str>,
+) -> bool {
+    !input.acceptance_criteria.is_empty()
+        && input.acceptance_criteria.len() <= 1_000
+        && input
+            .acceptance_criteria
+            .iter()
+            .any(|criterion| criterion.required)
+        && input.acceptance_criteria.iter().all(|criterion| {
+            portable_execution_identifier(&criterion.criterion_id)
+                && bounded_length(&criterion.description, 1, 20_000)
+                && criterion
+                    .verification_method
+                    .as_deref()
+                    .is_none_or(|method| bounded_length(method, 1, 20_000))
+        })
+        && criterion_ids.len() == input.acceptance_criteria.len()
+}
+
+fn delivery_stage_task_valid(
+    input: &DeliveryStageInput,
+    scope: &DeliveryStageExecutionScope,
+    criterion_ids: &HashSet<&str>,
+) -> bool {
+    input.task.as_ref().is_none_or(|task| {
+        scope.delivery_task_id.as_ref() == Some(&task.task_id)
+            && bounded_length(&task.title, 1, 256)
+            && bounded_length(&task.goal, 1, 20_000)
+            && !task.acceptance_criterion_ids.is_empty()
+            && task.acceptance_criterion_ids.len() <= 1_000
+            && task
+                .acceptance_criterion_ids
+                .iter()
+                .all(|criterion| criterion_ids.contains(criterion.as_str()))
+            && task
+                .acceptance_criterion_ids
+                .iter()
+                .collect::<HashSet<_>>()
+                .len()
+                == task.acceptance_criterion_ids.len()
+    })
+}
+
+fn delivery_stage_candidate_valid(input: &DeliveryStageInput) -> bool {
+    input.candidate_ref.as_deref().is_none_or(|candidate| {
+        candidate
+            .strip_prefix("git-candidate:sha256:")
+            .is_some_and(lowercase_sha256)
+    })
+}
+
+fn delivery_stage_role_shape_valid(
+    job: &ExecutionJob,
+    input: &DeliveryStageInput,
+    scope: &DeliveryStageExecutionScope,
+) -> bool {
+    let goal_matches_task = input
+        .task
+        .as_ref()
+        .is_some_and(|task| job.goal == task.goal);
+    match job.execution_profile.as_str() {
+        "requirements" | "planner" => {
+            input.task.is_none()
+                && scope.delivery_task_id.is_none()
+                && input.candidate_ref.is_none()
+                && job.goal == input.goal
+        }
+        "executor" => input.task.is_some() && input.candidate_ref.is_none() && goal_matches_task,
+        "reviewer" | "verifier" | "adversarial-verifier" => {
+            input.task.is_some() && input.candidate_ref.is_some() && goal_matches_task
+        }
+        "remediator" => {
+            input.task.is_some()
+                && input.candidate_ref.as_ref()
+                    == scope
+                        .rework_authorization
+                        .as_ref()
+                        .map(|authorization| &authorization.candidate_ref)
+                && goal_matches_task
+        }
+        _ => false,
+    }
+}
+
+fn delivery_role_write_mode_valid(job: &ExecutionJob) -> bool {
+    match job.execution_profile.as_str() {
+        "executor" | "remediator" => {
+            job.workspace.write_mode == ExecutionWorkspaceWriteMode::Candidate
+        }
+        "requirements"
+        | "solution"
+        | "planner"
+        | "reviewer"
+        | "verifier"
+        | "adversarial-verifier" => {
+            job.workspace.write_mode == ExecutionWorkspaceWriteMode::ReadOnly
+        }
+        _ => false,
+    }
+}
+
+fn nonempty_unique_texts(values: &[String]) -> bool {
+    !values.is_empty() && unique_texts(values)
+}
+
+fn unique_texts(values: &[String]) -> bool {
+    values.len() <= 1_000
+        && values.iter().all(|value| bounded_length(value, 1, 20_000))
+        && values.iter().collect::<HashSet<_>>().len() == values.len()
+}
+
 fn delivery_rework_scope_error(
     job: &ExecutionJob,
     scope: &DeliveryStageExecutionScope,
@@ -647,6 +939,14 @@ fn delivery_rework_scope_error(
     let Some(task_id) = scope.delivery_task_id.as_ref() else {
         return Some("executionJob.scope.deliveryTaskId");
     };
+    delivery_rework_header_error(job, authorization)
+        .or_else(|| delivery_rework_targets_error(task_id, authorization))
+}
+
+fn delivery_rework_header_error(
+    job: &ExecutionJob,
+    authorization: &DeliveryReworkAuthorizationScope,
+) -> Option<&'static str> {
     for (field, valid) in [
         (
             "executionJob.executionProfile",
@@ -692,6 +992,13 @@ fn delivery_rework_scope_error(
             return Some(field);
         }
     }
+    None
+}
+
+fn delivery_rework_targets_error(
+    task_id: &winwincode_domain::DeliveryTaskId,
+    authorization: &DeliveryReworkAuthorizationScope,
+) -> Option<&'static str> {
     let mut targets = HashSet::with_capacity(authorization.targets.len());
     for target in &authorization.targets {
         let key = (
@@ -928,6 +1235,61 @@ mod tests {
     use super::*;
     use winwincode_domain::DeliveryTaskId;
 
+    fn prepared_execution_job() -> ExecutionJob {
+        serde_json::from_slice(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/prepared-delivery-execution-job.json"
+        )))
+        .expect("canonical prepared Delivery ExecutionJob fixture")
+    }
+
+    fn assert_stage_input_rejected(job: &ExecutionJob, field: &str) {
+        assert_eq!(
+            validate_delivery_stage_input(job).expect_err("invalid sealed stage input"),
+            invalid_execution_value(field)
+        );
+    }
+
+    #[test]
+    fn sealed_stage_input_validator_accepts_only_the_exact_executor_shape() {
+        let job = prepared_execution_job();
+        validate_delivery_stage_input(&job).expect("canonical sealed stage input");
+
+        let mut missing = job.clone();
+        missing.stage_input = None;
+        assert_stage_input_rejected(&missing, "executionJob.stageInput");
+
+        let mut foreign_criterion = job.clone();
+        foreign_criterion
+            .stage_input
+            .as_mut()
+            .expect("stage input")
+            .task
+            .as_mut()
+            .expect("task")
+            .acceptance_criterion_ids = vec!["criterion-foreign".into()];
+        assert_stage_input_rejected(&foreign_criterion, "executionJob.stageInput.task");
+
+        let mut candidate_on_writer = job.clone();
+        candidate_on_writer
+            .stage_input
+            .as_mut()
+            .expect("stage input")
+            .candidate_ref = Some(format!("git-candidate:sha256:{}", "a".repeat(64)));
+        assert_stage_input_rejected(&candidate_on_writer, "executionJob.stageInput.roleShape");
+
+        let mut foreign_task = job.clone();
+        let ExecutionScope::DeliveryStageExecutionScope(scope) = &mut foreign_task.scope else {
+            panic!("Delivery fixture scope");
+        };
+        scope.delivery_task_id = Some(DeliveryTaskId("dtk_00000000000000000000000007".into()));
+        assert_stage_input_rejected(&foreign_task, "executionJob.stageInput.task");
+
+        let mut foreign_goal = job;
+        foreign_goal.goal = "Execute an unsealed goal.".into();
+        assert_stage_input_rejected(&foreign_goal, "executionJob.stageInput.roleShape");
+    }
+
     fn authorization_scope(file_path: &str) -> DeliveryReworkAuthorizationScope {
         DeliveryReworkAuthorizationScope {
             authorization_digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
@@ -947,14 +1309,38 @@ mod tests {
         }
     }
 
+    fn stage_input() -> DeliveryStageInput {
+        DeliveryStageInput {
+            acceptance_criteria: vec![DeliveryStageAcceptanceCriterionInput {
+                criterion_id: "criterion-fixture".into(),
+                description: "The exact fixture behavior passes.".into(),
+                required: true,
+                verification_method: Some("Run the exact fixture check.".into()),
+            }],
+            candidate_ref: Some(format!("git-candidate:sha256:{}", "d".repeat(64))),
+            constraints: Vec::new(),
+            delivery_spec_id: "spec-fixture".into(),
+            delivery_spec_revision: 1,
+            goal: "Repair invitation".into(),
+            out_of_scope: Vec::new(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            scope: vec!["Invitation source".into()],
+            task: None,
+            title: "Repair invitation".into(),
+        }
+    }
+
     #[test]
     fn rework_authorization_is_structured_and_part_of_the_payload_digest() {
         let base_digest = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
         let first = authorization_scope("src/invitation.rs");
-        let first_digest = authorized_payload_digest("repair invitation", &base_digest, &first)
-            .expect("authorized payload");
-        let replayed_digest = authorized_payload_digest("repair invitation", &base_digest, &first)
-            .expect("deterministic replay payload");
+        let input = stage_input();
+        let first_digest =
+            stage_payload_digest("repair invitation", &base_digest, &input, Some(&first))
+                .expect("authorized payload");
+        let replayed_digest =
+            stage_payload_digest("repair invitation", &base_digest, &input, Some(&first))
+                .expect("deterministic replay payload");
         assert_eq!(first_digest, replayed_digest);
         let encoded = serde_json::to_value(&first).expect("structured authorization");
         assert_eq!(encoded["targets"][0]["filePath"], "src/invitation.rs");
@@ -965,12 +1351,28 @@ mod tests {
         );
 
         let second = authorization_scope("src/foreign.rs");
-        let second_digest = authorized_payload_digest("repair invitation", &base_digest, &second)
-            .expect("changed authorization payload");
+        let second_digest =
+            stage_payload_digest("repair invitation", &base_digest, &input, Some(&second))
+                .expect("changed authorization payload");
         assert_ne!(first_digest, second_digest);
-        let changed_goal =
-            authorized_payload_digest("repair another invitation", &base_digest, &first)
-                .expect("changed base goal");
+        let changed_goal = stage_payload_digest(
+            "repair another invitation",
+            &base_digest,
+            &input,
+            Some(&first),
+        )
+        .expect("changed base goal");
         assert_ne!(first_digest, changed_goal);
+
+        let mut changed_input = input;
+        changed_input.delivery_spec_revision += 1;
+        let changed_input_digest = stage_payload_digest(
+            "repair invitation",
+            &base_digest,
+            &changed_input,
+            Some(&first),
+        )
+        .expect("changed stage input");
+        assert_ne!(first_digest, changed_input_digest);
     }
 }

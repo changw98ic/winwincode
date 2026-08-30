@@ -2,11 +2,11 @@
 
 use serde_json::{Value, from_value};
 use winwincode_execution_port::generated::{
-    ApprovalDecisionMessageDecision, ApprovalDecisionMessageScope, ExecutionPortMessage,
-    InputResponseMessageStatus, JobCancelAckMessageStatus, JobCancelMessageReason,
-    JobDispatchResultMessageStatus, JobOutcomeAckMessageStatus, WorkerCapabilitySetPlatform,
-    WorkerHeartbeatAckMessageStatus, WorkerRegistrationResultMessageLeaseRecovery,
-    WorkerRegistrationResultMessageStatus,
+    ActionEnforcementDecision, ActionPolicyKind, ActionPolicyMode, ApprovalDecisionMessageDecision,
+    ApprovalDecisionMessageScope, ExecutionPortMessage, InputResponseMessageStatus,
+    JobCancelAckMessageStatus, JobCancelMessageReason, JobDispatchResultMessageStatus,
+    JobOutcomeAckMessageStatus, WorkerCapabilitySetPlatform, WorkerHeartbeatAckMessageStatus,
+    WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
 
 fn valid_messages() -> Vec<Value> {
@@ -23,7 +23,7 @@ fn valid_messages() -> Vec<Value> {
 #[test]
 fn every_canonical_execution_port_message_round_trips_through_the_shared_crate() {
     let messages = valid_messages();
-    assert_eq!(messages.len(), 26);
+    assert_eq!(messages.len(), 28);
 
     for message in messages {
         let kind = message["kind"].as_str().expect("message kind");
@@ -61,6 +61,10 @@ fn execution_port_inline_string_enums_reject_unknown_values() {
         ("input.response", "status"),
         ("approval.decision", "decision"),
         ("approval.decision", "scope"),
+        ("action.enforcement_request", "policyKind"),
+        ("action.enforcement_receipt", "policyKind"),
+        ("action.enforcement_receipt", "decision"),
+        ("action.enforcement_receipt", "policyMode"),
         ("job.cancel", "reason"),
         ("job.cancel_ack", "status"),
         ("job.outcome_ack", "status"),
@@ -76,6 +80,9 @@ fn execution_port_inline_string_enums_reject_unknown_values() {
     let _: fn(InputResponseMessageStatus) = |_| {};
     let _: fn(ApprovalDecisionMessageDecision) = |_| {};
     let _: fn(ApprovalDecisionMessageScope) = |_| {};
+    let _: fn(ActionPolicyKind) = |_| {};
+    let _: fn(ActionEnforcementDecision) = |_| {};
+    let _: fn(ActionPolicyMode) = |_| {};
     let _: fn(JobCancelMessageReason) = |_| {};
     let _: fn(JobCancelAckMessageStatus) = |_| {};
     let _: fn(JobOutcomeAckMessageStatus) = |_| {};

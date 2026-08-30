@@ -1,12 +1,12 @@
 # 发布 WinWinCode
 
-WinWinCode 以九个 npm 包发布：五个公共产品包和四个单平台原生包。GitHub Actions 为四个 macOS/Linux 目标分别构建原生证据，产品门禁再把它们与当前真实 Delivery 结果绑定到同一源码 commit。
+WinWinCode 以十个 npm 包发布：六个公共产品包和四个单平台原生包。GitHub Actions 为四个 macOS/Linux 目标分别构建原生证据，产品门禁再把它们与当前真实 Delivery 结果绑定到同一源码 commit。
 
 本手册负责版本、候选冻结、发布动作和回滚。证据目录和门禁字段见 [产品发布门禁](release-gate.md)。
 
 ## 1. 确定版本与变化
 
-根 `package.json` 是产品版本来源。以下命令会把同一个语义版本写入根清单和全部九个产品包清单：
+根 `package.json` 是产品版本来源。以下命令会把同一个语义版本写入根清单和全部十个产品包清单：
 
 ```bash
 corepack pnpm version:set VERSION
@@ -74,7 +74,7 @@ corepack pnpm fixture:delivery
 
 分别选择 `platform=macos` 和 `platform=linux`。每个 job 必须指向冻结候选的同一 commit，并通过 `scripts/run-native-release-gate.mjs`。
 
-下载四个 artifact 时保持每个目标一个目录。五个公共包会在四个目录重复出现；产品门禁负责核对它们，不要在门禁前覆盖或手工合并。
+下载四个 artifact 时保持每个目标一个目录。六个公共包会在四个目录重复出现；产品门禁负责核对它们，不要在门禁前覆盖或手工合并。
 
 ## 5. 运行产品门禁
 
@@ -90,9 +90,9 @@ corepack pnpm verify:release \
 
 发布批准人检查 `status: passed`、四个目标、相同源码身份、包校验和、真实 Delivery、可重算测量、Apache-2.0 边界和第三方通知。这个命令只写审核报告，不发布 npm、Git tag 或 GitHub Release。
 
-## 6. 发布九个包
+## 6. 发布十个包
 
-从已通过报告引用的四个平台目录中选择 tarball。五个公共包各取一份；四个原生包各取对应目标的一份。再次按报告中的 SHA-256 核对后，按依赖顺序发布：
+从已通过报告引用的四个平台目录中选择 tarball。六个公共包各取一份；四个原生包各取对应目标的一份。再次按报告中的 SHA-256 核对后，按依赖顺序发布：
 
 ```text
 1. @winwincode/contracts
@@ -103,10 +103,11 @@ corepack pnpm verify:release \
 6. @winwincode/native
 7. @winwincode/strongflow
 8. @winwincode/dsh-profile
-9. winwincode
+9. @winwincode/client
+10. winwincode
 ```
 
-每个包使用已验证 tarball 执行 `npm publish PACKAGE_TARBALL --access public`。不要从工作目录重新打包。发布完成后确认 npm 上九个包的版本、完整性摘要和公开访问状态，再创建与同一源码 commit 对应的 Git tag 和 GitHub Release，并附上发布说明、支持平台、迁移说明及产品门禁报告摘要。
+每个包使用已验证 tarball 执行 `npm publish PACKAGE_TARBALL --access public`。不要从工作目录重新打包。发布完成后确认 npm 上十个包的版本、完整性摘要和公开访问状态，再创建与同一源码 commit 对应的 Git tag 和 GitHub Release，并附上发布说明、支持平台、迁移说明及产品门禁报告摘要。
 
 ## 7. 发布后检查
 

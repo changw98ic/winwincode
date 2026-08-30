@@ -1,62 +1,34 @@
 import { createHash } from 'node:crypto'
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-} from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
 export const PRODUCT_RELEASE_SCHEMA_VERSION = 1
 
+/** JavaScript packages that are part of the deployable Client surface. */
 export const PRODUCT_PACKAGE_DIRECTORIES = Object.freeze([
-  'apps/host',
+  'apps/client',
   'packages/contracts',
-  'packages/dsh-profile',
-  'packages/native',
-  'packages/strongflow',
-  'packages/native-darwin-arm64',
-  'packages/native-darwin-x64',
-  'packages/native-linux-arm64',
-  'packages/native-linux-x64',
-])
-
-export const PRODUCT_COMMON_RELEASE_PACKAGE_DIRECTORIES = Object.freeze([
-  'apps/host',
-  'packages/contracts',
-  'packages/dsh-profile',
-  'packages/native',
   'packages/strongflow',
 ])
 
-export const NATIVE_RELEASE_REQUIRED_CHECKS = Object.freeze([
+export const PRODUCT_COMMON_RELEASE_PACKAGE_DIRECTORIES = PRODUCT_PACKAGE_DIRECTORIES
+
+export const PRODUCT_RELEASE_REQUIRED_CHECKS = Object.freeze([
   'format',
   'lint-and-typecheck',
-  'cpb-design-only-boundary',
-  'typescript-and-rust-tests',
-  'runtime-filesystem-cleanup',
-  'upstream-source-lock',
-  'release-native-package',
-  'publish-file-allowlists',
-  'clean-native-install-and-sandbox',
-  'installed-dsh-chat-and-strongflow-host',
-  'full-delivery-human-review-rework',
-  'recovery-and-semantic-projection',
-  'apache-2.0-and-third-party-notices',
+  'rust-tests',
+  'product-build',
+  'api-production-vertical',
+  'clean-install',
 ])
 
 const releaseRootFiles = Object.freeze([
   '.gitignore',
-  '.node-version',
-  'AGENTS.md',
-  'CLAUDE.md',
-  'CODE_OF_CONDUCT.md',
-  'CONTRIBUTING.md',
   'Cargo.lock',
   'Cargo.toml',
   'LICENSE',
   'NOTICE',
   'README.md',
-  'SECURITY.md',
   'THIRD_PARTY_NOTICES.md',
   'package.json',
   'pnpm-lock.yaml',
@@ -68,24 +40,19 @@ const releaseRootFiles = Object.freeze([
 ])
 
 const releaseRoots = Object.freeze([
-  '.cargo',
-  '.github',
   'apps',
   'crates',
-  'docs',
   'packages',
   'scripts',
-  'tests',
   'upstream',
 ])
 
 const excludedDirectoryNames = new Set([
+  '.beads',
   '.cache',
   '.git',
   'dist',
   'node_modules',
-  'prebuild',
-  'prebuilds',
   'target',
 ])
 
@@ -144,20 +111,10 @@ export function productPackageManifests(root) {
   })))
 }
 
-export function projectRepositorySlug(repository) {
-  if (typeof repository !== 'string') return null
-  const match = repository.match(/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/u)
-  return match?.[1]?.toLowerCase() ?? null
-}
-
 export function verifyReleaseLegalBoundary(root) {
   const errors = []
   const workspace = readCanonicalJson(join(root, 'package.json'))
-  const sourceLock = readCanonicalJson(join(root, 'upstream', 'sources.lock.json'))
   if (workspace.license !== 'Apache-2.0') errors.push('root package license is not Apache-2.0')
-  if (sourceLock.project?.license !== 'Apache-2.0') {
-    errors.push('source lock project license is not Apache-2.0')
-  }
   for (const { directory, manifest } of productPackageManifests(root)) {
     if (manifest.license !== 'Apache-2.0') {
       errors.push(`${directory} license is not Apache-2.0`)
@@ -176,9 +133,6 @@ export function verifyReleaseLegalBoundary(root) {
   if (existsSync(licensePath)
     && !readFileSync(licensePath, 'utf8').includes('Apache License')) {
     errors.push('root LICENSE is not the Apache License text')
-  }
-  if (!sourceLock.licenseObligations?.noDualProjectLicense) {
-    errors.push('source lock does not prohibit a dual project license')
   }
   return Object.freeze(errors)
 }

@@ -52,7 +52,6 @@ pub struct DeliverySpecFacts {
     criterion_verification_methods: Vec<(String, String)>,
 }
 
-#[cfg(feature = "test-support")]
 pub(crate) struct TrustedDeliverySpecFacts {
     pub(crate) now_millis: u64,
     pub(crate) repository: RepositoryRef,
@@ -64,7 +63,6 @@ pub(crate) struct TrustedDeliverySpecFacts {
     pub(crate) criterion_verification_methods: Vec<(String, String)>,
 }
 
-#[cfg(feature = "test-support")]
 impl DeliverySpecFacts {
     pub(crate) fn from_trusted_adapter(facts: TrustedDeliverySpecFacts) -> Self {
         Self {
@@ -96,13 +94,6 @@ pub struct DeliveryCommandFacts {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(
-        dead_code,
-        reason = "production authority variants stay sealed until a trusted repository adapter is installed"
-    )
-)]
 enum DeliveryCommandAuthority {
     Specification(Box<DeliverySpecFacts>),
     HumanAdvance(Box<StageAdvanceResult>),
@@ -110,7 +101,6 @@ enum DeliveryCommandAuthority {
 }
 
 impl DeliveryCommandFacts {
-    #[cfg(feature = "test-support")]
     pub(crate) fn specification_from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -125,7 +115,6 @@ impl DeliveryCommandFacts {
         )
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn advance_from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -142,7 +131,6 @@ impl DeliveryCommandFacts {
         )
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn attention_from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -159,7 +147,6 @@ impl DeliveryCommandFacts {
         )
     }
 
-    #[cfg(feature = "test-support")]
     fn from_trusted_adapter(
         command: &CommandEnvelope,
         repository_scope: RepositoryScope,
@@ -232,6 +219,7 @@ pub(crate) fn execute(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
     facts: &DeliveryCommandFacts,
+    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
     if !matches!(
         command.command,
@@ -257,6 +245,12 @@ pub(crate) fn execute(
         return Ok(receipt);
     }
     facts.validate_for(scope, &command_digest)?;
+    if command.command != CommandName::DeliveryAdvance && handoff.is_some() {
+        return Err(StorageError::invalid_input(
+            "terminal handoff can only be consumed by delivery.advance",
+        )
+        .into());
+    }
     let parsed = parse_command(command)?;
 
     match parsed {
@@ -269,31 +263,15 @@ pub(crate) fn execute(
             &command_digest,
             facts,
         ),
-        ParsedCommand::UpdateSpec(payload) => update_spec(
-            storage,
-            command,
-            scope,
-            payload,
-            &receipt_identity,
-            &command_digest,
-            facts,
-        ),
-        ParsedCommand::Advance(payload) => advance_human_stage(
-            storage,
-            command,
-            &payload,
-            &receipt_identity,
-            &command_digest,
-            facts,
-        ),
-        ParsedCommand::ResolveAttention(payload) => resolve_business_attention(
-            storage,
-            command,
-            &payload,
-            &receipt_identity,
-            &command_digest,
-            facts,
-        ),
+        ParsedCommand::UpdateSpec(payload) => {
+            update_spec(storage, command, scope, payload, &command_digest, facts)
+        }
+        ParsedCommand::Advance(payload) => {
+            advance_human_stage(storage, command, &payload, &command_digest, facts, handoff)
+        }
+        ParsedCommand::ResolveAttention(payload) => {
+            resolve_business_attention(storage, command, &payload, &command_digest, facts)
+        }
     }
 }
 
@@ -420,11 +398,11 @@ fn create(
     match commit_mutation(
         storage,
         command,
-        receipt_identity,
         &payload.delivery_id,
         journal,
         &mutation,
         DeliveryChangeKind::Created,
+        None,
     ) {
         Ok(receipt) => Ok(receipt),
         Err(error)
@@ -497,7 +475,6 @@ fn update_spec(
     command: &CommandEnvelope,
     scope: &RepositoryScope,
     payload: DeliveryUpdateSpecPayload,
-    receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     facts: &DeliveryCommandFacts,
 ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
@@ -562,11 +539,11 @@ fn update_spec(
     Ok(commit_mutation(
         storage,
         command,
-        receipt_identity,
         &payload.delivery_id,
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
+        None,
     )?)
 }
 
@@ -574,9 +551,9 @@ fn advance_human_stage(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
     payload: &DeliveryAdvancePayload,
-    receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     facts: &DeliveryCommandFacts,
+    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
     let expected_revision = expected_revision(command)?;
     let (journal, current) = load_current(storage, &payload.delivery_id, command)?;
@@ -632,11 +609,11 @@ fn advance_human_stage(
     Ok(commit_mutation(
         storage,
         command,
-        receipt_identity,
         &payload.delivery_id,
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
+        handoff,
     )?)
 }
 
@@ -644,7 +621,6 @@ fn resolve_business_attention(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
     payload: &DeliveryResolveAttentionPayload,
-    receipt_identity: &ReceiptIdentity,
     command_digest: &Sha256Digest,
     facts: &DeliveryCommandFacts,
 ) -> Result<CommitReceipt, DeliveryCommandCommitError> {
@@ -725,11 +701,11 @@ fn resolve_business_attention(
     Ok(commit_mutation(
         storage,
         command,
-        receipt_identity,
         &payload.delivery_id,
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
+        None,
     )?)
 }
 
@@ -774,12 +750,13 @@ fn coordination_error(
 fn commit_mutation(
     storage: &mut dyn ProductStateStorage,
     command: &CommandEnvelope,
-    receipt_identity: &ReceiptIdentity,
     delivery_id: &DeliveryId,
     journal: StagedDeliveryJournal,
     mutation: &DeliveryStoreMutationResult,
     change_kind: DeliveryChangeKind,
+    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
 ) -> Result<CommitReceipt, StorageError> {
+    let (receipt_identity, _) = command_receipt(command)?;
     if mutation.replayed {
         return Err(StorageError::invalid_input(
             "Delivery journal replay is missing its scoped command receipt",
@@ -790,6 +767,8 @@ fn commit_mutation(
         delivery_id,
         mutation.snapshot.revision(),
         change_kind,
+        crate::instant_from_millis(mutation.snapshot.snapshot().updated_at_millis)?,
+        "delivery-command-transaction",
     )?;
     let mut commit = storage_commit(
         command,
@@ -806,10 +785,23 @@ fn commit_mutation(
             StorageError::invalid_input("new Delivery mutation did not stage a journal record")
         })?;
     commit = commit.with_journal_publication(publication);
+    if change_kind == DeliveryChangeKind::Created {
+        let Scope::RepositoryScope(scope) = &command.scope else {
+            return Err(StorageError::invalid_input(
+                "Delivery catalog entries require repository scope",
+            ));
+        };
+        commit = commit.with_state_mutation(
+            crate::delivery_application::delivery_catalog_mutation(scope, delivery_id)?,
+        );
+    }
+    if let Some(handoff) = handoff {
+        commit = commit.with_state_mutation(handoff.consumption());
+    }
     let receipt = storage.commit(&commit)?;
     validate_receipt(
         &receipt,
-        receipt_identity,
+        &receipt_identity,
         delivery_id,
         command,
         change_kind,

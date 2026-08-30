@@ -4,9 +4,9 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use winwincode_domain::{
-    CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, FencingToken, LeaseId, OrganizationId, ProductSessionId, ProjectId,
-    PublicationId, RepositoryId, RequestId, ServiceAccountId, Sha256Digest, StageRunId,
+    CodexThreadId, CredentialReferenceId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId, OrganizationId, ProductSessionId,
+    ProjectId, PublicationId, RepositoryId, RequestId, ServiceAccountId, Sha256Digest, StageRunId,
     SystemActorId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 
@@ -259,15 +259,23 @@ pub struct AuditAction {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_invocation: Option<AuditModelInvocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_reference_id: Option<CredentialReferenceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditActionKind {
+    Business,
+    Administration,
     Command,
     Approval,
     Policy,
+    Credential,
     WorkerLease,
+    Provider,
     ModelInvocation,
     DeliveryState,
     Publication,
@@ -358,6 +366,24 @@ impl AuditModelInvocation {
 }
 
 impl AuditAction {
+    /// Builds a business operation from one stable canonical name.
+    ///
+    /// # Errors
+    ///
+    /// Rejects arbitrary or unbounded text.
+    pub fn business(name: &str) -> Result<Self, AuditError> {
+        Self::new(AuditActionKind::Business, name)
+    }
+
+    /// Builds an administrative operation from one stable canonical name.
+    ///
+    /// # Errors
+    ///
+    /// Rejects arbitrary or unbounded text.
+    pub fn administration(name: &str) -> Result<Self, AuditError> {
+        Self::new(AuditActionKind::Administration, name)
+    }
+
     /// Builds a command action from one stable canonical name.
     ///
     /// # Errors
@@ -385,6 +411,31 @@ impl AuditAction {
         Self::new(AuditActionKind::Policy, name)
     }
 
+    /// Builds a secret-safe Credential operation from one stable canonical
+    /// name. Credential material has no representation in an audit action.
+    ///
+    /// # Errors
+    ///
+    /// Rejects arbitrary or unbounded text.
+    pub fn credential(
+        name: &str,
+        credential_reference_id: CredentialReferenceId,
+    ) -> Result<Self, AuditError> {
+        validate_token(name, "audit action name")?;
+        if !canonical_id(&credential_reference_id.0, "crd") {
+            return Err(AuditError::invalid(
+                "credential audit action identity is not canonical",
+            ));
+        }
+        Ok(Self {
+            kind: AuditActionKind::Credential,
+            name: name.to_owned(),
+            model_invocation: None,
+            credential_reference_id: Some(credential_reference_id),
+            provider_id: None,
+        })
+    }
+
     /// Builds a Worker lease action from one stable canonical name.
     ///
     /// # Errors
@@ -392,6 +443,24 @@ impl AuditAction {
     /// Rejects arbitrary or unbounded text.
     pub fn worker_lease(name: &str) -> Result<Self, AuditError> {
         Self::new(AuditActionKind::WorkerLease, name)
+    }
+
+    /// Builds a secret-safe Provider operation from one stable canonical
+    /// name. Provider requests and responses remain outside the audit event.
+    ///
+    /// # Errors
+    ///
+    /// Rejects arbitrary or unbounded text.
+    pub fn provider(provider_id: &str, name: &str) -> Result<Self, AuditError> {
+        validate_token(provider_id, "audit Provider identity")?;
+        validate_token(name, "audit action name")?;
+        Ok(Self {
+            kind: AuditActionKind::Provider,
+            name: name.to_owned(),
+            model_invocation: None,
+            credential_reference_id: None,
+            provider_id: Some(provider_id.to_owned()),
+        })
     }
 
     /// Builds a Delivery state action from one stable canonical name.
@@ -418,6 +487,8 @@ impl AuditAction {
             kind,
             name: name.to_owned(),
             model_invocation: None,
+            credential_reference_id: None,
+            provider_id: None,
         })
     }
 
@@ -432,6 +503,8 @@ impl AuditAction {
             kind: AuditActionKind::ModelInvocation,
             name: "model.invoke".to_owned(),
             model_invocation: Some(summary),
+            credential_reference_id: None,
+            provider_id: None,
         })
     }
 
@@ -450,16 +523,43 @@ impl AuditAction {
         self.model_invocation.as_ref()
     }
 
+    #[must_use]
+    pub const fn credential_reference_id(&self) -> Option<&CredentialReferenceId> {
+        self.credential_reference_id.as_ref()
+    }
+
+    #[must_use]
+    pub fn provider_id(&self) -> Option<&str> {
+        self.provider_id.as_deref()
+    }
+
     fn validate(&self) -> Result<(), AuditError> {
         validate_token(&self.name, "audit action name")?;
-        match (self.kind, &self.model_invocation) {
-            (AuditActionKind::ModelInvocation, Some(summary)) => summary.validate(),
-            (AuditActionKind::ModelInvocation, None) => Err(AuditError::invalid(
+        match (
+            self.kind,
+            &self.model_invocation,
+            &self.credential_reference_id,
+            &self.provider_id,
+        ) {
+            (AuditActionKind::ModelInvocation, Some(summary), None, None) => summary.validate(),
+            (AuditActionKind::Credential, None, Some(id), None) if canonical_id(&id.0, "crd") => {
+                Ok(())
+            }
+            (AuditActionKind::Provider, None, None, Some(provider_id)) => {
+                validate_token(provider_id, "audit Provider identity")
+            }
+            (AuditActionKind::ModelInvocation, None, None, None) => Err(AuditError::invalid(
                 "model invocation audit action requires its sealed summary",
             )),
-            (_, None) => Ok(()),
-            (_, Some(_)) => Err(AuditError::invalid(
-                "only a model invocation action may carry model summary facts",
+            (AuditActionKind::Credential, None, None, None) => Err(AuditError::invalid(
+                "Credential audit action requires its stable reference identity",
+            )),
+            (AuditActionKind::Provider, None, None, None) => Err(AuditError::invalid(
+                "Provider audit action requires its stable Provider identity",
+            )),
+            (_, None, None, None) => Ok(()),
+            _ => Err(AuditError::invalid(
+                "audit action carries facts from a different action category",
             )),
         }
     }

@@ -12,10 +12,10 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 
+import { WinWinCodeAgentFactoryFixture } from '../packages/dsh-profile/dist/agent-factory-test-support.js'
 import { strongFlowRoleSessionPolicy } from '../packages/contracts/dist/index.js'
 import {
   RuntimeSessionLedger,
-  WinWinCodeAgentFactory,
 } from '../packages/dsh-profile/dist/index.js'
 import {
   DshStrongFlowStageRuntime,
@@ -178,7 +178,7 @@ async function mount(home, kernel, persistenceRoot) {
   }
   let factory
   const plugin = (pluginCtx) => {
-    factory = new WinWinCodeAgentFactory(
+    factory = new WinWinCodeAgentFactoryFixture(
       pluginCtx,
       { home, roleId: 'chat' },
       () => kernel,

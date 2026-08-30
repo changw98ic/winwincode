@@ -57,6 +57,7 @@ impl FrameDirection {
             | "model.ack"
             | "input.request"
             | "approval.request"
+            | "action.enforcement_request"
             | "job.cancel_ack"
             | "job.outcome" => Ok(Self::WorkerToControlPlane),
             "worker.registration_result"
@@ -69,6 +70,7 @@ impl FrameDirection {
             | "model.chunk"
             | "input.response"
             | "approval.decision"
+            | "action.enforcement_receipt"
             | "job.cancel"
             | "job.outcome_ack" => Ok(Self::ControlPlaneToWorker),
             other => Err(FrameError::UnknownMessageKind(other.to_owned())),

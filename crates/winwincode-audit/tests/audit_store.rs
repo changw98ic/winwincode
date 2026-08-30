@@ -9,12 +9,13 @@ use std::sync::{Arc, Barrier};
 
 use winwincode_audit::{
     AuditAction, AuditActionKind, AuditActor, AuditErrorKind, AuditEvent, AuditEventId,
-    AuditModelInvocation, AuditOrigin, AuditOutcome, AuditPage, AuditRetention, AuditScope,
-    AuditState, AuditStore, AuditSubject,
+    AuditModelInvocation, AuditOrigin, AuditOutcome, AuditPage, AuditRecord, AuditRetention,
+    AuditScope, AuditState, AuditStore, AuditSubject,
 };
 use winwincode_domain::{
-    DeliveryId, LeaseId, OrganizationId, ProductSessionId, ProjectId, PublicationId, RepositoryId,
-    RequestId, ServiceAccountId, Sha256Digest, SystemActorId, UserId, WorkspaceId,
+    CredentialReferenceId, DeliveryId, LeaseId, OrganizationId, ProductSessionId, ProjectId,
+    PublicationId, RepositoryId, RequestId, ServiceAccountId, Sha256Digest, SystemActorId, UserId,
+    WorkspaceId,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -178,6 +179,14 @@ fn assert_retention_rows_are_immutable(database_path: &Path) {
         delete.is_err(),
         "audit event header delete must be rejected"
     );
+    let payload_update = connection.execute(
+        "UPDATE audit_payloads SET payload = X'7B7D' WHERE sequence = 2",
+        [],
+    );
+    assert!(
+        payload_update.is_err(),
+        "retained audit payload update must be rejected"
+    );
     let tombstone_update = connection.execute(
         "UPDATE audit_payload_tombstones SET pruned_at_millis = pruned_at_millis + 1 \
          WHERE sequence = 1",
@@ -228,9 +237,15 @@ fn state_change_survives_restart_with_one_verified_sequence() {
         );
         assert_eq!(record.event(), Some(&event));
         assert_eq!(record.previous_digest(), None);
-        store
+        let checkpoint = store
             .verify_organization(event.scope().organization_id())
             .expect("verify first audit chain");
+        assert_eq!(
+            checkpoint.organization_id(),
+            event.scope().organization_id()
+        );
+        assert_eq!(checkpoint.last_sequence(), 1);
+        assert_eq!(checkpoint.last_digest(), Some(record.event_digest()));
         record
     };
 
@@ -243,11 +258,43 @@ fn state_change_survives_restart_with_one_verified_sequence() {
             1_850_000_000_000,
         )
         .expect("read repository audit records");
-    assert_eq!(page.records(), &[first]);
+    assert_eq!(page.records(), std::slice::from_ref(&first));
     assert_eq!(page.next_sequence(), None);
-    store
+    assert_eq!(
+        store
+            .read_exact(
+                &event.scope().clone().into_access(),
+                event.event_id(),
+                1_850_000_000_000,
+            )
+            .expect("read exact repository audit record"),
+        Some(first.clone())
+    );
+    let foreign_repository = AuditScope::repository(
+        OrganizationId(id("org", '1')),
+        WorkspaceId(id("wsp", '2')),
+        ProjectId(id("prj", '3')),
+        RepositoryId(id("rep", '5')),
+    )
+    .expect("foreign repository audit scope");
+    assert_eq!(
+        store
+            .read_exact(
+                &foreign_repository.into_access(),
+                event.event_id(),
+                1_850_000_000_000,
+            )
+            .expect("foreign exact lookup is hidden"),
+        None
+    );
+    let restarted_checkpoint = store
         .verify_organization(event.scope().organization_id())
         .expect("verify audit chain after restart");
+    assert_eq!(restarted_checkpoint.last_sequence(), 1);
+    assert_eq!(
+        restarted_checkpoint.last_digest(),
+        Some(first.event_digest())
+    );
 }
 
 #[test]
@@ -455,6 +502,26 @@ fn read_authority_filters_every_scope_level_without_cross_tenant_payloads() {
     let other_page = read_fixture_page(&store, FixtureScope::OtherOrganization, 0, 100);
     assert_eq!(other_page.records().len(), 1);
     assert_eq!(other_page.records()[0].event(), Some(&events[6]));
+
+    let primary_checkpoint = store
+        .verify_organization(&organization)
+        .expect("verify primary organization chain");
+    assert_eq!(primary_checkpoint.last_sequence(), 6);
+    assert_eq!(
+        primary_checkpoint.last_digest(),
+        organization_page
+            .records()
+            .last()
+            .map(AuditRecord::event_digest)
+    );
+    let other_checkpoint = store
+        .verify_organization(fixture_scope(FixtureScope::OtherOrganization).organization_id())
+        .expect("verify isolated organization chain");
+    assert_eq!(other_checkpoint.last_sequence(), 1);
+    assert_eq!(
+        other_checkpoint.last_digest(),
+        Some(other_page.records()[0].event_digest())
+    );
 }
 
 #[test]
@@ -518,6 +585,9 @@ fn payload_or_chain_head_tampering_fails_closed() {
         store
     };
     let connection = rusqlite::Connection::open(store.database_path()).expect("inspect audit db");
+    connection
+        .execute("DROP TRIGGER audit_payloads_no_update", [])
+        .expect("simulate an out-of-band writer bypassing the immutable payload guard");
     connection
         .execute(
             "UPDATE audit_payloads SET payload = X'7B7D' WHERE sequence = 1",
@@ -641,9 +711,17 @@ fn payload_deletion_without_an_immutable_retention_tombstone_is_corruption() {
         store
     };
     let connection = rusqlite::Connection::open(store.database_path()).expect("inspect audit db");
+    let guarded_delete = connection.execute("DELETE FROM audit_payloads WHERE sequence = 1", []);
+    assert!(
+        guarded_delete.is_err(),
+        "payload deletion without a retention tombstone must be rejected"
+    );
+    connection
+        .execute("DROP TRIGGER audit_payloads_delete_requires_tombstone", [])
+        .expect("simulate an out-of-band writer bypassing the payload delete guard");
     connection
         .execute("DELETE FROM audit_payloads WHERE sequence = 1", [])
-        .expect("simulate unauthorized payload deletion");
+        .expect("tamper after bypassing the immutable payload delete guard");
     let error = store
         .verify_organization(event.scope().organization_id())
         .expect_err("missing retention tombstone must fail chain verification");
@@ -696,15 +774,29 @@ fn concurrent_distinct_events_form_one_gapless_organization_chain() {
         assert_eq!(pair[1].sequence(), pair[0].sequence() + 1);
         assert_eq!(pair[1].previous_digest(), Some(pair[0].event_digest()));
     }
-    store
+    let checkpoint = store
         .verify_organization(repository_scope().organization_id())
         .expect("verify gapless concurrent organization chain");
+    assert_eq!(checkpoint.last_sequence(), 8);
+    assert_eq!(
+        checkpoint.last_digest(),
+        page.records().last().map(AuditRecord::event_digest)
+    );
 }
 
-#[test]
-fn every_audit_category_and_actor_shape_uses_closed_structured_values() {
-    let directory = TestDirectory::new("closed-categories");
-    let actions = [
+fn closed_action_fixtures() -> Vec<(&'static str, AuditActionKind, AuditAction)> {
+    vec![
+        (
+            "business",
+            AuditActionKind::Business,
+            AuditAction::business("delivery.create").expect("business action"),
+        ),
+        (
+            "administration",
+            AuditActionKind::Administration,
+            AuditAction::administration("organization.member.remove")
+                .expect("administration action"),
+        ),
         (
             "command",
             AuditActionKind::Command,
@@ -721,9 +813,20 @@ fn every_audit_category_and_actor_shape_uses_closed_structured_values() {
             AuditAction::policy("repository.write").expect("policy action"),
         ),
         (
+            "credential",
+            AuditActionKind::Credential,
+            AuditAction::credential("credential.rotate", CredentialReferenceId(id("crd", 'X')))
+                .expect("credential action"),
+        ),
+        (
             "worker_lease",
             AuditActionKind::WorkerLease,
             AuditAction::worker_lease("lease.renew").expect("lease action"),
+        ),
+        (
+            "provider",
+            AuditActionKind::Provider,
+            AuditAction::provider("github", "provider.connection.open").expect("provider action"),
         ),
         (
             "model_invocation",
@@ -751,13 +854,19 @@ fn every_audit_category_and_actor_shape_uses_closed_structured_values() {
             AuditActionKind::Publication,
             AuditAction::publication("pull-request.create").expect("publication action"),
         ),
-    ];
+    ]
+}
+
+#[test]
+fn every_audit_category_and_actor_shape_uses_closed_structured_values() {
+    let directory = TestDirectory::new("closed-categories");
+    let actions = closed_action_fixtures();
     let actors = [
         AuditActor::User(UserId(id("usr", '6'))),
         AuditActor::ServiceAccount(ServiceAccountId(id("svc", '7'))),
         AuditActor::System(SystemActorId(id("sys", '8'))),
     ];
-    let tails = ['J', 'K', 'M', 'N', 'P', 'Q', 'R'];
+    let tails = ['J', 'K', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W'];
     let mut store = AuditStore::open(directory.path()).expect("open category audit store");
     for (index, ((expected_kind, expected_typed_kind, action), tail)) in
         actions.into_iter().zip(tails).enumerate()
@@ -777,6 +886,15 @@ fn every_audit_category_and_actor_shape_uses_closed_structured_values() {
         )
         .expect("valid category event");
         assert_eq!(event.action().kind(), expected_typed_kind);
+        if expected_typed_kind == AuditActionKind::Credential {
+            assert_eq!(
+                event.action().credential_reference_id(),
+                Some(&CredentialReferenceId(id("crd", 'X')))
+            );
+        }
+        if expected_typed_kind == AuditActionKind::Provider {
+            assert_eq!(event.action().provider_id(), Some("github"));
+        }
         let encoded = serde_json::to_value(&event).expect("encode category event");
         assert_eq!(encoded["action"]["kind"], expected_kind);
         store.append(&event).expect("append category event");

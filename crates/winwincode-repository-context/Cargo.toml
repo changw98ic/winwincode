@@ -1,0 +1,17 @@
+[package]
+name = "winwincode-repository-context"
+description = "Baseline-bound repository facts and local code-index capability reporting for WinWinCode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

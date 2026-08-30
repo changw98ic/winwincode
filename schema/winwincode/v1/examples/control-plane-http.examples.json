@@ -435,6 +435,9 @@
       "providerId": "deepseek",
       "displayName": "Team model credential",
       "secretState": "available",
+      "rotationVersion": 2,
+      "lastRotatedAt": "2026-08-24T09:55:00.000Z",
+      "revokedAt": null,
       "revision": 3,
       "updatedAt": "2026-08-24T10:00:00.000Z"
     },

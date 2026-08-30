@@ -1,0 +1,45 @@
+[package]
+name = "winwincode-worker"
+description = "Standalone WinWinCode Execution Worker lifecycle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+test-support = ["winwincode-codex/test-support"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "winwincode-worker"
+path = "src/main.rs"
+
+[[test]]
+name = "production_vertical"
+required-features = ["test-support"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+winwincode-codex = { path = "../winwincode-codex" }
+winwincode-domain = { path = "../winwincode-domain" }
+winwincode-execution-port = { path = "../winwincode-execution-port" }
+
+[dev-dependencies]
+base64.workspace = true
+futures.workspace = true
+rusqlite.workspace = true
+winwincode-api.workspace = true
+winwincode-control-plane = { path = "../winwincode-control-plane", features = ["test-support"] }
+winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
+winwincode-kernel = { path = "../kernel" }
+winwincode-storage.workspace = true
+
+[lints]
+workspace = true

@@ -32,8 +32,8 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, ExecutionSequence, FencingToken, LeaseId, ProductSessionId, Revision,
-    SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId,
+    ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
+    Revision, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId,
     WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
@@ -44,11 +44,12 @@ use winwincode_execution_port::generated::{
 };
 use winwincode_storage::{
     CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
-    ProjectionEventStream, ReceiptIdentity, ReceiptScopeKey, StateCommit, StateRevisionGuard,
-    StorageError, StorageErrorKind,
+    ProjectionEventStream, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+    StateRevisionGuard, StorageError, StorageErrorKind,
 };
 
 use crate::delivery_transaction::{EXECUTION_JOB_TOPIC, delivery_stream_id};
+use crate::product_session_service::catalog_stream_id;
 use crate::session_binding_transaction::{
     execution_message_actor_key, execution_message_request_id, instant_millis, projection_event_id,
     require_id,
@@ -120,11 +121,12 @@ impl From<StorageError> for RuntimeMessageError {
 /// Executes one generated runtime-event ingress against the durable product
 /// state and its independent runtime ledger stream.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn execute(
+pub(crate) fn execute_at(
     storage: &mut dyn ProductStateStorage,
     scope: &RepositoryScope,
     message: &RuntimeEventMessage,
     authority: &SessionBindingAuthority,
+    server_time: &Instant,
 ) -> Result<RuntimeAckMessage, RuntimeMessageError> {
     let scope_key = repository_scope_key(scope)?;
     let phase = RuntimePhase::new(&scope_key, message)?;
@@ -150,6 +152,10 @@ pub(crate) fn execute(
             ));
         }
         Err(error) => return Err(error.into()),
+    }
+
+    if let Err(rejection) = validate_trusted_lease_time(authority, server_time) {
+        return Ok(rejection_ack(message, 0, rejection));
     }
 
     if let Err(rejection) = validate_message_shape(message) {
@@ -270,7 +276,8 @@ pub(crate) fn execute(
         runtime_projection_invalidated_event(
             &phase.receipt_identity,
             &context,
-            &message.session_identity,
+            scope,
+            message,
             next.highest_sequence,
         )?,
     ];
@@ -329,6 +336,29 @@ pub(crate) fn execute(
         LeaseWriteStatus::Accepted
     };
     Ok(accepted_ack(message, next.highest_sequence, status, None))
+}
+
+fn validate_trusted_lease_time(
+    authority: &SessionBindingAuthority,
+    server_time: &Instant,
+) -> Result<(), Rejection> {
+    let now = instant_millis(server_time)
+        .map_err(|_| Rejection::Conflict("runtime ingress time is not canonical"))?;
+    let issued_at = instant_millis(authority.issued_at())
+        .map_err(|_| Rejection::Conflict("runtime authority issuedAt is not canonical"))?;
+    let expires_at = instant_millis(authority.expires_at())
+        .map_err(|_| Rejection::Conflict("runtime authority expiresAt is not canonical"))?;
+    if now < issued_at {
+        return Err(Rejection::Conflict(
+            "runtime ingress precedes the scheduler-owned lease",
+        ));
+    }
+    if now >= expires_at {
+        return Err(Rejection::Expired(
+            "runtime ingress observed an expired scheduler-owned lease",
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_raced_append(
@@ -456,7 +486,15 @@ impl RuntimePhase {
         scope_key: &ReceiptScopeKey,
         message: &RuntimeEventMessage,
     ) -> Result<Self, StorageError> {
-        let stream_id = runtime_stream_id(scope_key, &message.lease.job_id);
+        // ProductSession runtime facts have one stable resource stream so the
+        // StrongFlow read-cut can join the ledger with the ProductSession
+        // event cursor from only the requested session id. Delivery runtime
+        // facts remain isolated by repository scope and ExecutionJob id.
+        let stream_id = if message.session_identity.stage_run_id.is_none() {
+            product_session_runtime_stream_id(&message.session_identity.product_session_id)
+        } else {
+            runtime_stream_id(scope_key, &message.lease.job_id)
+        };
         let receipt_identity = ReceiptIdentity::new(
             execution_message_actor_key(&message.message_id)?,
             scope_key.clone(),
@@ -702,7 +740,7 @@ impl RuntimeContext {
             delivery_task_id,
             stage_run_id,
             product_session_id,
-            stream_id,
+            intent_stream_id,
         ) = match &job.scope {
             ExecutionScope::DeliveryStageExecutionScope(job_scope) => {
                 if job_scope.kind != DeliveryStageExecutionScopeKind::DeliveryStage {
@@ -731,12 +769,12 @@ impl RuntimeContext {
                     None,
                     None,
                     job_scope.product_session_id.clone(),
-                    product_session_runtime_stream_id(&job_scope.product_session_id),
+                    catalog_stream_id(scope_key),
                 )
             }
         };
         if durable.receipt_identity().scope_key() != scope_key
-            || durable.stream_id() != stream_id
+            || durable.stream_id() != intent_stream_id
             || durable.revision() == 0
             || job.workspace.repository_id != scope.repository_id
         {
@@ -1661,7 +1699,8 @@ fn runtime_outbox_event_id(stream_id: &str, event: &ExecutionEventRecord) -> Str
 fn runtime_projection_invalidated_event(
     receipt_identity: &ReceiptIdentity,
     context: &RuntimeContext,
-    session_identity: &SessionIdentity,
+    scope: &RepositoryScope,
+    message: &RuntimeEventMessage,
     accepted_sequence: u64,
 ) -> Result<NewOutboxEvent, StorageError> {
     let revision = i64::try_from(accepted_sequence)
@@ -1688,7 +1727,7 @@ fn runtime_projection_invalidated_event(
                 ),
                 scope_kind:
                     ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
-                session_identity: session_identity.clone(),
+                session_identity: message.session_identity.clone(),
                 stage_run_id: stage_run_id.clone(),
                 type_value:
                     ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
@@ -1730,12 +1769,21 @@ fn runtime_projection_invalidated_event(
         receipt_identity.scope_key(),
         &payload,
     );
-    Ok(NewOutboxEvent::projection(
+    NewOutboxEvent::public_projection(
         event_id,
         RUNTIME_INVALIDATED_TOPIC,
         payload,
         stream,
-    ))
+        crate::public_repository_scope(scope),
+        message.sent_at.clone(),
+        PublicEventSource::SessionExecutionWorker {
+            worker_id: message.lease.worker_id.clone(),
+            worker_session_id: message.worker_session_id.clone(),
+            lease_id: message.lease.lease_id.clone(),
+            codex_thread_id: message.codex_thread_id.clone(),
+            session_identity: message.session_identity.clone(),
+        },
+    )
 }
 
 fn accepted_ack(

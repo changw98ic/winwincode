@@ -104,12 +104,14 @@ use winwincode_execution_port::generated::{
     JobOutcomeMessage, SessionBindingMessage,
 };
 use winwincode_session::migration::{
-    MigrationCommit, MigrationTransaction, migrate_legacy_delivery_json,
+    MigrationCommit, MigrationOutcome, MigrationTransaction, MigrationTransactionError,
+    migrate_legacy_delivery_json,
 };
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
     ProductStateStorage, ProjectionEventCursor, ProjectionEventStream, ProjectionEventStreamKey,
-    ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+    PublicEventActor, PublicEventScope, PublicEventSource, ReceiptIdentity, ReceiptScopeKey,
+    SqliteStorage, StateCommit, receipt_actor_key,
 };
 
 const PLAN_SCHEMA: &str = "winwincode.delivery-strongflow-differential-plan.v2";
@@ -566,13 +568,14 @@ impl ProjectionAuthority {
         scope: &RepositoryScope,
         delivery: &Delivery,
         read_cut: FixtureRuntimeReadCut,
+        leases: &HashMap<String, LeaseFixture>,
     ) -> Result<(), String> {
         let event_cursor = read_cut.event_cursor.clone();
         let source = read_cut
             .source_at_cursor(&event_cursor)
             .map_err(|error| error.to_string())?
             .clone();
-        let projection = semantic_runtime_projection(delivery, &source.runtime_events)?;
+        let projection = semantic_runtime_projection(delivery, &source.runtime_events, leases)?;
         let accepted_sequence = projection
             .snapshot()
             .sessions
@@ -722,6 +725,7 @@ impl TrustedPublicationProjectionAdapter for PublicationSourceAdapter {
 fn semantic_runtime_projection(
     delivery: &Delivery,
     raw_events: &[Value],
+    leases: &HashMap<String, LeaseFixture>,
 ) -> Result<RuntimeProjection, String> {
     let mut bindings = Vec::new();
     let mut accepted_events = Vec::new();
@@ -735,20 +739,28 @@ fn semantic_runtime_projection(
             .iter()
             .find(|run| run.id == binding.stage_run_id)
             .ok_or_else(|| "runtime fixture binding lost its StageRun".to_owned())?;
-        let observed_count = raw_events
-            .iter()
-            .filter(|event| {
-                event
-                    .pointer("/source/sessionId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|session| {
-                        binding
-                            .worker_session_id
-                            .as_ref()
-                            .is_some_and(|worker| canonical_id("wsn_", session) == worker.0)
+        let observed_count = match leases.get(&binding.stage_run_id.0) {
+            Some(fixture) => {
+                if binding.worker_session_id.as_ref()
+                    != Some(&fixture.binding_message.worker_session_id)
+                    || binding.codex_thread_id.as_ref()
+                        != Some(&fixture.binding_message.codex_thread_id)
+                {
+                    return Err(
+                        "runtime fixture lease does not match its accepted binding".to_owned()
+                    );
+                }
+                raw_events
+                    .iter()
+                    .filter(|event| {
+                        event.pointer("/source/sessionId").and_then(Value::as_str)
+                            == Some(fixture.legacy_session_id.as_str())
                     })
-            })
-            .count();
+                    .count()
+            }
+            None if raw_events.is_empty() => 0,
+            None => return Err("runtime fixture binding lost its accepted lease".to_owned()),
+        };
         let terminal = matches!(
             run.status,
             StageRunStatus::Succeeded | StageRunStatus::Failed | StageRunStatus::Cancelled
@@ -1498,13 +1510,8 @@ impl ScenarioRunner {
             );
             return Ok(Vec::new());
         }
-        let dsh = required_str(payload, "dshSessionId")?;
-        let codex = payload.get("codexSessionId").and_then(Value::as_str);
-        let worker_session_id = WorkerSessionId(canonical_id("wsn_", dsh));
-        let codex_thread_id = CodexThreadId(canonical_id(
-            "cdx_",
-            codex.unwrap_or("missing-codex-thread"),
-        ));
+        let legacy_session_id = required_str(payload, "dshSessionId")?;
+        required_str(payload, "codexSessionId")?;
         let authority = delivery.as_ref().ok().and_then(|delivery| {
             let run = delivery
                 .snapshot()
@@ -1530,6 +1537,10 @@ impl ScenarioRunner {
                 1,
             )
         });
+        let execution_identity_seed =
+            format!("{}:{}:{attempt}:{source_index}", self.id, stage_run_id.0);
+        let worker_session_id = WorkerSessionId(canonical_id("wsn_", &execution_identity_seed));
+        let codex_thread_id = CodexThreadId(canonical_id("cdx_", &execution_identity_seed));
         let bound_at = self.clock.peek_next();
         let worker_id = WorkerId(canonical_id("wrk_", &stage_run_id.0));
         let worker_instance_id = WorkerInstanceId(canonical_id("wki_", &stage_run_id.0));
@@ -1591,9 +1602,11 @@ impl ScenarioRunner {
         if serde_json::to_value(&message).map_err(string_error)? != request {
             return Err("SessionBindingMessage did not round-trip exactly".to_owned());
         }
-        let result = self
-            .control_plane_mut()
-            .commit_delivery_session_binding(&message, &binding_authority);
+        let result = self.control_plane_mut().commit_delivery_session_binding(
+            &message,
+            &binding_authority,
+            &message.sent_at,
+        );
         let response = match result {
             Ok(_) if !expects_acceptance => {
                 return Err(format!(
@@ -1614,7 +1627,7 @@ impl ScenarioRunner {
                     LeaseFixture {
                         authority: binding_authority,
                         binding_message: message.clone(),
-                        legacy_session_id: dsh.to_owned(),
+                        legacy_session_id: legacy_session_id.to_owned(),
                     },
                 );
                 self.refresh_projection_authority()?;
@@ -2252,6 +2265,7 @@ impl ScenarioRunner {
             &repository_scope,
             &message,
             &facts,
+            &message.sent_at,
         );
         let (response, committed) = match result {
             Ok(commit) => {
@@ -2636,7 +2650,7 @@ impl ScenarioRunner {
         self.execution_source = source.clone();
         let read_cut = FixtureRuntimeReadCut::capture(&source, cursor_before);
         self.projection_authority
-            .replace(&self.repository_scope, &delivery, read_cut)
+            .replace(&self.repository_scope, &delivery, read_cut, &self.leases)
     }
 
     fn terminal_handoff(
@@ -3596,9 +3610,10 @@ fn seed_snapshot_sqlite(home: &Path, scenario: &str, delivery: &Delivery) -> Res
     let scope: RepositoryScope =
         serde_json::from_value(fixture_scope(scenario)).map_err(string_error)?;
     let scope_key = fixture_repository_scope_key(&scope)?;
-    let actor_key =
-        ReceiptActorKey::from_encoded(format!("fixture-seed-actor:{scenario}").into_bytes())
-            .map_err(string_error)?;
+    let public_actor = PublicEventActor::System {
+        id: winwincode_domain::SystemActorId(canonical_id("sys_", scenario)),
+    };
+    let actor_key = receipt_actor_key(&public_actor).map_err(string_error)?;
     let receipt_identity =
         ReceiptIdentity::new(actor_key, scope_key.clone(), request_id).map_err(string_error)?;
     let event_payload = serde_json::to_vec(&ControlPlaneWebSocketDeliveryChangedEvent {
@@ -3638,12 +3653,26 @@ fn seed_snapshot_sqlite(home: &Path, scenario: &str, delivery: &Delivery) -> Res
                 format!("delivery:{}", delivery.id().0),
                 0,
                 delivery.encode_json().map_err(string_error)?,
-                vec![NewOutboxEvent::projection(
-                    event_id,
-                    "delivery.changed.v1",
-                    event_payload,
-                    ProjectionEventStream::Delivery(delivery.id().clone()),
-                )],
+                vec![
+                    NewOutboxEvent::public_projection(
+                        event_id,
+                        "delivery.changed.v1",
+                        event_payload,
+                        ProjectionEventStream::Delivery(delivery.id().clone()),
+                        PublicEventScope::Repository {
+                            organization_id: scope.organization_id.clone(),
+                            workspace_id: scope.workspace_id.clone(),
+                            project_id: scope.project_id.clone(),
+                            repository_id: scope.repository_id.clone(),
+                        },
+                        Instant("2026-08-27T00:00:00.000Z".into()),
+                        PublicEventSource::ControlPlane {
+                            actor: public_actor,
+                            component: "differential-seed".into(),
+                        },
+                    )
+                    .map_err(string_error)?,
+                ],
             )
             .with_journal_publication(publication),
         )
@@ -4047,15 +4076,23 @@ impl MigrationTransaction for DifferentialMigrationCapture {
         &mut self,
         _source_key: &str,
         _canonical_snapshot: &[u8],
-    ) -> Result<MigrationCommit, String> {
+    ) -> Result<MigrationCommit, MigrationTransactionError> {
         Ok(MigrationCommit::Applied)
     }
 }
 
 fn migrate_legacy_snapshot(snapshot: Value) -> Result<Value, String> {
     let input = serde_json::to_vec(&snapshot).map_err(string_error)?;
-    let canonical = migrate_legacy_delivery_json(&input, &mut DifferentialMigrationCapture)
+    let outcome = migrate_legacy_delivery_json(&input, &mut DifferentialMigrationCapture)
         .map_err(string_error)?;
+    let canonical = match outcome {
+        MigrationOutcome::Applied {
+            canonical_snapshot, ..
+        } => canonical_snapshot,
+        MigrationOutcome::AlreadyConsumed { .. } => {
+            return Err("fresh differential migration was already consumed".to_owned());
+        }
+    };
     let mut snapshot: Value = serde_json::from_slice(&canonical).map_err(string_error)?;
     let delivery_id = required_str(&snapshot, "id")?.to_owned();
     let task_id_map = snapshot
@@ -4521,7 +4558,13 @@ fn terminal_outcome_error_response(
             let (code, retryable) = storage_error_contract(source);
             (code, retryable, error.to_string())
         }
-        winwincode_control_plane::DeliveryTerminalOutcomeCommitError::PublicationPending {
+        winwincode_control_plane::DeliveryTerminalOutcomeCommitError::WorkerQuotaPending {
+            ..
+        }
+        | winwincode_control_plane::DeliveryTerminalOutcomeCommitError::ArtifactQuotaPending {
+            ..
+        }
+        | winwincode_control_plane::DeliveryTerminalOutcomeCommitError::PublicationPending {
             ..
         } => ("SERVICE_UNAVAILABLE", true, error.to_string()),
     };
@@ -4628,10 +4671,15 @@ fn receipt_json(receipt: &winwincode_control_plane::CommitReceipt) -> Result<Val
                     .unwrap_or_else(|_| Value::String(lowercase_hex(&event.payload))),
                 "projectionCursor": event.projection_cursor.as_ref().map(|cursor| {
                     let (kind, resource_id) = match cursor.key().stream() {
-                        ProjectionEventStream::Delivery(id) => ("delivery", id.0.as_str()),
+                        ProjectionEventStream::Scope => ("scope", String::new()),
+                        ProjectionEventStream::Delivery(id) => ("delivery", id.0.clone()),
                         ProjectionEventStream::ProductSession(id) => {
-                            ("product-session", id.0.as_str())
+                            ("product-session", id.0.clone())
                         }
+                        ProjectionEventStream::Lease {
+                            worker_id,
+                            lease_id,
+                        } => ("lease", format!("{}/{}", worker_id.0, lease_id.0)),
                     };
                     json!({
                         "kind": kind,
@@ -4673,6 +4721,7 @@ fn execution_config_for_transition(
             "sha256:{:x}",
             Sha256::digest(delivery.encode_json().map_err(string_error)?)
         )),
+        candidate_ref: None,
         workspace: ExecutionWorkspace {
             checkout_revision,
             repository_id: repository_id.clone(),
@@ -5451,10 +5500,7 @@ mod tests {
             .expect("restart seeded scenario");
         scenario.delivery_id = Some(delivery.id().clone());
         scenario.execution_source = ExecutionSource {
-            runtime_events: vec![json!({
-                "source": { "sessionId": "fixture-old-runtime" },
-                "sequence": 1,
-            })],
+            runtime_events: Vec::new(),
             ..ExecutionSource::default()
         };
         scenario
@@ -5486,6 +5532,7 @@ mod tests {
             &scenario.repository_scope,
             &delivery,
             FixtureRuntimeReadCut::capture(&old_runtime, new_cursor),
+            &HashMap::new(),
         );
 
         // This first red run reaches the same replace -> installed adapter ->

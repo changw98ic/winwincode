@@ -11,9 +11,25 @@ const schemaPath = join(root, 'schema', 'winwincode', 'v1', 'execution-port.sche
 const domainSchemaPath = join(root, 'schema', 'winwincode', 'v1', 'domain.schema.json')
 const validFixturePath = join(root, 'tests', 'fixtures', 'contracts', 'execution-port.valid.json')
 const invalidFixturePath = join(root, 'tests', 'fixtures', 'contracts', 'execution-port.invalid.json')
+const productSessionBindingFixturePath = join(
+  root,
+  'tests',
+  'fixtures',
+  'contracts',
+  'session-binding.product-session.valid.json',
+)
+const deliveryStageBindingFixturePath = join(
+  root,
+  'tests',
+  'fixtures',
+  'contracts',
+  'session-binding.delivery-stage.valid.json',
+)
 const domainSchemaId = 'https://schemas.winwincode.dev/winwincode/v1/domain.schema.json'
 
 const expectedKinds = [
+  'action.enforcement_request',
+  'action.enforcement_receipt',
   'worker.register',
   'worker.registration_result',
   'worker.capabilities',
@@ -55,12 +71,14 @@ const domainDefinitions = [
   'LeaseId',
   'ProductSessionId',
   'RepositoryId',
+  'RepositoryScope',
   'RequestId',
   'SchemaVersion',
   'SessionBindingSourceIdentity',
   'SessionIdentity',
   'Sha256Digest',
   'StageRunId',
+  'UserActor',
   'WorkerId',
   'WorkerInstanceId',
   'WorkerSessionId',
@@ -169,6 +187,119 @@ test('ExecutionPort accepts a positive sample for every message kind', () => {
   for (const message of fixture.messages) {
     assert.equal(validate(message), true, `${message.kind}: ${JSON.stringify(validate.errors)}`)
   }
+})
+
+test('ExecutionPort seals typed stage input only on Delivery jobs', () => {
+  const validate = validator(json(schemaPath))
+  const fixture = json(validFixturePath)
+  const dispatch = structuredClone(
+    fixture.messages.find(message => message.kind === 'job.dispatch'),
+  )
+  assert.ok(dispatch)
+
+  const missing = structuredClone(dispatch)
+  delete missing.job.stageInput
+  assert.equal(validate(missing), false, 'Delivery job requires typed stageInput')
+
+  const chatWithStageInput = structuredClone(dispatch)
+  chatWithStageInput.job.scope = {
+    kind: 'product-session',
+    productSessionId: dispatch.job.scope.productSessionId,
+  }
+  assert.equal(
+    validate(chatWithStageInput),
+    false,
+    'ProductSession job rejects Delivery stageInput',
+  )
+
+  delete chatWithStageInput.job.stageInput
+  assert.equal(
+    validate(chatWithStageInput),
+    true,
+    `ProductSession job keeps its plain goal: ${JSON.stringify(validate.errors)}`,
+  )
+})
+
+test('ExecutionPort carries one sealed replacement lineage on replacement dispatches', () => {
+  const validate = validator(json(schemaPath))
+  const fixture = json(validFixturePath)
+  const firstDispatch = structuredClone(
+    fixture.messages.find(message => message.kind === 'job.dispatch'),
+  )
+  assert.ok(firstDispatch)
+  assert.equal(firstDispatch.replacementAuthority, null)
+  assert.equal(validate(firstDispatch), true, JSON.stringify(validate.errors))
+
+  const missing = structuredClone(firstDispatch)
+  delete missing.replacementAuthority
+  assert.equal(validate(missing), false, 'replacementAuthority is present even when null')
+
+  const replacement = structuredClone(firstDispatch)
+  replacement.job.attempt = 2
+  replacement.lease = {
+    ...replacement.lease,
+    leaseId: 'lse_0000000000000000000000000B',
+    workerInstanceId: 'wki_0000000000000000000000000C',
+    attempt: 2,
+    fencingToken: '43',
+    issuedAt: '2026-08-24T12:11:00.000Z',
+    expiresAt: '2026-08-24T12:21:00.000Z',
+  }
+  replacement.replacementAuthority = {
+    receiptId: 'req_0000000000000000000000000D',
+    receiptDigest: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+    logicalJobDigest: 'sha256:2222222222222222222222222222222222222222222222222222222222222222',
+    scope: replacement.job.scope,
+    predecessorLease: firstDispatch.lease,
+    predecessorSessionIdentity: {
+      productSessionId: replacement.job.scope.productSessionId,
+      workerSessionId: 'wsn_0000000000000000000000000E',
+      codexThreadId: 'cdx_0000000000000000000000000F',
+      stageRunId: replacement.job.scope.stageRunId,
+    },
+    successorLease: replacement.lease,
+    createdAt: '2026-08-24T12:11:00.000Z',
+  }
+  assert.equal(validate(replacement), true, JSON.stringify(validate.errors))
+
+  replacement.replacementAuthority.predecessorSessionIdentity = null
+  assert.equal(
+    validate(replacement),
+    true,
+    'leased replacements can precede WorkerSession creation',
+  )
+})
+
+test('ExecutionPort workspace write mode distinguishes readers from writers', () => {
+  const validate = validator(json(schemaPath))
+  const fixture = json(validFixturePath)
+  const dispatch = structuredClone(
+    fixture.messages.find(message => message.kind === 'job.dispatch'),
+  )
+  assert.ok(dispatch)
+  dispatch.job.workspace.writeMode = 'read-only'
+  assert.equal(validate(dispatch), true, JSON.stringify(validate.errors))
+  dispatch.job.workspace.writeMode = 'unrestricted'
+  assert.equal(validate(dispatch), false)
+})
+
+test('ExecutionPort requires measured safe-integer usage only for succeeded outcomes', () => {
+  const validate = validator(json(schemaPath))
+  const fixture = json(validFixturePath)
+  const succeeded = fixture.messages.find(message => message.kind === 'job.outcome')
+  assert.ok(succeeded, 'positive fixture includes one terminal Job outcome')
+
+  const missingUsage = structuredClone(succeeded)
+  delete missingUsage.outcome.usage
+  assert.equal(validate(missingUsage), false, 'succeeded outcome requires usage')
+
+  const unsafeUsage = structuredClone(succeeded)
+  unsafeUsage.outcome.usage.tokens = 9_007_199_254_740_992
+  assert.equal(validate(unsafeUsage), false, 'usage is bounded to JavaScript safe integers')
+
+  const cancelled = structuredClone(missingUsage)
+  cancelled.outcome.status = 'cancelled'
+  assert.equal(validate(cancelled), true, 'cancelled outcome does not fabricate usage')
 })
 
 test('ExecutionPort rejects lease escape, canonical writes, secrets, and malformed ordering', () => {
@@ -296,6 +427,21 @@ test('ProductSession runtime messages carry no fabricated StageRun identity', ()
     true,
     `ProductSession runtime event must omit StageRun: ${JSON.stringify(validate.errors)}`,
   )
+})
+
+test('SessionBinding carries StageRun only for DeliveryStage jobs', () => {
+  const schema = json(schemaPath)
+  const validate = validator(schema)
+  const productSession = json(productSessionBindingFixturePath)
+  const deliveryStage = json(deliveryStageBindingFixturePath)
+
+  assert.equal(schema.$defs.SessionBindingMessage.required.includes('stageRunId'), false)
+  assert.equal(validate(productSession), true, JSON.stringify(validate.errors))
+  assert.equal(Object.hasOwn(productSession, 'stageRunId'), false)
+  assert.equal(Object.hasOwn(productSession.sessionIdentity, 'stageRunId'), false)
+
+  assert.equal(validate(deliveryStage), true, JSON.stringify(validate.errors))
+  assert.equal(deliveryStage.stageRunId, deliveryStage.sessionIdentity.stageRunId)
 })
 
 test('ExecutionPort input response maps provided and empty terminal values exactly', () => {

@@ -5,13 +5,14 @@
 mod coordinator;
 mod facts;
 mod github;
+mod metering;
 mod operation;
 mod policy;
 
 pub use coordinator::{
     Publication, PublicationCancelCommand, PublicationCommandContext, PublicationCoordinator,
     PublicationError, PublicationErrorKind, PublicationLedger, PublicationPublishCommand,
-    PublicationState,
+    PublicationReadLedger, PublicationState,
 };
 pub use facts::{
     PublicationAuthorization, PublicationFactBinding, PublicationResourceFact,
@@ -20,6 +21,11 @@ pub use facts::{
 pub use github::{
     CredentialResolutionError, GitHubAdapterConfig, GitHubCredential, GitHubCredentialResolver,
     GitHubPublicationAdapter,
+};
+pub use metering::{
+    PublicationEnterpriseAttribution, PublicationMeteringCursor, PublicationMeteringError,
+    PublicationMeteringErrorKind, PublicationMeteringFilter, PublicationMeteringLedger,
+    PublicationMeteringSourceEntry, PublicationMeteringSourcePage,
 };
 pub use operation::{
     PUBLICATION_OPERATION_PROTOCOL, PUBLICATION_OPERATION_SCHEMA_VERSION, PublicationOperation,

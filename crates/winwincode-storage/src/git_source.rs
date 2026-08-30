@@ -160,6 +160,14 @@ pub trait GitSourceResolver: Send {
         repository_locator: &str,
         base_revision: &str,
     ) -> Result<ValidatedGitSourceArtifact, ArtifactError>;
+
+    /// Returns the canonical root used to resolve local repositories, when
+    /// this adapter has one.  The Control Plane uses this exact root for Git
+    /// retention so source reconstruction and durable references cannot drift
+    /// to different repository trees.  Remote adapters may leave this unset.
+    fn controlled_repository_root(&self) -> Option<&Path> {
+        None
+    }
 }
 
 impl ValidatedGitSourceArtifact {
@@ -266,6 +274,12 @@ impl LocalGitSourceResolver {
             &candidate_commit,
             artifact.metadata().clone(),
         )
+    }
+
+    /// Returns the canonical repository root selected at adapter startup.
+    #[must_use]
+    pub fn controlled_repository_root(&self) -> &Path {
+        &self.allowed_root
     }
 }
 
@@ -517,6 +531,10 @@ impl GitSourceResolver for LocalGitSourceResolver {
         base_revision: &str,
     ) -> Result<ValidatedGitSourceArtifact, ArtifactError> {
         Self::resolve_candidate(self, artifact, repository_locator, base_revision)
+    }
+
+    fn controlled_repository_root(&self) -> Option<&Path> {
+        Some(self.controlled_repository_root())
     }
 }
 

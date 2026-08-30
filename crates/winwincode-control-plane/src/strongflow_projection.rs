@@ -8,6 +8,7 @@
 
 mod application;
 mod mapping;
+mod production_sources;
 mod sources;
 
 use std::fmt;
@@ -24,7 +25,10 @@ use crate::ControlPlane;
 pub use application::PublicationAuthorizationSnapshot;
 pub(crate) use application::{
     current_publication_approval, derive_publication_binding, load_current,
+    load_current_publication_read,
 };
+pub use production_sources::SqliteTrustedPublicationProjectionAdapter;
+pub(crate) use production_sources::production_sources;
 pub use sources::{
     DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, PublicationFactBinding,
     PublicationResourceFact, PublicationResourceKind, PublicationResultFact, RuntimeCutExpectation,

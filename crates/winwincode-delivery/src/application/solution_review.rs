@@ -45,6 +45,7 @@ use crate::domain::{
 const SOLUTION_REVIEW_SCHEMA_VERSION: u8 = 1;
 const SOLUTION_REVIEW_CONTEXT_PROTOCOL: &str = "winwincode.solution-review-context.v1";
 const SOLUTION_REVIEW_DECISION_PROTOCOL: &str = "winwincode.solution-review-decision.v1";
+const PLANNER_SOLUTION_PROTOCOL: &str = "winwincode.planner-solution.v1";
 const MAX_TEXT_CODE_UNITS: usize = 65_536;
 const MAX_TITLE_CODE_UNITS: usize = 256;
 const MAX_COLLECTION_ITEMS: usize = 200;
@@ -259,6 +260,209 @@ struct SolutionReviewContextV1 {
     task_proposals: Vec<DeliveryTaskProposal>,
     prepared_at: u64,
     review_set_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlannerSolutionV1 {
+    schema_version: u8,
+    protocol: String,
+    solution: SolutionWire,
+    architecture_diagram: ValidatedDiagram,
+    process_diagram: ValidatedDiagram,
+    risks: Vec<String>,
+    unresolved_items: Vec<String>,
+    task_proposals: Vec<DeliveryTaskProposal>,
+}
+
+/// One canonical plan-review transition prepared from the exact authenticated
+/// planner runtime output. Delivery, stage, binding, Attention and digest
+/// authority are reconstructed here rather than accepted from the Worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlannerSolutionReview {
+    transition: crate::application::stage::StageAdvanceResult,
+    review_set_sha256: String,
+}
+
+impl PreparedPlannerSolutionReview {
+    #[must_use]
+    pub const fn transition(&self) -> &crate::application::stage::StageAdvanceResult {
+        &self.transition
+    }
+
+    #[must_use]
+    pub fn into_transition(self) -> crate::application::stage::StageAdvanceResult {
+        self.transition
+    }
+
+    #[must_use]
+    pub fn review_set_sha256(&self) -> &str {
+        &self.review_set_sha256
+    }
+}
+
+fn current_planning_authority(
+    delivery: &Delivery,
+) -> Result<(StageRunId, SessionBindingId), SolutionReviewError> {
+    let highest_attempt = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| {
+            run.delivery_task_id.is_none()
+                && run.stage == DeliveryStage::Planning
+                && run.actor_type == StageRunActorType::Codex
+                && run.role == "planner"
+        })
+        .map(|run| run.attempt)
+        .max()
+        .ok_or_else(|| stale_authority("Delivery has no planning StageRun"))?;
+    let planning_runs = delivery
+        .snapshot()
+        .stage_runs
+        .iter()
+        .filter(|run| {
+            run.delivery_task_id.is_none()
+                && run.stage == DeliveryStage::Planning
+                && run.actor_type == StageRunActorType::Codex
+                && run.role == "planner"
+                && run.attempt == highest_attempt
+        })
+        .collect::<Vec<_>>();
+    let [planning] = planning_runs.as_slice() else {
+        return Err(stale_authority(
+            "Delivery does not have one exact current planning StageRun",
+        ));
+    };
+    let bindings = delivery
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.stage_run_id == planning.id)
+        .collect::<Vec<_>>();
+    let [binding] = bindings.as_slice() else {
+        return Err(stale_authority(
+            "current planning StageRun does not have one exact SessionBinding",
+        ));
+    };
+    Ok((planning.id.clone(), binding.id.clone()))
+}
+
+/// Builds the only production Solution Review Attention from one canonical
+/// planner result and the current Delivery identities.
+///
+/// The planner payload is semantic content only. It cannot name a Delivery,
+/// `StageRun`, binding, Attention item, reviewer, preparation time, or review
+/// digest. Those facts are sealed from `delivery` and `input` below.
+///
+/// # Errors
+///
+/// Rejects non-canonical JSON, a foreign protocol/version, malformed semantic
+/// content, stale planning authority, or a transition that is not `PlanReview`.
+pub fn prepare_planner_solution_review(
+    delivery: &Delivery,
+    mut input: crate::application::stage::AdvanceStageInput,
+    planner_output: &[u8],
+    attention_title: String,
+    assigned_to: String,
+) -> Result<PreparedPlannerSolutionReview, crate::application::CoordinationError> {
+    use crate::application::stage::{ReviewAttentionSeed, StageAdvanceEffect, advance};
+    use crate::application::{CoordinationError, CoordinationErrorCode};
+
+    if input.review.is_some() {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "planner solution authority owns the PlanReview Attention seed",
+        ));
+    }
+    let semantic: PlannerSolutionV1 = serde_json::from_slice(planner_output).map_err(|_| {
+        CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "planner solution output is not canonical JSON",
+        )
+    })?;
+    let canonical = serde_json::to_vec(&semantic).map_err(|error| {
+        CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            format!("planner solution output cannot be encoded: {error}"),
+        )
+    })?;
+    if canonical != planner_output
+        || semantic.schema_version != SOLUTION_REVIEW_SCHEMA_VERSION
+        || semantic.protocol != PLANNER_SOLUTION_PROTOCOL
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::InvalidRequest,
+            "planner solution output is non-canonical or uses another protocol",
+        ));
+    }
+    let (planning_stage_run_id, planning_session_binding_id) = current_planning_authority(delivery)
+        .map_err(|error| CoordinationError::new(CoordinationErrorCode::Conflict, error.message))?;
+    let review_stage_run_id = input.identities.stage_run_id.clone();
+    let attention_item_id = input.identities.attention_item_id.clone();
+    let prepared_at = input.now_millis;
+    let mut context = SolutionReviewContextV1 {
+        schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
+        protocol: SOLUTION_REVIEW_CONTEXT_PROTOCOL.to_owned(),
+        delivery_id: delivery.id().clone(),
+        delivery_spec_id: delivery.snapshot().spec.id.clone(),
+        delivery_spec_revision: delivery.snapshot().spec.revision,
+        planning_stage_run_id,
+        planning_session_binding_id,
+        review_stage_run_id,
+        attention_item_id,
+        solution: semantic.solution,
+        architecture_diagram: semantic.architecture_diagram,
+        process_diagram: semantic.process_diagram,
+        risks: semantic.risks,
+        unresolved_items: semantic.unresolved_items,
+        task_proposals: semantic.task_proposals,
+        prepared_at,
+        review_set_sha256: String::new(),
+    };
+    context.review_set_sha256 = review_set_digest(&context).map_err(|error| {
+        CoordinationError::new(CoordinationErrorCode::InvalidRequest, error.to_string())
+    })?;
+    let review_set_sha256 = context.review_set_sha256.clone();
+    input.review = Some(ReviewAttentionSeed {
+        title: attention_title,
+        context: serde_json::to_string(&context).map_err(|error| {
+            CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                format!("Solution Review context cannot be encoded: {error}"),
+            )
+        })?,
+        assigned_to,
+    });
+    let transition = advance(delivery, input)?;
+    if !matches!(transition.effect, StageAdvanceEffect::Review(_)) {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::WrongState,
+            "planner solution did not advance to PlanReview",
+        ));
+    }
+    let resolved = resolve_current_solution_review(&transition.delivery)
+        .map_err(|error| {
+            CoordinationError::new(CoordinationErrorCode::InvalidRequest, error.to_string())
+        })?
+        .ok_or_else(|| {
+            CoordinationError::new(
+                CoordinationErrorCode::WrongState,
+                "prepared Delivery has no current Solution Review",
+            )
+        })?;
+    if resolved.review_status != ValidatedReviewStatus::Pending
+        || resolved.review_set_sha256 != review_set_sha256
+    {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "prepared Solution Review lost its exact digest authority",
+        ));
+    }
+    Ok(PreparedPlannerSolutionReview {
+        transition,
+        review_set_sha256,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1340,11 +1544,10 @@ fn review_error(code: SolutionReviewErrorCode, message: &str) -> SolutionReviewE
 #[doc(hidden)]
 pub mod test_support {
     use super::{
-        AcceptanceCriterionId, DecisionActionWire, Delivery, DeliveryStage, DeliveryTaskId,
-        DeliveryTaskProposal, Error, SOLUTION_REVIEW_CONTEXT_PROTOCOL,
-        SOLUTION_REVIEW_DECISION_PROTOCOL, SOLUTION_REVIEW_SCHEMA_VERSION, SessionBindingId,
-        SolutionReviewContextV1, SolutionReviewDecisionV1, SolutionWire, StageRunActorType,
-        StageRunId, ValidatedDiagram, ValidatedDiagramEdge, ValidatedDiagramKind,
+        AcceptanceCriterionId, DecisionActionWire, Delivery, DeliveryTaskId, DeliveryTaskProposal,
+        Error, SOLUTION_REVIEW_CONTEXT_PROTOCOL, SOLUTION_REVIEW_DECISION_PROTOCOL,
+        SOLUTION_REVIEW_SCHEMA_VERSION, SolutionReviewContextV1, SolutionReviewDecisionV1,
+        SolutionWire, ValidatedDiagram, ValidatedDiagramEdge, ValidatedDiagramKind,
         ValidatedDiagramNode, ValidatedDiagramNodeKind, ValidatedReviewStatus,
         ValidatedSolutionComponent, ValidatedSolutionComponentKind, ValidatedSolutionConnection,
         fmt, resolve_current_solution_review, review_set_digest,
@@ -1506,6 +1709,7 @@ pub mod test_support {
     }
 
     impl SolutionReviewFixtureError {
+        #[must_use]
         pub fn message(&self) -> &str {
             &self.message
         }
@@ -1526,14 +1730,17 @@ pub mod test_support {
     }
 
     impl PreparedSolutionReviewFixture {
+        #[must_use]
         pub fn transition(&self) -> &StageAdvanceResult {
             &self.transition
         }
 
+        #[must_use]
         pub fn into_transition(self) -> StageAdvanceResult {
             self.transition
         }
 
+        #[must_use]
         pub fn review_set_sha256(&self) -> &str {
             &self.review_set_sha256
         }
@@ -1546,14 +1753,17 @@ pub mod test_support {
     }
 
     impl SettledSolutionReviewFixture {
+        #[must_use]
         pub fn transition(&self) -> &ResolvedAttentionTransition {
             &self.transition
         }
 
+        #[must_use]
         pub fn into_transition(self) -> ResolvedAttentionTransition {
             self.transition
         }
 
+        #[must_use]
         pub fn review_set_sha256(&self) -> &str {
             &self.review_set_sha256
         }
@@ -1573,7 +1783,8 @@ pub mod test_support {
             ));
         }
         let (planning_stage_run_id, planning_session_binding_id) =
-            current_planning_authority(delivery)?;
+            super::current_planning_authority(delivery)
+                .map_err(|error| fixture_error(error.message()))?;
         let review_stage_run_id = input.identities.stage_run_id.clone();
         let attention_item_id = input.identities.attention_item_id.clone();
         let prepared_at = input.now_millis;
@@ -1739,6 +1950,7 @@ pub mod test_support {
     /// Produces semantic invalid graphs without exposing canonical context or
     /// digest construction. Passing one of these graphs to `prepare` must be
     /// rejected by the production solution-review resolver.
+    #[must_use]
     pub fn invalid_task_proposals_fixture(
         delivery: &Delivery,
         invalid: InvalidTaskProposalFixture,
@@ -1770,53 +1982,6 @@ pub mod test_support {
                 vec![first, second]
             }
         }
-    }
-
-    fn current_planning_authority(
-        delivery: &Delivery,
-    ) -> Result<(StageRunId, SessionBindingId), SolutionReviewFixtureError> {
-        let highest_attempt = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .filter(|run| {
-                run.delivery_task_id.is_none()
-                    && run.stage == DeliveryStage::Planning
-                    && run.actor_type == StageRunActorType::Codex
-                    && run.role == "planner"
-            })
-            .map(|run| run.attempt)
-            .max()
-            .ok_or_else(|| fixture_error("Delivery has no planning StageRun"))?;
-        let planning_runs: Vec<_> = delivery
-            .snapshot()
-            .stage_runs
-            .iter()
-            .filter(|run| {
-                run.delivery_task_id.is_none()
-                    && run.stage == DeliveryStage::Planning
-                    && run.actor_type == StageRunActorType::Codex
-                    && run.role == "planner"
-                    && run.attempt == highest_attempt
-            })
-            .collect();
-        let [planning] = planning_runs.as_slice() else {
-            return Err(fixture_error(
-                "Delivery does not have one exact current planning StageRun",
-            ));
-        };
-        let bindings: Vec<_> = delivery
-            .snapshot()
-            .session_bindings
-            .iter()
-            .filter(|binding| binding.stage_run_id == planning.id)
-            .collect();
-        let [binding] = bindings.as_slice() else {
-            return Err(fixture_error(
-                "current planning StageRun does not have one exact SessionBinding",
-            ));
-        };
-        Ok((planning.id.clone(), binding.id.clone()))
     }
 
     fn normalized_task_proposals(
@@ -2114,7 +2279,7 @@ mod tests {
                         kind: ValidatedSolutionComponentKind::Component,
                         trust_boundary: Some("browser".into()),
                         unresolved: false,
-                        repository_path_prefixes: vec!["apps/web".into()],
+                        repository_path_prefixes: vec!["apps/client".into()],
                     },
                     ValidatedSolutionComponent {
                         id: "component:api".into(),
@@ -3205,6 +3370,67 @@ mod tests {
             unresolved_items: Vec::new(),
             task_proposals,
         }
+    }
+
+    fn canonical_planner_solution(delivery: &Delivery) -> Vec<u8> {
+        let fixture =
+            semantic_review_fixture(vec![test_support::SolutionReviewTaskProposalFixture {
+                id: DeliveryTaskId("dtk_00000000000000000000000001".into()),
+                title: delivery.snapshot().spec.title.clone(),
+                goal: delivery.snapshot().spec.goal.clone(),
+                acceptance_criterion_ids: delivery
+                    .snapshot()
+                    .spec
+                    .acceptance_criteria
+                    .iter()
+                    .map(|criterion| criterion.id.clone())
+                    .collect(),
+                blocked_by_task_ids: Vec::new(),
+            }]);
+        serde_json::to_vec(&PlannerSolutionV1 {
+            schema_version: SOLUTION_REVIEW_SCHEMA_VERSION,
+            protocol: PLANNER_SOLUTION_PROTOCOL.into(),
+            solution: fixture.solution.into(),
+            architecture_diagram: fixture.architecture_diagram.into(),
+            process_diagram: fixture.process_diagram.into(),
+            risks: fixture.risks,
+            unresolved_items: fixture.unresolved_items,
+            task_proposals: fixture.task_proposals.into_iter().map(Into::into).collect(),
+        })
+        .expect("canonical Planner solution")
+    }
+
+    #[test]
+    fn production_planner_solution_seals_current_authority_and_rejects_changed_bytes() {
+        let (delivery, input) = planning_handoff_fixture(1_800_000_000_020);
+        let bytes = canonical_planner_solution(&delivery);
+        let prepared = prepare_planner_solution_review(
+            &delivery,
+            input.clone(),
+            &bytes,
+            "Review the authenticated Planner result".into(),
+            "alice".into(),
+        )
+        .expect("production Planner solution review");
+        let pending = resolve_current_solution_review(&prepared.transition().delivery)
+            .expect("resolve production review")
+            .expect("pending production review");
+        assert_eq!(pending.review_status, ValidatedReviewStatus::Pending);
+        assert_eq!(pending.review_set_sha256(), prepared.review_set_sha256());
+        assert_eq!(pending.task_proposals.len(), 1);
+
+        let mut changed = bytes;
+        changed.insert(0, b' ');
+        assert!(
+            prepare_planner_solution_review(
+                &delivery,
+                input,
+                &changed,
+                "Review the authenticated Planner result".into(),
+                "alice".into(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

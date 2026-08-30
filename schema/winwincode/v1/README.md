@@ -7,17 +7,23 @@
 
 | 路由 | 用途 |
 | --- | --- |
+| `GET /api/v1/auth/session` | 从 HttpOnly cookie 恢复当前 Actor 和授权 Scope |
+| `POST /api/v1/auth/session` | 用短时 bootstrap proof 创建独立浏览器 session |
+| `DELETE /api/v1/auth/session` | 撤销当前浏览器 session 并清除 cookie |
 | `POST /api/v1/commands` | 提交会改变业务状态的命令 |
 | `POST /api/v1/queries` | 读取不会改变业务状态的投影 |
 
 WebSocket 只推送投影、运行事件、审批请求和通知。业务变更统一提交到 command
 入口，避免 HTTP 与 WebSocket 各自形成一套写入规则。
 
-两个 HTTP 路由都必须显式认证，且只接受两种方式之一：同源 Web/本地 Host 使用
+command/query 两个业务路由都必须显式认证，且只接受两种方式之一：同源 Web/本地 Host 使用
 `wwc_session` cookie，服务账号和企业客户端使用 `Authorization: Bearer <JWT>`。认证材料
 不进入 query、command body 或 URL query；包络中的 `actor` 必须等于服务端认证出的
-principal。OpenAPI 的 `sessionCookie` 与 `bearerAuth` security scheme 是生成客户端的唯一
-认证合同，不存在匿名分支。
+principal。浏览器 session 创建只在 `Authorization` header 接受 `bootstrapProof`；创建成功
+后和 cookie reload 都返回 secret-free `AuthSessionResponse`，其中 Actor 与有界 Scope 集合
+来自当前服务端 session。bootstrap proof、cookie 原值和长期 token 都不会进入 URL、响应、
+DOM 或 Client 可读存储。OpenAPI 的 `bootstrapProof`、`sessionCookie` 与 `bearerAuth`
+security scheme 是唯一认证合同，不存在匿名分支。
 
 ## 文件
 
@@ -47,8 +53,8 @@ HTTP schema 只通过 `$ref` 使用通用领域定义，不再声明另一份 ID
 - `crates/winwincode-domain/src/generated.rs`：Rust 共用 ID 和基础值类型；
 - `crates/winwincode-api/src/generated.rs`：引用上述共用类型的 Rust Control Plane HTTP/WebSocket 传输类型；
 - `crates/winwincode-execution-port/src/generated.rs`：Rust ExecutionPort Worker 消息 DTO；
-- `apps/web/src/generated/contracts.ts`：Web 客户端类型；
-- `apps/web/src/generated/control-plane-client.ts`：Web Control Plane 校验客户端与内嵌运行时合同；
+- `apps/client/src/generated/contracts.ts`：Web 客户端类型；
+- `apps/client/src/generated/control-plane-client.ts`：Web Control Plane 校验客户端与内嵌运行时合同；
 - `schema-collection.generated.json`：可独立分发的 JSON Schema 集合；
 - `openapi.generated.json`：OpenAPI 3.1 文档。
 
@@ -64,7 +70,7 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 | Chat | `session.create`、`chat.submit`、`input.respond`、`session.cancel`、`session.close` |
 | Delivery / StrongFlow | `delivery.create`、`delivery.update_spec`、`delivery.approve_task_breakdown`、`delivery.advance`、`delivery.resolve_attention`、`delivery.submit_verdict` |
 | 设置 | `settings.update` |
-| 凭据引用 | `credential.reference.create`、`credential.reference.delete` |
+| 凭据引用 | `credential.reference.create`、`credential.reference.rotate`、`credential.reference.revoke`、`credential.reference.delete` |
 | 审批 | `approval.decide` |
 | Worker 管理 | `worker.drain`、`worker.enable` |
 | 发布 | `publication.publish`、`publication.cancel` |

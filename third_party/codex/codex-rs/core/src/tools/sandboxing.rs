@@ -362,6 +362,8 @@ pub(crate) enum ToolError {
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
 
+    fn action_gate_payload(&self, req: &Req) -> Option<crate::ToolCallGatePayload>;
+
     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
         false
     }

@@ -170,3 +170,59 @@ fn unsequenced_control_messages_are_not_silently_stored_as_replay_frames() {
         );
     }
 }
+
+#[test]
+fn product_session_model_messages_share_a_stream_without_stage_run() {
+    let keys = ["model.open", "model.chunk", "model.ack"].map(|kind| {
+        let mut message = fixture_value(kind);
+        message["sessionIdentity"]
+            .as_object_mut()
+            .expect("model session identity")
+            .remove("stageRunId");
+        stream_key_from_message(
+            &serde_json::from_value::<ExecutionPortMessage>(message)
+                .expect("ProductSession model fixture"),
+        )
+        .unwrap_or_else(|error| panic!("{kind} accepts ProductSession identity: {error:?}"))
+        .stream
+    });
+    assert_eq!(keys[0], keys[1]);
+    assert_eq!(keys[1], keys[2]);
+}
+
+#[test]
+fn delivery_stage_model_stream_key_rejects_missing_or_foreign_stage_binding() {
+    let open = stream_key_from_message(&fixture_message("model.open"))
+        .expect("DeliveryStage model open")
+        .stream;
+
+    let mut missing_stage = fixture_value("model.chunk");
+    missing_stage["sessionIdentity"]
+        .as_object_mut()
+        .expect("model session identity")
+        .remove("stageRunId");
+    let missing_stage = stream_key_from_message(
+        &serde_json::from_value::<ExecutionPortMessage>(missing_stage)
+            .expect("shape-valid ProductSession chunk"),
+    )
+    .expect("ProductSession chunk maps independently")
+    .stream;
+    assert_ne!(
+        missing_stage, open,
+        "a chunk without the opened Delivery StageRun cannot enter that stream"
+    );
+
+    let mut foreign_stage = fixture_value("model.chunk");
+    foreign_stage["sessionIdentity"]["stageRunId"] =
+        Value::String("run_01J0000000000000000000000ZZ".to_owned());
+    let foreign_stage = stream_key_from_message(
+        &serde_json::from_value::<ExecutionPortMessage>(foreign_stage)
+            .expect("foreign StageRun chunk"),
+    )
+    .expect("foreign StageRun maps to its own stream")
+    .stream;
+    assert_ne!(
+        foreign_stage, open,
+        "a foreign Delivery StageRun cannot enter the opened stream"
+    );
+}

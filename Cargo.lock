@@ -1043,6 +1043,7 @@ dependencies = [
  "axum-core",
  "base64 0.22.1",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
@@ -1058,6 +1059,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sha1 0.10.6",
  "sync_wrapper",
  "tokio",
@@ -1065,6 +1067,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -1082,6 +1085,29 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum-server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
  "tower-service",
 ]
 
@@ -3265,15 +3291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "convert_case"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4531,6 +4548,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -6702,16 +6729,18 @@ checksum = "a5a3cc660ba5d72bce0b3bb295bf20847ccbb40fd423f3f05b61273672e561fe"
 
 [[package]]
 name = "jsonwebtoken"
-version = "9.3.1"
+version = "10.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+checksum = "0529410abe238729a60b108898784df8984c87f6054c9c4fcacc47e4803c1ce1"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
+ "getrandom 0.2.17",
  "js-sys",
  "pem",
- "ring",
  "serde",
  "serde_json",
+ "signature",
  "simple_asn1",
 ]
 
@@ -6803,16 +6832,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
 dependencies = [
  "pkg-config",
-]
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
 ]
 
 [[package]]
@@ -7179,69 +7198,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "napi"
-version = "3.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "459197f1592f4c3dbbf9c1b13f5a4599a343e4ef66b96bc340e2a518b36a6662"
-dependencies = [
- "bitflags 2.13.1",
- "ctor",
- "futures",
- "futures-core",
- "libc",
- "napi-build",
- "napi-sys",
- "nohash-hasher",
- "rustc-hash 2.1.1",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "napi-build"
-version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60fdf9b392c50e7c4170fa633bd909490ed7835cea4c046776d1a4dd8d2ae0ab"
-
-[[package]]
-name = "napi-derive"
-version = "3.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fa55ea69990c90b888e9e77044410e304ce7f35de599dc6d0b5c1923d2e59af"
-dependencies = [
- "convert_case 0.11.0",
- "ctor",
- "napi-derive-backend",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "napi-derive-backend"
-version = "6.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df4056ac7c18e4438ccf0edaed4340ca0d269278c8ec19284f7b23cb039fd0ae"
-dependencies = [
- "convert_case 0.11.0",
- "proc-macro2",
- "quote",
- "semver",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "napi-sys"
-version = "3.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85fbf1fa9f1babfe396d74bbbf52b3643770243e8f5b0b46715d4caf7f0dfc9a"
-dependencies = [
- "libloading",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7309,12 +7265,6 @@ dependencies = [
  "cfg_aliases 0.2.1",
  "libc",
 ]
-
-[[package]]
-name = "nohash-hasher"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nom"
@@ -9019,6 +8969,7 @@ checksum = "10b99e0098aa4082912d4c649628623db6aba77335e4f4569ff5083a6448b32e"
 dependencies = [
  "aws-lc-rs",
  "pem",
+ "ring",
  "rustls-pki-types",
  "time",
  "x509-parser",
@@ -12631,20 +12582,71 @@ dependencies = [
 ]
 
 [[package]]
-name = "winwincode-control-plane"
+name = "winwincode-backup"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-audit",
+ "winwincode-domain",
+]
+
+[[package]]
+name = "winwincode-cli"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-delivery",
+ "winwincode-domain",
+ "winwincode-evidence-export",
+ "winwincode-repository-context",
+ "winwincode-storage",
+ "winwincode-test-assets",
+]
+
+[[package]]
+name = "winwincode-codex"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "codex-protocol",
+ "ed25519-dalek",
+ "futures",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+ "uuid",
+ "winwincode-domain",
+ "winwincode-execution-port",
+ "winwincode-kernel",
+]
+
+[[package]]
+name = "winwincode-control-plane"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
  "winwincode-api",
  "winwincode-audit",
  "winwincode-delivery",
  "winwincode-domain",
  "winwincode-execution-port",
  "winwincode-publication",
+ "winwincode-repository-context",
  "winwincode-session",
  "winwincode-storage",
 ]
@@ -12653,6 +12655,7 @@ dependencies = [
 name = "winwincode-delivery"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12668,6 +12671,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-drill"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-audit",
+ "winwincode-backup",
+ "winwincode-domain",
+ "winwincode-storage",
+]
+
+[[package]]
+name = "winwincode-evidence-export"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "winwincode-execution-port"
 version = "0.0.0"
 dependencies = [
@@ -12675,6 +12700,27 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-domain",
+]
+
+[[package]]
+name = "winwincode-integration"
+version = "0.0.0"
+dependencies = [
+ "hmac 0.12.1",
+ "jsonwebtoken",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "ureq",
+ "winwincode-api",
+ "winwincode-audit",
+ "winwincode-domain",
+ "winwincode-publication",
+ "winwincode-storage",
 ]
 
 [[package]]
@@ -12696,19 +12742,56 @@ name = "winwincode-kernel-helper"
 version = "0.0.0"
 dependencies = [
  "codex-arg0",
+ "sha2 0.10.9",
 ]
 
 [[package]]
-name = "winwincode-native"
+name = "winwincode-local"
 version = "0.0.0"
 dependencies = [
- "futures",
- "napi",
- "napi-build",
- "napi-derive",
+ "serde",
  "serde_json",
  "tokio",
- "winwincode-kernel",
+ "winwincode-control-plane",
+ "winwincode-observability",
+ "winwincode-worker",
+]
+
+[[package]]
+name = "winwincode-object-store"
+version = "0.0.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+ "winwincode-audit",
+ "winwincode-backup",
+ "winwincode-domain",
+ "winwincode-storage",
+]
+
+[[package]]
+name = "winwincode-observability"
+version = "0.0.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "winwincode-postgres"
+version = "0.0.0"
+dependencies = [
+ "sha2 0.10.9",
+ "winwincode-audit",
+ "winwincode-backup",
+ "winwincode-domain",
+ "winwincode-storage",
 ]
 
 [[package]]
@@ -12725,9 +12808,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-repository-context"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "winwincode-server"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "axum-server",
+ "base64 0.22.1",
+ "futures",
+ "getrandom 0.3.4",
+ "http 1.4.0",
+ "httpdate",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "winwincode-api",
+ "winwincode-codex",
+ "winwincode-control-plane",
+ "winwincode-domain",
+ "winwincode-execution-port",
+ "winwincode-local",
+ "winwincode-session",
+ "winwincode-storage",
+ "winwincode-worker",
+]
+
+[[package]]
 name = "winwincode-session"
 version = "0.0.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12743,6 +12867,37 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "winwincode-domain",
+]
+
+[[package]]
+name = "winwincode-test-assets"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-delivery",
+]
+
+[[package]]
+name = "winwincode-worker"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "winwincode-api",
+ "winwincode-codex",
+ "winwincode-control-plane",
+ "winwincode-delivery",
+ "winwincode-domain",
+ "winwincode-execution-port",
+ "winwincode-kernel",
+ "winwincode-storage",
 ]
 
 [[package]]

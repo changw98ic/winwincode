@@ -7,13 +7,15 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    ArtifactId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId, RequestId, Sha256Digest,
-    WorkerId, WorkerInstanceId, WorkerSessionId,
+    ArtifactId, DeliveryId, ExecutionJobId, ExecutionMessageId, FencingToken, LeaseId,
+    OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Sha256Digest, UserId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
-    ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactObjectStore,
-    ArtifactOpen, ArtifactProvenance, ArtifactRetention, ArtifactStore, FakeArtifactObjectStore,
-    LocalArtifactObjectStore, ReceiptScopeKey,
+    ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactMeteringAttribution,
+    ArtifactObjectStore, ArtifactOpen, ArtifactProvenance, ArtifactRetention,
+    ArtifactStorageOperationKind, ArtifactStore, FakeArtifactObjectStore, LocalArtifactObjectStore,
+    ReceiptScopeKey,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -39,8 +41,12 @@ fn request(value: u64) -> RequestId {
 }
 
 fn provenance() -> ArtifactProvenance {
+    provenance_for_job(ExecutionJobId("job_00000000000000000000000003".into()))
+}
+
+fn provenance_for_job(execution_job_id: ExecutionJobId) -> ArtifactProvenance {
     ArtifactProvenance::execution_job(
-        ExecutionJobId("job_00000000000000000000000003".into()),
+        execution_job_id,
         1,
         LeaseId("lse_00000000000000000000000004".into()),
         FencingToken("42".into()),
@@ -49,6 +55,82 @@ fn provenance() -> ArtifactProvenance {
         WorkerSessionId("wsn_00000000000000000000000005".into()),
     )
     .expect("execution artifact provenance")
+}
+
+#[test]
+fn unfinished_quota_authority_is_bounded_to_one_exact_job_and_excludes_completed_artifacts() {
+    let root = temporary_directory("unfinished-quota-authority");
+    let mut store = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("Artifact store");
+    let job_id = ExecutionJobId("job_00000000000000000000000003".into());
+    let foreign_job_id = ExecutionJobId("job_00000000000000000000000013".into());
+    let bytes = b"quota-authority";
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+    for (seed, job) in [
+        (901, job_id.clone()),
+        (902, job_id.clone()),
+        (903, foreign_job_id),
+    ] {
+        store
+            .open_artifact(ArtifactOpen::new(
+                scope("repository:unfinished-quota"),
+                message(seed * 2),
+                request(seed),
+                ArtifactId(format!("art_{seed:026}")),
+                "report",
+                "application/octet-stream",
+                digest.clone(),
+                bytes.len() as u64,
+                None,
+                provenance_for_job(job),
+                metering_attribution(),
+                ArtifactRetention::Indefinite,
+                1_000,
+            ))
+            .expect("Artifact open");
+    }
+    store
+        .append_chunk(&artifact_chunk(
+            scope("repository:unfinished-quota"),
+            message(1_805),
+            ArtifactId(format!("art_{:026}", 902)),
+            1,
+            digest,
+            bytes.to_vec(),
+            true,
+        ))
+        .expect("complete same-Job Artifact");
+
+    let unfinished = store
+        .unfinished_quota_opens_for_job(&job_id)
+        .expect("unfinished quota authority");
+    assert_eq!(unfinished.len(), 1);
+    assert_eq!(unfinished[0].artifact_id().0, format!("art_{:026}", 901));
+    assert_eq!(unfinished[0].request_id(), &request(901));
+
+    store.close().expect("Artifact close");
+    let restarted = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("restart Artifact store");
+    assert_eq!(
+        restarted
+            .unfinished_quota_opens_for_job(&job_id)
+            .expect("restart unfinished authority"),
+        unfinished
+    );
+    restarted.close().expect("restart Artifact close");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn metering_attribution() -> ArtifactMeteringAttribution {
+    ArtifactMeteringAttribution {
+        organization_id: OrganizationId("org_00000000000000000000000001".into()),
+        workspace_id: WorkspaceId("wsp_00000000000000000000000001".into()),
+        project_id: ProjectId("prj_00000000000000000000000001".into()),
+        repository_id: RepositoryId("rep_00000000000000000000000001".into()),
+        delivery_id: Some(DeliveryId("dlv_00000000000000000000000001".into())),
+        product_session_id: Some(ProductSessionId("psn_00000000000000000000000001".into())),
+        user_id: UserId("usr_00000000000000000000000001".into()),
+    }
 }
 
 #[test]
@@ -212,6 +294,7 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
             bytes.len() as u64,
             Some("report.json".into()),
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::UntilMillis(2_000),
             1_000,
         ))
@@ -230,6 +313,7 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
             bytes.len() as u64,
             Some("report.json".into()),
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::UntilMillis(2_000),
             1_000,
         ))
@@ -248,6 +332,13 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
         ))
         .expect_err("both adapters must reject a sequence gap");
     assert_eq!(gap.kind(), ArtifactErrorKind::SequenceGap);
+    assert!(
+        store
+            .scan_storage_sources(None, 10)
+            .expect("incomplete source page")
+            .entries
+            .is_empty()
+    );
     assert_eq!(
         store
             .acknowledged_sequence(&artifact_scope, &artifact_id)
@@ -270,6 +361,41 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
         .expect("final artifact chunk");
     assert_eq!(completed.acknowledged_sequence(), 1);
     assert!(completed.is_complete());
+    let source_page = store
+        .scan_storage_sources(None, 10)
+        .expect("completed source page");
+    assert_eq!(source_page.snapshot_sequence, 1);
+    assert_eq!(source_page.entries.len(), 1);
+    let source = &source_page.entries[0];
+    assert_eq!(source.sequence, 1);
+    assert_eq!(source.fact.operation_id, message(3));
+    assert_eq!(source.fact.request_id, request(1));
+    assert_eq!(
+        source.fact.operation_kind,
+        ArtifactStorageOperationKind::ArtifactFinalize
+    );
+    assert_eq!(source.fact.bytes, bytes.len() as u64);
+    assert_eq!(source.fact.attribution, metering_attribution());
+
+    let duplicate = store
+        .append_chunk(&artifact_chunk(
+            artifact_scope.clone(),
+            message(3),
+            artifact_id.clone(),
+            1,
+            digest.clone(),
+            bytes.to_vec(),
+            true,
+        ))
+        .expect("exact final replay");
+    assert!(duplicate.is_duplicate());
+    assert_eq!(
+        store
+            .scan_storage_sources(None, 10)
+            .expect("replayed source page")
+            .entries,
+        source_page.entries
+    );
 
     let changed = store
         .append_chunk(&artifact_chunk(
@@ -299,6 +425,16 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
     assert_eq!(loaded.metadata().kind(), "report");
 
     store.close().expect("artifact store close");
+    let restarted = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("restart Artifact store");
+    assert_eq!(
+        restarted
+            .scan_storage_sources(None, 10)
+            .expect("restart source page")
+            .entries,
+        source_page.entries
+    );
+    restarted.close().expect("restart close");
     fs::remove_dir_all(root).expect("artifact fixture release");
 }
 
@@ -339,6 +475,7 @@ fn exercise_concurrent_exact_chunk<F>(
             bytes.len() as u64,
             None,
             provenance(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_000,
         ))
@@ -389,6 +526,18 @@ fn exercise_concurrent_exact_chunk<F>(
         .collect::<Vec<_>>();
     duplicate_flags.sort_unstable();
     assert_eq!(duplicate_flags, [false, true]);
+
+    let verifier = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("concurrent source verifier");
+    assert_eq!(
+        verifier
+            .scan_storage_sources(None, 10)
+            .expect("concurrent source page")
+            .entries
+            .len(),
+        1
+    );
+    verifier.close().expect("concurrent source close");
 
     fs::remove_dir_all(root).expect("artifact fixture release");
 }
@@ -450,6 +599,7 @@ fn retention_and_shared_content_prevent_early_or_cross_artifact_deletion() {
                 bytes.len() as u64,
                 None,
                 artifact_provenance.clone(),
+                metering_attribution(),
                 retention,
                 1_000,
             ))
@@ -518,6 +668,7 @@ fn retention_and_shared_content_prevent_early_or_cross_artifact_deletion() {
             bytes.len() as u64,
             None,
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::UntilMillis(2_000),
             1_000,
         ))
@@ -549,6 +700,7 @@ fn retention_and_shared_content_prevent_early_or_cross_artifact_deletion() {
             0,
             None,
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::UntilMillis(1_000),
             1_000,
         ))
@@ -581,6 +733,7 @@ fn retention_and_shared_content_prevent_early_or_cross_artifact_deletion() {
             held_bytes.len() as u64,
             None,
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_000,
         ))
@@ -643,6 +796,7 @@ fn concurrent_new_content_reference_is_serialized_with_physical_deletion() {
             bytes.len() as u64,
             None,
             provenance(),
+            metering_attribution(),
             ArtifactRetention::UntilMillis(1_000),
             1_000,
         ))
@@ -691,6 +845,7 @@ fn concurrent_new_content_reference_is_serialized_with_physical_deletion() {
                 bytes.len() as u64,
                 None,
                 provenance(),
+                metering_attribution(),
                 ArtifactRetention::Indefinite,
                 1_000,
             ))
@@ -758,6 +913,7 @@ fn artifact_chunks_require_the_exact_open_provenance_and_message_body() {
             bytes.len() as u64,
             None,
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_000,
         ))
@@ -853,6 +1009,7 @@ fn artifact_reads_require_exact_scope_digest_and_execution_provenance() {
             bytes.len() as u64,
             None,
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_000,
         ))
@@ -927,6 +1084,7 @@ fn object_corruption_is_detected_before_bytes_are_returned() {
             24,
             Some("tests.txt".into()),
             artifact_provenance.clone(),
+            metering_attribution(),
             ArtifactRetention::UntilMillis(2_000),
             1_000,
         ))
@@ -991,6 +1149,7 @@ fn local_metadata_and_content_survive_restart_without_exposing_object_paths() {
             24,
             Some("candidate.diff".into()),
             artifact_provenance,
+            metering_attribution(),
             ArtifactRetention::UntilMillis(2_000),
             1_000,
         ))
@@ -1069,6 +1228,7 @@ fn catalog_corruption_is_detected_before_metadata_or_bytes_are_returned() {
             24,
             Some("report.json".into()),
             artifact_provenance,
+            metering_attribution(),
             ArtifactRetention::Indefinite,
             1_000,
         ))
@@ -1105,4 +1265,333 @@ fn catalog_corruption_is_detected_before_metadata_or_bytes_are_returned() {
 
     restarted.close().expect("restart close");
     fs::remove_dir_all(root).expect("artifact fixture release");
+}
+
+fn table_shape(connection: &rusqlite::Connection, table: &str) -> Vec<(String, String, bool, u32)> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut statement = connection.prepare(&pragma).expect("table shape");
+    statement
+        .query_map([], |row| {
+            Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(5)?))
+        })
+        .expect("shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("shape values")
+}
+
+fn create_legacy_catalog(root: &std::path::Path, populated: bool) {
+    fs::create_dir_all(root).expect("legacy root");
+    let connection =
+        rusqlite::Connection::open(root.join("artifact-catalog.sqlite3")).expect("legacy catalog");
+    connection
+        .execute_batch(
+            "CREATE TABLE artifacts (artifact_id TEXT);
+             CREATE TABLE artifact_chunks (artifact_id TEXT);
+             PRAGMA user_version = 1;",
+        )
+        .expect("legacy schema");
+    if populated {
+        connection
+            .execute(
+                "INSERT INTO artifacts (artifact_id) VALUES (?1)",
+                ["art_00000000000000000000000801"],
+            )
+            .expect("legacy row");
+    }
+}
+
+#[test]
+fn empty_v1_catalog_migrates_to_the_exact_fresh_v2_shape() {
+    let migrated_root = temporary_directory("empty-v1-migration");
+    create_legacy_catalog(&migrated_root, false);
+    ArtifactStore::open(&migrated_root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("empty v1 migration")
+        .close()
+        .expect("migrated close");
+
+    let fresh_root = temporary_directory("fresh-v2-shape");
+    ArtifactStore::open(&fresh_root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("fresh v2")
+        .close()
+        .expect("fresh close");
+    let migrated = rusqlite::Connection::open(migrated_root.join("artifact-catalog.sqlite3"))
+        .expect("migrated catalog");
+    let fresh = rusqlite::Connection::open(fresh_root.join("artifact-catalog.sqlite3"))
+        .expect("fresh catalog");
+    for table in ["artifacts", "artifact_chunks", "artifact_metering_sources"] {
+        assert_eq!(table_shape(&migrated, table), table_shape(&fresh, table));
+    }
+    assert_eq!(
+        migrated
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("migrated version"),
+        2
+    );
+    drop((migrated, fresh));
+    fs::remove_dir_all(migrated_root).expect("migrated cleanup");
+    fs::remove_dir_all(fresh_root).expect("fresh cleanup");
+}
+
+#[test]
+fn populated_v1_catalog_fails_without_changing_version_or_rows() {
+    let root = temporary_directory("populated-v1-migration");
+    create_legacy_catalog(&root, true);
+    let error = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .err()
+        .expect("legacy attribution cannot be fabricated");
+    assert_eq!(error.kind(), ArtifactErrorKind::Adapter);
+    let connection =
+        rusqlite::Connection::open(root.join("artifact-catalog.sqlite3")).expect("legacy verify");
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("legacy version"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("legacy count"),
+        1
+    );
+    drop(connection);
+    fs::remove_dir_all(root).expect("legacy cleanup");
+}
+
+#[test]
+fn malformed_metering_table_with_matching_names_fails_closed() {
+    let root = temporary_directory("malformed-metering-schema");
+    ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("fresh catalog")
+        .close()
+        .expect("fresh close");
+    let catalog_path = root.join("artifact-catalog.sqlite3");
+    let connection = rusqlite::Connection::open(&catalog_path).expect("schema injector");
+    connection
+        .execute_batch(
+            "DROP TABLE artifact_metering_sources;
+             CREATE TABLE artifact_metering_sources (
+                sequence TEXT PRIMARY KEY,
+                source_key TEXT,
+                source_digest TEXT,
+                fact_json TEXT,
+                artifact_id TEXT,
+                operation_id TEXT
+             );
+             CREATE TABLE preserved_metering_marker (value TEXT NOT NULL);
+             INSERT INTO preserved_metering_marker VALUES ('unchanged');",
+        )
+        .expect("malformed schema");
+    drop(connection);
+
+    let error = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .err()
+        .expect("matching names do not prove canonical schema");
+    assert_eq!(error.kind(), ArtifactErrorKind::Adapter);
+    let connection = rusqlite::Connection::open(catalog_path).expect("verify injector");
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM preserved_metering_marker", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("preserved marker"),
+        "unchanged"
+    );
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("preserved version"),
+        2
+    );
+    drop(connection);
+    fs::remove_dir_all(root).expect("schema cleanup");
+}
+
+fn seed_metering_source(root: &std::path::Path) {
+    let bytes = b"metered artifact";
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+    let artifact_id = ArtifactId("art_00000000000000000000000811".into());
+    let artifact_scope = scope("repository:metering");
+    let mut store =
+        ArtifactStore::open(root, Box::new(FakeArtifactObjectStore::new())).expect("seed store");
+    store
+        .open_artifact(ArtifactOpen::new(
+            artifact_scope.clone(),
+            message(811),
+            request(811),
+            artifact_id.clone(),
+            "report",
+            "application/octet-stream",
+            digest.clone(),
+            bytes.len() as u64,
+            None,
+            provenance(),
+            metering_attribution(),
+            ArtifactRetention::Indefinite,
+            1_000,
+        ))
+        .expect("seed open");
+    store
+        .append_chunk(&artifact_chunk(
+            artifact_scope,
+            message(812),
+            artifact_id,
+            1,
+            digest,
+            bytes.to_vec(),
+            true,
+        ))
+        .expect("seed completion");
+    store.close().expect("seed close");
+}
+
+#[test]
+fn noncanonical_durable_metering_json_is_rejected() {
+    for (label, statement) in [
+        (
+            "attribution",
+            "UPDATE artifacts
+             SET metering_attribution_json = ' ' || metering_attribution_json",
+        ),
+        (
+            "source-fact",
+            "UPDATE artifact_metering_sources SET fact_json = ' ' || fact_json",
+        ),
+    ] {
+        let root = temporary_directory(label);
+        seed_metering_source(&root);
+        let connection = rusqlite::Connection::open(root.join("artifact-catalog.sqlite3"))
+            .expect("corruption injector");
+        connection.execute(statement, []).expect("corrupt JSON");
+        drop(connection);
+        let restarted = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+            .expect("restart store");
+        assert!(
+            restarted.scan_storage_sources(None, 10).is_err(),
+            "{label} JSON with noncanonical bytes must fail closed"
+        );
+        restarted.close().expect("restart close");
+        fs::remove_dir_all(root).expect("corruption cleanup");
+    }
+}
+
+#[test]
+fn failed_finalization_leaves_no_storage_metering_source() {
+    let root = temporary_directory("failed-finalization-source");
+    let bytes = b"canonical bytes";
+    let chunk_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+    let declared_digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(b"different bytes")));
+    let artifact_id = ArtifactId("art_00000000000000000000000821".into());
+    let artifact_scope = scope("repository:failed-metering");
+    let mut store = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("Artifact store");
+    store
+        .open_artifact(ArtifactOpen::new(
+            artifact_scope.clone(),
+            message(821),
+            request(821),
+            artifact_id.clone(),
+            "report",
+            "application/octet-stream",
+            declared_digest,
+            bytes.len() as u64,
+            None,
+            provenance(),
+            metering_attribution(),
+            ArtifactRetention::Indefinite,
+            1_000,
+        ))
+        .expect("Artifact open");
+    assert!(
+        store
+            .append_chunk(&artifact_chunk(
+                artifact_scope,
+                message(822),
+                artifact_id,
+                1,
+                chunk_digest,
+                bytes.to_vec(),
+                true,
+            ))
+            .is_err()
+    );
+    assert!(
+        store
+            .scan_storage_sources(None, 10)
+            .expect("failed source page")
+            .entries
+            .is_empty()
+    );
+    store.close().expect("Artifact close");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn append_metered_artifact(store: &mut ArtifactStore, seed: u64) {
+    let bytes = format!("metered-{seed}").into_bytes();
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(&bytes)));
+    let artifact_id = ArtifactId(format!("art_{seed:026}"));
+    let artifact_scope = scope("repository:paged-metering");
+    store
+        .open_artifact(ArtifactOpen::new(
+            artifact_scope.clone(),
+            message(seed * 2),
+            request(seed),
+            artifact_id.clone(),
+            "report",
+            "application/octet-stream",
+            digest.clone(),
+            bytes.len() as u64,
+            None,
+            provenance(),
+            metering_attribution(),
+            ArtifactRetention::Indefinite,
+            1_000,
+        ))
+        .expect("paged open");
+    store
+        .append_chunk(&artifact_chunk(
+            artifact_scope,
+            message(seed * 2 + 1),
+            artifact_id,
+            1,
+            digest,
+            bytes,
+            true,
+        ))
+        .expect("paged completion");
+}
+
+#[test]
+fn metering_cursor_keeps_a_fixed_upper_bound_across_new_completions() {
+    let root = temporary_directory("metering-fixed-snapshot");
+    let mut store = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
+        .expect("Artifact store");
+    for seed in 830..833 {
+        append_metered_artifact(&mut store, seed);
+    }
+    let first = store
+        .scan_storage_sources(None, 2)
+        .expect("first metering page");
+    assert_eq!(first.snapshot_sequence, 3);
+    assert_eq!(first.entries.len(), 2);
+    let cursor = first.next.expect("next cursor");
+    append_metered_artifact(&mut store, 833);
+    let second = store
+        .scan_storage_sources(Some(&cursor), 2)
+        .expect("second metering page");
+    assert_eq!(second.snapshot_sequence, 3);
+    assert_eq!(second.entries.len(), 1);
+    assert!(second.next.is_none());
+    assert_eq!(
+        store
+            .scan_storage_sources(None, 10)
+            .expect("new metering snapshot")
+            .entries
+            .len(),
+        4
+    );
+    store.close().expect("Artifact close");
+    fs::remove_dir_all(root).expect("cleanup");
 }

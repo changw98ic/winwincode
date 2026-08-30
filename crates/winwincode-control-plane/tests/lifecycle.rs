@@ -17,11 +17,12 @@ use winwincode_control_plane::{
     StoredState,
 };
 use winwincode_domain::{
-    ControlPlaneEventId, DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId,
+    ControlPlaneEventId, DeliveryId, Instant, OrganizationId, ProjectId, RepositoryId, RequestId,
     SchemaVersion, ServiceAccountId, UserId, WorkspaceId,
 };
 use winwincode_storage::{
-    ProjectionReadCut, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+    ProjectionReadCut, PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey,
+    ReceiptIdentity, ReceiptScopeKey, StateCommit,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -108,7 +109,7 @@ impl TraceStorage {
 }
 
 impl ProductStateStorage for TraceStorage {
-    fn commit(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
+    fn commit_adapter(&mut self, commit: &StateCommit) -> Result<CommitReceipt, StorageError> {
         self.trace
             .lock()
             .expect("trace lock")
@@ -129,6 +130,7 @@ impl ProductStateStorage for TraceStorage {
                 topic: event.topic.clone(),
                 payload: event.payload.clone(),
                 projection_cursor: None,
+                public_context: event.public_context().cloned(),
             })
             .collect();
         Ok(CommitReceipt {
@@ -146,6 +148,7 @@ impl ProductStateStorage for TraceStorage {
                     topic: event.topic.clone(),
                     payload: event.payload.clone(),
                     projection_cursor: None,
+                    public_context: event.public_context().cloned(),
                 })
                 .collect(),
             idempotent_replay: false,
@@ -244,6 +247,7 @@ fn committed_event(sequence: u64, event_id: &str) -> OutboxEvent {
         topic: "control-plane.state.changed".to_owned(),
         payload: b"event".to_vec(),
         projection_cursor: None,
+        public_context: None,
     }
 }
 
@@ -441,7 +445,7 @@ fn startup_migrates_storage_before_the_control_plane_accepts_commits() {
     let temporary_root = control_plane.temporary_root().to_path_buf();
     assert!(
         temporary_root
-            .join(".winwincode-control-plane-owner")
+            .join(winwincode_control_plane::TEMPORARY_ROOT_LEASE_FILE)
             .is_file(),
         "the running instance must mark its owned temporary root"
     );
@@ -493,12 +497,26 @@ fn generic_commit_cannot_forge_a_public_projection_stream_event() {
     let mut control_plane =
         ControlPlane::start(Box::new(storage), Box::new(publisher)).expect("Control Plane start");
     trace.lock().expect("trace lock").clear();
-    let event = NewOutboxEvent::projection(
+    let event = NewOutboxEvent::public_projection(
         ControlPlaneEventId("evt_0000000000000001".into()),
         "delivery.changed.v1",
         br#"{"credential":"caller-controlled"}"#.to_vec(),
         ProjectionEventStream::Delivery(DeliveryId("dlv_01J00000000000000000000000".into())),
-    );
+        PublicEventScope::Repository {
+            organization_id: OrganizationId("org_01J00000000000000000000000".into()),
+            workspace_id: WorkspaceId("wsp_01J00000000000000000000000".into()),
+            project_id: ProjectId("prj_01J00000000000000000000000".into()),
+            repository_id: RepositoryId("rep_01J00000000000000000000000".into()),
+        },
+        Instant("2026-08-27T00:00:00.000Z".into()),
+        PublicEventSource::ControlPlane {
+            actor: PublicEventActor::User {
+                id: UserId("usr_01J00000000000000000000000".into()),
+            },
+            component: "forged-generic-test".into(),
+        },
+    )
+    .expect("well-formed public event fixture");
 
     let error = control_plane
         .commit(

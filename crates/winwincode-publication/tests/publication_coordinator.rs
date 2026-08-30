@@ -9,16 +9,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use winwincode_domain::{AttentionItemId, DeliveryId, RequestId, Sha256Digest};
+use winwincode_domain::{
+    AttentionItemId, DeliveryId, OrganizationId, ProductSessionId, ProjectId, PublicationId,
+    RepositoryId, RequestId, Sha256Digest, UserId, WorkspaceId,
+};
 use winwincode_publication::{
     PUBLICATION_OPERATION_PROTOCOL, PUBLICATION_OPERATION_SCHEMA_VERSION, PublicationAuthorization,
-    PublicationCancelCommand, PublicationCommandContext, PublicationFactBinding,
-    PublicationOperation, PublicationOperationKind, PublicationOperationPayload, PublicationPort,
-    PublicationPortError, PublicationPortMutation, PublicationPortObservation,
-    PublicationPublishCommand, PublicationResourceFact, PublicationResourceKind,
-    PublicationSourceIssue, PublicationState, PublicationTarget,
+    PublicationCancelCommand, PublicationCommandContext, PublicationEnterpriseAttribution,
+    PublicationErrorKind, PublicationFactBinding, PublicationMeteringErrorKind,
+    PublicationMeteringFilter, PublicationMeteringLedger, PublicationOperation,
+    PublicationOperationKind, PublicationOperationPayload, PublicationPort, PublicationPortError,
+    PublicationPortMutation, PublicationPortObservation, PublicationPublishCommand,
+    PublicationResourceFact, PublicationResourceKind, PublicationSourceIssue, PublicationState,
+    PublicationTarget, RepositoryPolicyScope,
     test_support::{
         CurrentPublicationCoordinator, current_policy_coordinator, current_publication_fixture,
+        current_publication_operations,
     },
 };
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -32,6 +38,7 @@ struct RecordingPort {
     applied_operations: Vec<PublicationOperation>,
     unknown_after_write_once: Option<PublicationOperationKind>,
     reject_once: Option<PublicationOperationKind>,
+    no_remote_write_once: Option<PublicationOperationKind>,
 }
 
 impl PublicationPort for RecordingPort {
@@ -84,7 +91,15 @@ impl PublicationPort for RecordingPort {
                 "provider-response-lost",
             ));
         }
-        Ok(PublicationPortMutation::applied(operation, resource, true))
+        let remote_write_performed = self.no_remote_write_once != Some(operation.kind());
+        if !remote_write_performed {
+            self.no_remote_write_once = None;
+        }
+        Ok(PublicationPortMutation::applied(
+            operation,
+            resource,
+            remote_write_performed,
+        ))
     }
 }
 
@@ -132,6 +147,9 @@ fn unknown_remote_result_is_reconciled_after_restart_without_repeating_the_write
             .count(),
         1,
     );
+    let metering = metering_entries(&restarted);
+    assert_eq!(metering.len(), 4);
+    assert!(metering.iter().all(|entry| entry.remote_write_performed));
 
     Box::new(restarted)
         .close()
@@ -270,6 +288,14 @@ fn exact_approved_publication_persists_intent_then_converges_without_duplicate_w
             && branch == "winwincode/delivery"
             && commit_id == &"a".repeat(40)
     ));
+    let metering = metering_entries(&storage);
+    assert_eq!(metering.len(), 4);
+    assert!(metering.iter().all(|entry| {
+        entry.publication_id == *fixture.publication_id()
+            && entry.remote_write_performed
+            && entry.attribution == *fixture.attribution()
+            && entry.request_sha256.starts_with("sha256:")
+    }));
 
     let converged = coordinator(&mut storage, &mut port)
         .resume(fixture.publication_id(), fixture.resume_time_millis() + 1)
@@ -334,6 +360,7 @@ fn cancel_after_partial_remote_progress_changes_only_the_publication_and_replays
         (port.lookups.len(), port.applies.len()),
         port_calls_before_cancel,
     );
+    assert!(metering_entries(&storage).is_empty());
 
     let replay = coordinator(&mut storage, &mut port)
         .cancel(&context, &command)
@@ -393,10 +420,7 @@ fn current_read_rejects_a_valid_looking_state_that_no_longer_matches_the_durable
     let error = coordinator(&mut reopened, &mut port)
         .get(fixture.publication_id())
         .expect_err("state must remain bound to its durable intent and journal");
-    assert_eq!(
-        error.kind(),
-        winwincode_publication::PublicationErrorKind::Corrupt
-    );
+    assert_eq!(error.kind(), PublicationErrorKind::Corrupt);
 
     Box::new(reopened).close().expect("close reopened storage");
     fs::remove_dir_all(&root).expect("remove fixture");
@@ -449,10 +473,7 @@ fn current_read_rejects_step_metadata_that_claims_progress_without_a_step_transi
     let error = coordinator(&mut reopened, &mut port)
         .get(fixture.publication_id())
         .expect_err("step metadata without a matching transition must be rejected");
-    assert_eq!(
-        error.kind(),
-        winwincode_publication::PublicationErrorKind::Corrupt,
-    );
+    assert_eq!(error.kind(), PublicationErrorKind::Corrupt,);
 
     Box::new(reopened).close().expect("close reopened storage");
     fs::remove_dir_all(&root).expect("remove fixture");
@@ -522,17 +543,11 @@ fn stale_candidate_command_is_rejected_before_intent_or_provider_activity() {
     let error = coordinator(&mut storage, &mut port)
         .publish(fixture.publish_context(), &stale, fixture.authorization())
         .expect_err("stale candidate cannot publish");
-    assert_eq!(
-        error.kind(),
-        winwincode_publication::PublicationErrorKind::StaleAuthority,
-    );
+    assert_eq!(error.kind(), PublicationErrorKind::StaleAuthority,);
     let missing = coordinator(&mut storage, &mut port)
         .get(fixture.publication_id())
         .expect_err("stale command must not persist intent");
-    assert_eq!(
-        missing.kind(),
-        winwincode_publication::PublicationErrorKind::NotFound,
-    );
+    assert_eq!(missing.kind(), PublicationErrorKind::NotFound,);
     assert!(port.lookups.is_empty());
     assert!(port.applies.is_empty());
 
@@ -564,6 +579,9 @@ fn rejected_remote_step_fails_without_calling_later_operations() {
     assert_eq!(port.applies.len(), 2);
     assert!(port.applies[0].ends_with(":branch"));
     assert!(port.applies[1].ends_with(":pull-request"));
+    let metering = metering_entries(&storage);
+    assert_eq!(metering.len(), 1);
+    assert!(metering[0].operation_key.ends_with(":branch"));
     let calls = (port.lookups.len(), port.applies.len());
     let terminal = coordinator(&mut storage, &mut port)
         .resume(fixture.publication_id(), fixture.resume_time_millis() + 1)
@@ -573,6 +591,90 @@ fn rejected_remote_step_fails_without_calling_later_operations() {
 
     Box::new(storage).close().expect("close storage");
     fs::remove_dir_all(&root).expect("remove fixture");
+}
+
+#[test]
+fn lookup_found_writes_metering_source_while_applied_without_remote_write_does_not() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let operations = current_publication_operations();
+    let mut storage = SqliteStorage::open(&root).expect("open storage");
+    let mut found_port = RecordingPort::default();
+    for operation in &operations {
+        let resource = (operation.kind() == PublicationOperationKind::PullRequest).then(|| {
+            PublicationResourceFact::try_new(
+                PublicationResourceKind::GitHubPullRequest,
+                "example/widget",
+                42,
+            )
+            .expect("canonical PR identity")
+        });
+        found_port.resources.insert(
+            operation.operation_key().to_owned(),
+            (operation.request_sha256().to_owned(), resource),
+        );
+    }
+    coordinator(&mut storage, &mut found_port)
+        .publish(
+            fixture.publish_context(),
+            fixture.publish_command(),
+            fixture.authorization(),
+        )
+        .expect("persist lookup-only publication");
+    let published = coordinator(&mut storage, &mut found_port)
+        .resume(fixture.publication_id(), fixture.resume_time_millis())
+        .expect("converge from provider lookup facts");
+    assert_eq!(published.state(), PublicationState::Published);
+    assert!(found_port.applies.is_empty());
+    let found_metering = metering_entries(&storage);
+    assert_eq!(found_metering.len(), 4);
+    assert!(
+        found_metering
+            .iter()
+            .all(|entry| entry.remote_write_performed)
+    );
+    Box::new(storage).close().expect("close found storage");
+
+    let false_root = temporary_root();
+    let fixture = current_publication_fixture();
+    let mut storage = SqliteStorage::open(&false_root).expect("open false-write storage");
+    let mut port = RecordingPort {
+        no_remote_write_once: Some(PublicationOperationKind::Branch),
+        ..RecordingPort::default()
+    };
+    coordinator(&mut storage, &mut port)
+        .publish(
+            fixture.publish_context(),
+            fixture.publish_command(),
+            fixture.authorization(),
+        )
+        .expect("persist publication");
+    coordinator(&mut storage, &mut port)
+        .resume(fixture.publication_id(), fixture.resume_time_millis())
+        .expect("converge with one no-write apply result");
+    let metering = metering_entries(&storage);
+    assert_eq!(metering.len(), 3);
+    assert!(
+        metering
+            .iter()
+            .all(|entry| !entry.operation_key.ends_with(":branch")),
+    );
+    Box::new(storage)
+        .close()
+        .expect("close false-write storage");
+
+    fs::remove_dir_all(root).expect("remove found fixture");
+    fs::remove_dir_all(false_root).expect("remove false-write fixture");
+}
+
+fn metering_entries(
+    storage: &dyn ProductStateStorage,
+) -> Vec<winwincode_publication::PublicationMeteringSourceEntry> {
+    let page = PublicationMeteringLedger::new(storage)
+        .scan_sources(&PublicationMeteringFilter::default(), None, 200)
+        .expect("scan Publication metering sources");
+    assert!(page.next.is_none());
+    page.entries
 }
 
 #[test]
@@ -603,10 +705,7 @@ fn request_identity_conflict_and_duplicate_publication_are_distinct_and_write_no
             fixture.authorization(),
         )
         .expect_err("same request identity cannot change body");
-    assert_eq!(
-        conflict.kind(),
-        winwincode_publication::PublicationErrorKind::RequestConflict,
-    );
+    assert_eq!(conflict.kind(), PublicationErrorKind::RequestConflict,);
 
     let different_request = PublicationCommandContext::try_new(
         ReceiptIdentity::new(
@@ -629,10 +728,7 @@ fn request_identity_conflict_and_duplicate_publication_are_distinct_and_write_no
             fixture.authorization(),
         )
         .expect_err("another request cannot recreate one publication identity");
-    assert_eq!(
-        duplicate.kind(),
-        winwincode_publication::PublicationErrorKind::AlreadyExists,
-    );
+    assert_eq!(duplicate.kind(), PublicationErrorKind::AlreadyExists,);
     assert_eq!(
         coordinator(&mut storage, &mut port)
             .get(fixture.publication_id())
@@ -644,6 +740,167 @@ fn request_identity_conflict_and_duplicate_publication_are_distinct_and_write_no
 
     Box::new(storage).close().expect("close storage");
     fs::remove_dir_all(&root).expect("remove fixture");
+}
+
+#[test]
+fn exact_replay_rejects_changed_product_session_user_and_scope_attribution() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let mut storage = SqliteStorage::open(&root).expect("open storage");
+    let mut port = RecordingPort::default();
+    coordinator(&mut storage, &mut port)
+        .publish(
+            fixture.publish_context(),
+            fixture.publish_command(),
+            fixture.authorization(),
+        )
+        .expect("persist Publication attribution");
+
+    let exact_scope = RepositoryPolicyScope::try_new(
+        OrganizationId("org_00000000000000000000000001".to_owned()),
+        WorkspaceId("wsp_00000000000000000000000001".to_owned()),
+        ProjectId("prj_00000000000000000000000001".to_owned()),
+        RepositoryId("rep_00000000000000000000000001".to_owned()),
+    )
+    .expect("exact fixture scope");
+    let variants = [
+        PublicationEnterpriseAttribution::try_new(
+            &exact_scope,
+            fixture.authorization().binding().delivery_id().clone(),
+            ProductSessionId("psn_00000000000000000000000002".to_owned()),
+            fixture.attribution().user_id().clone(),
+        )
+        .expect("changed ProductSession attribution"),
+        PublicationEnterpriseAttribution::try_new(
+            &exact_scope,
+            fixture.authorization().binding().delivery_id().clone(),
+            fixture.attribution().product_session_id().clone(),
+            UserId("usr_00000000000000000000000003".to_owned()),
+        )
+        .expect("changed User attribution"),
+        PublicationEnterpriseAttribution::try_new(
+            &RepositoryPolicyScope::try_new(
+                OrganizationId("org_00000000000000000000000002".to_owned()),
+                exact_scope.workspace_id().clone(),
+                exact_scope.project_id().clone(),
+                exact_scope.repository_id().clone(),
+            )
+            .expect("changed organization scope"),
+            fixture.authorization().binding().delivery_id().clone(),
+            fixture.attribution().product_session_id().clone(),
+            fixture.attribution().user_id().clone(),
+        )
+        .expect("changed scope attribution"),
+    ];
+    for changed in variants {
+        let error = coordinator(&mut storage, &mut port)
+            .publish_with_attribution(
+                fixture.publish_context(),
+                fixture.publish_command(),
+                fixture.authorization(),
+                &changed,
+            )
+            .expect_err("changed durable attribution must fail closed");
+        assert_eq!(error.kind(), PublicationErrorKind::Corrupt);
+    }
+    assert!(port.lookups.is_empty());
+    assert!(port.applies.is_empty());
+
+    Box::new(storage).close().expect("close storage");
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn metering_source_scan_keeps_a_bounded_filter_bound_snapshot_across_restart() {
+    let root = temporary_root();
+    let fixture = current_publication_fixture();
+    let mut storage = SqliteStorage::open(&root).expect("open storage");
+    let mut first_port = RecordingPort::default();
+    coordinator(&mut storage, &mut first_port)
+        .publish(
+            fixture.publish_context(),
+            fixture.publish_command(),
+            fixture.authorization(),
+        )
+        .expect("persist first Publication");
+    coordinator(&mut storage, &mut first_port)
+        .resume(fixture.publication_id(), fixture.resume_time_millis())
+        .expect("settle first Publication");
+
+    let filter = PublicationMeteringFilter {
+        user_id: Some(fixture.attribution().user_id().clone()),
+        ..PublicationMeteringFilter::default()
+    };
+    let first_page = PublicationMeteringLedger::new(&storage)
+        .scan_sources(&filter, None, 2)
+        .expect("scan first fixed-snapshot page");
+    assert_eq!(first_page.snapshot_sequence, 4);
+    assert_eq!(first_page.entries.len(), 2);
+    let cursor = first_page.next.expect("remaining first snapshot page");
+
+    let second_publication = PublicationId("pub_00000000000000000000000002".to_owned());
+    let second_command = PublicationPublishCommand::try_new(
+        second_publication.clone(),
+        fixture.authorization().binding().delivery_id().clone(),
+        fixture.authorization().candidate_digest().clone(),
+        fixture.authorization().target().clone(),
+    )
+    .expect("second Publication command");
+    let second_context = PublicationCommandContext::try_new(
+        ReceiptIdentity::new(
+            ReceiptActorKey::from_encoded(b"fixture-publication-actor".to_vec())
+                .expect("actor key"),
+            ReceiptScopeKey::from_encoded(b"fixture-publication-repository-scope".to_vec())
+                .expect("scope key"),
+            RequestId("req_00000000000000000000000004".to_owned()),
+        )
+        .expect("second receipt identity"),
+        Sha256Digest(format!("sha256:{}", "4".repeat(64))),
+        0,
+        fixture.publish_context().occurred_at_millis() + 1,
+    )
+    .expect("second command context");
+    let mut second_port = RecordingPort::default();
+    coordinator(&mut storage, &mut second_port)
+        .publish_with_attribution(
+            &second_context,
+            &second_command,
+            fixture.authorization(),
+            fixture.attribution(),
+        )
+        .expect("persist second Publication");
+    coordinator(&mut storage, &mut second_port)
+        .resume(&second_publication, fixture.resume_time_millis() + 1)
+        .expect("settle second Publication");
+    assert_eq!(metering_entries(&storage).len(), 8);
+
+    Box::new(storage).close().expect("close first storage");
+    let restarted = SqliteStorage::open(&root).expect("restart storage");
+    let remaining = PublicationMeteringLedger::new(&restarted)
+        .scan_sources(&filter, Some(&cursor), 2)
+        .expect("continue the original bounded snapshot after restart");
+    assert_eq!(remaining.snapshot_sequence, 4);
+    assert_eq!(remaining.entries.len(), 2);
+    assert!(remaining.next.is_none());
+    assert!(
+        remaining
+            .entries
+            .iter()
+            .all(|entry| entry.publication_id == *fixture.publication_id()),
+    );
+    let changed_filter = PublicationMeteringFilter {
+        publication_id: Some(second_publication),
+        ..filter
+    };
+    let error = PublicationMeteringLedger::new(&restarted)
+        .scan_sources(&changed_filter, Some(&cursor), 2)
+        .expect_err("a cursor cannot be reused with a changed filter");
+    assert_eq!(error.kind(), PublicationMeteringErrorKind::InvalidInput,);
+
+    Box::new(restarted)
+        .close()
+        .expect("close restarted storage");
+    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[test]
@@ -690,7 +947,7 @@ fn concurrent_exact_publish_requests_create_one_intent_and_one_remote_effect_set
 
     let connection = Connection::open(root.join("control-plane.sqlite3")).expect("open database");
     for (table, expected) in [
-        ("product_state", 1_i64),
+        ("product_state", 2_i64),
         ("aggregate_journals", 1),
         ("aggregate_journal_records", 1),
         ("command_receipts", 1),

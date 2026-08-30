@@ -12,10 +12,12 @@ use winwincode_delivery::{
     projection::runtime::{RuntimeFoldSnapshot, RuntimeProjection, RuntimeSessionProjection},
 };
 use winwincode_domain::{
-    DeliveryId, ExecutionEventId, Instant, ProductSessionId, Revision, Sha256Digest,
+    CodexThreadId, DeliveryId, ExecutionEventId, ExecutionJobId, FencingToken, Instant, LeaseId,
+    ProductSessionId, Revision, Sha256Digest, WorkerSessionId,
 };
 use winwincode_storage::{
-    ProductStateStorage, ProjectionEventCursor, ProjectionReadCut, StorageError, StorageErrorKind,
+    ArtifactStore, GitSourceResolver, ProductStateStorage, ProjectionEventCursor,
+    ProjectionReadCut, StorageError, StorageErrorKind,
 };
 
 use crate::runtime_event_transaction::{
@@ -37,6 +39,25 @@ pub struct TrustedRuntimeFoldSnapshot {
     pub delivery_id: Option<DeliveryId>,
     pub product_session_id: Option<ProductSessionId>,
     pub sessions: Vec<RuntimeSessionProjection>,
+}
+
+/// Exact runtime identity for a standalone `ProductSession` execution.
+///
+/// `ProductSession` execution uses the typed `(ProductSession, ExecutionJob)`
+/// binding rather than a Delivery `SessionBinding` id. The transport contract
+/// still exposes one `sessionBindingId` field, so the mapping layer derives a
+/// stable projection key from those two durable identities. No independent
+/// binding authority is created here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedProductSessionRuntimeSession {
+    pub(crate) product_session_id: ProductSessionId,
+    pub(crate) execution_job_id: ExecutionJobId,
+    pub(crate) worker_session_id: WorkerSessionId,
+    pub(crate) codex_thread_id: CodexThreadId,
+    pub(crate) lease_id: LeaseId,
+    pub(crate) attempt: u64,
+    pub(crate) fencing_token: FencingToken,
+    pub(crate) as_of_sequence: u64,
 }
 
 impl TrustedRuntimeFoldSnapshot {
@@ -238,6 +259,7 @@ pub struct TrustedRuntimeProjectionRead {
     accepted_sequence: u64,
     rebuilt_at: Instant,
     snapshot: TrustedRuntimeFoldSnapshot,
+    product_session_runtime: Option<TrustedProductSessionRuntimeSession>,
     source_seal: Sha256Digest,
     /// Cursor captured by the same durable read as this runtime fact.
     ///
@@ -265,6 +287,26 @@ impl TrustedRuntimeProjectionRead {
         source_seal: Sha256Digest,
     ) -> Result<Self, TrustedProjectionReadError> {
         let snapshot = TrustedRuntimeFoldSnapshot::from_delivery(projection.snapshot());
+        Self::try_new_fold(
+            scope,
+            delivery_revision,
+            ledger_revision,
+            accepted_sequence,
+            rebuilt_at,
+            snapshot,
+            source_seal,
+        )
+    }
+
+    fn try_new_fold(
+        scope: RepositoryScope,
+        delivery_revision: u64,
+        ledger_revision: Revision,
+        accepted_sequence: u64,
+        rebuilt_at: Instant,
+        snapshot: TrustedRuntimeFoldSnapshot,
+        source_seal: Sha256Digest,
+    ) -> Result<Self, TrustedProjectionReadError> {
         let max_session_sequence = snapshot
             .sessions
             .iter()
@@ -295,6 +337,7 @@ impl TrustedRuntimeProjectionRead {
             accepted_sequence,
             rebuilt_at,
             snapshot,
+            product_session_runtime: None,
             source_seal,
             event_cursor: None,
         })
@@ -310,6 +353,7 @@ impl TrustedRuntimeProjectionRead {
         accepted_sequence: u64,
         rebuilt_at: Instant,
         source_seal: Sha256Digest,
+        product_session_runtime: Option<TrustedProductSessionRuntimeSession>,
     ) -> Result<Self, TrustedProjectionReadError> {
         if !canonical_repository_scope(&scope)
             || !portable(&product_session_id.0, 200)
@@ -317,6 +361,17 @@ impl TrustedRuntimeProjectionRead {
             || accepted_sequence > MAX_SAFE_INTEGER
             || !canonical_instant(&rebuilt_at)
             || !canonical_sha256(&source_seal)
+            || product_session_runtime.as_ref().is_some_and(|runtime| {
+                runtime.product_session_id != product_session_id
+                    || runtime.as_of_sequence != accepted_sequence
+                    || runtime.attempt == 0
+                    || runtime.attempt > MAX_SAFE_INTEGER
+                    || !portable(&runtime.execution_job_id.0, 200)
+                    || !portable(&runtime.worker_session_id.0, 200)
+                    || !portable(&runtime.codex_thread_id.0, 200)
+                    || !portable(&runtime.lease_id.0, 200)
+                    || !portable(&runtime.fencing_token.0, 200)
+            })
         {
             return Err(TrustedProjectionReadError::Invalid);
         }
@@ -327,6 +382,7 @@ impl TrustedRuntimeProjectionRead {
             accepted_sequence,
             rebuilt_at,
             snapshot: TrustedRuntimeFoldSnapshot::product_session(product_session_id),
+            product_session_runtime,
             source_seal,
             event_cursor: None,
         })
@@ -384,6 +440,12 @@ impl TrustedRuntimeProjectionRead {
 
     pub(crate) const fn source_seal(&self) -> &Sha256Digest {
         &self.source_seal
+    }
+
+    pub(crate) const fn product_session_runtime(
+        &self,
+    ) -> Option<&TrustedProductSessionRuntimeSession> {
+        self.product_session_runtime.as_ref()
     }
 }
 
@@ -680,7 +742,27 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             return Err(TrustedProjectionReadError::Invalid);
         }
         let Some(state) = cut.states().first() else {
-            return Err(TrustedProjectionReadError::Unavailable);
+            let ledger_revision = Revision(0);
+            let accepted_sequence = 0;
+            if request.expected().is_some_and(|expected| {
+                expected.ledger_revision() != &ledger_revision
+                    || expected.accepted_sequence() != accepted_sequence
+            }) {
+                return Err(TrustedProjectionReadError::Stale);
+            }
+            let read = TrustedRuntimeProjectionRead::try_new_product_session(
+                request.scope().clone(),
+                request.product_session_id().clone(),
+                ledger_revision,
+                accepted_sequence,
+                Instant("1970-01-01T00:00:00.000Z".to_owned()),
+                runtime_source_seal(&cut),
+                None,
+            )?;
+            return Ok(TrustedRuntimeProjectionReadCut::new(
+                read,
+                cut.projection_event_cursor().clone(),
+            ));
         };
         let ledger = decode_runtime_ledger_state(state, &state_stream_id)
             .map_err(|error| map_storage_read_error(&error))?;
@@ -696,6 +778,16 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             .last()
             .map(|entry| entry.event.occurred_at.clone())
             .ok_or(TrustedProjectionReadError::Invalid)?;
+        let product_session_runtime = TrustedProductSessionRuntimeSession {
+            product_session_id: ledger.product_session_id.clone(),
+            execution_job_id: ledger.execution_job_id.clone(),
+            worker_session_id: ledger.worker_session_id.clone(),
+            codex_thread_id: ledger.codex_thread_id.clone(),
+            lease_id: ledger.lease_id.clone(),
+            attempt: ledger.attempt,
+            fencing_token: ledger.fencing_token.clone(),
+            as_of_sequence: ledger.highest_sequence,
+        };
         let ledger_revision = Revision(
             i64::try_from(ledger.highest_sequence)
                 .map_err(|_| TrustedProjectionReadError::Invalid)?,
@@ -713,6 +805,7 @@ impl TrustedRuntimeProjectionReadCutReader for SqliteStorageRuntimeProjectionRea
             accepted_sequence,
             rebuilt_at,
             source_seal,
+            Some(product_session_runtime),
         )?;
         if expected_mismatch {
             return Err(TrustedProjectionReadError::Stale);
@@ -731,7 +824,7 @@ fn delivery_runtime_read(
     cut: &ProjectionReadCut,
     bindings: &[&winwincode_delivery::domain::SessionBinding],
 ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
-    let Some(binding) = bindings.first() else {
+    if bindings.is_empty() {
         let projection = RuntimeProjection::new(delivery, Vec::new())
             .map_err(|_| TrustedProjectionReadError::Invalid)?;
         return trusted_runtime_read(
@@ -739,61 +832,77 @@ fn delivery_runtime_read(
             &projection,
             Revision(0),
             0,
-            Instant("1970-01-01T00:00:00Z".to_owned()),
+            Instant("1970-01-01T00:00:00.000Z".to_owned()),
             cut,
         );
-    };
-    if bindings.len() != 1 {
-        return Err(TrustedProjectionReadError::Invalid);
     }
-    let LoadedDeliveryRuntimeState {
-        events,
-        ledger_revision,
-        accepted_sequence,
-        rebuilt_at,
-    } = load_delivery_runtime_state(delivery, binding, scope_key, cut)?;
-    let stage_run_settled = delivery
-        .snapshot()
-        .stage_runs
-        .iter()
-        .find(|run| run.id == binding.stage_run_id)
-        .ok_or(TrustedProjectionReadError::Invalid)?
-        .finished_at_millis
-        .is_some();
-    let settled_last_sequence = if stage_run_settled {
-        if accepted_sequence == 0 {
+    let mut sessions = Vec::with_capacity(bindings.len());
+    let mut accepted_sequence = 0_u64;
+    let mut rebuilt_at = Instant("1970-01-01T00:00:00.000Z".to_owned());
+    for binding in bindings {
+        let loaded = load_delivery_runtime_state(delivery, binding, scope_key, cut)?;
+        let stage_run_settled = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .find(|run| run.id == binding.stage_run_id)
+            .ok_or(TrustedProjectionReadError::Invalid)?
+            .finished_at_millis
+            .is_some();
+        let settled_last_sequence = if stage_run_settled {
+            if loaded.accepted_sequence == 0 {
+                return Err(TrustedProjectionReadError::Invalid);
+            }
+            Some(loaded.accepted_sequence)
+        } else {
+            None
+        };
+        let projection = RuntimeProjection::from_persisted_checkpoints(
+            delivery,
+            &binding.id,
+            binding
+                .lease_id
+                .clone()
+                .ok_or(TrustedProjectionReadError::Invalid)?,
+            binding
+                .fencing_token
+                .clone()
+                .ok_or(TrustedProjectionReadError::Invalid)?,
+            binding
+                .worker_id
+                .clone()
+                .ok_or(TrustedProjectionReadError::Invalid)?,
+            binding
+                .worker_instance_id
+                .clone()
+                .ok_or(TrustedProjectionReadError::Invalid)?,
+            settled_last_sequence,
+            &loaded.events,
+        )
+        .map_err(|_| TrustedProjectionReadError::Invalid)?;
+        let [session] = projection.snapshot().sessions.as_slice() else {
             return Err(TrustedProjectionReadError::Invalid);
+        };
+        sessions.push(session.clone());
+        accepted_sequence = accepted_sequence
+            .checked_add(loaded.accepted_sequence)
+            .filter(|sequence| *sequence <= MAX_SAFE_INTEGER)
+            .ok_or(TrustedProjectionReadError::Invalid)?;
+        if loaded.rebuilt_at.0 > rebuilt_at.0 {
+            rebuilt_at = loaded.rebuilt_at;
         }
-        Some(accepted_sequence)
-    } else {
-        None
-    };
-    let projection = RuntimeProjection::from_persisted_checkpoints(
-        delivery,
-        &binding.id,
-        binding
-            .lease_id
-            .clone()
-            .ok_or(TrustedProjectionReadError::Invalid)?,
-        binding
-            .fencing_token
-            .clone()
-            .ok_or(TrustedProjectionReadError::Invalid)?,
-        binding
-            .worker_id
-            .clone()
-            .ok_or(TrustedProjectionReadError::Invalid)?,
-        binding
-            .worker_instance_id
-            .clone()
-            .ok_or(TrustedProjectionReadError::Invalid)?,
-        settled_last_sequence,
-        &events,
-    )
-    .map_err(|_| TrustedProjectionReadError::Invalid)?;
-    trusted_runtime_read(
+    }
+    sessions.sort_by(|left, right| left.session_binding_id.0.cmp(&right.session_binding_id.0));
+    let ledger_revision = Revision(
+        i64::try_from(accepted_sequence).map_err(|_| TrustedProjectionReadError::Invalid)?,
+    );
+    trusted_runtime_fold_read(
         request,
-        &projection,
+        TrustedRuntimeFoldSnapshot {
+            delivery_id: Some(delivery.id().clone()),
+            product_session_id: None,
+            sessions,
+        },
         ledger_revision,
         accepted_sequence,
         rebuilt_at,
@@ -803,7 +912,6 @@ fn delivery_runtime_read(
 
 struct LoadedDeliveryRuntimeState {
     events: Vec<(u64, ExecutionEventId)>,
-    ledger_revision: Revision,
     accepted_sequence: u64,
     rebuilt_at: Instant,
 }
@@ -825,9 +933,8 @@ fn load_delivery_runtime_state(
     let Some(ledger) = ledger else {
         return Ok(LoadedDeliveryRuntimeState {
             events: Vec::new(),
-            ledger_revision: Revision(0),
             accepted_sequence: 0,
-            rebuilt_at: Instant("1970-01-01T00:00:00Z".to_owned()),
+            rebuilt_at: Instant("1970-01-01T00:00:00.000Z".to_owned()),
         });
     };
     let (
@@ -879,12 +986,8 @@ fn load_delivery_runtime_state(
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let ledger_revision = Revision(
-        i64::try_from(ledger.highest_sequence).map_err(|_| TrustedProjectionReadError::Invalid)?,
-    );
     Ok(LoadedDeliveryRuntimeState {
         events,
-        ledger_revision,
         accepted_sequence: ledger.highest_sequence,
         rebuilt_at,
     })
@@ -898,14 +1001,32 @@ fn trusted_runtime_read(
     rebuilt_at: Instant,
     cut: &ProjectionReadCut,
 ) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
+    trusted_runtime_fold_read(
+        request,
+        TrustedRuntimeFoldSnapshot::from_delivery(projection.snapshot()),
+        ledger_revision,
+        accepted_sequence,
+        rebuilt_at,
+        cut,
+    )
+}
+
+fn trusted_runtime_fold_read(
+    request: &DeliveryRuntimeReadRequest,
+    snapshot: TrustedRuntimeFoldSnapshot,
+    ledger_revision: Revision,
+    accepted_sequence: u64,
+    rebuilt_at: Instant,
+    cut: &ProjectionReadCut,
+) -> Result<TrustedRuntimeProjectionRead, TrustedProjectionReadError> {
     let source_seal = runtime_source_seal(cut);
-    let read = TrustedRuntimeProjectionRead::try_new(
+    let read = TrustedRuntimeProjectionRead::try_new_fold(
         request.scope().clone(),
         request.delivery_revision(),
         ledger_revision,
         accepted_sequence,
         rebuilt_at,
-        projection,
+        snapshot,
         source_seal,
     )?;
     if request.expected().is_some_and(|expected| {
@@ -1042,6 +1163,40 @@ impl TrustedPublicationProjectionRead {
 
 /// Trusted Git/publication intent and result reader.
 pub trait TrustedPublicationProjectionAdapter: Send + Sync {
+    /// Reads publication facts through the Control Plane's canonical durable
+    /// storage, Artifact store, and Git source resolver.
+    ///
+    /// Production adapters override this method. The default preserves the
+    /// small in-memory adapter seam while ensuring that application code has
+    /// one call path for local and injected sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable source failure when the exact durable facts cannot be
+    /// reconstructed or have changed.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the trusted read binds every independent durable authority explicitly"
+    )]
+    fn read_current_with_storage(
+        &self,
+        _storage: &dyn ProductStateStorage,
+        _artifacts: Option<&ArtifactStore>,
+        _source_resolver: Option<&dyn GitSourceResolver>,
+        _delivery: &Delivery,
+        scope: &RepositoryScope,
+        delivery_id: &DeliveryId,
+        delivery_revision: u64,
+        expected_publication_revision: Option<&Revision>,
+    ) -> Result<TrustedPublicationProjectionRead, TrustedProjectionReadError> {
+        self.read_current(
+            scope,
+            delivery_id,
+            delivery_revision,
+            expected_publication_revision,
+        )
+    }
+
     /// Reads latest or exact publication facts for one aggregate revision.
     ///
     /// # Errors
@@ -1129,6 +1284,16 @@ fn portable_scope_id(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::runtime_event_transaction::{RuntimeLedgerEvent, RuntimeLedgerState};
+    use winwincode_api::generated::{
+        ControlPlaneWebSocketDeliveryGetReloadQuery,
+        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent,
+        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind,
+        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue,
+        ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent,
+        ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventScopeKind,
+        ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventTypeValue,
+        ControlPlaneWebSocketRuntimeProjectionGetReloadQuery,
+    };
     use winwincode_delivery::{
         domain::{Delivery, SessionBindingId},
         projection::runtime::{
@@ -1140,14 +1305,16 @@ mod tests {
     };
     use winwincode_domain::{
         ControlPlaneEventId, ExecutionEventId, ExecutionJobId, ExecutionSequence, FencingToken,
-        Instant as DomainInstant, LeaseId, RequestId, WorkerId, WorkerInstanceId, WorkerSessionId,
+        Instant as DomainInstant, LeaseId, RequestId, Revision, SessionIdentity, WorkerId,
+        WorkerInstanceId, WorkerSessionId,
     };
     use winwincode_execution_port::generated::{
         ExecutionEventCategory, ExecutionEventRecord, ExecutionLeaseStamp,
     };
     use winwincode_storage::{
         NewOutboxEvent, ProductStateStorage, ProjectionEventStream, ProjectionEventStreamKey,
-        ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+        PublicEventActor, PublicEventSource, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+        receipt_actor_key,
     };
 
     fn scope() -> RepositoryScope {
@@ -1189,7 +1356,6 @@ mod tests {
     }
 
     struct RuntimeFixtureCommit<'fixture> {
-        actor_key: &'fixture [u8],
         request_id: &'fixture str,
         command_digest: char,
         stream_id: String,
@@ -1204,12 +1370,64 @@ mod tests {
         fixture: RuntimeFixtureCommit<'_>,
     ) {
         let scope_key = crate::repository_scope_key(scope).expect("scope key");
+        let actor = PublicEventActor::System {
+            id: winwincode_domain::SystemActorId("sys_01J00000000000000000000000".into()),
+        };
         let receipt_identity = ReceiptIdentity::new(
-            ReceiptActorKey::from_encoded(fixture.actor_key.to_vec()).expect("actor key"),
+            receipt_actor_key(&actor).expect("actor key"),
             scope_key,
             RequestId(fixture.request_id.into()),
         )
         .expect("receipt identity");
+        let accepted_sequence = i64::try_from(fixture.ledger.highest_sequence)
+            .expect("fixture sequence in public range");
+        let payload = if let Some(delivery_id) = &fixture.ledger.delivery_id {
+            let stage_run_id = fixture
+                .ledger
+                .stage_run_id
+                .clone()
+                .expect("Delivery fixture StageRun");
+            serde_json::to_vec(
+                &ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
+                    delivery_id: delivery_id.clone(),
+                    last_projection_sequence: accepted_sequence,
+                    product_session_id: fixture.ledger.product_session_id.clone(),
+                    projection_revision: Revision(accepted_sequence),
+                    reload_queries: (
+                        ControlPlaneWebSocketDeliveryGetReloadQuery::DeliveryGet,
+                        ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
+                    ),
+                    scope_kind:
+                        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
+                    session_identity: SessionIdentity {
+                        codex_thread_id: fixture.ledger.codex_thread_id.clone(),
+                        product_session_id: fixture.ledger.product_session_id.clone(),
+                        stage_run_id: Some(stage_run_id.clone()),
+                        worker_session_id: fixture.ledger.worker_session_id.clone(),
+                    },
+                    stage_run_id,
+                    type_value:
+                        ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
+                },
+            )
+            .expect("generated Delivery runtime invalidation")
+        } else {
+            serde_json::to_vec(
+                &ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent {
+                    last_projection_sequence: accepted_sequence,
+                    product_session_id: fixture.ledger.product_session_id.clone(),
+                    projection_revision: Revision(accepted_sequence),
+                    reload_queries: (
+                        ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
+                    ),
+                    scope_kind:
+                        ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventScopeKind::ProductSession,
+                    type_value:
+                        ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
+                },
+            )
+            .expect("generated ProductSession runtime invalidation")
+        };
         storage
             .commit(&StateCommit::new(
                 receipt_identity,
@@ -1220,12 +1438,21 @@ mod tests {
                 fixture.stream_id,
                 0,
                 serde_json::to_vec(fixture.ledger).expect("ledger JSON"),
-                vec![NewOutboxEvent::projection(
-                    ControlPlaneEventId(fixture.event_id.into()),
-                    "runtime-projection.invalidated.v1",
-                    b"{}".to_vec(),
-                    fixture.stream,
-                )],
+                vec![
+                    NewOutboxEvent::public_projection(
+                        ControlPlaneEventId(fixture.event_id.into()),
+                        "runtime-projection.invalidated.v1",
+                        payload,
+                        fixture.stream,
+                        crate::public_repository_scope(scope),
+                        DomainInstant("2026-08-25T00:00:00.000Z".into()),
+                        PublicEventSource::ControlPlane {
+                            actor,
+                            component: "strongflow-projection-fixture".into(),
+                        },
+                    )
+                    .expect("public fixture event"),
+                ],
             ))
             .expect("runtime state and invalidation");
     }
@@ -1342,9 +1569,7 @@ mod tests {
             product_session_id: product_session_id.clone(),
             execution_job_id: lease.job_id.clone(),
             worker_session_id: WorkerSessionId("wsn_01J00000000000000000000000".into()),
-            codex_thread_id: winwincode_domain::CodexThreadId(
-                "cdx_01J00000000000000000000000".into(),
-            ),
+            codex_thread_id: CodexThreadId("cdx_01J00000000000000000000000".into()),
             lease_id: lease.lease_id.clone(),
             attempt: 1,
             fencing_token: lease.fencing_token.clone(),
@@ -1360,7 +1585,6 @@ mod tests {
             &mut storage,
             &scope,
             RuntimeFixtureCommit {
-                actor_key: b"source-product-fixture",
                 request_id: "req_source_product_fixture_0001",
                 command_digest: 'b',
                 stream_id,
@@ -1386,6 +1610,74 @@ mod tests {
                 .as_ref()
                 .is_some_and(|id| id == request.product_session_id())
         );
+        assert!(read.runtime().snapshot().sessions.is_empty());
+        Box::new(storage).close().expect("SQLite close");
+        std::fs::remove_dir_all(root).expect("temporary source directory");
+    }
+
+    #[test]
+    fn sqlite_product_session_read_cut_is_empty_before_the_first_runtime_event() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-control-plane-empty-product-source-test-{}",
+            std::process::id()
+        ));
+        let mut storage = winwincode_storage::SqliteStorage::open(&root).expect("SQLite storage");
+        let scope = canonical_source_scope();
+        let product_session_id = ProductSessionId("psn_01J00000000000000000000001".into());
+        let actor = PublicEventActor::System {
+            id: winwincode_domain::SystemActorId("sys_01J00000000000000000000000".into()),
+        };
+        let receipt_identity = ReceiptIdentity::new(
+            receipt_actor_key(&actor).expect("actor key"),
+            crate::repository_scope_key(&scope).expect("scope key"),
+            RequestId("req_empty_product_runtime_0001".into()),
+        )
+        .expect("receipt identity");
+        let event = ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent {
+            last_projection_sequence: 0,
+            product_session_id: product_session_id.clone(),
+            projection_revision: Revision(0),
+            reload_queries: (
+                ControlPlaneWebSocketRuntimeProjectionGetReloadQuery::RuntimeProjectionGet,
+            ),
+            scope_kind:
+                ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventScopeKind::ProductSession,
+            type_value:
+                ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
+        };
+        storage
+            .commit(&StateCommit::new(
+                receipt_identity,
+                Sha256Digest(format!("sha256:{}", "d".repeat(64))),
+                "unrelated:empty-product-runtime",
+                0,
+                b"{}".to_vec(),
+                vec![
+                    NewOutboxEvent::public_projection(
+                        ControlPlaneEventId("evt_empty_product_runtime_0001".into()),
+                        "runtime-projection.invalidated.v1",
+                        serde_json::to_vec(&event).expect("generated event"),
+                        ProjectionEventStream::ProductSession(product_session_id.clone()),
+                        crate::public_repository_scope(&scope),
+                        DomainInstant("2026-08-25T00:00:00.000Z".into()),
+                        PublicEventSource::ControlPlane {
+                            actor,
+                            component: "empty-product-runtime-fixture".into(),
+                        },
+                    )
+                    .expect("public event"),
+                ],
+            ))
+            .expect("public event commit");
+
+        let request = ProductSessionRuntimeReadRequest::new(scope, product_session_id, None, 20);
+        let read = SqliteStorageRuntimeProjectionReadCutReader
+            .read_product_session_cut(&storage, &request)
+            .expect("empty ProductSession runtime cut");
+        assert_eq!(read.event_cursor().sequence(), 1);
+        assert_eq!(read.runtime().ledger_revision(), &Revision(0));
+        assert_eq!(read.runtime().accepted_sequence(), 0);
+        assert_eq!(read.runtime().rebuilt_at().0, "1970-01-01T00:00:00.000Z");
         assert!(read.runtime().snapshot().sessions.is_empty());
         Box::new(storage).close().expect("SQLite close");
         std::fs::remove_dir_all(root).expect("temporary source directory");
@@ -1450,7 +1742,6 @@ mod tests {
             &mut storage,
             &scope,
             RuntimeFixtureCommit {
-                actor_key: b"source-delivery-fixture",
                 request_id: "req_source_delivery_fixture_0001",
                 command_digest: 'c',
                 stream_id,

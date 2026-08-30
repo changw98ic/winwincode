@@ -137,7 +137,11 @@ fn validate_message_identifiers(
 ) -> Result<(), SessionIdentityAdapterError> {
     require_id(&message.message_id.0, "messageId", "xmsg_")?;
     require_id(&message.product_session_id.0, "productSessionId", "psn_")?;
-    require_id(&message.stage_run_id.0, "stageRunId", "run_")?;
+    let stage_run_id = message
+        .stage_run_id
+        .as_ref()
+        .ok_or(SessionIdentityAdapterError::InvalidMessage("stageRunId"))?;
+    require_id(&stage_run_id.0, "stageRunId", "run_")?;
     require_id(&message.worker_session_id.0, "workerSessionId", "wsn_")?;
     require_id(&message.codex_thread_id.0, "codexThreadId", "cdx_")?;
     require_id(&message.worker_id.0, "workerId", "wrk_")?;
@@ -210,7 +214,7 @@ fn validate_message_authority_fields(
     if message.session_identity.product_session_id != message.product_session_id
         || message.session_identity.worker_session_id != message.worker_session_id
         || message.session_identity.codex_thread_id != message.codex_thread_id
-        || message.session_identity.stage_run_id.as_ref() != Some(&message.stage_run_id)
+        || message.session_identity.stage_run_id != message.stage_run_id
     {
         return Err(SessionIdentityAdapterError::InvalidMessage(
             "sessionIdentity",
@@ -288,7 +292,7 @@ fn validate_delivery_scope(
         "psn_",
     )?;
     if scope.product_session_id != message.product_session_id
-        || scope.stage_run_id != message.stage_run_id
+        || message.stage_run_id.as_ref() != Some(&scope.stage_run_id)
         || authority.active_lease().execution_job_id() != &message.lease.job_id
     {
         return Err(SessionIdentityAdapterError::ForeignAuthority(
@@ -475,7 +479,7 @@ mod tests {
                 worker_instance_id,
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id: stage_run_id.clone(),
+            stage_run_id: Some(stage_run_id.clone()),
             worker_id,
             worker_session_id,
         };
@@ -537,8 +541,8 @@ mod tests {
         ));
 
         let (authority, mut message, scope) = fixture(3);
-        message.stage_run_id = StageRunId(id("run", 99));
-        message.session_identity.stage_run_id = Some(message.stage_run_id.clone());
+        message.stage_run_id = Some(StageRunId(id("run", 99)));
+        message.session_identity.stage_run_id = message.stage_run_id.clone();
         assert!(matches!(
             validate_session_binding(&message, &authority, &scope),
             Err(SessionIdentityAdapterError::ForeignAuthority(
@@ -554,6 +558,18 @@ mod tests {
             Err(SessionIdentityAdapterError::ForeignAuthority(
                 "execution scope"
             ))
+        ));
+    }
+
+    #[test]
+    fn delivery_stage_binding_cannot_omit_its_stage_run() {
+        let (authority, mut message, scope) = fixture(8);
+        message.stage_run_id = None;
+        message.session_identity.stage_run_id = None;
+
+        assert!(matches!(
+            validate_session_binding(&message, &authority, &scope),
+            Err(SessionIdentityAdapterError::InvalidMessage("stageRunId"))
         ));
     }
 

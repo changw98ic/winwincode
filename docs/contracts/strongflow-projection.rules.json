@@ -949,7 +949,7 @@
       "id": "boundary.web_generated_contracts_only",
       "statement": "TypeScript Web reads StrongFlow through generated HTTP and WebSocket client code and does not hand-maintain a second DTO or domain entity shape.",
       "refs": [
-        "apps/web/src/generated/contracts.ts",
+        "apps/client/src/generated/contracts.ts",
         "docs/decisions/0028-control-plane-worker-target-graph.json"
       ],
       "baseline": {
@@ -1068,7 +1068,7 @@
       "target": "Web imports one generated client for HTTP queries/commands and WebSocket subscription/reset handling; page code owns rendering and local interaction state only.",
       "action": "Phase 2.5.4 builds the network implementation directly from WINWINCODE_CLIENT_METADATA without hand-written route or event tables.",
       "refs": [
-        "apps/web/src/generated/contracts.ts",
+        "apps/client/src/generated/contracts.ts",
         "scripts/generate-contracts.mjs",
         "docs/decisions/0028-control-plane-worker-target-graph.json"
       ],

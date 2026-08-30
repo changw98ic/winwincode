@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt;
+use std::{fmt, path::Path};
 
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
@@ -14,19 +14,32 @@ use winwincode_audit::{
 use winwincode_domain::{RequestId, SchemaVersion};
 use winwincode_publication::{
     Publication, PublicationAuthorization, PublicationCommandContext, PublicationCoordinator,
-    PublicationError, PublicationErrorKind, PublicationLedger, PublicationPolicyAudit,
-    PublicationPolicyAuditError, PublicationPolicyContext, PublicationPolicyDecision,
-    PublicationPolicyEffect, PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPort,
-    PublicationPublishCommand, PublicationRequester, PublicationState, PublicationTarget,
+    PublicationEnterpriseAttribution, PublicationError, PublicationErrorKind, PublicationLedger,
+    PublicationMeteringLedger, PublicationPolicyAudit, PublicationPolicyAuditError,
+    PublicationPolicyContext, PublicationPolicyDecision, PublicationPolicyEffect,
+    PublicationPolicyEvidence, PublicationPolicyOrigin, PublicationPort, PublicationPublishCommand,
+    PublicationReadLedger, PublicationRequester, PublicationState, PublicationTarget,
     RepositoryPolicyScope, RepositoryPublicationPolicy,
 };
+use winwincode_storage::ProductStateStorage;
 
-use crate::{ControlPlane, StorageError, command_receipt};
+use crate::{
+    ControlPlane, DurableEnterpriseQuotaAdmission, PublicationAuthorityError,
+    PublicationAuthorityErrorKind, PublicationEnterpriseQuotaSaga,
+    PublicationEnterpriseUsageReconciler, PublicationProviderRegistryError,
+    PublicationProviderRegistryErrorKind, StorageError, command_receipt,
+    publication_enterprise_quota::publication_quota_requested_at,
+};
 
 /// Failure at the single generated-command → policy → audit → Publication seam.
 #[derive(Debug)]
 pub enum PublicationCommandError {
     InvalidInput(String),
+    ReadCursorExpired,
+    Authority(PublicationAuthorityError),
+    Provider(PublicationProviderRegistryError),
+    EnterprisePolicyDenied,
+    EnterprisePolicyUnavailable,
     PolicyDenied(Box<PublicationPolicyDecision>),
     AuditUnavailable(AuditError),
     Publication(PublicationError),
@@ -37,8 +50,28 @@ impl PublicationCommandError {
     pub const fn public_code(&self) -> ErrorCode {
         match self {
             Self::InvalidInput(_) => ErrorCode::InvalidRequest,
-            Self::PolicyDenied(_) => ErrorCode::PermissionDenied,
-            Self::AuditUnavailable(_) => ErrorCode::ServiceUnavailable,
+            Self::ReadCursorExpired => ErrorCode::ReadCursorExpired,
+            Self::Authority(error) => match error.kind() {
+                PublicationAuthorityErrorKind::InvalidConfiguration => {
+                    ErrorCode::ServiceUnavailable
+                }
+                PublicationAuthorityErrorKind::TrustedFactsUnavailable => {
+                    ErrorCode::TrustedFactsUnavailable
+                }
+            },
+            Self::Provider(error) => match error.kind() {
+                PublicationProviderRegistryErrorKind::PermissionDenied => {
+                    ErrorCode::PermissionDenied
+                }
+                PublicationProviderRegistryErrorKind::NotConfigured
+                | PublicationProviderRegistryErrorKind::Unavailable => {
+                    ErrorCode::ServiceUnavailable
+                }
+            },
+            Self::EnterprisePolicyDenied | Self::PolicyDenied(_) => ErrorCode::PermissionDenied,
+            Self::EnterprisePolicyUnavailable | Self::AuditUnavailable(_) => {
+                ErrorCode::ServiceUnavailable
+            }
             Self::Publication(error) => match error.kind() {
                 PublicationErrorKind::InvalidInput => ErrorCode::InvalidRequest,
                 PublicationErrorKind::StaleAuthority => ErrorCode::TrustedFactsUnavailable,
@@ -80,6 +113,15 @@ impl PublicationCommandError {
     #[must_use]
     pub const fn retryable(&self) -> bool {
         matches!(self, Self::AuditUnavailable(_))
+            || matches!(self, Self::EnterprisePolicyUnavailable)
+            || matches!(
+                self,
+                Self::Provider(error)
+                    if matches!(
+                        error.kind(),
+                        PublicationProviderRegistryErrorKind::Unavailable
+                    )
+            )
             || matches!(
                 self,
                 Self::Publication(error)
@@ -96,7 +138,14 @@ impl PublicationCommandError {
     pub fn decision(&self) -> Option<&PublicationPolicyDecision> {
         match self {
             Self::PolicyDenied(decision) => Some(decision.as_ref()),
-            Self::InvalidInput(_) | Self::AuditUnavailable(_) | Self::Publication(_) => None,
+            Self::InvalidInput(_)
+            | Self::ReadCursorExpired
+            | Self::Authority(_)
+            | Self::Provider(_)
+            | Self::EnterprisePolicyDenied
+            | Self::EnterprisePolicyUnavailable
+            | Self::AuditUnavailable(_)
+            | Self::Publication(_) => None,
         }
     }
 }
@@ -105,6 +154,15 @@ impl fmt::Display for PublicationCommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput(message) => formatter.write_str(message),
+            Self::ReadCursorExpired => formatter.write_str("publication list cursor expired"),
+            Self::Authority(error) => write!(formatter, "publication authority failed: {error}"),
+            Self::Provider(error) => write!(formatter, "publication provider failed: {error}"),
+            Self::EnterprisePolicyDenied => {
+                formatter.write_str("enterprise Publication Policy denied the request")
+            }
+            Self::EnterprisePolicyUnavailable => {
+                formatter.write_str("enterprise Publication Policy is unavailable")
+            }
             Self::PolicyDenied(decision) => {
                 write!(
                     formatter,
@@ -137,6 +195,24 @@ impl From<PublicationError> for PublicationCommandError {
     }
 }
 
+impl From<AuditError> for PublicationCommandError {
+    fn from(error: AuditError) -> Self {
+        Self::AuditUnavailable(error)
+    }
+}
+
+impl From<PublicationAuthorityError> for PublicationCommandError {
+    fn from(error: PublicationAuthorityError) -> Self {
+        Self::Authority(error)
+    }
+}
+
+impl From<PublicationProviderRegistryError> for PublicationCommandError {
+    fn from(error: PublicationProviderRegistryError) -> Self {
+        Self::Provider(error)
+    }
+}
+
 impl ControlPlane {
     /// Applies the repository policy and durably audits its exact rule before
     /// persisting one Publication intent. Provider effects remain deferred to
@@ -151,6 +227,7 @@ impl ControlPlane {
         &mut self,
         command: &ApiPublicationPublishCommand,
         authorization: &PublicationAuthorization,
+        attribution: &PublicationEnterpriseAttribution,
         policy: &RepositoryPublicationPolicy,
         evidence: &PublicationPolicyEvidence,
         origin: &PublicationPolicyOrigin,
@@ -185,6 +262,7 @@ impl ControlPlane {
                 &mapped.context,
                 &mapped.command,
                 authorization,
+                attribution,
                 &policy_context,
                 policy,
             )
@@ -208,24 +286,82 @@ impl ControlPlane {
         policy: &RepositoryPublicationPolicy,
         port: &mut dyn PublicationPort,
     ) -> Result<Publication, PublicationCommandError> {
-        let storage = self.storage.as_mut().ok_or_else(|| {
-            PublicationCommandError::Publication(PublicationError::from(StorageError::adapter(
-                "Control Plane storage is closed",
-            )))
-        })?;
-        let audit: Box<dyn PublicationPolicyAudit + '_> = self.audit_store.as_mut().map_or_else(
-            || Box::new(UnavailablePolicyAudit) as Box<dyn PublicationPolicyAudit>,
-            |store| Box::new(ControlPlanePolicyAudit { store }),
-        );
-        let publication =
-            PublicationCoordinator::new(PublicationLedger::new(storage.as_mut()), port, audit)
-                .resume(
-                    publication_id,
-                    policy_context.evidence().observed_at_millis(),
-                    policy_context,
-                    policy,
-                )
-                .map_err(PublicationCommandError::from)?;
+        let attribution =
+            PublicationMeteringLedger::new(self.storage_ref().map_err(publication_storage_error)?)
+                .attribution(publication_id)
+                .map_err(|_| {
+                    publication_quota_error("Publication enterprise attribution is unavailable")
+                })?;
+        let quota_directory = self
+            .local_database_path()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                publication_quota_error("local Publication quota database is unavailable")
+            })?;
+        let quota_storage = winwincode_storage::SqliteStorage::open(&quota_directory)
+            .map_err(publication_storage_error)?;
+        let mut quota = DurableEnterpriseQuotaAdmission::new(quota_storage);
+        let requested_at =
+            PublicationReadLedger::new(self.storage_ref().map_err(publication_storage_error)?)
+                .get(publication_id)
+                .map_err(PublicationCommandError::from)
+                .and_then(|publication| {
+                    publication_quota_requested_at(publication.approved_at_millis())
+                        .map_err(publication_storage_error)
+                })?;
+        let publication = {
+            let mut guarded = PublicationEnterpriseQuotaSaga::new(
+                &mut quota,
+                port,
+                &attribution,
+                publication_id,
+                requested_at,
+            );
+            let storage = self
+                .storage
+                .as_mut()
+                .ok_or_else(|| publication_quota_error("Control Plane storage is closed"))?;
+            let audit: Box<dyn PublicationPolicyAudit + '_> =
+                self.audit_store.as_mut().map_or_else(
+                    || Box::new(UnavailablePolicyAudit) as Box<dyn PublicationPolicyAudit>,
+                    |store| Box::new(ControlPlanePolicyAudit { store }),
+                );
+            PublicationCoordinator::new(
+                PublicationLedger::new(storage.as_mut()),
+                &mut guarded,
+                audit,
+            )
+            .resume(
+                publication_id,
+                policy_context.evidence().observed_at_millis(),
+                policy_context,
+                policy,
+            )
+            .map_err(PublicationCommandError::from)?
+        };
+        quota.close().map_err(publication_storage_error)?;
+        let mut usage_storage = winwincode_storage::SqliteStorage::open(&quota_directory)
+            .map_err(publication_storage_error)?;
+        let reconciliation = PublicationEnterpriseUsageReconciler::new(&mut usage_storage)
+            .reconcile_exact_publication(publication_id)
+            .map_err(|_| {
+                publication_quota_error("Publication enterprise Usage reconciliation failed")
+            });
+        let close = Box::new(usage_storage).close();
+        reconciliation?;
+        close.map_err(publication_storage_error)?;
+        if matches!(
+            publication.state(),
+            PublicationState::Published | PublicationState::Cancelled | PublicationState::Failed
+        ) {
+            self.finalize_candidate_git_for_terminal_delivery(publication.binding().delivery_id())
+                .map_err(|error| {
+                    PublicationCommandError::Publication(PublicationError::from(
+                        StorageError::adapter(error.to_string()),
+                    ))
+                })?;
+        }
         self.record_publication_result(&publication, policy_context)?;
         Ok(publication)
     }
@@ -263,6 +399,14 @@ impl ControlPlane {
         append_publication_result_audit(store, publication, context)
             .map_err(PublicationCommandError::AuditUnavailable)
     }
+}
+
+fn publication_storage_error(error: StorageError) -> PublicationCommandError {
+    PublicationCommandError::Publication(PublicationError::from(error))
+}
+
+fn publication_quota_error(message: &'static str) -> PublicationCommandError {
+    publication_storage_error(StorageError::adapter(message))
 }
 
 struct MappedPublish {

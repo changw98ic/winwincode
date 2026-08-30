@@ -356,6 +356,18 @@ test('requires four current native targets and one reproducible passing live Del
   )
   await writeFile(alteredPath, originalArtifact)
 
+  await writeFile(
+    alteredPath,
+    'release payload contains sk-fixturecredentialleakgate1234567890\n',
+  )
+  assert.throws(
+    () => createProductReleaseGateReport(input),
+    error => error instanceof ProductReleaseGateError
+      && error.code === 'CREDENTIAL_LEAK_DETECTED'
+      && !error.message.includes('sk-fixturecredentialleakgate1234567890'),
+  )
+  await writeFile(alteredPath, originalArtifact)
+
   const originalNativeEvidence = await readFile(native[0].evidencePath, 'utf8')
   const missingCheck = JSON.parse(originalNativeEvidence)
   missingCheck.checks = missingCheck.checks.slice(1)

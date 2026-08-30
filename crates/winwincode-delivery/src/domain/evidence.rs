@@ -22,8 +22,9 @@ use super::verification::AcceptedVerificationJobOutcomeFact;
 use super::{
     CandidatePathState, Delivery, DeliverySpecId, DeliveryStage, DeliveryValidationError,
     FrozenDeliveryCandidate, MAX_REFERENCE_LENGTH, MAX_SAFE_INTEGER, RepositoryRef, SessionBinding,
-    SessionBindingId, StageRun, StageRunActorType, assert_frozen_candidate_current, bounded_text,
-    portable_identifier, positive, safe_non_negative, schema_version,
+    SessionBindingId, StageRun, StageRunActorType, ValidatedGitSnapshotFact,
+    assert_frozen_candidate_current, bounded_text, portable_identifier, positive,
+    safe_non_negative, schema_version,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,13 +69,6 @@ pub struct EvidenceRef {
 /// This value is sealed inside [`ResolvedDeliveryEvidence`]. API callers do not
 /// submit it to verdict computation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "verdict consumes all classified outcomes after branch integration"
-    )
-)]
 pub(crate) enum VerifiedEvidenceOutcome {
     Observed,
     Succeeded,
@@ -130,6 +124,59 @@ pub(crate) struct AcceptedRuntimeSourceFact {
     candidate_ref: String,
     occurred_at_millis: u64,
     outcome: VerifiedEvidenceOutcome,
+}
+
+pub(crate) fn checkout_attestation_from_snapshot(
+    terminal: &AcceptedVerificationJobOutcomeFact,
+    snapshot: &ValidatedGitSnapshotFact,
+) -> ValidatedCheckoutAttestationFact {
+    ValidatedCheckoutAttestationFact {
+        product_session_id: terminal.product_session_id().clone(),
+        execution_job_id: terminal.execution_job_id().clone(),
+        stage_run_id: terminal.stage_run_id().clone(),
+        role_id: terminal.role_id().into(),
+        attempt: terminal.attempt(),
+        lease_id: terminal.lease_id().clone(),
+        fencing_token: terminal.fencing_token().clone(),
+        worker_id: terminal.worker_id().clone(),
+        worker_instance_id: terminal.worker_instance_id().clone(),
+        worker_session_id: terminal.worker_session_id().clone(),
+        codex_thread_id: terminal.codex_thread_id().clone(),
+        repository: snapshot.repository().clone(),
+        checkout_commit_id: snapshot.candidate_commit_id().into(),
+        checkout_tree_id: snapshot.candidate_tree_id().into(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn accepted_runtime_source(
+    terminal: &AcceptedVerificationJobOutcomeFact,
+    candidate: &FrozenDeliveryCandidate,
+    source_event_id: ExecutionEventId,
+    evidence_type: EvidenceRefType,
+    source_sequence: u64,
+    occurred_at_millis: u64,
+    outcome: VerifiedEvidenceOutcome,
+) -> AcceptedRuntimeSourceFact {
+    AcceptedRuntimeSourceFact {
+        source_event_id,
+        evidence_type,
+        product_session_id: terminal.product_session_id().clone(),
+        execution_job_id: terminal.execution_job_id().clone(),
+        worker_session_id: terminal.worker_session_id().clone(),
+        codex_thread_id: terminal.codex_thread_id().clone(),
+        stage_run_id: terminal.stage_run_id().clone(),
+        role_id: terminal.role_id().into(),
+        attempt: terminal.attempt(),
+        lease_id: terminal.lease_id().clone(),
+        fencing_token: terminal.fencing_token().clone(),
+        worker_id: terminal.worker_id().clone(),
+        worker_instance_id: terminal.worker_instance_id().clone(),
+        source_sequence,
+        candidate_ref: candidate.candidate_ref().into(),
+        occurred_at_millis,
+        outcome,
+    }
 }
 
 /// Fenced execution identity shared by the terminal outcome, source ledger,
@@ -249,6 +296,7 @@ struct EvidenceIdentity<'identity> {
 }
 
 impl ResolvedDeliveryEvidence {
+    #[must_use]
     pub fn evidence(&self) -> &EvidenceRef {
         &self.evidence
     }
@@ -343,13 +391,6 @@ fn resolution_error(
 /// Rejects a stale candidate, foreign `StageRun` or `SessionBinding`, missing or
 /// ambiguous source facts, identity/type/candidate drift, and sources that do
 /// not strictly precede the resulting Evidence.
-#[cfg_attr(
-    all(not(test), not(feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Phase 3/4 adapter gate keeps production construction closed"
-    )
-)]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the sealed resolver command is single-use application input"

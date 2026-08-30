@@ -1,67 +1,93 @@
-# Rust Delivery / StrongFlow 后端切换门禁
+# Rust Delivery 发布合同
 
 ## 结论
 
-从阶段 2.7 起，Rust Control Plane 是迁移后 Delivery 后端的唯一正式写入者。后续后端阶段只能调用 typed Control Plane 命令和查询，不能再新增 TypeScript `DeliveryStore` 写入者，也不能从 Rust differential runner 退回旧 TypeScript 业务实现。
+当前发布路径由 Rust Control Plane 统一持有 Delivery 业务事实，Rust Worker 统一持有
+Job、Lease、fencing、工作区和执行运行时。`apps/client` 通过生成的 HTTP/WebSocket
+facade 访问 `winwincode-server`；Server 只做认证、合同校验和组合，不另建产品状态。
 
-这项结论只针对后端写入权威，不代表浏览器和 Host 已完成切换。现有 DSH Chat、StrongFlow 页面、Host CLI 和 live evaluation 仍有一组已列明的 TypeScript 过渡调用：`winwincode-9c4.16.6.3` 负责把页面接到 Control Plane，`winwincode-9c4.16.6.6` 负责删除旧 DSH/Cordis/N-API 后端、旧路由和旧 `DeliveryStore`。阶段 2.7 不把这些尚未完成的工作写成已完成。
+机器规则位于 [`delivery-rust-cutover.rules.json`](./delivery-rust-cutover.rules.json)。本门
+使用 Git 文件清单、`rg` 和直接读取，声明文件级覆盖；依赖方向和目录闭包由
+[ADR-0028](../decisions/0028-control-plane-worker-migration.md)、
+[目标图](../decisions/0028-control-plane-worker-target-graph.json) 与
+[源码清单](../decisions/0028-control-plane-worker-migration.inventory.json) 共同固定。
 
-机器可读规则位于 [`delivery-rust-cutover.rules.json`](./delivery-rust-cutover.rules.json)。本地代码索引脚本在本工作树中不存在，因此本门禁使用文件清单、`rg` 和直接读文件，只声明文件级覆盖，不声称完整调用关系覆盖。
+## 唯一 Delivery 路径
 
-## 唯一 Rust 后端路径
+```text
+apps/client
+  └─ generated Control Plane API
+       └─ winwincode-server
+            └─ winwincode-control-plane
+                 ├─ winwincode-delivery
+                 ├─ winwincode-storage
+                 └─ winwincode-publication
+                      └─ winwincode-worker → winwincode-execution-port → Codex Core
+```
 
-十个冻结场景由 Node 生成一份闭合的 plan v2。Rust runner 只消费这份计划，不自行读取旧 TypeScript oracle，也不自行推导 Worker terminal 状态。所有实际写操作进入真实 `ControlPlane::start_local` 实例和同一个 SQLite 存储：
+所有正式变更进入 Control Plane 的 typed command：
 
-- 普通 Delivery 命令进入 `commit_delivery_command`；
-- Codex 阶段派发进入 `commit_delivery_execution`；
-- Worker session/thread 绑定进入 `commit_delivery_session_binding`；
-- Worker 终态进入 `commit_delivery_terminal_outcome`；
-- 人工批准后的任务图进入 `commit_delivery_task_breakdown`；
-- Reviewer/Verifier 结论进入 `commit_delivery_verdict`；
-- Delivery 与 runtime 读取进入 `StrongFlowProjectionQueryPort`。
+- `commit_delivery_command`：创建和更新 Delivery；
+- `commit_delivery_execution`：记录一次新的执行 attempt；
+- `commit_delivery_session_binding`：绑定 ProductSession、StageRun、Job、WorkerSession
+  和 CodexThread；
+- `commit_delivery_terminal_outcome`：写入当前 attempt 的 terminal outcome；
+- `commit_delivery_task_breakdown`：提交获批任务图；
+- `commit_delivery_verdict`：记录 Reviewer/Verifier 的独立结论。
 
-每次正式变更把当前状态、追加式 journal、同请求回执和待发布事件作为一个 SQLite 事务提交。runner 里唯一的直接 SQLite seed 只用于把旧 task-DAG 测试样本一次性转换成新身份；它不是产品写入口。重启、损坏、恢复、请求重放、修订冲突、旧候选失效、Attention、Inconclusive、InfraError 和返工都由同一真实 Control Plane 路径验证。
+Delivery 与 runtime 读取通过 `StrongFlowProjectionQueryPort`。当前状态、追加式 journal、
+同请求 receipt 和待发送 outbox 在一个 SQLite 事务中提交。重启恢复同一 receipt 和 cursor；
+重复请求不增加 revision，也不重复发送外部副作用。
 
-阶段 3 增加了 ADR-0028 已批准的 `winwincode-delivery -> winwincode-storage`
-单向引用。Delivery 只消费 Storage 签发且调用方不能构造的 Git 源码事实；它不读取
-SQLite、不选择对象存储，也不接收调用方自报的 commit、tree、diff 或 path 哈希。源码
-与 Artifact adapter 仍由 Control Plane 组合，Delivery 只负责把已验证的源码事实与精确
-成功 Worker 结果合成候选。原来把 `winwincode-storage` 列为禁止依赖的阶段 2 临时规则已
-删除，不保留第二条候选路径。
+## Attempt、SessionBinding 与恢复
 
-## 精确结果
+每个执行 attempt 都有唯一 `ExecutionJob`、`WorkerSession`、`CodexThread`、Lease 和
+Fencing 身份。Worker 重启只恢复当前合法 Lease；旧 Lease 的 runtime、outcome 和 cancel
+记录保持零写。Failed 进入 retry 时严格创建 attempt+1，并旋转 Delivery 与 ProductSession
+的真实 owner binding，receipt 先于任何 outbox 或响应发布。
 
-唯一结果文件是 `tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json`，SHA-256 为 `198c61015ff49885d1640c074f3927b4b5dbc98bf858fbb0cc5541b7ed5495d7`。十场景最终修订号依次为：
+取消是独立终态。Control Plane 先提交 cancel receipt，Worker 只处理当前 attempt；相同
+request ID 重放返回原 receipt。连接在提交后丢失时，重启从 durable receipt/outbox 继续；外部
+响应丢失、重复 dispatch 和重复 terminal 都按相同 revision、attempt、fencing 事实去重。
+
+## 精确场景结果
+
+唯一结果文件为
+`tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json`，SHA-256 为
+`246451128fbc0526b5f9c23377f63a2dca54921f58b6140cad7b0f3cf22a0aa7`。当前十个场景固定如下：
 
 | 场景 | 最终修订号 | 关键结果 |
 | --- | ---: | --- |
-| success-closed-loop | 21 | Delivered，Pass |
-| request-id-replay | 1 | 同一请求返回原结果，不重复写入 |
-| revision-conflict | 2 | 旧修订号被拒绝，状态不变 |
-| corruption-recovery | 1 | 损坏时拒绝读取，恢复后逐值一致 |
-| task-dag | 2 | 先执行前置任务，循环任务图零写入 |
-| candidate-invalidation | 31 | 旧候选被拒绝，新候选 Pass |
-| attention | 8 | Attention 保留并正确结算 |
-| inconclusive | 19 | Inconclusive，进入待处理状态 |
-| infra-error | 19 | InfraError，进入待处理状态 |
-| rework | 31 | Fail 后返工，再以新候选 Pass |
+| `success-closed-loop` | 21 | Delivered，Pass |
+| `request-id-replay` | 1 | 同一请求返回原结果，不重复写入 |
+| `revision-conflict` | 2 | 旧修订号被拒绝，状态不变 |
+| `corruption-recovery` | 1 | 损坏时拒绝读取，恢复后逐值一致 |
+| `task-dag` | 2 | 前置任务先执行，循环任务图零写入 |
+| `candidate-invalidation` | 31 | 旧候选拒绝，新候选 Pass |
+| `attention` | 8 | Attention 保留并正确结算 |
+| `inconclusive` | 19 | Inconclusive，进入待处理状态 |
+| `infra-error` | 19 | InfraError，进入待处理状态 |
+| `rework` | 31 | Fail 后返工，再以新候选 Pass |
 
-## 旧 TypeScript 边界
+## 依赖与发布边界
 
-门禁逐文件冻结现存过渡调用。当前 `StrongFlowService` 只能在 Host CLI、StrongFlow DSH 入口和 live evaluation 创建；`DeliveryStore.create/open/append` 只能留在 StrongFlow service 与 DSH restart recovery；`DeliveryStore` 的公开导出只允许留在 StrongFlow 包入口，供这条过渡恢复路径使用。任何新增文件命中这些写入口都会让门禁失败。
+- `winwincode-control-plane` 只持有产品写入权，不依赖 Server 或 Worker；
+- `winwincode-server` 组合生成 API、Control Plane、Worker 和 Local；
+- `winwincode-worker` 只依赖 Codex、Domain 和 ExecutionPort；
+- `winwincode-local` 只组装 Control Plane、Worker 和 Observability；
+- `crates/helper` 是无产品依赖的独立辅助可执行文件；
+- Client 不连接 Worker，不持有长期凭据，不手写传输 DTO；
+- 新业务调用方必须先进入生成 schema 和 Control Plane typed command，不能新增旁路。
 
-这组文件不是后续后端阶段的备用路径，也不允许双写或 fallback。它们只服务尚未切换的页面/Host 和旧行为 oracle，并由阶段 6 的两个明确任务一次性迁移、删除。
-
-## 资源清理与恢复
-
-`scripts/verify-rust-delivery-cleanup.mjs` 默认重复四次完整 Rust differential。每次都在新进程和独立 `TMPDIR` 中运行，要求十场景逐值匹配，并在进程结束后检查该临时目录为空。每轮都包含真实 Control Plane shutdown/restart、请求回放，以及 journal 损坏/恢复场景。
-
-`verify:fixture-cleanup` 同时运行旧行为样本清理、Rust Control Plane 清理和 native kernel 清理。可用 `WINWINCODE_CLEANUP_STRESS_ITERATIONS=32` 提高重复次数。
-
-## 运行方式
+## 检查
 
 ```bash
-corepack pnpm verify:delivery-rust-cutover
-corepack pnpm verify:fixture-cleanup
-corepack pnpm verify
+corepack pnpm contracts:check
+corepack pnpm verify:source
+corepack pnpm format:check
+corepack pnpm verify:phase-6.6
+node --test tests/delivery-rust-cutover-gate.test.mjs
 ```
+
+门禁要求目录、manifest、生成产物和 source boundary 都符合当前单一路径；任何第二个
+Client 网络实现、Worker 直接产品写入、失配 attempt 绑定或未清理的旧产物都会失败。

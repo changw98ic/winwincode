@@ -145,7 +145,7 @@
   "http": {
     "schemaPath": "schema/winwincode/v1/control-plane-http.schema.json",
     "generatedRustPath": "crates/winwincode-api/src/generated.rs",
-    "generatedTypeScriptPath": "apps/web/src/generated/contracts.ts",
+    "generatedTypeScriptPath": "apps/client/src/generated/contracts.ts",
     "command": "delivery.approve_task_breakdown",
     "commandType": "DeliveryApproveTaskBreakdownCommand",
     "payload": {
@@ -537,7 +537,7 @@
       "refs": [
         "schema/winwincode/v1/control-plane-http.schema.json",
         "crates/winwincode-api/src/generated.rs",
-        "apps/web/src/generated/contracts.ts"
+        "apps/client/src/generated/contracts.ts"
       ]
     },
     {

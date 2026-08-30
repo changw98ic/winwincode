@@ -17,7 +17,10 @@ use winwincode_domain::{
     SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
 };
 
-use super::{StrongFlowProjectionError, application::EstablishedDeliveryRead};
+use super::{
+    StrongFlowProjectionError, application::EstablishedDeliveryRead,
+    sources::TrustedProductSessionRuntimeSession,
+};
 
 pub(super) fn cursor(
     read: &EstablishedDeliveryRead,
@@ -684,6 +687,25 @@ pub(super) fn runtime_snapshot_for_delivery(
     stage_run_id: &winwincode_domain::StageRunId,
     product_session_id: &winwincode_domain::ProductSessionId,
 ) -> Result<api::RuntimeProjectionSnapshot, StrongFlowProjectionError> {
+    let stage = read
+        .detail
+        .stages()
+        .iter()
+        .find(|stage| stage.id() == stage_run_id)
+        .ok_or_else(|| {
+            StrongFlowProjectionError::ResourceNotFound(
+                "the exact StageRun was not found at this read cut".to_owned(),
+            )
+        })?;
+    if stage.actor_type() != StageRunActorType::Codex
+        || stage
+            .session_binding()
+            .is_none_or(|binding| binding.product_session_id() != product_session_id)
+    {
+        return Err(StrongFlowProjectionError::ResourceNotFound(
+            "the exact ProductSession binding was not found at this read cut".to_owned(),
+        ));
+    }
     let sessions = read
         .runtime
         .snapshot()
@@ -695,9 +717,9 @@ pub(super) fn runtime_snapshot_for_delivery(
         })
         .map(runtime_session)
         .collect::<Result<Vec<_>, _>>()?;
-    if sessions.len() != 1 {
-        return Err(StrongFlowProjectionError::ResourceNotFound(
-            "the exact runtime session was not found at this read cut".to_owned(),
+    if sessions.len() > 1 {
+        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "multiple runtime sessions matched one Delivery StageRun at this read cut".to_owned(),
         ));
     }
     Ok(api::RuntimeProjectionSnapshot {
@@ -725,12 +747,12 @@ pub(super) fn runtime_snapshot_for_product_session(
 ) -> Result<api::RuntimeProjectionSnapshot, StrongFlowProjectionError> {
     let sessions = read
         .runtime
-        .snapshot()
-        .sessions
-        .iter()
+        .product_session_runtime()
+        .map(runtime_product_session)
+        .transpose()?
+        .into_iter()
         .filter(|session| &session.product_session_id == product_session_id)
-        .map(runtime_session)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
     Ok(api::RuntimeProjectionSnapshot {
         kind: api::RuntimeProjectionSnapshotKind::RuntimeProjection,
         event_cursor: api::RuntimeProjectionEventCursor::ProductSessionEventReadCursor(
@@ -747,6 +769,41 @@ pub(super) fn runtime_snapshot_for_product_session(
         )?,
         sessions,
         rebuilt_at: read.runtime.rebuilt_at().clone(),
+    })
+}
+
+/// Maps the standalone `ProductSession` identity to the generated runtime
+/// session contract. `ProductSession` execution has no Delivery `StageRun` or
+/// domain `SessionBinding` id; the stable projection key is derived from the
+/// exact ProductSession/ExecutionJob identity retained by the runtime ledger.
+fn runtime_product_session(
+    source: &TrustedProductSessionRuntimeSession,
+) -> Result<api::RuntimeSessionProjection, StrongFlowProjectionError> {
+    Ok(api::RuntimeSessionProjection {
+        activities: Vec::new(),
+        agent_edges: Vec::new(),
+        agents: Vec::new(),
+        as_of_sequence: integer(source.as_of_sequence, "session sequence")?,
+        attempt: integer(source.attempt, "runtime attempt")?,
+        codex_thread_id: source.codex_thread_id.clone(),
+        delivery_task_id: None,
+        diff_summary: None,
+        execution_job_id: source.execution_job_id.clone(),
+        fencing_token: source.fencing_token.0.clone(),
+        lease_id: source.lease_id.clone(),
+        plan: None,
+        product_session_id: source.product_session_id.clone(),
+        recovery: api::RuntimeRecoveryProjection {
+            state: api::RuntimeRecoveryState::None,
+            failure_count: Count(0),
+            recovery_count: Count(0),
+            last_failure_source_ref: None,
+            latest_recovery_source_ref: None,
+        },
+        session_binding_id: format!("product-session-runtime:{}", source.execution_job_id.0),
+        stage_run_id: None,
+        usage: None,
+        worker_session_id: source.worker_session_id.clone(),
     })
 }
 

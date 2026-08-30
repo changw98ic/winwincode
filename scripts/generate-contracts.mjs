@@ -50,11 +50,11 @@ function parseArguments(arguments_) {
       'src',
       'generated.rs',
     ),
-    typescriptOutput: join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts'),
+    typescriptOutput: join(root, 'apps', 'client', 'src', 'generated', 'contracts.ts'),
     typescriptClientOutput: join(
       root,
       'apps',
-      'web',
+      'client',
       'src',
       'generated',
       'control-plane-client.ts',
@@ -671,6 +671,7 @@ function renderControlPlaneClient(context, digest) {
     throw new Error('canonical ErrorCode must include READ_CURSOR_EXPIRED')
   }
   const runtimeSchemas = reachableRuntimeSchemas(context, [
+    'AuthSessionResponse',
     'CommandAcceptedResponse',
     'CommandCompletedResponse',
     'CommandRequest',
@@ -955,7 +956,7 @@ function matchesSchemaNode(schemaValue: unknown, value: unknown, depth = 0): boo
   return true
 }
 
-function matchesCanonicalSchema(name: string, value: unknown): boolean {
+export function matchesCanonicalSchema(name: string, value: unknown): boolean {
   const definition = schemaDefinition(name)
   return definition !== null && matchesSchemaNode(definition, value)
 }
@@ -1319,6 +1320,7 @@ function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
   switch (event.type) {
     case 'product-session.changed.v1':
     case 'approval.changed.v1':
+    case 'chat-interactions.invalidated.v1':
       return stream.kind === 'product-session'
         && event.productSessionId === stream.productSessionId
     case 'product-session.message.appended.v1':
@@ -1339,6 +1341,17 @@ function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
         : stream.kind === 'product-session' && event.productSessionId === stream.productSessionId
     case 'worker-health.changed.v1':
       return stream.kind === 'lease' && event.workerId === stream.workerId
+    case 'enterprise-organization.invalidated.v1':
+    case 'enterprise-membership.invalidated.v1':
+    case 'enterprise-team.invalidated.v1':
+    case 'enterprise-role.invalidated.v1':
+    case 'enterprise-project.invalidated.v1':
+    case 'enterprise-policy.invalidated.v1':
+    case 'enterprise-fleet.invalidated.v1':
+    case 'enterprise-usage.invalidated.v1':
+    case 'enterprise-audit.invalidated.v1':
+    case 'enterprise-integration.invalidated.v1':
+      return stream.kind === 'scope'
     case 'activity.recorded.v1':
       if (stream.kind === 'scope') {
         return event.deliveryId === undefined && event.productSessionId === undefined
@@ -1482,7 +1495,12 @@ export function createControlPlaneWebSocketClient(
       ? error
       : clientFailure('EVENT_HANDLER_FAILED', 'The page did not apply a Control Plane event.')
     report(failure)
-    stopSocket(1011, 'event application failed')
+    // Browser WebSocket clients may only initiate a normal close (1000) or a
+    // private-use close (3000-4999). The server-failure close code is reserved
+    // for server-side use and causes browsers to throw InvalidAccessError here. Keep the
+    // application failure in the reported ControlPlaneClientError while using
+    // a legal private-use transport code for the local socket shutdown.
+    stopSocket(4000, 'event application failed')
   }
 
   function queueProtocolFailure(error: ControlPlaneClientError): void {
@@ -3074,15 +3092,49 @@ function renderRustApi(context, digest) {
     ))
     .sort((left, right) => left.name.localeCompare(right.name))
   const declarations = entries.map(entry => renderRustDefinition(entry, context, true))
+  const sharedReexports = [...context.rustSharedDefinitionNames].sort()
+  if (context.rustSharedDefinitionNames.has('RepositoryScope')) {
+    sharedReexports.push('RepositoryScopeKind')
+  }
+  if (context.rustSharedDefinitionNames.has('SessionBindingSourceIdentity')) {
+    sharedReexports.push('SessionBindingSourceIdentityKind')
+  }
+  if (context.rustSharedDefinitionNames.has('UserActor')) sharedReexports.push('UserActorKind')
+  sharedReexports.sort()
+  const sharedReexportLines = []
+  let currentReexportLine = '    '
+  for (const name of sharedReexports) {
+    const token = `${name},`
+    const candidate = currentReexportLine === '    '
+      ? `${currentReexportLine}${token}`
+      : `${currentReexportLine} ${token}`
+    if (candidate.length > 99) {
+      sharedReexportLines.push(currentReexportLine)
+      currentReexportLine = `    ${token}`
+    } else {
+      currentReexportLine = candidate
+    }
+  }
+  if (currentReexportLine !== '    ') sharedReexportLines.push(currentReexportLine)
+  const singleReexportLine = `pub use winwincode_domain::{${sharedReexports.join(', ')}};`
+  const sharedReexportBlock = singleReexportLine.length <= 99
+    ? [singleReexportLine]
+    : ['pub use winwincode_domain::{', ...sharedReexportLines, '};']
   return [
     '// SPDX-License-Identifier: Apache-2.0',
     `// ${GENERATED_MARKER}`,
     `// Source digest: sha256:${digest}`,
     '',
-    '#![allow(clippy::doc_markdown, clippy::large_enum_variant)]',
+    '#![allow(',
+    '    clippy::doc_markdown,',
+    '    clippy::large_enum_variant,',
+    '    unused_qualifications',
+    ')]',
     '',
     '//! Public Control Plane HTTP/WebSocket transport types generated from the canonical `WinWinCode` schemas.',
     '//! Shared identifiers and value objects are defined once in `winwincode-domain`.',
+    '',
+    ...sharedReexportBlock,
     '',
     '#[allow(clippy::missing_errors_doc)]',
     "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",

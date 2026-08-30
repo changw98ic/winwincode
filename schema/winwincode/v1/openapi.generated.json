@@ -25,6 +25,251 @@
         ],
         "type": "object"
       },
+      "ActionEnforcementDecision": {
+        "description": "Closed Control Plane action enforcement outcome.",
+        "enum": [
+          "permit",
+          "reject"
+        ],
+        "title": "ActionEnforcementDecision",
+        "type": "string"
+      },
+      "ActionEnforcementReceiptMessage": {
+        "additionalProperties": false,
+        "description": "Immutable Control Plane-issued action receipt bound to tenant, actor, Policy version, invocation, action digest, and current Worker authority.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/UserActor"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/ActionEnforcementDecision"
+          },
+          "evaluatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "evaluationSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "jobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "kind": {
+            "const": "action.enforcement_receipt"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "matchedConditionSha256": {
+            "items": {
+              "$ref": "#/components/schemas/Sha256Digest"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "policyKind": {
+            "$ref": "#/components/schemas/ActionPolicyKind"
+          },
+          "policyMode": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActionPolicyMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policyVersion": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActionPolicyVersionReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "receiptSignature": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "resource": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/RepositoryScope"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "subjectSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "jobId",
+          "lease",
+          "workerSessionId",
+          "sessionIdentity",
+          "scope",
+          "actor",
+          "policyKind",
+          "resource",
+          "subjectSha256",
+          "matchedConditionSha256",
+          "decision",
+          "policyMode",
+          "policyVersion",
+          "evaluationSha256",
+          "evaluatedAt",
+          "receiptSignature"
+        ],
+        "title": "action.enforcement_receipt",
+        "type": "object",
+        "x-authority": "control-command",
+        "x-direction": "control-plane-to-worker"
+      },
+      "ActionEnforcementRequestMessage": {
+        "additionalProperties": false,
+        "description": "Requests one Control Plane Policy decision for a normalized action under current durable Worker authority.",
+        "properties": {
+          "jobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "kind": {
+            "const": "action.enforcement_request"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "matchedConditionSha256": {
+            "items": {
+              "$ref": "#/components/schemas/Sha256Digest"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "messageId": {
+            "$ref": "#/components/schemas/ExecutionMessageId"
+          },
+          "policyKind": {
+            "$ref": "#/components/schemas/ActionPolicyKind"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "resource": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sentAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "subjectSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "messageId",
+          "sentAt",
+          "requestId",
+          "jobId",
+          "lease",
+          "workerSessionId",
+          "sessionIdentity",
+          "policyKind",
+          "resource",
+          "subjectSha256",
+          "matchedConditionSha256"
+        ],
+        "title": "action.enforcement_request",
+        "type": "object",
+        "x-authority": "telemetry",
+        "x-direction": "worker-to-control-plane"
+      },
+      "ActionPolicyKind": {
+        "description": "Enterprise Policy family selected for one normalized Worker action.",
+        "enum": [
+          "repository",
+          "tool",
+          "network"
+        ],
+        "title": "ActionPolicyKind",
+        "type": "string"
+      },
+      "ActionPolicyMode": {
+        "description": "Enterprise Policy enforcement mode captured by an action receipt.",
+        "enum": [
+          "enforce",
+          "audit"
+        ],
+        "title": "ActionPolicyMode",
+        "type": "string"
+      },
+      "ActionPolicyVersionReference": {
+        "additionalProperties": false,
+        "description": "Exact immutable enterprise Policy version used for one action decision.",
+        "properties": {
+          "effectiveDefinitionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "policyId": {
+            "pattern": "^pol_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "version": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "versionDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "policyId",
+          "version",
+          "versionDigest",
+          "effectiveDefinitionSha256"
+        ],
+        "title": "ActionPolicyVersionReference",
+        "type": "object"
+      },
       "ActiveLeaseSummary": {
         "additionalProperties": false,
         "properties": {
@@ -84,6 +329,10 @@
             "$ref": "#/components/schemas/SystemActorId"
           }
         ]
+      },
+      "ApiTokenId": {
+        "pattern": "^tok_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
       },
       "ApprovalAction": {
         "additionalProperties": false,
@@ -160,6 +409,9 @@
           "approvalId": {
             "$ref": "#/components/schemas/ApprovalId"
           },
+          "binding": {
+            "$ref": "#/components/schemas/ChatInteractionBindingProjection"
+          },
           "decision": {
             "enum": [
               "approve",
@@ -176,7 +428,8 @@
         "required": [
           "approvalId",
           "decision",
-          "reason"
+          "reason",
+          "binding"
         ],
         "type": "object"
       },
@@ -390,6 +643,12 @@
       "ApprovalProjection": {
         "additionalProperties": false,
         "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/ChatInteractionBindingProjection"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
           "id": {
             "$ref": "#/components/schemas/ApprovalId"
           },
@@ -407,13 +666,21 @@
               "expired"
             ],
             "type": "string"
+          },
+          "subject": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
           }
         },
         "required": [
           "id",
           "revision",
           "state",
-          "requestedAt"
+          "requestedAt",
+          "expiresAt",
+          "subject",
+          "binding"
         ],
         "type": "object"
       },
@@ -755,6 +1022,269 @@
         "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
+      "AuthSessionRequest": {
+        "additionalProperties": false,
+        "description": "Versioned, credential-free browser-session mutation body. Bootstrap proof and session cookie remain transport-only.",
+        "properties": {
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          }
+        },
+        "required": [
+          "schemaVersion"
+        ],
+        "type": "object"
+      },
+      "AuthSessionResponse": {
+        "additionalProperties": false,
+        "description": "Secret-free current browser-session context. Scopes are bounded, current, and ordered by canonical scope identity.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "authorizedScopes": {
+            "items": {
+              "$ref": "#/components/schemas/Scope"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "expiresAt",
+          "actor",
+          "authorizedScopes"
+        ],
+        "type": "object"
+      },
+      "ChatApprovalInteractionProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalProjection"
+          },
+          "kind": {
+            "const": "approval"
+          }
+        },
+        "required": [
+          "kind",
+          "approval"
+        ],
+        "type": "object"
+      },
+      "ChatInputInteractionProjection": {
+        "additionalProperties": false,
+        "description": "Secret-safe pending input projection. It excludes Worker envelopes, provider data, credentials, and raw tool payloads.",
+        "properties": {
+          "allowEmpty": {
+            "type": "boolean"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/ChatInteractionBindingProjection"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "inputRequestId": {
+            "$ref": "#/components/schemas/InputRequestId"
+          },
+          "kind": {
+            "const": "input"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/InteractiveInputMode"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/ChatInteractionOptionProjection"
+            },
+            "maxItems": 100,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "prompt": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "provided",
+              "cancelled",
+              "expired"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "inputRequestId",
+          "revision",
+          "state",
+          "binding",
+          "mode",
+          "prompt",
+          "options",
+          "allowEmpty",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "ChatInteractionBindingProjection": {
+        "additionalProperties": false,
+        "description": "Complete public interaction binding. The Control Plane validates equality across every duplicated identity before accepting a decision.",
+        "properties": {
+          "executionJobId": {
+            "$ref": "#/components/schemas/ExecutionJobId"
+          },
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "sessionIdentity": {
+            "$ref": "#/components/schemas/SessionIdentity"
+          },
+          "workerSessionId": {
+            "$ref": "#/components/schemas/WorkerSessionId"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "executionJobId",
+          "workerSessionId",
+          "sessionIdentity"
+        ],
+        "type": "object"
+      },
+      "ChatInteractionListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "pending",
+                "resolved",
+                "expired",
+                "cancelled"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "productSessionId",
+          "states"
+        ],
+        "type": "object"
+      },
+      "ChatInteractionListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/ChatInteractionListParameters"
+              },
+              "query": {
+                "const": "session.interactions.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/RepositoryScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ChatInteractionListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "session.interactions.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ChatInteractionPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "ChatInteractionOptionProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "type": "object"
+      },
+      "ChatInteractionPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChatInteractionProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "chat_interaction_page"
+          }
+        },
+        "required": [
+          "kind",
+          "items"
+        ],
+        "type": "object"
+      },
+      "ChatInteractionProjection": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ChatInputInteractionProjection"
+          },
+          {
+            "$ref": "#/components/schemas/ChatApprovalInteractionProjection"
+          }
+        ]
+      },
       "ChatMessageId": {
         "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
@@ -895,6 +1425,580 @@
         "pattern": "^cdx_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
+      "CollaborationActivityCategory": {
+        "enum": [
+          "product",
+          "runtime",
+          "approval",
+          "publication",
+          "collaboration",
+          "security"
+        ],
+        "type": "string"
+      },
+      "CollaborationActivityListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationActivityCategory"
+            },
+            "maxItems": 6,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "deliveryId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "productSessionId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProductSessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "categories",
+          "deliveryId",
+          "productSessionId"
+        ],
+        "type": "object"
+      },
+      "CollaborationActivityListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CollaborationActivityListParameters"
+              },
+              "query": {
+                "const": "collaboration.activity.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationActivityListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "collaboration.activity.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationActivityPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationActivityPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationActivityProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "collaboration_activity_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "CollaborationActivityProjection": {
+        "additionalProperties": false,
+        "description": "Durable collaboration activity reference. It contains no raw provider payload or credential material.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "category": {
+            "$ref": "#/components/schemas/CollaborationActivityCategory"
+          },
+          "deliveryId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "productSessionId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProductSessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "summary": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "sequence",
+          "actor",
+          "category",
+          "summary",
+          "occurredAt"
+        ],
+        "type": "object"
+      },
+      "CollaborationNotificationAckCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "collaboration.notification.ack"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CollaborationNotificationAckPayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationNotificationAckCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "collaboration.notification.ack"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationNotificationReceiptProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationNotificationAckPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "throughSequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "throughSequence"
+        ],
+        "type": "object"
+      },
+      "CollaborationNotificationListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationActivityCategory"
+            },
+            "maxItems": 6,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "states": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationNotificationState"
+            },
+            "maxItems": 2,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states",
+          "categories"
+        ],
+        "type": "object"
+      },
+      "CollaborationNotificationListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CollaborationNotificationListParameters"
+              },
+              "query": {
+                "const": "collaboration.notification.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationNotificationListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "collaboration.notification.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationNotificationPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationNotificationPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationNotificationProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "collaboration_notification_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "CollaborationNotificationProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgedAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "activity": {
+            "$ref": "#/components/schemas/CollaborationActivityProjection"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CollaborationNotificationState"
+          }
+        },
+        "required": [
+          "activity",
+          "state",
+          "acknowledgedAt"
+        ],
+        "type": "object"
+      },
+      "CollaborationNotificationReceiptProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "throughSequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "userId": {
+            "$ref": "#/components/schemas/UserId"
+          }
+        },
+        "required": [
+          "userId",
+          "throughSequence",
+          "revision",
+          "acknowledgedAt"
+        ],
+        "type": "object"
+      },
+      "CollaborationNotificationState": {
+        "enum": [
+          "unread",
+          "read"
+        ],
+        "type": "string"
+      },
+      "CollaborationPresenceListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "productSessionId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProductSessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "states": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationPresenceState"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "productSessionId",
+          "states"
+        ],
+        "type": "object"
+      },
+      "CollaborationPresenceListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/CollaborationPresenceListParameters"
+              },
+              "query": {
+                "const": "collaboration.presence.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPresenceListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "collaboration.presence.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationPresencePage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPresencePage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CollaborationPresenceProjection"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "kind": {
+            "const": "collaboration_presence_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "CollaborationPresenceProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "expiresAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "productSessionId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProductSessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CollaborationPresenceState"
+          },
+          "userId": {
+            "$ref": "#/components/schemas/UserId"
+          }
+        },
+        "required": [
+          "userId",
+          "productSessionId",
+          "state",
+          "observedAt",
+          "expiresAt",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "CollaborationPresenceState": {
+        "enum": [
+          "online",
+          "away",
+          "offline"
+        ],
+        "type": "string"
+      },
+      "CollaborationPresenceUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "collaboration.presence.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CollaborationPresenceUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPresenceUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "collaboration.presence.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CollaborationPresenceProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CollaborationPresenceUpdatePayload": {
+        "additionalProperties": false,
+        "description": "online and away require a lease duration; offline requires null. The application rejects every other pair.",
+        "properties": {
+          "leaseDurationMillis": {
+            "oneOf": [
+              {
+                "maximum": 300000,
+                "minimum": 5000,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "productSessionId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProductSessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/CollaborationPresenceState"
+          }
+        },
+        "required": [
+          "productSessionId",
+          "state",
+          "leaseDurationMillis"
+        ],
+        "type": "object"
+      },
       "CommandAcceptedResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1005,6 +2109,12 @@
             "$ref": "#/components/schemas/CredentialReferenceCreateCompletedResponse"
           },
           {
+            "$ref": "#/components/schemas/CredentialReferenceRotateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceRevokeCompletedResponse"
+          },
+          {
             "$ref": "#/components/schemas/CredentialReferenceDeleteCompletedResponse"
           },
           {
@@ -1021,6 +2131,39 @@
           },
           {
             "$ref": "#/components/schemas/PublicationCancelCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseOrganizationUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseMembershipUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseTeamUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseRoleUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseProjectRepositoryUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterprisePolicyUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseFleetUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIntegrationUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIdentityUpdateCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationNotificationAckCompletedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPresenceUpdateCompletedResponse"
           }
         ]
       },
@@ -1076,12 +2219,25 @@
           "delivery.submit_verdict",
           "settings.update",
           "credential.reference.create",
+          "credential.reference.rotate",
+          "credential.reference.revoke",
           "credential.reference.delete",
           "approval.decide",
           "worker.drain",
           "worker.enable",
           "publication.publish",
-          "publication.cancel"
+          "publication.cancel",
+          "enterprise.organization.update",
+          "enterprise.membership.update",
+          "enterprise.team.update",
+          "enterprise.role.update",
+          "enterprise.project_repository.update",
+          "enterprise.policy.update",
+          "enterprise.fleet.update",
+          "enterprise.integration.update",
+          "enterprise.identity.update",
+          "collaboration.notification.ack",
+          "collaboration.presence.update"
         ],
         "type": "string"
       },
@@ -1127,6 +2283,12 @@
             "$ref": "#/components/schemas/CredentialReferenceCreateCommand"
           },
           {
+            "$ref": "#/components/schemas/CredentialReferenceRotateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CredentialReferenceRevokeCommand"
+          },
+          {
             "$ref": "#/components/schemas/CredentialReferenceDeleteCommand"
           },
           {
@@ -1143,6 +2305,39 @@
           },
           {
             "$ref": "#/components/schemas/PublicationCancelCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseOrganizationUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseMembershipUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseTeamUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseRoleUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseProjectRepositoryUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterprisePolicyUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseFleetUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIntegrationUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIdentityUpdateCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationNotificationAckCommand"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPresenceUpdateCommand"
           }
         ]
       },
@@ -1292,6 +2487,9 @@
         ],
         "type": "object"
       },
+      "ControlPlaneWebSocketApprovalListReloadQuery": {
+        "const": "approval.list"
+      },
       "ControlPlaneWebSocketAttentionChangedEvent": {
         "additionalProperties": false,
         "properties": {
@@ -1416,6 +2614,45 @@
           "ackRequiredThrough",
           "disconnectAt",
           "closeCode"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketChatInteractionListReloadQuery": {
+        "const": "session.interactions.list"
+      },
+      "ControlPlaneWebSocketChatInteractionsInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe invalidation. Browsers reload Control Plane interaction and approval snapshots; no Worker payload is carried over WebSocket.",
+        "properties": {
+          "productSessionId": {
+            "$ref": "#/components/schemas/ProductSessionId"
+          },
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketChatInteractionListReloadQuery"
+              },
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketApprovalListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "chat-interactions.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "productSessionId",
+          "revision",
+          "reloadQueries"
         ],
         "type": "object"
       },
@@ -1585,6 +2822,326 @@
         ],
         "type": "object"
       },
+      "ControlPlaneWebSocketEnterpriseAuditInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe audit invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseAuditListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-audit.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseAuditListReloadQuery": {
+        "const": "enterprise.audit.list"
+      },
+      "ControlPlaneWebSocketEnterpriseFleetInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe fleet invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseFleetListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-fleet.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseFleetListReloadQuery": {
+        "const": "enterprise.fleet.list"
+      },
+      "ControlPlaneWebSocketEnterpriseIntegrationInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe integration invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseIntegrationListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-integration.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseIntegrationListReloadQuery": {
+        "const": "enterprise.integration.list"
+      },
+      "ControlPlaneWebSocketEnterpriseMembershipInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe membership invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseMembershipListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-membership.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseMembershipListReloadQuery": {
+        "const": "enterprise.membership.list"
+      },
+      "ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe organization invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseOrganizationListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-organization.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseOrganizationListReloadQuery": {
+        "const": "enterprise.organization.list"
+      },
+      "ControlPlaneWebSocketEnterprisePolicyInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe policy invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterprisePolicyListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-policy.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterprisePolicyListReloadQuery": {
+        "const": "enterprise.policy.list"
+      },
+      "ControlPlaneWebSocketEnterpriseProjectInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe project invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseProjectListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-project.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseProjectListReloadQuery": {
+        "const": "enterprise.project.list"
+      },
+      "ControlPlaneWebSocketEnterpriseRoleInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe role invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseRoleListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-role.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseRoleListReloadQuery": {
+        "const": "enterprise.role.list"
+      },
+      "ControlPlaneWebSocketEnterpriseTeamInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe team invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseTeamListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-team.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseTeamListReloadQuery": {
+        "const": "enterprise.team.list"
+      },
+      "ControlPlaneWebSocketEnterpriseUsageInvalidatedEvent": {
+        "additionalProperties": false,
+        "description": "Secret-safe usage invalidation. The browser reloads only the named bounded enterprise query.",
+        "properties": {
+          "reloadQueries": {
+            "items": false,
+            "maxItems": 1,
+            "minItems": 1,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseUsageListReloadQuery"
+              }
+            ],
+            "type": "array"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "type": {
+            "const": "enterprise-usage.invalidated.v1"
+          }
+        },
+        "required": [
+          "type",
+          "snapshotRevision",
+          "reloadQueries"
+        ],
+        "type": "object"
+      },
+      "ControlPlaneWebSocketEnterpriseUsageListReloadQuery": {
+        "const": "enterprise.usage.list"
+      },
       "ControlPlaneWebSocketEventFrame": {
         "additionalProperties": false,
         "properties": {
@@ -1648,6 +3205,9 @@
             "$ref": "#/components/schemas/ControlPlaneWebSocketApprovalChangedEvent"
           },
           {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketChatInteractionsInvalidatedEvent"
+          },
+          {
             "$ref": "#/components/schemas/ControlPlaneWebSocketAttentionChangedEvent"
           },
           {
@@ -1664,6 +3224,36 @@
           },
           {
             "$ref": "#/components/schemas/ControlPlaneWebSocketActivityRecordedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseOrganizationInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseMembershipInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseTeamInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseRoleInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseProjectInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterprisePolicyInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseFleetInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseUsageInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseAuditInvalidatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ControlPlaneWebSocketEnterpriseIntegrationInvalidatedEvent"
           }
         ]
       },
@@ -1689,6 +3279,7 @@
         "enum": [
           "activity.recorded.v1",
           "approval.changed.v1",
+          "chat-interactions.invalidated.v1",
           "attention.changed.v1",
           "delivery.changed.v1",
           "delivery-task.changed.v1",
@@ -1696,7 +3287,17 @@
           "product-session.changed.v1",
           "product-session.message.appended.v1",
           "runtime-projection.invalidated.v1",
-          "worker-health.changed.v1"
+          "worker-health.changed.v1",
+          "enterprise-organization.invalidated.v1",
+          "enterprise-membership.invalidated.v1",
+          "enterprise-team.invalidated.v1",
+          "enterprise-role.invalidated.v1",
+          "enterprise-project.invalidated.v1",
+          "enterprise-policy.invalidated.v1",
+          "enterprise-fleet.invalidated.v1",
+          "enterprise-usage.invalidated.v1",
+          "enterprise-audit.invalidated.v1",
+          "enterprise-integration.invalidated.v1"
         ],
         "type": "string"
       },
@@ -2503,7 +4104,7 @@
       },
       "CredentialReferenceProjection": {
         "additionalProperties": false,
-        "description": "Secret-safe: responses never include secret material or vault locator.",
+        "description": "Secret-safe lifecycle metadata only: responses never include secret material or vault locator.",
         "properties": {
           "displayName": {
             "maxLength": 500,
@@ -2513,6 +4114,16 @@
           "id": {
             "$ref": "#/components/schemas/CredentialReferenceId"
           },
+          "lastRotatedAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "providerId": {
             "maxLength": 128,
             "minLength": 1,
@@ -2520,6 +4131,21 @@
           },
           "revision": {
             "$ref": "#/components/schemas/Revision"
+          },
+          "revokedAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rotationVersion": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
           },
           "secretState": {
             "enum": [
@@ -2538,8 +4164,115 @@
           "providerId",
           "displayName",
           "secretState",
+          "rotationVersion",
+          "lastRotatedAt",
+          "revokedAt",
           "revision",
           "updatedAt"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceRevokeCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.revoke"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CredentialReferenceRevokePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceRevokeCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.revoke"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CredentialReferenceProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceRevokePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "credentialReferenceId": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          }
+        },
+        "required": [
+          "credentialReferenceId"
+        ],
+        "type": "object"
+      },
+      "CredentialReferenceRotateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.rotate"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/CredentialReferenceRotatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceRotateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "credential.reference.rotate"
+              },
+              "result": {
+                "$ref": "#/components/schemas/CredentialReferenceProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CredentialReferenceRotatePayload": {
+        "additionalProperties": false,
+        "description": "Binds an already-atomically-rotated secret-store version to lifecycle metadata. The locator is write-only and is never persisted in the Credential reference aggregate.",
+        "properties": {
+          "credentialReferenceId": {
+            "$ref": "#/components/schemas/CredentialReferenceId"
+          },
+          "vaultLocator": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "credentialReferenceId",
+          "vaultLocator"
         ],
         "type": "object"
       },
@@ -3799,6 +5532,36 @@
         ],
         "type": "object"
       },
+      "DeliveryStageAcceptanceCriterionInput": {
+        "additionalProperties": false,
+        "properties": {
+          "criterionId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "verificationMethod": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "criterionId",
+          "description",
+          "required"
+        ],
+        "type": "object"
+      },
       "DeliveryStageExecutionScope": {
         "additionalProperties": false,
         "properties": {
@@ -3826,6 +5589,93 @@
           "productSessionId",
           "deliveryId",
           "stageRunId"
+        ],
+        "type": "object"
+      },
+      "DeliveryStageInput": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptanceCriteria": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryStageAcceptanceCriterionInput"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "candidateRef": {
+            "pattern": "^git-candidate:sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "constraints": {
+            "items": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "deliverySpecId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+            "type": "string"
+          },
+          "deliverySpecRevision": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "goal": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "outOfScope": {
+            "items": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "schemaVersion": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "scope": {
+            "items": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "task": {
+            "$ref": "#/components/schemas/DeliveryStageTaskInput"
+          },
+          "title": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "deliverySpecId",
+          "deliverySpecRevision",
+          "title",
+          "goal",
+          "scope",
+          "outOfScope",
+          "constraints",
+          "acceptanceCriteria"
         ],
         "type": "object"
       },
@@ -4171,6 +6021,43 @@
           "attempt",
           "fencingToken",
           "sourceIdentity"
+        ],
+        "type": "object"
+      },
+      "DeliveryStageTaskInput": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptanceCriterionIds": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "goal": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "taskId": {
+            "$ref": "#/components/schemas/DeliveryTaskId"
+          },
+          "title": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "taskId",
+          "title",
+          "goal",
+          "acceptanceCriterionIds"
         ],
         "type": "object"
       },
@@ -4633,6 +6520,3217 @@
         ],
         "type": "object"
       },
+      "EnterpriseApiTokenIssuePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "issue",
+              "rotate"
+            ],
+            "type": "string"
+          },
+          "apiTokenId": {
+            "$ref": "#/components/schemas/ApiTokenId"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "kind": {
+            "const": "api_token"
+          },
+          "serviceAccountId": {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          },
+          "tokenSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "kind",
+          "action",
+          "apiTokenId",
+          "serviceAccountId",
+          "tokenSha256",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseApiTokenProjection": {
+        "additionalProperties": false,
+        "description": "Secret-free API Token metadata. Raw token material and its SHA-256 verifier are never returned.",
+        "properties": {
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ApiTokenId"
+          },
+          "kind": {
+            "const": "api_token"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "revokedAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rotatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "rotationVersion": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "serviceAccountId": {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "expired",
+              "revoked"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "serviceAccountId",
+          "state",
+          "expiresAt",
+          "rotationVersion",
+          "revision",
+          "createdAt",
+          "rotatedAt",
+          "revokedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseApiTokenRevokePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "revoke"
+          },
+          "apiTokenId": {
+            "$ref": "#/components/schemas/ApiTokenId"
+          },
+          "kind": {
+            "const": "api_token"
+          }
+        },
+        "required": [
+          "kind",
+          "action",
+          "apiTokenId"
+        ],
+        "type": "object"
+      },
+      "EnterpriseAuditListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "items": {
+              "enum": [
+                "business",
+                "administration",
+                "credential",
+                "provider",
+                "policy",
+                "worker",
+                "publication",
+                "integration"
+              ],
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "fromInclusive": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "toExclusive": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "fromInclusive",
+          "toExclusive",
+          "categories"
+        ],
+        "type": "object"
+      },
+      "EnterpriseAuditListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseAuditListParameters"
+              },
+              "query": {
+                "const": "enterprise.audit.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseAuditListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.audit.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseAuditPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseAuditPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseAuditProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_audit_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseAuditProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "category": {
+            "enum": [
+              "business",
+              "administration",
+              "credential",
+              "provider",
+              "policy",
+              "worker",
+              "publication",
+              "integration"
+            ],
+            "type": "string"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "outcome": {
+            "enum": [
+              "allowed",
+              "denied",
+              "completed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "recordSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "sequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "occurredAt",
+          "actor",
+          "category",
+          "action",
+          "outcome",
+          "recordSha256",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "EnterpriseExternalIdentityLinkPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "link"
+          },
+          "authorizedScopes": {
+            "items": {
+              "$ref": "#/components/schemas/Scope"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "externalIdentityId": {
+            "$ref": "#/components/schemas/ExternalIdentityId"
+          },
+          "issuerSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "kind": {
+            "const": "external_identity"
+          },
+          "provider": {
+            "enum": [
+              "oidc",
+              "saml",
+              "scim"
+            ],
+            "type": "string"
+          },
+          "subjectSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "userId": {
+            "$ref": "#/components/schemas/UserId"
+          }
+        },
+        "required": [
+          "kind",
+          "action",
+          "externalIdentityId",
+          "provider",
+          "issuerSha256",
+          "subjectSha256",
+          "userId",
+          "authorizedScopes"
+        ],
+        "type": "object"
+      },
+      "EnterpriseExternalIdentityProjection": {
+        "additionalProperties": false,
+        "description": "Secret-free external subject binding. Authentication maps it to one canonical User Actor.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/UserActor"
+          },
+          "authorizedScopes": {
+            "items": {
+              "$ref": "#/components/schemas/Scope"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ExternalIdentityId"
+          },
+          "issuerSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "kind": {
+            "const": "external_identity"
+          },
+          "provider": {
+            "enum": [
+              "oidc",
+              "saml",
+              "scim"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "revoked"
+            ],
+            "type": "string"
+          },
+          "subjectSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "provider",
+          "issuerSha256",
+          "subjectSha256",
+          "actor",
+          "authorizedScopes",
+          "state",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseExternalIdentityRevokePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "revoke"
+          },
+          "externalIdentityId": {
+            "$ref": "#/components/schemas/ExternalIdentityId"
+          },
+          "kind": {
+            "const": "external_identity"
+          }
+        },
+        "required": [
+          "kind",
+          "action",
+          "externalIdentityId"
+        ],
+        "type": "object"
+      },
+      "EnterpriseFleetListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "enum": [
+                "healthy",
+                "degraded",
+                "draining",
+                "offline"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "EnterpriseFleetListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseFleetListParameters"
+              },
+              "query": {
+                "const": "enterprise.fleet.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseFleetListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.fleet.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseFleetPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseFleetPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseFleetProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_fleet_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseFleetProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "activeLeases": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "availableCapacity": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EnterpriseWorkerPoolId"
+          },
+          "labels": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "registeredWorkers": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "healthy",
+              "degraded",
+              "draining",
+              "offline"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "displayName",
+          "state",
+          "registeredWorkers",
+          "activeLeases",
+          "availableCapacity",
+          "labels",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseFleetUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.fleet.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseFleetUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseFleetUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.fleet.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseFleetProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseFleetUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "drain",
+              "enable"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workerPoolId": {
+            "$ref": "#/components/schemas/EnterpriseWorkerPoolId"
+          }
+        },
+        "required": [
+          "workerPoolId",
+          "action",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "EnterpriseIdentityListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "kinds": {
+            "items": {
+              "enum": [
+                "service_account",
+                "external_identity",
+                "api_token"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "active",
+                "expired",
+                "revoked"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "kinds",
+          "states"
+        ],
+        "type": "object"
+      },
+      "EnterpriseIdentityListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseIdentityListParameters"
+              },
+              "query": {
+                "const": "enterprise.identity.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIdentityListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.identity.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseIdentityPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIdentityPage": {
+        "additionalProperties": false,
+        "description": "One stable, bounded organization identity page; it never contains token verifier or raw token material.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseIdentityProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_identity_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseIdentityProjection": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EnterpriseServiceAccountProjection"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseExternalIdentityProjection"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseApiTokenProjection"
+          }
+        ]
+      },
+      "EnterpriseIdentityUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.identity.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseIdentityUpdatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIdentityUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.identity.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseIdentityProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIdentityUpdatePayload": {
+        "description": "Identity mutation. API Token callers generate the raw wwc_api token locally and submit only its SHA-256 verifier.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EnterpriseServiceAccountUpsertPayload"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseServiceAccountRevokePayload"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseExternalIdentityLinkPayload"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseExternalIdentityRevokePayload"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseApiTokenIssuePayload"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseApiTokenRevokePayload"
+          }
+        ]
+      },
+      "EnterpriseIntegrationId": {
+        "pattern": "^int_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "EnterpriseIntegrationListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "kinds": {
+            "items": {
+              "enum": [
+                "github",
+                "oidc",
+                "saml",
+                "scim",
+                "webhook",
+                "custom"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "enabled",
+                "disabled",
+                "error"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "kinds",
+          "states"
+        ],
+        "type": "object"
+      },
+      "EnterpriseIntegrationListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseIntegrationListParameters"
+              },
+              "query": {
+                "const": "enterprise.integration.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIntegrationListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.integration.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseIntegrationPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIntegrationPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseIntegrationProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_integration_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseIntegrationProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "configurationSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EnterpriseIntegrationId"
+          },
+          "kind": {
+            "enum": [
+              "github",
+              "oidc",
+              "saml",
+              "scim",
+              "webhook",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "lastSyncAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "enabled",
+              "disabled",
+              "error"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "displayName",
+          "state",
+          "configurationSha256",
+          "lastSyncAt",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseIntegrationUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.integration.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseIntegrationUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIntegrationUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.integration.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseIntegrationProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseIntegrationUpdatePayload": {
+        "additionalProperties": false,
+        "description": "Configuration contains secret-safe settings and credential references only; raw secrets are rejected.",
+        "properties": {
+          "configuration": {
+            "additionalProperties": false,
+            "description": "Closed secret-safe integration settings. Credentials are referenced separately and URL queries/fragments are not accepted.",
+            "properties": {
+              "audience": {
+                "oneOf": [
+                  {
+                    "maxLength": 512,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "endpointOrigin": {
+                "oneOf": [
+                  {
+                    "pattern": "^https://[^/?#]+(?::[0-9]{1,5})?$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "repository": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/GitHubRepositorySlug"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tenant": {
+                "oneOf": [
+                  {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "endpointOrigin",
+              "tenant",
+              "repository",
+              "audience"
+            ],
+            "type": "object"
+          },
+          "configurationSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "credentialReferenceId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CredentialReferenceId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "integrationId": {
+            "$ref": "#/components/schemas/EnterpriseIntegrationId"
+          },
+          "kind": {
+            "enum": [
+              "github",
+              "oidc",
+              "saml",
+              "scim",
+              "webhook",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "enabled",
+              "disabled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "integrationId",
+          "kind",
+          "displayName",
+          "state",
+          "configuration",
+          "configurationSha256",
+          "credentialReferenceId"
+        ],
+        "type": "object"
+      },
+      "EnterpriseMembershipId": {
+        "pattern": "^mbr_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "EnterpriseMembershipListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "roleIds": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleId"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "invited",
+                "active",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "teamIds": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseTeamId"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states",
+          "teamIds",
+          "roleIds"
+        ],
+        "type": "object"
+      },
+      "EnterpriseMembershipListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseMembershipListParameters"
+              },
+              "query": {
+                "const": "enterprise.membership.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseMembershipListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.membership.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseMembershipPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseMembershipPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseMembershipProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_membership_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseMembershipProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "actorId": {
+            "$ref": "#/components/schemas/ActorId"
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EnterpriseMembershipId"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "roleAssignments": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleAssignment"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "state": {
+            "enum": [
+              "invited",
+              "active",
+              "disabled"
+            ],
+            "type": "string"
+          },
+          "teamIds": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseTeamId"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "organizationId",
+          "actorId",
+          "displayName",
+          "state",
+          "teamIds",
+          "roleAssignments",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseMembershipUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.membership.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseMembershipUpdatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseMembershipUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.membership.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseMembershipProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseMembershipUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "actorId": {
+            "$ref": "#/components/schemas/ActorId"
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "membershipId": {
+            "$ref": "#/components/schemas/EnterpriseMembershipId"
+          },
+          "roleAssignments": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleAssignment"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "state": {
+            "enum": [
+              "invited",
+              "active",
+              "disabled"
+            ],
+            "type": "string"
+          },
+          "teamIds": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseTeamId"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "membershipId",
+          "actorId",
+          "displayName",
+          "state",
+          "teamIds",
+          "roleAssignments"
+        ],
+        "type": "object"
+      },
+      "EnterpriseOrganizationListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "enum": [
+                "active",
+                "suspended",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "EnterpriseOrganizationListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseOrganizationListParameters"
+              },
+              "query": {
+                "const": "enterprise.organization.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseOrganizationListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.organization.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseOrganizationPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseOrganizationPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseOrganizationProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_organization_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseOrganizationProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "slug": {
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "suspended",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "displayName",
+          "state",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseOrganizationUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.organization.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseOrganizationUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseOrganizationUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.organization.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseOrganizationProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseOrganizationUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "slug": {
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "suspended",
+              "archived"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "organizationId",
+          "slug",
+          "displayName",
+          "state"
+        ],
+        "type": "object"
+      },
+      "EnterprisePermission": {
+        "description": "Closed least-privilege permission vocabulary. There is no wildcard permission.",
+        "enum": [
+          "organization_read",
+          "organization_write",
+          "membership_read",
+          "membership_write",
+          "team_read",
+          "team_write",
+          "role_read",
+          "role_write",
+          "project_read",
+          "project_write",
+          "policy_read",
+          "policy_write",
+          "fleet_read",
+          "fleet_write",
+          "usage_read",
+          "audit_read",
+          "integration_read",
+          "integration_write",
+          "identity_read",
+          "identity_write",
+          "assignment_assign",
+          "assignment_reassign",
+          "assignment_review",
+          "assignment_approve",
+          "collaboration_read",
+          "collaboration_write"
+        ],
+        "type": "string"
+      },
+      "EnterprisePolicyDefinition": {
+        "additionalProperties": false,
+        "description": "Closed, secret-free policy rule manifest; condition bodies are stored and audited by their canonical digest.",
+        "properties": {
+          "childOverrideMode": {
+            "description": "Only an organization-scoped active policy may authorize explicit child relaxation.",
+            "enum": [
+              "tighten_only",
+              "allow_explicit_relaxation"
+            ],
+            "type": "string"
+          },
+          "defaultEffect": {
+            "enum": [
+              "allow",
+              "deny"
+            ],
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/EnterprisePolicyRule"
+            },
+            "maxItems": 256,
+            "type": "array"
+          }
+        },
+        "required": [
+          "defaultEffect",
+          "childOverrideMode",
+          "rules"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyId": {
+        "pattern": "^pol_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "EnterprisePolicyListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "policyKinds": {
+            "items": {
+              "enum": [
+                "repository",
+                "model",
+                "provider",
+                "tool",
+                "network",
+                "approval",
+                "verifier",
+                "worker_placement",
+                "publication",
+                "retention",
+                "integration"
+              ],
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "draft",
+                "active",
+                "retired"
+              ],
+              "type": "string"
+            },
+            "maxItems": 3,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "policyKinds",
+          "states"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterprisePolicyListParameters"
+              },
+              "query": {
+                "const": "enterprise.policy.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterprisePolicyListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.policy.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterprisePolicyPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterprisePolicyPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterprisePolicyProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_policy_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "baseVersion": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EnterprisePolicyVersionReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "definitionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "effectiveAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "effectiveDefinitionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EnterprisePolicyId"
+          },
+          "inheritanceMode": {
+            "enum": [
+              "tighten",
+              "override"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "enforce",
+              "audit"
+            ],
+            "type": "string"
+          },
+          "policyKind": {
+            "enum": [
+              "repository",
+              "model",
+              "provider",
+              "tool",
+              "network",
+              "approval",
+              "verifier",
+              "worker_placement",
+              "publication",
+              "retention",
+              "integration"
+            ],
+            "type": "string"
+          },
+          "relaxationAuthority": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EnterprisePolicyVersionReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "source": {
+            "$ref": "#/components/schemas/EnterprisePolicyVersionSource"
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "active",
+              "retired"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "version": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "versionDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "id",
+          "policyKind",
+          "scope",
+          "mode",
+          "state",
+          "version",
+          "source",
+          "effectiveAt",
+          "inheritanceMode",
+          "baseVersion",
+          "relaxationAuthority",
+          "definitionSha256",
+          "effectiveDefinitionSha256",
+          "versionDigest",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "conditionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "effect": {
+            "enum": [
+              "allow",
+              "deny"
+            ],
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "repository",
+              "model",
+              "provider",
+              "tool",
+              "network",
+              "approval",
+              "verifier",
+              "worker_placement",
+              "publication",
+              "retention",
+              "integration"
+            ],
+            "type": "string"
+          },
+          "resourcePattern": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "effect",
+          "resourcePattern",
+          "conditionSha256"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.policy.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterprisePolicyUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterprisePolicyUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.policy.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterprisePolicyProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterprisePolicyUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "baseVersion": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EnterprisePolicyVersionReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "definition": {
+            "$ref": "#/components/schemas/EnterprisePolicyDefinition"
+          },
+          "definitionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "effectiveAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "inheritanceMode": {
+            "enum": [
+              "tighten",
+              "override"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "enforce",
+              "audit"
+            ],
+            "type": "string"
+          },
+          "policyId": {
+            "$ref": "#/components/schemas/EnterprisePolicyId"
+          },
+          "policyKind": {
+            "enum": [
+              "repository",
+              "model",
+              "provider",
+              "tool",
+              "network",
+              "approval",
+              "verifier",
+              "worker_placement",
+              "publication",
+              "retention",
+              "integration"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "active",
+              "retired"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "policyId",
+          "policyKind",
+          "mode",
+          "state",
+          "definition",
+          "definitionSha256",
+          "effectiveAt",
+          "inheritanceMode",
+          "baseVersion"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyVersionReference": {
+        "additionalProperties": false,
+        "description": "Exact immutable policy version seal used for inheritance and relaxation authority.",
+        "properties": {
+          "definitionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "effectiveDefinitionSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "policyId": {
+            "$ref": "#/components/schemas/EnterprisePolicyId"
+          },
+          "policyKind": {
+            "enum": [
+              "repository",
+              "model",
+              "provider",
+              "tool",
+              "network",
+              "approval",
+              "verifier",
+              "worker_placement",
+              "publication",
+              "retention",
+              "integration"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "version": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "versionDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          }
+        },
+        "required": [
+          "policyId",
+          "policyKind",
+          "scope",
+          "version",
+          "definitionSha256",
+          "effectiveDefinitionSha256",
+          "versionDigest"
+        ],
+        "type": "object"
+      },
+      "EnterprisePolicyVersionSource": {
+        "additionalProperties": false,
+        "description": "Authenticated source of one immutable policy version.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          }
+        },
+        "required": [
+          "actor",
+          "requestId"
+        ],
+        "type": "object"
+      },
+      "EnterpriseProjectListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "includeRepositories": {
+            "type": "boolean"
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "active",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states",
+          "includeRepositories"
+        ],
+        "type": "object"
+      },
+      "EnterpriseProjectListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseProjectListParameters"
+              },
+              "query": {
+                "const": "enterprise.project.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseProjectListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.project.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseProjectRepositoryPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseProjectProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "project"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryCount": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "kind",
+          "projectId",
+          "displayName",
+          "state",
+          "repositoryCount",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseProjectRepositoryPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseProjectRepositoryProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_project_repository_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseProjectRepositoryProjection": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EnterpriseProjectProjection"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseRepositoryProjection"
+          }
+        ]
+      },
+      "EnterpriseProjectRepositoryUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.project_repository.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseProjectRepositoryUpdatePayload"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseProjectRepositoryUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.project_repository.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseProjectRepositoryProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseProjectRepositoryUpdatePayload": {
+        "additionalProperties": false,
+        "description": "repositoryId is required exactly when kind is repository; the application rejects a mismatched pair.",
+        "properties": {
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "project",
+              "repository"
+            ],
+            "type": "string"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "active",
+              "archived"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "projectId",
+          "repositoryId",
+          "displayName",
+          "state"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRepositoryProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "defaultBranch": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "repository"
+          },
+          "projectId": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "repositoryId": {
+            "$ref": "#/components/schemas/RepositoryId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "kind",
+          "projectId",
+          "repositoryId",
+          "displayName",
+          "state",
+          "defaultBranch",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRoleAssignment": {
+        "additionalProperties": false,
+        "description": "Exact role-version grant. Nullable time bounds represent a permanent grant; descendants is evaluated only inside the authenticated organization boundary.",
+        "properties": {
+          "expiresAt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notBefore": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "roleId": {
+            "$ref": "#/components/schemas/EnterpriseRoleId"
+          },
+          "roleVersion": {
+            "$ref": "#/components/schemas/EnterpriseRoleVersion"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "scopeMode": {
+            "enum": [
+              "exact",
+              "descendants"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "roleId",
+          "roleVersion",
+          "scope",
+          "scopeMode",
+          "notBefore",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRoleId": {
+        "pattern": "^rol_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "EnterpriseRoleListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "permissions": {
+            "items": {
+              "$ref": "#/components/schemas/EnterprisePermission"
+            },
+            "maxItems": 24,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "states": {
+            "items": {
+              "enum": [
+                "active",
+                "revoked"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states",
+          "permissions"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRoleListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseRoleListParameters"
+              },
+              "query": {
+                "const": "enterprise.role.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseRoleListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.role.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseRolePage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseRolePage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable role-authority snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_role_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRolePermissionRule": {
+        "additionalProperties": false,
+        "properties": {
+          "effect": {
+            "enum": [
+              "allow",
+              "deny"
+            ],
+            "type": "string"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/EnterprisePermission"
+          }
+        },
+        "required": [
+          "permission",
+          "effect"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRoleProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "conflictingRoleIds": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleId"
+            },
+            "maxItems": 32,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EnterpriseRoleId"
+          },
+          "inheritedRoles": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleVersionReference"
+            },
+            "maxItems": 32,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRolePermissionRule"
+            },
+            "maxItems": 128,
+            "minItems": 1,
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "revoked"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "version": {
+            "$ref": "#/components/schemas/EnterpriseRoleVersion"
+          }
+        },
+        "required": [
+          "id",
+          "organizationId",
+          "displayName",
+          "state",
+          "version",
+          "rules",
+          "inheritedRoles",
+          "conflictingRoleIds",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRoleUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.role.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseRoleUpdatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseRoleUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.role.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseRoleProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseRoleUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "conflictingRoleIds": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleId"
+            },
+            "maxItems": 32,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "inheritedRoles": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleVersionReference"
+            },
+            "maxItems": 32,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "roleId": {
+            "$ref": "#/components/schemas/EnterpriseRoleId"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRolePermissionRule"
+            },
+            "maxItems": 128,
+            "minItems": 1,
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "revoked"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "roleId",
+          "displayName",
+          "state",
+          "rules",
+          "inheritedRoles",
+          "conflictingRoleIds"
+        ],
+        "type": "object"
+      },
+      "EnterpriseRoleVersion": {
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "EnterpriseRoleVersionReference": {
+        "additionalProperties": false,
+        "properties": {
+          "roleId": {
+            "$ref": "#/components/schemas/EnterpriseRoleId"
+          },
+          "roleVersion": {
+            "$ref": "#/components/schemas/EnterpriseRoleVersion"
+          }
+        },
+        "required": [
+          "roleId",
+          "roleVersion"
+        ],
+        "type": "object"
+      },
+      "EnterpriseServiceAccountProjection": {
+        "additionalProperties": false,
+        "description": "Secret-free Service Account identity. Its API Token digests are never part of this projection.",
+        "properties": {
+          "authorizedScopes": {
+            "items": {
+              "$ref": "#/components/schemas/Scope"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          },
+          "kind": {
+            "const": "service_account"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "revoked"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "displayName",
+          "authorizedScopes",
+          "state",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseServiceAccountRevokePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "revoke"
+          },
+          "kind": {
+            "const": "service_account"
+          },
+          "serviceAccountId": {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          }
+        },
+        "required": [
+          "kind",
+          "action",
+          "serviceAccountId"
+        ],
+        "type": "object"
+      },
+      "EnterpriseServiceAccountUpsertPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "upsert"
+          },
+          "authorizedScopes": {
+            "items": {
+              "$ref": "#/components/schemas/Scope"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "service_account"
+          },
+          "serviceAccountId": {
+            "$ref": "#/components/schemas/ServiceAccountId"
+          }
+        },
+        "required": [
+          "kind",
+          "action",
+          "serviceAccountId",
+          "displayName",
+          "authorizedScopes"
+        ],
+        "type": "object"
+      },
+      "EnterpriseTeamId": {
+        "pattern": "^tem_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "EnterpriseTeamListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "states": {
+            "items": {
+              "enum": [
+                "active",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "states"
+        ],
+        "type": "object"
+      },
+      "EnterpriseTeamListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseTeamListParameters"
+              },
+              "query": {
+                "const": "enterprise.team.list"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseTeamListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.team.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseTeamPage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseTeamPage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable team-authority snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseTeamProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_team_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseTeamProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EnterpriseTeamId"
+          },
+          "organizationId": {
+            "$ref": "#/components/schemas/OrganizationId"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "roleAssignments": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleAssignment"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "state": {
+            "enum": [
+              "active",
+              "disabled"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "id",
+          "organizationId",
+          "displayName",
+          "state",
+          "roleAssignments",
+          "revision",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "EnterpriseTeamUpdateCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.team.update"
+              },
+              "payload": {
+                "$ref": "#/components/schemas/EnterpriseTeamUpdatePayload"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/OrganizationScope"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseTeamUpdateCompletedResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandCompletedEnvelope"
+          },
+          {
+            "properties": {
+              "command": {
+                "const": "enterprise.team.update"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseTeamProjection"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseTeamUpdatePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "roleAssignments": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseRoleAssignment"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "state": {
+            "enum": [
+              "active",
+              "disabled"
+            ],
+            "type": "string"
+          },
+          "teamId": {
+            "$ref": "#/components/schemas/EnterpriseTeamId"
+          }
+        },
+        "required": [
+          "teamId",
+          "displayName",
+          "state",
+          "roleAssignments"
+        ],
+        "type": "object"
+      },
+      "EnterpriseUsageListParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "fromInclusive": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceKinds": {
+            "items": {
+              "enum": [
+                "provider",
+                "worker",
+                "artifact",
+                "publication"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "toExclusive": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Instant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "fromInclusive",
+          "toExclusive",
+          "sourceKinds"
+        ],
+        "type": "object"
+      },
+      "EnterpriseUsageListQuery": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryEnvelope"
+          },
+          {
+            "properties": {
+              "parameters": {
+                "$ref": "#/components/schemas/EnterpriseUsageListParameters"
+              },
+              "query": {
+                "const": "enterprise.usage.list"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseUsageListResultResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryResultEnvelope"
+          },
+          {
+            "properties": {
+              "query": {
+                "const": "enterprise.usage.list"
+              },
+              "result": {
+                "$ref": "#/components/schemas/EnterpriseUsagePage"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EnterpriseUsagePage": {
+        "additionalProperties": false,
+        "description": "One bounded, cursor-bound page from a stable enterprise management snapshot.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnterpriseUsageProjection"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "kind": {
+            "const": "enterprise_usage_page"
+          },
+          "snapshotRevision": {
+            "$ref": "#/components/schemas/Revision"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshotRevision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "EnterpriseUsageProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "bucketEnd": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "bucketStart": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "costMicros": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "inputTokens": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "operationCount": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "outputTokens": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "runtimeMillis": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sourceKind": {
+            "enum": [
+              "provider",
+              "worker",
+              "artifact",
+              "publication"
+            ],
+            "type": "string"
+          },
+          "storageBytes": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bucketStart",
+          "bucketEnd",
+          "sourceKind",
+          "inputTokens",
+          "outputTokens",
+          "runtimeMillis",
+          "storageBytes",
+          "operationCount",
+          "costMicros",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "EnterpriseWorkerPoolId": {
+        "pattern": "^wpl_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
       "Error": {
         "oneOf": [
           {
@@ -4842,6 +9940,54 @@
       },
       "ExecutionJob": {
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "scope": {
+                  "$ref": "#/components/schemas/DeliveryStageExecutionScope"
+                }
+              },
+              "required": [
+                "scope"
+              ]
+            },
+            "then": {
+              "properties": {
+                "stageInput": {
+                  "$ref": "#/components/schemas/DeliveryStageInput"
+                }
+              },
+              "required": [
+                "stageInput"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "scope": {
+                  "$ref": "#/components/schemas/ProductSessionExecutionScope"
+                }
+              },
+              "required": [
+                "scope"
+              ]
+            },
+            "then": {
+              "not": {
+                "properties": {
+                  "stageInput": {
+                    "$ref": "#/components/schemas/DeliveryStageInput"
+                  }
+                },
+                "required": [
+                  "stageInput"
+                ]
+              }
+            }
+          }
+        ],
         "properties": {
           "attempt": {
             "maximum": 1000,
@@ -4870,6 +10016,9 @@
           "scope": {
             "$ref": "#/components/schemas/ExecutionScope"
           },
+          "stageInput": {
+            "$ref": "#/components/schemas/DeliveryStageInput"
+          },
           "workspace": {
             "$ref": "#/components/schemas/ExecutionWorkspace"
           }
@@ -4890,6 +10039,55 @@
         "description": "Identity of one scheduler-owned execution job.",
         "pattern": "^job_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
+      },
+      "ExecutionJobReplacementAuthority": {
+        "additionalProperties": false,
+        "description": "Control Plane seal for one exact predecessor-to-successor Job replacement. The predecessor lease and optional bound session also authorize exact continuation of an already durable Artifact stream; they never authorize a new stream.",
+        "properties": {
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "logicalJobDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "predecessorLease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          },
+          "predecessorSessionIdentity": {
+            "description": "The exact slot-bound predecessor WorkerSession and CodexThread. Null means no predecessor slot-bound runtime exists; the predecessor dispatch may have been accepted, but null authorizes neither dirty-workspace reuse nor continuation of an old runtime or Artifact stream.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "receiptDigest": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "receiptId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ExecutionScope"
+          },
+          "successorLease": {
+            "$ref": "#/components/schemas/ExecutionLeaseStamp"
+          }
+        },
+        "required": [
+          "receiptId",
+          "receiptDigest",
+          "logicalJobDigest",
+          "scope",
+          "predecessorLease",
+          "predecessorSessionIdentity",
+          "successorLease",
+          "createdAt"
+        ],
+        "type": "object"
       },
       "ExecutionLeaseStamp": {
         "additionalProperties": false,
@@ -4964,6 +10162,28 @@
       },
       "ExecutionOutcome": {
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "succeeded"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "usage": {}
+              },
+              "required": [
+                "usage"
+              ]
+            }
+          }
+        ],
         "properties": {
           "artifacts": {
             "items": {
@@ -4991,6 +10211,9 @@
             "maxLength": 4000,
             "minLength": 1,
             "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/ExecutionOutcomeUsage"
           }
         },
         "required": [
@@ -5010,6 +10233,32 @@
           "succeeded"
         ],
         "type": "string"
+      },
+      "ExecutionOutcomeUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "costMicrounits": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "runtimeMillis": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tokens": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runtimeMillis",
+          "tokens",
+          "costMicrounits"
+        ],
+        "type": "object"
       },
       "ExecutionPortError": {
         "additionalProperties": false,
@@ -5134,6 +10383,12 @@
           },
           {
             "$ref": "#/components/schemas/JobOutcomeAckMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ActionEnforcementRequestMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ActionEnforcementReceiptMessage"
           }
         ],
         "title": "ExecutionPortMessage"
@@ -5165,7 +10420,11 @@
             "$ref": "#/components/schemas/RepositoryId"
           },
           "writeMode": {
-            "const": "candidate"
+            "enum": [
+              "read-only",
+              "candidate"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -5174,6 +10433,10 @@
           "writeMode"
         ],
         "type": "object"
+      },
+      "ExternalIdentityId": {
+        "pattern": "^xid_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
       },
       "FencingToken": {
         "description": "Monotonically increasing decimal token encoded as a string to preserve 64-bit precision.",
@@ -5712,6 +10975,16 @@
           "messageId": {
             "$ref": "#/components/schemas/ExecutionMessageId"
           },
+          "replacementAuthority": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionJobReplacementAuthority"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
           },
@@ -5729,7 +11002,8 @@
           "sentAt",
           "requestId",
           "job",
-          "lease"
+          "lease",
+          "replacementAuthority"
         ],
         "title": "job.dispatch",
         "type": "object",
@@ -7094,6 +12368,7 @@
           "session.list",
           "session.get",
           "session.messages.list",
+          "session.interactions.list",
           "runtime.projection.get",
           "delivery.list",
           "delivery.get",
@@ -7105,7 +12380,21 @@
           "worker.list",
           "worker.get",
           "publication.list",
-          "publication.get"
+          "publication.get",
+          "enterprise.organization.list",
+          "enterprise.membership.list",
+          "enterprise.team.list",
+          "enterprise.role.list",
+          "enterprise.project.list",
+          "enterprise.policy.list",
+          "enterprise.fleet.list",
+          "enterprise.usage.list",
+          "enterprise.audit.list",
+          "enterprise.integration.list",
+          "enterprise.identity.list",
+          "collaboration.activity.list",
+          "collaboration.notification.list",
+          "collaboration.presence.list"
         ],
         "type": "string"
       },
@@ -7119,6 +12408,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionMessagesListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/ChatInteractionListQuery"
           },
           {
             "$ref": "#/components/schemas/RuntimeProjectionGetQuery"
@@ -7155,6 +12447,48 @@
           },
           {
             "$ref": "#/components/schemas/PublicationGetQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseOrganizationListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseMembershipListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseTeamListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseRoleListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseProjectListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterprisePolicyListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseFleetListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseUsageListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseAuditListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIntegrationListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIdentityListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationActivityListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationNotificationListQuery"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPresenceListQuery"
           }
         ]
       },
@@ -7198,6 +12532,9 @@
             "$ref": "#/components/schemas/SessionMessagesListResultResponse"
           },
           {
+            "$ref": "#/components/schemas/ChatInteractionListResultResponse"
+          },
+          {
             "$ref": "#/components/schemas/RuntimeProjectionGetResultResponse"
           },
           {
@@ -7232,6 +12569,48 @@
           },
           {
             "$ref": "#/components/schemas/PublicationGetResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseOrganizationListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseMembershipListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseTeamListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseRoleListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseProjectListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterprisePolicyListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseFleetListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseUsageListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseAuditListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIntegrationListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/EnterpriseIdentityListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationActivityListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationNotificationListResultResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CollaborationPresenceListResultResponse"
           }
         ]
       },
@@ -8393,7 +13772,7 @@
       },
       "SessionBindingMessage": {
         "additionalProperties": false,
-        "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease.",
+        "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery-stage bindings carry the exact StageRun; ProductSession Chat bindings omit it.",
         "properties": {
           "attempt": {
             "maximum": 1000,
@@ -8437,7 +13816,8 @@
             "$ref": "#/components/schemas/SessionBindingSourceIdentity"
           },
           "stageRunId": {
-            "$ref": "#/components/schemas/StageRunId"
+            "$ref": "#/components/schemas/StageRunId",
+            "description": "Exact Delivery StageRun identity. ProductSession Chat bindings omit this field."
           },
           "workerId": {
             "$ref": "#/components/schemas/WorkerId"
@@ -8458,7 +13838,6 @@
           "boundAt",
           "sessionIdentity",
           "sourceIdentity",
-          "stageRunId",
           "workerId",
           "leaseId",
           "attempt",
@@ -10347,6 +15726,12 @@
         "scheme": "bearer",
         "type": "http"
       },
+      "bootstrapProof": {
+        "bearerFormat": "opaque",
+        "description": "Short-window, write-only browser bootstrap proof accepted only by session creation.",
+        "scheme": "bearer",
+        "type": "http"
+      },
       "sessionCookie": {
         "description": "Same-origin Web and local Host session.",
         "in": "cookie",
@@ -10367,6 +15752,164 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/auth/session": {
+      "delete": {
+        "description": "Revokes the exact current browser-session cookie and clears it from the browser.",
+        "operationId": "revokeBrowserSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Browser session revoked."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "INVALID_REQUEST"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "AUTHENTICATION_REQUIRED"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "SERVICE_UNAVAILABLE"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "get": {
+        "description": "Restores the current secret-free Actor and bounded authorized Scope set from the HttpOnly browser-session cookie.",
+        "operationId": "getBrowserSessionContext",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSessionResponse"
+                }
+              }
+            },
+            "description": "Current browser-session context."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "AUTHENTICATION_REQUIRED"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "SERVICE_UNAVAILABLE"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "description": "Exchanges one short-window bootstrap proof from the Authorization header for an independent HttpOnly session cookie and its secret-free current context.",
+        "operationId": "createBrowserSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSessionResponse"
+                }
+              }
+            },
+            "description": "Browser session created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "INVALID_REQUEST"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "AUTHENTICATION_REQUIRED"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "SERVICE_UNAVAILABLE"
+          }
+        },
+        "security": [
+          {
+            "bootstrapProof": []
+          }
+        ]
+      }
+    },
     "/api/v1/commands": {
       "post": {
         "description": "Checks authentication, scope, requestId replay identity, and expectedRevision before mutation. Identical retries return the stored original status and body; changed input with the same requestId returns IDEMPOTENCY_CONFLICT.",
@@ -10616,7 +16159,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:2993a4eabebf6ea387dba96cac36f18cdd90107565ff4a8e792efce904bb303f",
+  "x-source-digest": "sha256:27d7223d7ac698476019d0b9049266aa634d4e3da7d3c959c52ba9e4c693854a",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

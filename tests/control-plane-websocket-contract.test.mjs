@@ -36,8 +36,19 @@ const eventTypes = Object.freeze([
   'activity.recorded.v1',
   'approval.changed.v1',
   'attention.changed.v1',
+  'chat-interactions.invalidated.v1',
   'delivery.changed.v1',
   'delivery-task.changed.v1',
+  'enterprise-audit.invalidated.v1',
+  'enterprise-fleet.invalidated.v1',
+  'enterprise-integration.invalidated.v1',
+  'enterprise-membership.invalidated.v1',
+  'enterprise-team.invalidated.v1',
+  'enterprise-role.invalidated.v1',
+  'enterprise-organization.invalidated.v1',
+  'enterprise-policy.invalidated.v1',
+  'enterprise-project.invalidated.v1',
+  'enterprise-usage.invalidated.v1',
   'presence.changed.v1',
   'product-session.message.appended.v1',
   'product-session.changed.v1',
@@ -593,6 +604,23 @@ test('positive transcripts cover every public event and reconnect control frame'
     'transport.resume-accepted.v1',
     'transport.subscription-accepted.v1',
   ]) assert.equal(coveredFrames.has(frameType), true, frameType)
+})
+
+test('enterprise invalidations bind each area to its one generated reload query', () => {
+  const transcript = validFixture.transcripts.find(item => (
+    item.name === 'enterprise-management-scope-invalidations'
+  ))
+  assert.ok(transcript)
+  const organization = transcript.frames.find(frame => (
+    frame.type === 'event.v1'
+    && frame.event.type === 'enterprise-organization.invalidated.v1'
+  ))
+  assert.ok(organization)
+  assert.deepEqual(validateSchemaNode(organization, schema), [])
+
+  const crossed = structuredClone(organization)
+  crossed.event.reloadQueries = ['enterprise.membership.list']
+  assert.notDeepEqual(validateSchemaNode(crossed, schema), [])
 })
 
 test('negative transcripts reject commands, missing metadata, and crossed streams', () => {

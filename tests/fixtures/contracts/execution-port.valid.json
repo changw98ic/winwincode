@@ -121,6 +121,34 @@
         },
         "executionProfile": "executor",
         "goal": "Implement the approved candidate change.",
+        "stageInput": {
+          "schemaVersion": "winwincode/v1",
+          "deliverySpecId": "delivery-spec-fixture",
+          "deliverySpecRevision": 1,
+          "title": "Implement the approved candidate",
+          "goal": "Ship the exact approved candidate change.",
+          "scope": [
+            "Candidate source tree"
+          ],
+          "outOfScope": [],
+          "constraints": [],
+          "acceptanceCriteria": [
+            {
+              "criterionId": "criterion-fixture",
+              "description": "The approved candidate change passes its exact test.",
+              "verificationMethod": "Run the exact candidate test.",
+              "required": true
+            }
+          ],
+          "task": {
+            "taskId": "dtk_00000000000000000000000008",
+            "title": "Implement the candidate",
+            "goal": "Implement the approved candidate change.",
+            "acceptanceCriterionIds": [
+              "criterion-fixture"
+            ]
+          }
+        },
         "limits": {
           "deadlineAt": "2026-08-24T12:10:00.000Z",
           "maxRuntimeSeconds": 600,
@@ -136,7 +164,8 @@
         "fencingToken": "42",
         "issuedAt": "2026-08-24T12:00:00.000Z",
         "expiresAt": "2026-08-24T12:10:00.000Z"
-      }
+      },
+      "replacementAuthority": null
     },
     {
       "kind": "job.dispatch_result",
@@ -651,6 +680,90 @@
       }
     },
     {
+      "kind": "action.enforcement_request",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000T",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_0000000000000000000000000T",
+      "jobId": "job_00000000000000000000000003",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      },
+      "policyKind": "tool",
+      "resource": "action:shell:cwd:.",
+      "subjectSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matchedConditionSha256": [
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ]
+    },
+    {
+      "kind": "action.enforcement_receipt",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000V",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_0000000000000000000000000T",
+      "jobId": "job_00000000000000000000000003",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000001",
+        "workspaceId": "wsp_00000000000000000000000002",
+        "projectId": "prj_00000000000000000000000003",
+        "repositoryId": "rep_00000000000000000000000004"
+      },
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000005"
+      },
+      "policyKind": "tool",
+      "resource": "action:shell:cwd:.",
+      "subjectSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matchedConditionSha256": [
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "decision": "permit",
+      "policyMode": "enforce",
+      "policyVersion": {
+        "policyId": "pol_00000000000000000000000006",
+        "version": 1,
+        "versionDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "effectiveDefinitionSha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "evaluationSha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "evaluatedAt": "2026-08-24T12:00:00.000Z",
+      "receiptSignature": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
       "kind": "job.outcome",
       "schemaVersion": "winwincode/v1",
       "messageId": "xmsg_0000000000000000000000000R",
@@ -671,6 +784,11 @@
         "summary": "Execution completed.",
         "finishedAt": "2026-08-24T12:00:00.000Z",
         "lastEventSequence": 1,
+        "usage": {
+          "runtimeMillis": 17,
+          "tokens": 23,
+          "costMicrounits": 29
+        },
         "codexThreadId": "cdx_0000000000000000000000000G",
         "artifacts": [
           {

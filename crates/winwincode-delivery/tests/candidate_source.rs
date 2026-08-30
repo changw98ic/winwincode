@@ -22,13 +22,14 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{
     ArtifactId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
-    ExecutionMessageId, FencingToken, Instant, LeaseId, ProductSessionId, RequestId, Sha256Digest,
-    StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    ExecutionMessageId, FencingToken, Instant, LeaseId, OrganizationId, ProductSessionId,
+    ProjectId, RepositoryId, RequestId, Sha256Digest, StageRunId, UserId, WorkerId,
+    WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
 use winwincode_storage::{
-    ArtifactAccess, ArtifactChunk, ArtifactOpen, ArtifactProvenance, ArtifactRetention,
-    ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore, LocalGitSourceResolver,
-    ReceiptScopeKey,
+    ArtifactAccess, ArtifactChunk, ArtifactMeteringAttribution, ArtifactOpen, ArtifactProvenance,
+    ArtifactRetention, ArtifactStore, CandidateSourceManifest, FakeArtifactObjectStore,
+    LocalGitSourceResolver, ReceiptScopeKey,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -185,6 +186,15 @@ fn delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outco
             manifest.len() as u64,
             Some("candidate.json".into()),
             provenance.clone(),
+            ArtifactMeteringAttribution {
+                organization_id: OrganizationId("org_00000000000000000000000301".into()),
+                workspace_id: WorkspaceId("wsp_00000000000000000000000301".into()),
+                project_id: ProjectId("prj_00000000000000000000000301".into()),
+                repository_id: RepositoryId("rep_00000000000000000000000301".into()),
+                delivery_id: Some(DeliveryId("dlv_00000000000000000000000301".into())),
+                product_session_id: Some(ProductSessionId("psn_00000000000000000000000301".into())),
+                user_id: UserId("usr_00000000000000000000000301".into()),
+            },
             ArtifactRetention::Indefinite,
             finished_at.saturating_sub(1),
         ))

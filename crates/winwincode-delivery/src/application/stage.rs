@@ -81,6 +81,7 @@ use winwincode_domain::{
     ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, Sha256Digest, StageRunId,
     WorkerId, WorkerInstanceId, WorkerSessionId,
 };
+use winwincode_storage::ExecutionDispatchAuthority;
 
 use crate::domain::{
     AttentionItem, AttentionItemStatus, AttentionItemType, DELIVERY_SCHEMA_VERSION, Delivery,
@@ -143,30 +144,37 @@ pub struct ActiveLeaseIdentity {
 }
 
 impl ActiveLeaseIdentity {
+    #[must_use]
     pub fn execution_job_id(&self) -> &ExecutionJobId {
         &self.execution_job_id
     }
 
+    #[must_use]
     pub const fn attempt(&self) -> u64 {
         self.attempt
     }
 
+    #[must_use]
     pub fn lease_id(&self) -> &LeaseId {
         &self.lease_id
     }
 
+    #[must_use]
     pub fn fencing_token(&self) -> &FencingToken {
         &self.fencing_token
     }
 
+    #[must_use]
     pub fn worker_id(&self) -> &WorkerId {
         &self.worker_id
     }
 
+    #[must_use]
     pub fn worker_instance_id(&self) -> &WorkerInstanceId {
         &self.worker_instance_id
     }
 
+    #[must_use]
     pub fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
     }
@@ -184,6 +192,32 @@ pub struct SessionBindingAuthority {
     expires_at: Instant,
 }
 
+/// Seals the Registry's accepted dispatch record for Delivery/Runtime ingress.
+///
+/// [`ExecutionDispatchAuthority`] has no public field constructor and is
+/// returned only after the durable Registry has joined an accepted Worker
+/// dispatch result to its exact current lease. Keeping this conversion here
+/// prevents Worker message fields from becoming scheduler authority.
+#[must_use]
+pub fn seal_session_binding_authority(
+    dispatch: &ExecutionDispatchAuthority,
+) -> SessionBindingAuthority {
+    let lease = dispatch.lease();
+    SessionBindingAuthority {
+        active_lease: ActiveLeaseIdentity {
+            execution_job_id: lease.job_id.clone(),
+            attempt: lease.attempt,
+            lease_id: lease.lease_id.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            worker_id: lease.worker_id.clone(),
+            worker_instance_id: lease.worker_instance_id.clone(),
+            worker_session_id: dispatch.worker_session_id().clone(),
+        },
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+    }
+}
+
 /// Scheduler- and Worker-adapter facts for one terminal `job.outcome`.
 ///
 /// The raw lease and outcome fields stay private. A production adapter must
@@ -195,19 +229,95 @@ pub struct DeliveryTerminalOutcomeFacts {
     outcome: TerminalWorkerOutcome,
 }
 
+/// Exact scheduler lease and accepted Worker outcome read by a trusted
+/// production adapter from durable state.
+///
+/// This input is not itself authority. [`reconcile_durable_terminal_outcome`]
+/// checks every field against the current Delivery `StageRun` and
+/// `SessionBinding` before sealing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableTerminalOutcomeInput {
+    pub execution_job_id: ExecutionJobId,
+    pub attempt: u64,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+    pub worker_id: WorkerId,
+    pub worker_instance_id: WorkerInstanceId,
+    pub worker_session_id: WorkerSessionId,
+    pub issued_at: Instant,
+    pub expires_at: Instant,
+    pub stage_run_id: StageRunId,
+    pub status: TerminalOutcomeStatus,
+    pub codex_thread_id: Option<CodexThreadId>,
+    pub finished_at_millis: u64,
+    pub last_event_sequence: ExecutionAckSequence,
+    pub artifacts: Vec<TerminalArtifactReference>,
+}
+
+/// Worker-owned terminal values paired with Registry-owned dispatch authority.
+///
+/// This report deliberately excludes lease, fencing, Worker, and
+/// `WorkerSession` fields. Those values always come from the opaque accepted
+/// dispatch record when [`seal_dispatch_terminal_outcome`] is called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerTerminalOutcomeReport {
+    pub stage_run_id: StageRunId,
+    pub status: TerminalOutcomeStatus,
+    pub codex_thread_id: Option<CodexThreadId>,
+    pub finished_at_millis: u64,
+    pub last_event_sequence: ExecutionAckSequence,
+    pub artifacts: Vec<TerminalArtifactReference>,
+}
+
+/// Combines an accepted Registry dispatch with Worker-owned terminal values.
+///
+/// The returned facts still undergo the canonical current-Delivery and
+/// durable-Job join in the Control Plane terminal transaction. This first seal
+/// ensures a Worker frame cannot choose its own lease, fence, process, or
+/// session authority, while an exact terminal receipt can be replayed after
+/// the Delivery has already advanced.
+#[must_use]
+pub fn seal_dispatch_terminal_outcome(
+    dispatch: &ExecutionDispatchAuthority,
+    report: WorkerTerminalOutcomeReport,
+) -> DeliveryTerminalOutcomeFacts {
+    let lease = dispatch.lease();
+    terminal_outcome_facts(DurableTerminalOutcomeInput {
+        execution_job_id: lease.job_id.clone(),
+        attempt: lease.attempt,
+        lease_id: lease.lease_id.clone(),
+        fencing_token: lease.fencing_token.clone(),
+        worker_id: lease.worker_id.clone(),
+        worker_instance_id: lease.worker_instance_id.clone(),
+        worker_session_id: dispatch.worker_session_id().clone(),
+        issued_at: lease.issued_at.clone(),
+        expires_at: lease.expires_at.clone(),
+        stage_run_id: report.stage_run_id,
+        status: report.status,
+        codex_thread_id: report.codex_thread_id,
+        finished_at_millis: report.finished_at_millis,
+        last_event_sequence: report.last_event_sequence,
+        artifacts: report.artifacts,
+    })
+}
+
 impl DeliveryTerminalOutcomeFacts {
+    #[must_use]
     pub const fn authority(&self) -> &SessionBindingAuthority {
         &self.authority
     }
 
+    #[must_use]
     pub const fn stage_run_id(&self) -> &StageRunId {
         &self.outcome.stage_run_id
     }
 
+    #[must_use]
     pub const fn status(&self) -> TerminalOutcomeStatus {
         self.outcome.status
     }
 
+    #[must_use]
     pub const fn metadata(&self) -> &TerminalOutcomeMetadata {
         &self.outcome.metadata
     }
@@ -221,6 +331,19 @@ impl DeliveryTerminalOutcomeFacts {
             self.authority.active_lease(),
             self.outcome.clone(),
         )
+    }
+
+    /// Revalidates the sealed facts for an active-stage handoff.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stale Delivery, binding, Worker, lease, attempt, fencing
+    /// token, terminal position, or Artifact reference.
+    pub fn verify_active(
+        &self,
+        delivery: &Delivery,
+    ) -> Result<VerifiedTerminalOutcome, CoordinationError> {
+        self.verify(delivery)
     }
 
     /// Revalidates one already-settled successful Worker outcome for derived
@@ -278,15 +401,85 @@ impl DeliveryTerminalOutcomeFacts {
     }
 }
 
+/// Reconciles durable scheduler and Worker records with the exact current
+/// Delivery before creating terminal authority.
+///
+/// # Errors
+///
+/// Fails closed when any input differs from the active `StageRun` and its
+/// complete `SessionBinding`, or when the terminal metadata is invalid.
+pub fn reconcile_durable_terminal_outcome(
+    delivery: &Delivery,
+    input: DurableTerminalOutcomeInput,
+) -> Result<DeliveryTerminalOutcomeFacts, CoordinationError> {
+    let facts = terminal_outcome_facts(input);
+    facts.verify(delivery)?;
+    Ok(facts)
+}
+
+/// Reconciles a persisted successful outcome after its `StageRun` was settled by
+/// the same atomic handoff transaction.
+///
+/// # Errors
+///
+/// Fails closed when the successful `StageRun`, binding, lease identity,
+/// terminal metadata, or finish time no longer matches the Delivery.
+pub fn reconcile_durable_settled_terminal_outcome(
+    delivery: &Delivery,
+    input: DurableTerminalOutcomeInput,
+) -> Result<DeliveryTerminalOutcomeFacts, CoordinationError> {
+    let facts = terminal_outcome_facts(input);
+    facts.verify_settled_success(delivery)?;
+    Ok(facts)
+}
+
+fn terminal_outcome_facts(input: DurableTerminalOutcomeInput) -> DeliveryTerminalOutcomeFacts {
+    let active_lease = ActiveLeaseIdentity {
+        execution_job_id: input.execution_job_id.clone(),
+        attempt: input.attempt,
+        lease_id: input.lease_id.clone(),
+        fencing_token: input.fencing_token.clone(),
+        worker_id: input.worker_id.clone(),
+        worker_instance_id: input.worker_instance_id.clone(),
+        worker_session_id: input.worker_session_id.clone(),
+    };
+    let authority = SessionBindingAuthority {
+        active_lease,
+        issued_at: input.issued_at,
+        expires_at: input.expires_at,
+    };
+    let outcome = TerminalWorkerOutcome {
+        stage_run_id: input.stage_run_id,
+        execution_job_id: input.execution_job_id,
+        attempt: input.attempt,
+        lease_id: input.lease_id,
+        fencing_token: input.fencing_token,
+        worker_id: input.worker_id,
+        worker_instance_id: input.worker_instance_id,
+        worker_session_id: input.worker_session_id,
+        status: input.status,
+        metadata: TerminalOutcomeMetadata {
+            codex_thread_id: input.codex_thread_id,
+            finished_at_millis: input.finished_at_millis,
+            last_event_sequence: input.last_event_sequence,
+            artifacts: input.artifacts,
+        },
+    };
+    DeliveryTerminalOutcomeFacts { authority, outcome }
+}
+
 impl SessionBindingAuthority {
+    #[must_use]
     pub const fn active_lease(&self) -> &ActiveLeaseIdentity {
         &self.active_lease
     }
 
+    #[must_use]
     pub const fn issued_at(&self) -> &Instant {
         &self.issued_at
     }
 
+    #[must_use]
     pub const fn expires_at(&self) -> &Instant {
         &self.expires_at
     }
@@ -317,18 +510,22 @@ pub struct TerminalOutcomeMetadata {
 }
 
 impl TerminalOutcomeMetadata {
+    #[must_use]
     pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
         self.codex_thread_id.as_ref()
     }
 
+    #[must_use]
     pub const fn finished_at_millis(&self) -> u64 {
         self.finished_at_millis
     }
 
+    #[must_use]
     pub fn last_event_sequence(&self) -> &ExecutionAckSequence {
         &self.last_event_sequence
     }
 
+    #[must_use]
     pub fn artifacts(&self) -> &[TerminalArtifactReference] {
         &self.artifacts
     }
@@ -353,54 +550,67 @@ pub struct VerifiedTerminalOutcome {
 }
 
 impl VerifiedTerminalOutcome {
+    #[must_use]
     pub fn stage_run_id(&self) -> &StageRunId {
         &self.stage_run_id
     }
 
+    #[must_use]
     pub fn execution_job_id(&self) -> &ExecutionJobId {
         &self.lease_identity.execution_job_id
     }
 
+    #[must_use]
     pub fn worker_session_id(&self) -> &WorkerSessionId {
         &self.lease_identity.worker_session_id
     }
 
+    #[must_use]
     pub fn lease_id(&self) -> &LeaseId {
         &self.lease_identity.lease_id
     }
 
+    #[must_use]
     pub fn fencing_token(&self) -> &FencingToken {
         &self.lease_identity.fencing_token
     }
 
+    #[must_use]
     pub fn worker_id(&self) -> &WorkerId {
         &self.lease_identity.worker_id
     }
 
+    #[must_use]
     pub fn worker_instance_id(&self) -> &WorkerInstanceId {
         &self.lease_identity.worker_instance_id
     }
 
+    #[must_use]
     pub const fn attempt(&self) -> u64 {
         self.lease_identity.attempt
     }
 
+    #[must_use]
     pub const fn status(&self) -> TerminalOutcomeStatus {
         self.status
     }
 
+    #[must_use]
     pub fn codex_thread_id(&self) -> Option<&CodexThreadId> {
         self.metadata.codex_thread_id.as_ref()
     }
 
+    #[must_use]
     pub const fn finished_at_millis(&self) -> u64 {
         self.metadata.finished_at_millis
     }
 
+    #[must_use]
     pub fn last_event_sequence(&self) -> &ExecutionAckSequence {
         &self.metadata.last_event_sequence
     }
 
+    #[must_use]
     pub fn artifacts(&self) -> &[TerminalArtifactReference] {
         &self.metadata.artifacts
     }
@@ -490,6 +700,7 @@ pub mod test_support {
     };
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn active_lease_identity(
         execution_job_id: ExecutionJobId,
         attempt: u64,
@@ -513,6 +724,7 @@ pub mod test_support {
     /// Seals one exact active-lease window for a `SessionBinding` integration
     /// fixture. Production schedulers construct the equivalent fact inside
     /// their trusted adapter; raw fields remain unavailable to callers.
+    #[must_use]
     pub fn session_binding_authority(
         active_lease: ActiveLeaseIdentity,
         issued_at: Instant,
@@ -527,6 +739,7 @@ pub mod test_support {
 
     /// Seals one scheduler lease and raw Worker outcome for Control Plane
     /// transaction tests. Production builds expose no equivalent constructor.
+    #[must_use]
     pub fn delivery_terminal_outcome_facts(
         authority: SessionBindingAuthority,
         outcome: TerminalWorkerOutcome,
@@ -534,6 +747,7 @@ pub mod test_support {
         DeliveryTerminalOutcomeFacts { authority, outcome }
     }
 
+    #[must_use]
     pub fn terminal_outcome_metadata(
         codex_thread_id: Option<CodexThreadId>,
         finished_at_millis: u64,
@@ -549,6 +763,7 @@ pub mod test_support {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn terminal_worker_outcome(
         stage_run_id: StageRunId,
         execution_job_id: ExecutionJobId,
@@ -619,6 +834,7 @@ pub mod test_support {
         outcome.metadata.artifacts.push(duplicate);
     }
 
+    #[must_use]
     pub fn terminal_metadata(outcome: &TerminalWorkerOutcome) -> &TerminalOutcomeMetadata {
         &outcome.metadata
     }
@@ -717,6 +933,7 @@ struct ExecutionIntentSealIdentity<'intent> {
 }
 
 impl ExecutionIntent {
+    #[must_use]
     pub fn rework_authorization(&self) -> Option<&ReworkAuthorization> {
         self.rework_authorization.as_deref()
     }
@@ -1755,7 +1972,8 @@ fn legal_transition(
             DeliveryStatus::Clarifying,
             StageRunActorType::Codex,
         ),
-        (DeliveryStatus::Ready | DeliveryStatus::Planning, None) => (
+        (DeliveryStatus::Clarifying, Some(DeliveryStage::Clarifying))
+        | (DeliveryStatus::Ready | DeliveryStatus::Planning, None) => (
             DeliveryStage::Planning,
             DeliveryStatus::Planning,
             StageRunActorType::Codex,

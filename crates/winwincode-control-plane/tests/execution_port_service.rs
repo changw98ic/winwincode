@@ -23,8 +23,11 @@ use winwincode_execution_port::transport::{
     EndpointSide, LocalWorkerAdapter, RemoteTransportAdapter, TypedFrame,
 };
 use winwincode_storage::{
-    ExecutionLeaseClaim, NewOutboxEvent, ProductStateStorage, ReceiptActorKey, ReceiptIdentity,
-    ReceiptScopeKey, SqliteStorage, StateCommit,
+    EXECUTION_PROTOCOL_VERSION, ExecutionJobState, ExecutionJobSubmission,
+    ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope, NewOutboxEvent,
+    ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
+    StateCommit, WorkerAuthenticationIdentity, WorkerPlatform, WorkerRegistrationRequest,
+    WorkerRegistryScope,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -98,6 +101,62 @@ fn commit_durable_dispatch_intent(
         )],
     );
     storage.commit(&commit).expect("durable dispatch intent");
+}
+
+fn seed_queue_lease(
+    storage: &mut SqliteStorage,
+    job: &winwincode_execution_port::generated::ExecutionJob,
+    claim: &ExecutionLeaseClaim,
+    seed: u64,
+) {
+    let (product_session_id, delivery_id, stage_run_id) = match &job.scope {
+        winwincode_execution_port::generated::ExecutionScope::ProductSessionExecutionScope(
+            scope,
+        ) => (scope.product_session_id.clone(), None, None),
+        winwincode_execution_port::generated::ExecutionScope::DeliveryStageExecutionScope(
+            scope,
+        ) => (
+            scope.product_session_id.clone(),
+            Some(scope.delivery_id.clone()),
+            Some(scope.stage_run_id.clone()),
+        ),
+    };
+    let scope = ExecutionQueueScope {
+        organization_id: winwincode_domain::OrganizationId(format!("org_{seed:026}")),
+        workspace_id: winwincode_domain::WorkspaceId(format!("wsp_{seed:026}")),
+        project_id: winwincode_domain::ProjectId(format!("prj_{seed:026}")),
+        repository_id: job.workspace.repository_id.clone(),
+        product_session_id,
+        delivery_id,
+    };
+    let submitted = storage
+        .execution_queue()
+        .expect("queue")
+        .submit(&ExecutionJobSubmission {
+            scope: scope.clone(),
+            job_id: job.job_id.clone(),
+            request_id: winwincode_domain::RequestId(format!("req_{:026}", seed + 1)),
+            payload_digest: job.payload_digest.clone(),
+            dispatch_payload: serde_json::to_vec(job).expect("canonical job payload"),
+            attempt: u64::try_from(job.attempt).expect("positive attempt"),
+            dependencies: Vec::new(),
+            stage_run_id,
+            submitted_at: claim.issued_at.clone(),
+        })
+        .expect("queue submit");
+    storage
+        .execution_queue()
+        .expect("queue")
+        .transition(&ExecutionJobTransitionRequest {
+            scope,
+            job_id: job.job_id.clone(),
+            request_id: winwincode_domain::RequestId(format!("req_{:026}", seed + 2)),
+            expected_revision: submitted.job.revision,
+            from: ExecutionJobState::Queued,
+            to: ExecutionJobState::Leased,
+            occurred_at: claim.issued_at.clone(),
+        })
+        .expect("queue lease");
 }
 
 #[test]
@@ -228,7 +287,7 @@ fn registration_replay_and_changed_body_conflict_are_durable_results() {
     );
     assert_eq!(
         conflict.error.as_ref().map(|error| &error.code),
-        Some(&winwincode_execution_port::generated::ExecutionPortErrorCode::MessageConflict)
+        Some(&winwincode_execution_port::generated::ExecutionPortErrorCode::CapabilityMismatch)
     );
 
     drop(service);
@@ -320,12 +379,87 @@ fn claim_without_a_durable_execution_intent_is_rejected_before_lease_write() {
     fs::remove_dir_all(root).expect("directory release");
 }
 
+#[test]
+fn transport_authenticated_claim_without_durable_pool_placement_fails_closed() {
+    let root = temporary_directory("claim-missing-authenticated-placement");
+    let mut storage = SqliteStorage::open(&root).expect("storage open");
+    let expected: JobDispatchMessage = fixture_message("job.dispatch");
+    commit_durable_dispatch_intent(&mut storage, &expected.job);
+    let claim = claim_from_dispatch(&expected);
+    let register: WorkerRegisterMessage = fixture_message("worker.register");
+    storage
+        .execution_registry()
+        .expect("registry")
+        .register_worker_for_scope(
+            &WorkerRegistrationRequest {
+                authentication_identity: WorkerAuthenticationIdentity::TransportPrincipal {
+                    issuer: "fixture-enterprise-worker".to_owned(),
+                    subject: "remote-worker".to_owned(),
+                    credential_fingerprint: winwincode_domain::Sha256Digest(format!(
+                        "sha256:{}",
+                        "a".repeat(64)
+                    )),
+                },
+                protocol_version: EXECUTION_PROTOCOL_VERSION.to_owned(),
+                platform: WorkerPlatform::Aarch64AppleDarwin,
+                capabilities: vec!["codex".to_owned()],
+                capability_digest: winwincode_domain::Sha256Digest(format!(
+                    "sha256:{}",
+                    "b".repeat(64)
+                )),
+                security_zone: "enterprise-default".to_owned(),
+                max_slots: 1,
+                message_id: register.message_id,
+                request_id: register.request_id,
+                sent_at: claim.issued_at.clone(),
+                started_at: winwincode_domain::Instant("2026-08-24T11:59:00.000Z".to_owned()),
+                worker_id: claim.worker_id.clone(),
+                worker_instance_id: claim.worker_instance_id.clone(),
+            },
+            &WorkerRegistryScope::Repository {
+                organization_id: winwincode_domain::OrganizationId(
+                    "org_00000000000000000000000001".to_owned(),
+                ),
+                workspace_id: winwincode_domain::WorkspaceId(
+                    "wsp_00000000000000000000000001".to_owned(),
+                ),
+                project_id: winwincode_domain::ProjectId(
+                    "prj_00000000000000000000000001".to_owned(),
+                ),
+                repository_id: expected.job.workspace.repository_id.clone(),
+            },
+        )
+        .expect("transport Worker registration");
+
+    let mut service = ExecutionPortService::new(&mut storage, claim.issued_at.clone());
+    let error = service
+        .claim_execution_job(expected.job.clone(), claim.clone())
+        .expect_err("missing authenticated placement must fail closed");
+    assert!(matches!(
+        error,
+        ExecutionPortServiceError::AuthorityRejected("authenticated Worker placement is missing")
+    ));
+    drop(service);
+    assert!(
+        storage
+            .execution_registry()
+            .expect("registry")
+            .load_lease(&claim.job_id)
+            .expect("lease read")
+            .is_none(),
+        "fail-closed authenticated claim must not write a Registry lease"
+    );
+    Box::new(storage).close().expect("storage close");
+    fs::remove_dir_all(root).expect("directory release");
+}
+
 fn setup_service<'storage>(
     storage: &'storage mut SqliteStorage,
     server_time: &str,
 ) -> (ExecutionPortService<'storage>, JobDispatchMessage) {
     let dispatch: JobDispatchMessage = fixture_message("job.dispatch");
     commit_durable_dispatch_intent(storage, &dispatch.job);
+    seed_queue_lease(storage, &dispatch.job, &claim_from_dispatch(&dispatch), 100);
     let register: WorkerRegisterMessage = fixture_message("worker.register");
     let mut service =
         ExecutionPortService::new(storage, winwincode_domain::Instant(server_time.to_owned()));
@@ -416,6 +550,12 @@ fn dispatch_result_receipt_replays_as_duplicate_and_conflicts_on_changed_body_af
     let mut storage = SqliteStorage::open(&root).expect("storage open");
     let dispatch: JobDispatchMessage = fixture_message("job.dispatch");
     commit_durable_dispatch_intent(&mut storage, &dispatch.job);
+    seed_queue_lease(
+        &mut storage,
+        &dispatch.job,
+        &claim_from_dispatch(&dispatch),
+        200,
+    );
     let register: WorkerRegisterMessage = fixture_message("worker.register");
     let mut service = ExecutionPortService::new(&mut storage, register.sent_at.clone());
     service
@@ -966,6 +1106,18 @@ fn local_and_remote_adapters_share_the_same_durable_service_outcomes() {
     let expected: JobDispatchMessage = fixture_message("job.dispatch");
     commit_durable_dispatch_intent(&mut local_storage, &expected.job);
     commit_durable_dispatch_intent(&mut remote_storage, &expected.job);
+    seed_queue_lease(
+        &mut local_storage,
+        &expected.job,
+        &claim_from_dispatch(&expected),
+        300,
+    );
+    seed_queue_lease(
+        &mut remote_storage,
+        &expected.job,
+        &claim_from_dispatch(&expected),
+        300,
+    );
     let mut local = ExecutionPortService::new(
         &mut local_storage,
         winwincode_domain::Instant("2026-08-24T12:00:01.000Z".to_owned()),
@@ -1091,6 +1243,7 @@ mod runtime_router_fixture {
     use std::sync::{Arc, Mutex};
 
     use rusqlite::{Connection, params};
+    use sha2::{Digest, Sha256};
     use winwincode_api::generated::{
         Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
     };
@@ -1119,29 +1272,37 @@ mod runtime_router_fixture {
         DeliveryJournalPort, DeliveryStore, JournalBackendError, LoadedDeliveryJournal,
     };
     use winwincode_domain::{
-        AttentionItemId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionEventId,
-        ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-        OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision,
-        SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
+        AttentionItemId, CodexThreadId, DeliveryId, EnterprisePolicyId, ExecutionAckSequence,
+        ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken,
+        Instant, LeaseId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
+        Revision, SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind,
         SessionIdentity, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId,
         WorkerSessionId, WorkspaceId,
     };
+    use winwincode_execution_port::action_enforcement::{
+        ActionEnforcementIssuer, ActionEnforcementSigningKey,
+    };
     use winwincode_execution_port::generated::{
-        ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp,
-        ExecutionLimits, ExecutionPortMessage, ExecutionScope, ExecutionWorkspace,
-        ExecutionWorkspaceWriteMode, LeaseWriteStatus, RuntimeAckMessage, RuntimeEventMessage,
-        RuntimeEventMessageKind, SessionBindingMessage, SessionBindingMessageKind,
+        ActionEnforcementDecision, ActionEnforcementRequestMessage,
+        ActionEnforcementRequestMessageKind, ActionPolicyKind, ExecutionEventCategory,
+        ExecutionEventRecord, ExecutionJob, ExecutionLeaseStamp, ExecutionLimits,
+        ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+        LeaseWriteStatus, RuntimeAckMessage, RuntimeEventMessage, RuntimeEventMessageKind,
+        SessionBindingMessage, SessionBindingMessageKind,
     };
     use winwincode_execution_port::transport::{
         EndpointSide, FrameDirection, LocalWorkerAdapter, RemoteTransportAdapter, TypedFrame,
     };
     use winwincode_storage::{
         AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, CommitReceipt,
-        DurableOutboxEvent, ExecutionLeaseClaim, ExecutionRegistry, LoadedAggregateJournal,
-        NewOutboxEvent, PendingAuditEvent, ProductStateStorage, ProjectionEventCursor,
-        ProjectionEventStreamKey, ProjectionReadCut, ReceiptActorKey, ReceiptIdentity,
-        ReceiptScopeKey, SqliteStorage, StateCommit, StateRevisionGuard, StorageError, StoredState,
-        WorkerRegistrationRequest,
+        DurableOutboxEvent, EnterprisePolicyActor, EnterprisePolicyChildOverrideMode,
+        EnterprisePolicyDefinition, EnterprisePolicyEffect, EnterprisePolicyInheritanceMode,
+        EnterprisePolicyKind, EnterprisePolicyMode, EnterprisePolicyScope, EnterprisePolicyState,
+        EnterprisePolicyVersionSource, EnterprisePolicyWrite, ExecutionLeaseClaim,
+        ExecutionRegistry, LoadedAggregateJournal, NewOutboxEvent, PendingAuditEvent,
+        ProductStateStorage, ProjectionEventCursor, ProjectionEventStreamKey, ProjectionReadCut,
+        ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+        StateRevisionGuard, StorageError, StoredState, WorkerRegistrationRequest,
     };
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1_000);
@@ -1216,6 +1377,7 @@ mod runtime_router_fixture {
             result,
             DeliveryExecutionConfig {
                 payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                candidate_ref: None,
                 workspace: ExecutionWorkspace {
                     checkout_revision: "original-checkout".into(),
                     repository_id: RepositoryId(canonical_id("rep", seed)),
@@ -1313,7 +1475,7 @@ mod runtime_router_fixture {
                 worker_instance_id,
                 worker_session_id: worker_session_id.clone(),
             },
-            stage_run_id,
+            stage_run_id: Some(stage_run_id),
             worker_id,
             worker_session_id,
         };
@@ -1500,7 +1662,7 @@ mod runtime_router_fixture {
             .expect("Delivery execution commit");
         let (authority, binding) = lease_and_binding(&pending, seed);
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("SessionBinding commit");
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
@@ -1540,7 +1702,7 @@ mod runtime_router_fixture {
             .expect("Delivery execution commit");
         let (authority, binding) = lease_and_binding(&pending, seed);
         control_plane
-            .commit_delivery_session_binding(&binding, &authority)
+            .commit_delivery_session_binding(&binding, &authority, &binding.sent_at)
             .expect("SessionBinding commit");
         let scope = repository_scope(seed);
         let runtime = runtime_message(&pending, &binding, seed);
@@ -1579,7 +1741,12 @@ mod runtime_router_fixture {
 
         let ack = fixture
             .control_plane
-            .accept_runtime_event(&fixture.scope, &fixture.runtime, &fixture.authority)
+            .accept_runtime_event(
+                &fixture.scope,
+                &fixture.runtime,
+                &fixture.authority,
+                &fixture.runtime.sent_at,
+            )
             .expect("runtime event should be accepted");
         assert_eq!(ack.status, LeaseWriteStatus::Accepted);
 
@@ -1614,7 +1781,16 @@ mod runtime_router_fixture {
         let mut registry = ExecutionRegistry::new(storage).expect("execution registry");
         registry
             .register_worker(&WorkerRegistrationRequest {
+                authentication_identity:
+                    winwincode_storage::WorkerAuthenticationIdentity::LocalEmbedded {
+                        control_plane_principal: "fixture-control-plane".to_owned(),
+                    },
+                protocol_version: winwincode_storage::EXECUTION_PROTOCOL_VERSION.to_owned(),
+                platform: winwincode_storage::WorkerPlatform::Aarch64AppleDarwin,
                 capabilities: vec!["runtime-replay".to_owned()],
+                capability_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+                security_zone: "local".to_owned(),
+                max_slots: 1,
                 message_id: ExecutionMessageId(canonical_id("xmsg", seed + 600)),
                 request_id: RequestId(canonical_id("req", seed + 600)),
                 sent_at: runtime.lease.issued_at.clone(),
@@ -1654,6 +1830,7 @@ mod runtime_router_fixture {
         remote_route: RuntimeEventRoute,
         message: RuntimeEventMessage,
     ) -> (RuntimeAckMessage, RuntimeAckMessage, u64, u64) {
+        let server_time = message.sent_at.clone();
         let frame = TypedFrame::new(
             FrameDirection::WorkerToControlPlane,
             ExecutionPortMessage::RuntimeEventMessage(message),
@@ -1672,6 +1849,7 @@ mod runtime_router_fixture {
                 route: local_route,
                 calls: Arc::clone(&local_calls),
             },
+            server_time.clone(),
         );
         let mut remote_router = RuntimeEventPortRouter::new(
             remote_control_plane,
@@ -1679,6 +1857,7 @@ mod runtime_router_fixture {
                 route: remote_route,
                 calls: Arc::clone(&remote_calls),
             },
+            server_time,
         );
         let local_output = LocalWorkerAdapter::new(&mut local_router, EndpointSide::ControlPlane)
             .accept(&frame)
@@ -1734,11 +1913,42 @@ mod runtime_router_fixture {
 
         local.control_plane.shutdown().expect("local shutdown");
         remote.control_plane.shutdown().expect("remote shutdown");
+        assert_runtime_public_context(&local.root, &local.runtime);
+        assert_runtime_public_context(&remote.root, &remote.runtime);
         fs::remove_dir_all(local.root).expect("local database release");
         fs::remove_dir_all(remote.root).expect("remote database release");
     }
 
     type ReceiptRow = (Vec<u8>, Vec<u8>, String, String, String, i64);
+
+    fn assert_runtime_public_context(root: &Path, message: &RuntimeEventMessage) {
+        let connection = Connection::open(root.join("control-plane.sqlite3"))
+            .expect("runtime public context database");
+        let (occurred_at, source): (Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT public_occurred_at_json,public_source_json FROM outbox \
+                 WHERE topic='runtime-projection.invalidated.v1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("runtime public context row");
+        let occurred_at: Instant =
+            serde_json::from_slice(&occurred_at).expect("runtime public time");
+        let source: winwincode_storage::PublicEventSource =
+            serde_json::from_slice(&source).expect("runtime public source");
+        assert_eq!(occurred_at, message.sent_at);
+        assert_eq!(
+            source,
+            winwincode_storage::PublicEventSource::SessionExecutionWorker {
+                worker_id: message.lease.worker_id.clone(),
+                worker_session_id: message.worker_session_id.clone(),
+                lease_id: message.lease.lease_id.clone(),
+                codex_thread_id: message.codex_thread_id.clone(),
+                session_identity: message.session_identity.clone(),
+            }
+        );
+    }
+
     type OutboxRow = (
         String,
         String,
@@ -2035,6 +2245,175 @@ mod runtime_router_fixture {
         fs::remove_dir_all(remote.root).expect("remote database release");
     }
 
+    fn action_request(fixture: &RuntimeFixture, seed: u64) -> ActionEnforcementRequestMessage {
+        ActionEnforcementRequestMessage {
+            job_id: fixture.job.job_id.clone(),
+            kind: ActionEnforcementRequestMessageKind::ActionEnforcementRequest,
+            lease: fixture.runtime.lease.clone(),
+            matched_condition_sha256: vec![Sha256Digest(format!("sha256:{}", "b".repeat(64)))],
+            message_id: ExecutionMessageId(canonical_id("xmsg", seed + 700)),
+            policy_kind: ActionPolicyKind::Tool,
+            request_id: RequestId(canonical_id("req", seed + 700)),
+            resource: "action:shell:cwd:.".to_owned(),
+            schema_version: SchemaVersion::WinwincodeV1,
+            sent_at: Instant("2027-01-15T08:00:01.100Z".to_owned()),
+            session_identity: fixture.runtime.session_identity.clone(),
+            subject_sha256: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+            worker_session_id: fixture.runtime.worker_session_id.clone(),
+        }
+    }
+
+    fn seed_action_policy(
+        storage: &mut SqliteStorage,
+        organization_id: &OrganizationId,
+        seed: u64,
+    ) {
+        let definition = EnterprisePolicyDefinition {
+            default_effect: EnterprisePolicyEffect::Allow,
+            child_override_mode: EnterprisePolicyChildOverrideMode::TightenOnly,
+            rules: Vec::new(),
+        };
+        let definition_sha256 = Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                serde_json::to_vec(
+                    &serde_json::to_value(&definition).expect("Policy definition value"),
+                )
+                .expect("Policy definition"),
+            )
+        ));
+        storage
+            .enterprise_policy_ledger()
+            .expect("Policy ledger")
+            .write(&EnterprisePolicyWrite {
+                policy_id: EnterprisePolicyId(canonical_id("pol", seed)),
+                policy_kind: EnterprisePolicyKind::Tool,
+                scope: EnterprisePolicyScope::Organization {
+                    organization_id: organization_id.clone(),
+                },
+                mode: EnterprisePolicyMode::Enforce,
+                state: EnterprisePolicyState::Active,
+                definition_sha256,
+                definition,
+                effective_at: Instant("2027-01-15T07:59:00.000Z".to_owned()),
+                inheritance_mode: EnterprisePolicyInheritanceMode::Tighten,
+                base_version: None,
+                expected_revision: 0,
+                source: EnterprisePolicyVersionSource {
+                    actor: EnterprisePolicyActor::User {
+                        id: UserId(canonical_id("usr", seed)),
+                    },
+                    request_id: RequestId(canonical_id("req", seed + 702)),
+                },
+                updated_at: Instant("2027-01-15T07:59:00.000Z".to_owned()),
+            })
+            .expect("active Tool Policy");
+    }
+
+    fn make_action_receipt_bytes_noncanonical(root: &Path) {
+        let connection =
+            Connection::open(root.join("control-plane.sqlite3")).expect("action receipt database");
+        let mut payload = connection
+            .query_row(
+                "SELECT payload FROM product_state \
+                 WHERE stream_id LIKE 'action-enforcement-receipt:%'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .expect("action receipt payload");
+        payload.insert(0, b' ');
+        connection
+            .execute(
+                "UPDATE product_state SET payload = ?1 \
+                 WHERE stream_id LIKE 'action-enforcement-receipt:%'",
+                params![payload],
+            )
+            .expect("tamper action receipt payload");
+    }
+
+    #[test]
+    fn action_receipt_binds_durable_scope_actor_policy_and_replays_after_restart() {
+        let seed = 207;
+        let fixture = runtime_fixture(seed, "action-enforcement");
+        let root = fixture.root.clone();
+        let request = action_request(&fixture, seed);
+        let organization_id = fixture.scope.organization_id.clone();
+        fixture
+            .control_plane
+            .shutdown()
+            .expect("fixture Control Plane shutdown");
+        let issuer = ActionEnforcementIssuer::new(
+            ActionEnforcementSigningKey::from_bytes([11_u8; 32]).expect("signing key"),
+        );
+        let first = {
+            let mut storage = SqliteStorage::open(&root).expect("storage reopen");
+            install_runtime_lease(&mut storage, &fixture.runtime, &fixture.job, seed);
+            seed_action_policy(&mut storage, &organization_id, seed);
+            let mut service = winwincode_control_plane::ExecutionPortService::new(
+                &mut storage,
+                Instant("2027-01-15T08:00:01.200Z".to_owned()),
+            );
+            let message = service
+                .handle_with_action_enforcement(
+                    ExecutionPortMessage::ActionEnforcementRequestMessage(request.clone()),
+                    &issuer,
+                )
+                .expect("action receipt");
+            let ExecutionPortMessage::ActionEnforcementReceiptMessage(receipt) = message else {
+                panic!("action enforcement receipt variant")
+            };
+            assert_eq!(receipt.decision, ActionEnforcementDecision::Permit);
+            assert_eq!(receipt.request_id, request.request_id);
+            assert_eq!(receipt.job_id, fixture.job.job_id);
+            assert_eq!(receipt.scope, fixture.scope);
+            assert_eq!(receipt.actor.id.0, canonical_id("usr", seed));
+            let policy = receipt
+                .policy_version
+                .as_ref()
+                .expect("Policy version seal");
+            assert_eq!(policy.policy_id, canonical_id("pol", seed));
+            assert_eq!(policy.version, 1);
+            drop(service);
+            Box::new(storage).close().expect("storage close");
+            receipt
+        };
+
+        let mut restarted = SqliteStorage::open(&root).expect("storage restart");
+        let mut service = winwincode_control_plane::ExecutionPortService::new(
+            &mut restarted,
+            Instant("2027-01-15T08:00:01.300Z".to_owned()),
+        );
+        let replay = service
+            .enforce_action(&issuer, &request)
+            .expect("exact action receipt replay");
+        assert_eq!(replay, first);
+
+        let mut changed = request.clone();
+        changed.resource = "action:shell:changed".to_owned();
+        assert!(
+            service.enforce_action(&issuer, &changed).is_err(),
+            "changed action reuse must fail closed"
+        );
+        drop(service);
+        Box::new(restarted)
+            .close()
+            .expect("restarted storage close");
+
+        make_action_receipt_bytes_noncanonical(&root);
+        let mut corrupted = SqliteStorage::open(&root).expect("corrupt storage reopen");
+        let mut corrupt_service = winwincode_control_plane::ExecutionPortService::new(
+            &mut corrupted,
+            Instant("2027-01-15T08:00:01.400Z".to_owned()),
+        );
+        assert!(
+            corrupt_service.enforce_action(&issuer, &request).is_err(),
+            "noncanonical durable receipt bytes must fail closed"
+        );
+        drop(corrupt_service);
+        Box::new(corrupted).close().expect("corrupt storage close");
+        fs::remove_dir_all(root).expect("database release");
+    }
+
     #[test]
     fn runtime_replay_request_frame_uses_durable_job_binding_and_lease_authority() {
         let seed = 203;
@@ -2042,7 +2421,12 @@ mod runtime_router_fixture {
         let root = fixture.root.clone();
         let accepted = fixture
             .control_plane
-            .accept_runtime_event(&fixture.scope, &fixture.runtime, &fixture.authority)
+            .accept_runtime_event(
+                &fixture.scope,
+                &fixture.runtime,
+                &fixture.authority,
+                &fixture.runtime.sent_at,
+            )
             .expect("durable runtime acknowledgement before reconnect");
         assert_eq!(accepted.status, LeaseWriteStatus::Accepted);
         assert_eq!(accepted.ack_sequence, ExecutionAckSequence(1));

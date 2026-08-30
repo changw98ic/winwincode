@@ -14,7 +14,7 @@ use winwincode_delivery::{
 };
 use winwincode_domain::{DeliveryId, RequestId};
 
-const REVIEW_SET_SHA256: &str = "33d34d80dd21af9d1e2cd17b0fa9f746e7d39f40c3e7f158b71469ca39377ef0";
+const REVIEW_SET_SHA256: &str = "67ba86fac36a5275bef299120fc9d701cb9c1637f2019351e5b9b8ad7c1c4134";
 
 fn approved_delivery() -> Delivery {
     Delivery::decode_json(include_bytes!(

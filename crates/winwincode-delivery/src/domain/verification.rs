@@ -296,38 +296,47 @@ pub struct VerificationAssignment {
 }
 
 impl VerificationAssignment {
+    #[must_use]
     pub fn role(&self) -> VerificationRole {
         self.role
     }
 
+    #[must_use]
     pub fn stage_run_id(&self) -> &StageRunId {
         &self.stage_run_id
     }
 
+    #[must_use]
     pub fn session_binding_id(&self) -> &SessionBindingId {
         &self.session_binding_id
     }
 
+    #[must_use]
     pub fn product_session_id(&self) -> &ProductSessionId {
         &self.product_session_id
     }
 
+    #[must_use]
     pub fn execution_job_id(&self) -> &ExecutionJobId {
         &self.execution_job_id
     }
 
+    #[must_use]
     pub fn worker_session_id(&self) -> &WorkerSessionId {
         &self.worker_session_id
     }
 
+    #[must_use]
     pub fn codex_thread_id(&self) -> &CodexThreadId {
         &self.codex_thread_id
     }
 
+    #[must_use]
     pub fn repository(&self) -> &RepositoryRef {
         &self.repository
     }
 
+    #[must_use]
     pub fn checkout_revision(&self) -> &str {
         &self.checkout_revision
     }
@@ -375,22 +384,39 @@ pub struct AcceptedVerificationJobOutcomeFact {
     status: VerificationJobOutcomeStatus,
     terminal_candidate_tree_id: String,
     artifacts: Vec<TerminalArtifactReference>,
+    #[serde(skip)]
+    read_only_candidate_source: bool,
 }
 
 impl AcceptedVerificationJobOutcomeFact {
     /// Joins the stage coordinator's sealed outcome to one adapter-sealed Job
     /// snapshot. No caller-supplied identity or terminal timestamp is copied.
-    #[cfg_attr(
-        all(not(test), not(feature = "test-support")),
-        expect(
-            dead_code,
-            reason = "Phase 4 Worker and Git adapters are the production constructors"
-        )
-    )]
     pub(crate) fn from_verified_outcome(
         outcome: &VerifiedTerminalOutcome,
         snapshot: &ValidatedGitSnapshotFact,
         role_id: impl Into<String>,
+    ) -> Result<Self, DeliveryValidationError> {
+        Self::from_verified_outcome_mode(outcome, snapshot, role_id, true, false)
+    }
+
+    /// Joins a read-only verification terminal to the frozen writer
+    /// candidate checkout. The verifier does not produce a second candidate
+    /// Artifact; its terminal identity and runtime facts remain independently
+    /// fenced by its own Worker lease.
+    pub(crate) fn from_verified_read_only_outcome(
+        outcome: &VerifiedTerminalOutcome,
+        snapshot: &ValidatedGitSnapshotFact,
+        role_id: impl Into<String>,
+    ) -> Result<Self, DeliveryValidationError> {
+        Self::from_verified_outcome_mode(outcome, snapshot, role_id, false, true)
+    }
+
+    fn from_verified_outcome_mode(
+        outcome: &VerifiedTerminalOutcome,
+        snapshot: &ValidatedGitSnapshotFact,
+        role_id: impl Into<String>,
+        require_artifact: bool,
+        read_only_candidate_source: bool,
     ) -> Result<Self, DeliveryValidationError> {
         let role_id = role_id.into();
         portable_identifier(&role_id, "verification.terminal.roleId")?;
@@ -402,7 +428,7 @@ impl AcceptedVerificationJobOutcomeFact {
             && outcome.finished_at_millis() == snapshot.finished_at_millis()
             && u64::try_from(outcome.last_event_sequence().0).ok()
                 == Some(snapshot.last_event_sequence())
-            && exact_artifact;
+            && (!require_artifact || exact_artifact);
         if FencedExecutionIdentity::verified(outcome) != FencedExecutionIdentity::snapshot(snapshot)
             || outcome.stage_run_id() != snapshot.stage_run_id()
             || !exact_metadata
@@ -442,6 +468,7 @@ impl AcceptedVerificationJobOutcomeFact {
             },
             terminal_candidate_tree_id: snapshot.candidate_tree_id().into(),
             artifacts: outcome.artifacts().to_vec(),
+            read_only_candidate_source,
         })
     }
 
@@ -522,22 +549,27 @@ pub struct VerificationFinding {
 }
 
 impl VerificationFinding {
+    #[must_use]
     pub fn role(&self) -> VerificationRole {
         self.role
     }
 
+    #[must_use]
     pub fn finding_ref(&self) -> &str {
         &self.finding_ref
     }
 
+    #[must_use]
     pub fn criterion_id(&self) -> &AcceptanceCriterionId {
         &self.criterion_id
     }
 
+    #[must_use]
     pub fn conclusion(&self) -> VerificationFindingConclusion {
         self.conclusion
     }
 
+    #[must_use]
     pub fn source_refs(&self) -> &[String] {
         &self.source_refs
     }
@@ -557,10 +589,12 @@ impl VerificationFinding {
         &self.source_sequences
     }
 
+    #[must_use]
     pub fn explanation(&self) -> &str {
         &self.explanation
     }
 
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
@@ -579,26 +613,32 @@ pub struct VerificationRoleSettlement {
 }
 
 impl VerificationRoleSettlement {
+    #[must_use]
     pub fn role(&self) -> VerificationRole {
         self.role
     }
 
+    #[must_use]
     pub fn state(&self) -> VerificationSessionState {
         self.state
     }
 
+    #[must_use]
     pub fn assignment(&self) -> Option<&VerificationAssignment> {
         self.assignment.as_ref()
     }
 
+    #[must_use]
     pub fn findings(&self) -> &[VerificationFinding] {
         &self.findings
     }
 
+    #[must_use]
     pub fn terminal_job_outcome(&self) -> Option<&AcceptedVerificationJobOutcomeFact> {
         self.terminal_job_outcome.as_ref()
     }
 
+    #[must_use]
     pub fn terminal_settlement(&self) -> Option<VerificationTerminalSettlement> {
         self.terminal_settlement
     }
@@ -615,10 +655,12 @@ pub struct IndependentVerification {
 }
 
 impl IndependentVerification {
+    #[must_use]
     pub fn candidate_ref(&self) -> &str {
         &self.candidate_ref
     }
 
+    #[must_use]
     pub fn settlements(&self) -> &[VerificationRoleSettlement] {
         &self.settlements
     }
@@ -1255,10 +1297,11 @@ fn terminal_names_snapshot(
     outcome: &AcceptedVerificationJobOutcomeFact,
     snapshot: &ValidatedGitSnapshotFact,
 ) -> bool {
-    outcome.artifacts.iter().any(|artifact| {
-        artifact.artifact_id.0 == snapshot.artifact_ref()
-            && &artifact.digest == snapshot.artifact_digest()
-    })
+    outcome.read_only_candidate_source
+        || outcome.artifacts.iter().any(|artifact| {
+            artifact.artifact_id.0 == snapshot.artifact_ref()
+                && &artifact.digest == snapshot.artifact_digest()
+        })
 }
 
 fn validate_findings(
@@ -1786,6 +1829,7 @@ pub(crate) mod test_support {
             status: outcome_status,
             terminal_candidate_tree_id: candidate.candidate_tree_id().into(),
             artifacts: vec![],
+            read_only_candidate_source: false,
         };
         let (session_state, terminal_job_outcome, terminal_settlement, findings) = match state {
             VerificationFixtureState::Running => {

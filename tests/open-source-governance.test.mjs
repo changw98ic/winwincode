@@ -112,7 +112,7 @@ test('upstream guide has independent Codex and DSH checks with concrete rollback
   ]) assert.equal(guide.includes(path), true, path)
 })
 
-test('release guide fixes one version, four native lanes, nine package order, and rollback', () => {
+test('release guide fixes one version, four native lanes, ten package order, and rollback', () => {
   const guide = read('docs/releasing.md')
   for (const marker of [
     'corepack pnpm version:set 0.1.0-alpha.1',
@@ -129,7 +129,8 @@ test('release guide fixes one version, four native lanes, nine package order, an
     '@winwincode/native',
     '@winwincode/strongflow',
     '@winwincode/dsh-profile',
-    '9. winwincode',
+    '@winwincode/client',
+    '10. winwincode',
     'npm deprecate PACKAGE@VERSION',
   ]) assert.equal(guide.includes(marker), true, marker)
 })
@@ -226,7 +227,7 @@ test('release source and package metadata retain the Apache-2.0 project boundary
     )),
   ]
   const version = manifests[0].version
-  assert.equal(manifests.length, 10)
+  assert.equal(manifests.length, 11)
   assert.equal(manifests.every(manifest => manifest.version === version), true)
   assert.equal(manifests.every(manifest => manifest.license === 'Apache-2.0'), true)
   assert.match(read('LICENSE'), /Apache License\s+Version 2\.0/u)
@@ -252,7 +253,7 @@ test('product version command updates every manifest and rejects invalid version
       }, null, 2)}\n`)
     }
     const updated = setProductVersion(fixture, '1.2.3-rc.1')
-    assert.equal(updated.length, 10)
+    assert.equal(updated.length, 11)
     for (const directory of directories) {
       const manifest = JSON.parse(
         readFileSync(join(fixture, directory, 'package.json'), 'utf8'),

@@ -14,9 +14,9 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 
 import {
   RuntimeSessionLedger,
-  WinWinCodeAgentFactory,
   chatSurface,
-} from '../../packages/dsh-profile/dist/index.js'
+} from './dsh-profile/index.mjs'
+import { WinWinCodeAgentFactoryFixture } from './dsh-profile/agent-factory-test-support.mjs'
 import { WinWinCodeKernel } from '../../packages/native/dist/index.js'
 import { strongFlowSurface } from '../../packages/strongflow/dist/index.js'
 
@@ -90,7 +90,7 @@ try {
   await ctx.plugin(adapterPlugin)
 
   const factoryPlugin = pluginCtx => {
-    new WinWinCodeAgentFactory(
+    new WinWinCodeAgentFactoryFixture(
       pluginCtx,
       { home, roleId: 'chat' },
       options => {

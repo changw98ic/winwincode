@@ -98,6 +98,8 @@ pub(crate) fn execute(
         &delivery_id,
         mutation.snapshot.revision(),
         DeliveryChangeKind::Advanced,
+        crate::instant_from_millis(mutation.snapshot.snapshot().updated_at_millis)?,
+        "delivery-task-breakdown-transaction",
     )?;
     let stream_id = delivery_stream_id(&delivery_id);
     let mut commit = storage_commit(

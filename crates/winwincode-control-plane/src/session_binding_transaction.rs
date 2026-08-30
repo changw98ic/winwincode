@@ -19,6 +19,7 @@ use winwincode_audit::{
 use winwincode_delivery::{
     application::{
         session_binding::{
+            DeliveryExecutionAttemptReplacement,
             SessionBindingAuthority as DeliverySessionBindingAuthority, SessionBindingIdentity,
         },
         stage::SessionBindingAuthority as SchedulerSessionBindingAuthority,
@@ -26,20 +27,21 @@ use winwincode_delivery::{
     domain::{Delivery, StageRunStatus},
     store::{
         AcceptDeliveryWorkerSession, DeliveryCommand, DeliveryCommandPort, DeliveryStore,
-        ReportDeliveryCodexThread,
+        ReplaceDeliveryExecutionAttempt, ReportDeliveryCodexThread,
     },
 };
 use winwincode_domain::{
-    ControlPlaneEventId, DeliveryId, ExecutionMessageId, RequestId, Revision, SchemaVersion,
-    SessionIdentity, Sha256Digest,
+    ControlPlaneEventId, DeliveryId, ExecutionMessageId, Instant, RequestId, Revision,
+    SchemaVersion, SessionIdentity, Sha256Digest,
 };
 use winwincode_execution_port::generated::{
     DeliveryStageExecutionScope, ExecutionJob, ExecutionScope, SessionBindingMessage,
     SessionBindingMessageKind,
 };
 use winwincode_storage::{
-    CommitReceipt, DurableOutboxEvent, NewOutboxEvent, PendingAuditEvent, ProductStateStorage,
-    ProjectionEventStream, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
+    CommitReceipt, DurableOutboxEvent, ExecutionScopeReplacementAuthority, NewOutboxEvent,
+    PendingAuditEvent, ProductStateStorage, ProjectionEventStream, PublicEventScope,
+    PublicEventSource, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, StateCommit,
     StorageError,
 };
 
@@ -138,16 +140,18 @@ impl From<StorageError> for DeliverySessionBindingCommitError {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn execute(
+pub(crate) fn execute_at(
     storage: &mut dyn ProductStateStorage,
     message: &SessionBindingMessage,
     authority: &SchedulerSessionBindingAuthority,
+    server_time: &Instant,
 ) -> Result<DeliverySessionBindingCommitReceipt, DeliverySessionBindingCommitError> {
-    let bound_at_millis = validate_message_shape(message)?;
-    let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
-    validate_durable_job(&durable, &job, message)?;
-    let context = BindingContext::from_durable(&durable, &job, bound_at_millis)?;
-    let expected_identity = expected_session_identity(&context, message);
+    // Read the immutable intent first. Phase request identities/digests are
+    // rooted in this event, while queue/replacement state is mutable and is
+    // deliberately deferred until a new or partially committed binding is
+    // proven to need it.
+    let (durable, immutable_job) =
+        crate::delivery_transaction::load_durable_execution_intent(storage, &message.lease.job_id)?;
     let worker_phase = Phase::new(message, &durable, WORKER_SESSION_PHASE)?;
     let codex_phase = Phase::new(message, &durable, CODEX_THREAD_PHASE)?;
     let mut worker_replay =
@@ -158,9 +162,41 @@ pub(crate) fn execute(
         worker_replay =
             storage.load_receipt(&worker_phase.receipt_identity, &worker_phase.command_digest)?;
     }
+    let bound_at_millis = validate_message_shape(message)?;
+    // A complete receipt replay still has to identify the current attempt.
+    // Once the scheduler has sealed a successor, an exact old-attempt phase
+    // receipt is historical evidence, not permission to bind the fenced
+    // predecessor again. Read only the durable replacement seal here; do not
+    // inspect or mutate the current Delivery snapshot.
+    if let Some(replacement) =
+        storage.load_execution_scope_replacement_authority(&message.lease.job_id)?
+    {
+        let message_attempt = u64::try_from(message.lease.attempt)
+            .map_err(|_| StorageError::invalid_input("SessionBinding attempt is out of range"))?;
+        if message_attempt != replacement.replacement_attempt() {
+            return Err(StorageError::invalid_input(
+                "SessionBinding message belongs to a fenced predecessor attempt",
+            )
+            .into());
+        }
+    }
     if let (Some(worker_session_receipt), Some(codex_thread_receipt)) =
         (worker_replay.as_ref(), codex_replay.as_ref())
     {
+        // The two phase receipts are the complete replay authority. Derive
+        // the predecessor revision from their sealed revision instead of
+        // loading mutable queue, replacement, or Delivery state. This also
+        // permits replay after a successor replacement or a damaged current
+        // snapshot, as long as the original receipts and audit event remain
+        // intact.
+        let mut context = BindingContext::from_durable(&durable, &immutable_job, bound_at_millis)?;
+        context.job_revision = worker_session_receipt
+            .revision
+            .checked_sub(1)
+            .ok_or_else(|| {
+                StorageError::invalid_input("SessionBinding replay revision is invalid")
+            })?;
+        let expected_identity = expected_session_identity(&context, message);
         validate_complete_replay(
             worker_session_receipt,
             codex_thread_receipt,
@@ -176,9 +212,34 @@ pub(crate) fn execute(
         });
     }
 
+    // New and partially committed paths need the scheduler's current attempt
+    // and replacement seal. Only these paths consult mutable queue state.
+    let (_, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
+    validate_durable_job(&durable, &job, message)?;
+    let mut context = BindingContext::from_durable(&durable, &job, bound_at_millis)?;
+    // Validate the frame's internal identity before applying the scheduler
+    // replacement owner phase. A malformed frame must not advance Delivery
+    // merely because it carries the current attempt number.
     validate_message_session_identity(message)?;
+    let replacement = replacement_for_job(storage, &job)?;
+
+    // Validate scheduler authority before applying a replacement owner phase.
+    // Partial/new binding paths are the only paths that may mutate Delivery.
     let acceptance = validate_session_binding(message, authority, delivery_scope(&job)?)
         .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    if let Some(replacement) = replacement {
+        context.job_revision =
+            ensure_delivery_replacement_applied(storage, &context, &replacement)?;
+    }
+    let expected_identity = expected_session_identity(&context, message);
+
+    // A partially committed binding already has an owner receipt and must be
+    // able to finish after response loss. Only a genuinely new binding is
+    // authorized by the Server clock captured at ingress.
+    if worker_replay.is_none() && codex_replay.is_none() {
+        validate_trusted_lease_time(message, server_time)?;
+    }
+
     let worker_session_receipt = if let Some(receipt) = worker_replay {
         validate_phase_receipt(
             &receipt,
@@ -325,6 +386,157 @@ impl BindingContext {
             bound_at_millis,
         })
     }
+}
+
+fn replacement_for_job(
+    storage: &dyn ProductStateStorage,
+    job: &ExecutionJob,
+) -> Result<Option<ExecutionScopeReplacementAuthority>, StorageError> {
+    let replacement = storage.load_execution_scope_replacement_authority(&job.job_id)?;
+    let Some(replacement) = replacement else {
+        return Ok(None);
+    };
+    let attempt = u64::try_from(job.attempt).map_err(|_| {
+        StorageError::invalid_input("SessionBinding ExecutionJob attempt is out of range")
+    })?;
+    if replacement.replacement_attempt() != attempt || replacement.job_id() != &job.job_id {
+        return Err(StorageError::invalid_input(
+            "SessionBinding replacement does not own the current ExecutionJob attempt",
+        ));
+    }
+    Ok(Some(replacement))
+}
+
+fn ensure_delivery_replacement_applied(
+    storage: &mut dyn ProductStateStorage,
+    context: &BindingContext,
+    replacement: &ExecutionScopeReplacementAuthority,
+) -> Result<u64, StorageError> {
+    let phase = ReplacementPhase::new(context, replacement)?;
+    if let Some(receipt) = storage.load_receipt(&phase.receipt_identity, &phase.command_digest)? {
+        validate_replacement_receipt(&receipt, context, &phase, true)?;
+        return Ok(receipt.revision);
+    }
+    let current = load_current_delivery_state(storage, context)?;
+    let journal_key = delivery_journal_key(&context.delivery_id)?;
+    let loaded = storage.load_journal(&journal_key)?;
+    let journal = StagedDeliveryJournal::new(context.delivery_id.clone(), loaded);
+    let mutation = DeliveryStore::borrowed(&journal)
+        .execute(DeliveryCommand::ReplaceExecutionAttempt(Box::new(
+            ReplaceDeliveryExecutionAttempt {
+                expected_revision: current.revision(),
+                identity: context.identity.clone(),
+                replacement: DeliveryExecutionAttemptReplacement::from_scheduler(replacement),
+                now_millis: instant_millis(replacement.created_at())?,
+            },
+        )))
+        .map_err(|error| StorageError::invalid_input(error.to_string()))?;
+    if mutation.replayed {
+        return Err(StorageError::invalid_input(
+            "Delivery replacement journal replay has no matching owner receipt",
+        ));
+    }
+    let publication = journal
+        .into_publication()
+        .map_err(|error| StorageError::adapter(error.to_string()))?
+        .ok_or_else(|| {
+            StorageError::invalid_input(
+                "execution.attempt.replaced did not stage a journal publication",
+            )
+        })?;
+    let commit = StateCommit::new(
+        phase.receipt_identity.clone(),
+        phase.command_digest.clone(),
+        delivery_stream_id(&context.delivery_id),
+        current.revision(),
+        mutation.snapshot.encode_json().map_err(|error| {
+            StorageError::invalid_input(format!(
+                "failed to encode replaced Delivery snapshot: {error}"
+            ))
+        })?,
+        vec![NewOutboxEvent::internal(
+            phase.event_id.clone(),
+            "execution.scope-replacement.applied.v1",
+            serde_json::to_vec(&serde_json::json!({
+                "deliveryId": context.delivery_id,
+                "executionJobId": replacement.job_id(),
+                "replacementAttempt": replacement.replacement_attempt(),
+                "stageRunId": context.identity.stage_run_id,
+            }))
+            .map_err(|error| StorageError::adapter(error.to_string()))?,
+        )],
+    )
+    .with_journal_publication(publication);
+    let receipt = storage.commit(&commit)?;
+    validate_replacement_receipt(&receipt, context, &phase, receipt.idempotent_replay)?;
+    Ok(receipt.revision)
+}
+
+struct ReplacementPhase {
+    receipt_identity: ReceiptIdentity,
+    command_digest: Sha256Digest,
+    event_id: String,
+}
+
+impl ReplacementPhase {
+    fn new(
+        context: &BindingContext,
+        replacement: &ExecutionScopeReplacementAuthority,
+    ) -> Result<Self, StorageError> {
+        let mut actor = Vec::new();
+        actor.extend_from_slice(b"winwincode.execution-replacement-owner.v1\0");
+        append_phase_fact(&mut actor, replacement.job_id().0.as_bytes());
+        Ok(Self {
+            receipt_identity: ReceiptIdentity::new(
+                ReceiptActorKey::from_encoded(actor)?,
+                context.scope_key.clone(),
+                replacement.receipt_id().clone(),
+            )?,
+            command_digest: replacement.receipt_digest().clone(),
+            event_id: format!("execution-replacement-owner:{}", replacement.receipt_id().0),
+        })
+    }
+}
+
+fn validate_replacement_receipt(
+    receipt: &CommitReceipt,
+    context: &BindingContext,
+    phase: &ReplacementPhase,
+    expected_replay: bool,
+) -> Result<(), StorageError> {
+    if receipt.receipt_identity != phase.receipt_identity
+        || receipt.command_digest != phase.command_digest
+        || receipt.idempotent_replay != expected_replay
+        || receipt.stream_id != delivery_stream_id(&context.delivery_id)
+        || receipt.revision == 0
+        || receipt.events.len() != 1
+        || receipt.events[0].event_id != phase.event_id
+        || receipt.events[0].topic != "execution.scope-replacement.applied.v1"
+    {
+        return Err(StorageError::invalid_input(
+            "Delivery replacement owner receipt is incomplete or foreign",
+        ));
+    }
+    Ok(())
+}
+
+fn load_current_delivery_state(
+    storage: &dyn ProductStateStorage,
+    context: &BindingContext,
+) -> Result<Delivery, StorageError> {
+    let stream_id = delivery_stream_id(&context.delivery_id);
+    let state = storage
+        .load_state(&stream_id)?
+        .ok_or_else(|| StorageError::invalid_input("SessionBinding Delivery state is missing"))?;
+    let delivery = Delivery::decode_json(&state.payload).map_err(|error| {
+        StorageError::invalid_input(format!("SessionBinding Delivery state is invalid: {error}"))
+    })?;
+    if delivery.id() != &context.delivery_id || delivery.revision() != state.revision {
+        return Err(StorageError::invalid_input(
+            "SessionBinding Delivery snapshot does not match durable state",
+        ));
+    }
+    Ok(delivery)
 }
 
 struct Phase {
@@ -585,7 +797,7 @@ fn commit_phase(
             StorageError::invalid_input("session.bound did not stage a journal publication")
         })?;
     let revision = mutation.snapshot.revision();
-    let events = phase_events(context, revision, session_identity)?;
+    let events = phase_events(context, revision, session_identity, message)?;
     let pending_audit_event = match binding_phase {
         SessionBindingCommitPhase::WorkerSession => None,
         SessionBindingCommitPhase::CodexThread => Some(binding_pending_audit_event(
@@ -837,11 +1049,26 @@ fn validate_message_shape(message: &SessionBindingMessage) -> Result<u64, Storag
     Ok(bound_at)
 }
 
+fn validate_trusted_lease_time(
+    message: &SessionBindingMessage,
+    server_time: &Instant,
+) -> Result<(), StorageError> {
+    let issued_at = instant_millis(&message.lease.issued_at)?;
+    let expires_at = instant_millis(&message.lease.expires_at)?;
+    let server_time = instant_millis(server_time)?;
+    if server_time < issued_at || server_time >= expires_at {
+        return Err(StorageError::invalid_input(
+            "SessionBinding Server time is outside its active lease",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_message_session_identity(message: &SessionBindingMessage) -> Result<(), StorageError> {
     if message.session_identity.product_session_id != message.product_session_id
         || message.session_identity.worker_session_id != message.worker_session_id
         || message.session_identity.codex_thread_id != message.codex_thread_id
-        || message.session_identity.stage_run_id.as_ref() != Some(&message.stage_run_id)
+        || message.session_identity.stage_run_id != message.stage_run_id
     {
         return Err(StorageError::invalid_input(
             "SessionBinding message SessionIdentity is internally inconsistent",
@@ -863,7 +1090,7 @@ fn validate_durable_job(
     if job.job_id != message.lease.job_id
         || job.attempt != message.lease.attempt
         || scope.product_session_id != message.product_session_id
-        || scope.stage_run_id != message.stage_run_id
+        || message.stage_run_id.as_ref() != Some(&scope.stage_run_id)
     {
         return Err(StorageError::invalid_input(
             "SessionBinding message does not match the durable ExecutionJob",
@@ -914,15 +1141,33 @@ fn phase_events(
     context: &BindingContext,
     revision: u64,
     session_identity: &SessionIdentity,
+    message: &SessionBindingMessage,
 ) -> Result<Vec<NewOutboxEvent>, StorageError> {
+    let scope = crate::public_repository_scope(&context.repository_scope);
+    let source = PublicEventSource::SessionExecutionWorker {
+        worker_id: message.lease.worker_id.clone(),
+        worker_session_id: message.worker_session_id.clone(),
+        lease_id: message.lease.lease_id.clone(),
+        codex_thread_id: message.codex_thread_id.clone(),
+        session_identity: session_identity.clone(),
+    };
     Ok(vec![
         delivery_changed_event_for_scope(
-            &context.scope_key,
+            scope.clone(),
             &context.delivery_id,
             revision,
             DeliveryChangeKind::Advanced,
+            message.sent_at.clone(),
+            source.clone(),
         )?,
-        runtime_invalidated_event(context, revision, session_identity)?,
+        runtime_invalidated_event(
+            context,
+            revision,
+            session_identity,
+            scope,
+            message.sent_at.clone(),
+            source,
+        )?,
     ])
 }
 
@@ -930,34 +1175,47 @@ fn runtime_invalidated_event(
     context: &BindingContext,
     revision: u64,
     session_identity: &SessionIdentity,
+    scope: PublicEventScope,
+    occurred_at: Instant,
+    source: PublicEventSource,
 ) -> Result<NewOutboxEvent, StorageError> {
-    delivery_stage_runtime_invalidated_event(
-        &context.scope_key,
-        &context.delivery_id,
-        &context.identity.stage_run_id,
-        &context.identity.product_session_id,
+    delivery_stage_runtime_invalidated_event(&DeliveryStageRuntimeInvalidation {
+        scope_key: &context.scope_key,
+        delivery_id: &context.delivery_id,
+        stage_run_id: &context.identity.stage_run_id,
+        product_session_id: &context.identity.product_session_id,
         session_identity,
         revision,
-        b"winwincode.session-binding-runtime-invalidation.v1",
-    )
+        event_namespace: b"winwincode.session-binding-runtime-invalidation.v1",
+        scope,
+        occurred_at,
+        source,
+    })
+}
+
+pub(crate) struct DeliveryStageRuntimeInvalidation<'facts> {
+    pub scope_key: &'facts ReceiptScopeKey,
+    pub delivery_id: &'facts DeliveryId,
+    pub stage_run_id: &'facts winwincode_domain::StageRunId,
+    pub product_session_id: &'facts winwincode_domain::ProductSessionId,
+    pub session_identity: &'facts SessionIdentity,
+    pub revision: u64,
+    pub event_namespace: &'facts [u8],
+    pub scope: PublicEventScope,
+    pub occurred_at: Instant,
+    pub source: PublicEventSource,
 }
 
 pub(crate) fn delivery_stage_runtime_invalidated_event(
-    scope_key: &ReceiptScopeKey,
-    delivery_id: &DeliveryId,
-    stage_run_id: &winwincode_domain::StageRunId,
-    product_session_id: &winwincode_domain::ProductSessionId,
-    session_identity: &SessionIdentity,
-    revision: u64,
-    event_namespace: &[u8],
+    facts: &DeliveryStageRuntimeInvalidation<'_>,
 ) -> Result<NewOutboxEvent, StorageError> {
-    let revision = i64::try_from(revision)
+    let revision = i64::try_from(facts.revision)
         .map(Revision)
         .map_err(|_| StorageError::invalid_input("Delivery revision exceeds public range"))?;
     let payload = ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
-        delivery_id: delivery_id.clone(),
+        delivery_id: facts.delivery_id.clone(),
         last_projection_sequence: 0,
-        product_session_id: product_session_id.clone(),
+        product_session_id: facts.product_session_id.clone(),
         projection_revision: revision,
         reload_queries: (
             ControlPlaneWebSocketDeliveryGetReloadQuery::DeliveryGet,
@@ -965,21 +1223,24 @@ pub(crate) fn delivery_stage_runtime_invalidated_event(
         ),
         scope_kind:
             ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventScopeKind::DeliveryStage,
-        session_identity: session_identity.clone(),
-        stage_run_id: stage_run_id.clone(),
+        session_identity: facts.session_identity.clone(),
+        stage_run_id: facts.stage_run_id.clone(),
         type_value:
             ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEventTypeValue::RuntimeProjectionInvalidatedV1,
     };
     let payload = serde_json::to_vec(&payload).map_err(|error| {
         StorageError::adapter(format!("failed to encode runtime invalidation: {error}"))
     })?;
-    let event_id = projection_event_id(event_namespace, scope_key, &payload);
-    Ok(NewOutboxEvent::projection(
+    let event_id = projection_event_id(facts.event_namespace, facts.scope_key, &payload);
+    NewOutboxEvent::public_projection(
         event_id,
         RUNTIME_INVALIDATED_TOPIC,
         payload,
-        ProjectionEventStream::Delivery(delivery_id.clone()),
-    ))
+        ProjectionEventStream::Delivery(facts.delivery_id.clone()),
+        facts.scope.clone(),
+        facts.occurred_at.clone(),
+        facts.source.clone(),
+    )
 }
 
 fn validate_phase_receipt(
@@ -1212,7 +1473,7 @@ pub(crate) fn require_id(value: &str, prefix: &str, field: &str) -> Result<(), S
     Ok(())
 }
 
-pub(crate) fn instant_millis(instant: &winwincode_domain::Instant) -> Result<u64, StorageError> {
+pub(crate) fn instant_millis(instant: &Instant) -> Result<u64, StorageError> {
     let bytes = instant.0.as_bytes();
     if bytes.len() != 24
         || bytes[4] != b'-'

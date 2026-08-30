@@ -1,0 +1,2853 @@
+diff --git a/third_party/codex/MODULE.bazel.lock b/third_party/codex/MODULE.bazel.lock
+index 58415147fab76a1ad4c9beaa44197bceed501c7c..3b32aa9f1a2b217f197c052519753c609f9f2396 100644
+--- a/third_party/codex/MODULE.bazel.lock
++++ b/third_party/codex/MODULE.bazel.lock
+@@ -1243,7 +1243,7 @@
+       "js-sys_0.3.82": "{\"dependencies\":[{\"default_features\":false,\"name\":\"once_cell\",\"req\":\"^1.12\"},{\"default_features\":false,\"name\":\"wasm-bindgen\",\"req\":\"=0.2.105\"}],\"features\":{\"default\":[\"std\"],\"std\":[\"wasm-bindgen/std\"]}}",
+       "js-sys_0.3.85": "{\"dependencies\":[{\"default_features\":false,\"name\":\"once_cell\",\"req\":\"^1.12\"},{\"default_features\":false,\"name\":\"wasm-bindgen\",\"req\":\"=0.2.108\"}],\"features\":{\"default\":[\"std\"],\"std\":[\"wasm-bindgen/std\"]}}",
+       "jsonptr_0.7.1": "{\"dependencies\":[{\"features\":[\"fancy\"],\"name\":\"miette\",\"optional\":true,\"req\":\"^7.4.0\"},{\"kind\":\"dev\",\"name\":\"quickcheck\",\"req\":\"^1.0.3\"},{\"kind\":\"dev\",\"name\":\"quickcheck_macros\",\"req\":\"^1.0.0\"},{\"features\":[\"alloc\"],\"name\":\"serde\",\"optional\":true,\"req\":\"^1.0.203\"},{\"features\":[\"alloc\"],\"name\":\"serde_json\",\"optional\":true,\"req\":\"^1.0.119\"},{\"name\":\"syn\",\"optional\":true,\"req\":\"^1.0.109\",\"target\":\"cfg(any())\"},{\"name\":\"toml\",\"optional\":true,\"req\":\"^0.8\"}],\"features\":{\"assign\":[],\"default\":[\"std\",\"serde\",\"json\",\"resolve\",\"assign\",\"delete\"],\"delete\":[\"resolve\"],\"json\":[\"dep:serde_json\",\"serde\"],\"miette\":[\"dep:miette\",\"std\"],\"resolve\":[],\"std\":[\"serde/std\",\"serde_json?/std\"],\"toml\":[\"dep:toml\",\"serde\",\"std\"]}}",
+-      "jsonwebtoken_9.3.1": "{\"dependencies\":[{\"name\":\"base64\",\"req\":\"^0.22\"},{\"default_features\":false,\"kind\":\"dev\",\"name\":\"criterion\",\"req\":\"^0.4\",\"target\":\"cfg(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\"))))\"},{\"kind\":\"dev\",\"name\":\"criterion\",\"req\":\"^0.4\",\"target\":\"cfg(not(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\")))))\"},{\"name\":\"js-sys\",\"req\":\"^0.3\",\"target\":\"cfg(target_arch = \\\"wasm32\\\")\"},{\"name\":\"pem\",\"optional\":true,\"req\":\"^3\"},{\"features\":[\"std\"],\"name\":\"ring\",\"req\":\"^0.17.4\",\"target\":\"cfg(not(target_arch = \\\"wasm32\\\"))\"},{\"features\":[\"std\",\"wasm32_unknown_unknown_js\"],\"name\":\"ring\",\"req\":\"^0.17.4\",\"target\":\"cfg(target_arch = \\\"wasm32\\\")\"},{\"features\":[\"derive\"],\"name\":\"serde\",\"req\":\"^1.0\"},{\"name\":\"serde_json\",\"req\":\"^1.0\"},{\"name\":\"simple_asn1\",\"optional\":true,\"req\":\"^0.6\"},{\"features\":[\"wasm-bindgen\"],\"kind\":\"dev\",\"name\":\"time\",\"req\":\"^0.3\",\"target\":\"cfg(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\"))))\"},{\"kind\":\"dev\",\"name\":\"time\",\"req\":\"^0.3\",\"target\":\"cfg(not(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\")))))\"},{\"kind\":\"dev\",\"name\":\"wasm-bindgen-test\",\"req\":\"^0.3.1\"}],\"features\":{\"default\":[\"use_pem\"],\"use_pem\":[\"pem\",\"simple_asn1\"]}}",
++      "jsonwebtoken_10.3.0": "{\"dependencies\":[{\"name\":\"aws-lc-rs\",\"optional\":true,\"req\":\"^1.15.0\"},{\"name\":\"base64\",\"req\":\"^0.22\"},{\"default_features\":false,\"kind\":\"dev\",\"name\":\"criterion\",\"req\":\"^0.8\",\"target\":\"cfg(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\"))))\"},{\"kind\":\"dev\",\"name\":\"criterion\",\"req\":\"^0.8\",\"target\":\"cfg(not(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\")))))\"},{\"features\":[\"pkcs8\"],\"name\":\"ed25519-dalek\",\"optional\":true,\"req\":\"^2.1.1\"},{\"features\":[\"pkcs8\",\"rand_core\"],\"kind\":\"dev\",\"name\":\"ed25519-dalek\",\"req\":\"^2.1.1\"},{\"name\":\"getrandom\",\"req\":\"^0.2\",\"target\":\"cfg(target_arch = \\\"wasm32\\\")\"},{\"name\":\"hmac\",\"optional\":true,\"req\":\"^0.12.1\"},{\"name\":\"js-sys\",\"req\":\"^0.3\",\"target\":\"cfg(target_arch = \\\"wasm32\\\")\"},{\"features\":[\"ecdsa\"],\"name\":\"p256\",\"optional\":true,\"req\":\"^0.13.2\"},{\"features\":[\"ecdsa\"],\"name\":\"p384\",\"optional\":true,\"req\":\"^0.13.0\"},{\"name\":\"pem\",\"optional\":true,\"req\":\"^3\"},{\"default_features\":false,\"features\":[\"std\"],\"name\":\"rand\",\"optional\":true,\"req\":\"^0.8.5\"},{\"default_features\":false,\"features\":[\"std\"],\"kind\":\"dev\",\"name\":\"rand\",\"req\":\"^0.8.5\"},{\"kind\":\"dev\",\"name\":\"rand_core\",\"req\":\"^0.6.4\"},{\"name\":\"rsa\",\"optional\":true,\"req\":\"^0.9.6\"},{\"features\":[\"derive\"],\"name\":\"serde\",\"req\":\"^1.0.228\"},{\"name\":\"serde_json\",\"req\":\"^1.0\"},{\"features\":[\"oid\"],\"name\":\"sha2\",\"optional\":true,\"req\":\"^0.10.7\"},{\"features\":[\"std\"],\"name\":\"signature\",\"req\":\"^2.2.0\"},{\"name\":\"simple_asn1\",\"optional\":true,\"req\":\"^0.6\"},{\"features\":[\"wasm-bindgen\"],\"kind\":\"dev\",\"name\":\"time\",\"req\":\"^0.3\",\"target\":\"cfg(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\"))))\"},{\"kind\":\"dev\",\"name\":\"time\",\"req\":\"^0.3\",\"target\":\"cfg(not(all(target_arch = \\\"wasm32\\\", not(any(target_os = \\\"emscripten\\\", target_os = \\\"wasi\\\")))))\"},{\"kind\":\"dev\",\"name\":\"wasm-bindgen-test\",\"req\":\"^0.3.1\"}],\"features\":{\"aws-lc-rs\":[\"dep:aws-lc-rs\"],\"aws_lc_rs\":[\"aws-lc-rs\"],\"default\":[\"use_pem\"],\"ed25519-dalek\":[\"dep:ed25519-dalek\"],\"hmac\":[\"dep:hmac\"],\"p256\":[\"dep:p256\"],\"p384\":[\"dep:p384\"],\"pem\":[\"dep:pem\"],\"rand\":[\"dep:rand\"],\"rsa\":[\"dep:rsa\"],\"rust_crypto\":[\"ed25519-dalek\",\"hmac\",\"p256\",\"p384\",\"rand\",\"rsa\",\"sha2\"],\"sha2\":[\"dep:sha2\"],\"simple_asn1\":[\"dep:simple_asn1\"],\"use_pem\":[\"pem\",\"simple_asn1\"]}}",
+       "kasuari_0.4.12": "{\"dependencies\":[{\"name\":\"document-features\",\"optional\":true,\"req\":\"^0.2\"},{\"name\":\"hashbrown\",\"req\":\"^0.16\"},{\"default_features\":false,\"features\":[\"require-cas\"],\"name\":\"portable-atomic\",\"optional\":true,\"req\":\"^1.13\"},{\"features\":[\"alloc\"],\"name\":\"portable-atomic-util\",\"optional\":true,\"req\":\"^0.2.5\"},{\"kind\":\"dev\",\"name\":\"rstest\",\"req\":\"^0.26\"},{\"default_features\":false,\"name\":\"thiserror\",\"req\":\"^2.0\"}],\"features\":{\"default\":[\"std\"],\"document-features\":[\"dep:document-features\"],\"portable-atomic\":[\"dep:portable-atomic\",\"dep:portable-atomic-util\"],\"std\":[\"thiserror/std\",\"portable-atomic?/std\"]}}",
+       "keccak_0.1.6": "{\"dependencies\":[{\"name\":\"cpufeatures\",\"req\":\"^0.2\",\"target\":\"cfg(target_arch = \\\"aarch64\\\")\"}],\"features\":{\"asm\":[],\"no_unroll\":[],\"simd\":[]}}",
+       "kem_0.3.0-pre.0": "{\"dependencies\":[{\"kind\":\"dev\",\"name\":\"hpke\",\"req\":\"^0.10\"},{\"features\":[\"ecdsa\"],\"kind\":\"dev\",\"name\":\"p256\",\"req\":\"^0.9\"},{\"default_features\":false,\"features\":[\"pqcrypto-saber\"],\"kind\":\"dev\",\"name\":\"pqcrypto\",\"req\":\"^0.15\"},{\"kind\":\"dev\",\"name\":\"pqcrypto-traits\",\"req\":\"^0.3\"},{\"kind\":\"dev\",\"name\":\"rand\",\"req\":\"^0.8\"},{\"name\":\"rand_core\",\"req\":\"^0.6\"},{\"kind\":\"dev\",\"name\":\"x3dh-ke\",\"req\":\"^0.1\"},{\"default_features\":false,\"name\":\"zeroize\",\"req\":\"^1.7\"}],\"features\":{}}",
+diff --git a/third_party/codex/codex-rs/Cargo.lock b/third_party/codex/codex-rs/Cargo.lock
+index 471c342ff968bc77396ae2d238f18a83865b484c..61a8d8a2126c15b3efb00b77c7815969905573c4 100644
+--- a/third_party/codex/codex-rs/Cargo.lock
++++ b/third_party/codex/codex-rs/Cargo.lock
+@@ -394,7 +394,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1870,7 +1870,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1882,7 +1882,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1897,7 +1897,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1917,7 +1917,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -1938,7 +1938,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "ansi-to-tui",
+  "ratatui",
+@@ -1947,7 +1947,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -1982,7 +1982,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2082,7 +2082,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2109,7 +2109,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol",
+@@ -2130,7 +2130,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2163,11 +2163,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.149.0"
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2189,7 +2189,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2231,7 +2231,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2251,7 +2251,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2271,7 +2271,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -2280,7 +2280,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2295,7 +2295,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2315,7 +2315,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2324,7 +2324,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2336,7 +2336,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2345,7 +2345,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2367,7 +2367,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2455,7 +2455,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2468,7 +2468,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2493,7 +2493,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2526,7 +2526,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2541,7 +2541,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2550,7 +2550,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2574,7 +2574,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2601,7 +2601,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2619,7 +2619,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-protocol",
+@@ -2635,11 +2635,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.149.0"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2687,7 +2687,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2709,7 +2709,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2723,7 +2723,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -2731,7 +2731,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2862,7 +2862,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -2885,7 +2885,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2941,7 +2941,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -2949,7 +2949,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2996,7 +2996,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3054,7 +3054,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3069,7 +3069,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-exec-server",
+  "codex-http-client",
+@@ -3077,7 +3077,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3095,7 +3095,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3104,7 +3104,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-config",
+  "codex-context-fragments",
+@@ -3121,7 +3121,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3133,7 +3133,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3163,7 +3163,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-otel",
+  "codex-protocol",
+@@ -3176,7 +3176,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-http-client",
+@@ -3194,7 +3194,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3210,7 +3210,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3222,7 +3222,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3233,7 +3233,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3246,7 +3246,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3272,7 +3272,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3296,7 +3296,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -3318,7 +3318,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3330,7 +3330,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3341,7 +3341,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3366,7 +3366,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3398,7 +3398,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3425,7 +3425,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3438,7 +3438,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "keyring",
+  "tracing",
+@@ -3446,7 +3446,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3471,7 +3471,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3485,7 +3485,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3528,7 +3528,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3566,7 +3566,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-config",
+  "codex-connectors",
+@@ -3592,7 +3592,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-server"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -3631,7 +3631,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3652,7 +3652,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -3662,7 +3662,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3699,7 +3699,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -3713,7 +3713,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-agent-identity",
+  "codex-api",
+@@ -3736,7 +3736,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-api",
+  "codex-protocol",
+@@ -3752,7 +3752,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "chrono",
+  "codex-collaboration-mode-templates",
+@@ -3772,7 +3772,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3810,7 +3810,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -3830,7 +3830,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "chrono",
+  "codex-api",
+@@ -3863,7 +3863,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-config",
+  "codex-protocol",
+@@ -3876,7 +3876,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3884,7 +3884,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-context-fragments",
+@@ -3898,7 +3898,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -3940,7 +3940,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -3961,7 +3961,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3972,7 +3972,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3989,7 +3989,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4035,7 +4035,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4062,7 +4062,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4078,7 +4078,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-network-proxy",
+@@ -4102,7 +4102,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4123,7 +4123,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4146,7 +4146,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-escalation"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4166,7 +4166,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4183,7 +4183,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-config",
+@@ -4219,7 +4219,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4243,7 +4243,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4255,7 +4255,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4263,7 +4263,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4271,7 +4271,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4282,7 +4282,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4312,7 +4312,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-code-mode",
+@@ -4338,7 +4338,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4450,7 +4450,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "async-io",
+  "pretty_assertions",
+@@ -4462,7 +4462,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -4476,14 +4476,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -4497,7 +4497,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -4506,7 +4506,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -4515,7 +4515,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -4527,15 +4527,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.149.0"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.149.0"
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -4545,7 +4545,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -4558,7 +4558,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -4567,7 +4567,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -4577,7 +4577,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -4586,7 +4586,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -4596,7 +4596,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -4612,7 +4612,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -4626,7 +4626,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "filedescriptor",
+@@ -4642,7 +4642,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -4652,14 +4652,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -4668,7 +4668,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -4678,14 +4678,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -4695,14 +4695,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -4710,7 +4710,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -4731,7 +4731,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -4747,7 +4747,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4773,7 +4773,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -5013,7 +5013,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -8856,16 +8856,18 @@ checksum = "a5a3cc660ba5d72bce0b3bb295bf20847ccbb40fd423f3f05b61273672e561fe"
+ 
+ [[package]]
+ name = "jsonwebtoken"
+-version = "9.3.1"
++version = "10.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
++checksum = "0529410abe238729a60b108898784df8984c87f6054c9c4fcacc47e4803c1ce1"
+ dependencies = [
++ "aws-lc-rs",
+  "base64 0.22.1",
++ "getrandom 0.2.17",
+  "js-sys",
+  "pem",
+- "ring",
+  "serde",
+  "serde_json",
++ "signature",
+  "simple_asn1",
+ ]
+ 
+@@ -9275,7 +9277,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "mcp_test_support"
+-version = "0.0.0"
++version = "0.149.0"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+diff --git a/third_party/codex/codex-rs/Cargo.toml b/third_party/codex/codex-rs/Cargo.toml
+index 6e5fa01dda8a7e53be0e3ea5dfbf4316e19665b5..75dcfd66fe9f15fe739da87fc3273c0a7d7a3285 100644
+--- a/third_party/codex/codex-rs/Cargo.toml
++++ b/third_party/codex/codex-rs/Cargo.toml
+@@ -349,7 +349,7 @@ insta = "1.46.3"
+ inventory = "0.3.19"
+ itertools = "0.14.0"
+ jsonptr = { version = "0.7.1", default-features = false }
+-jsonwebtoken = "9.3.1"
++jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
+ keyring = { version = "3.6", default-features = false }
+ landlock = "0.4.4"
+ lazy_static = "1"
+diff --git a/third_party/codex/codex-rs/core-api/src/lib.rs b/third_party/codex/codex-rs/core-api/src/lib.rs
+index eed164543cc9a941a1ccbd2f95f43f68cf8ed345..37424c30edda7e6b8563616253c9e9d1036d6d65 100644
+--- a/third_party/codex/codex-rs/core-api/src/lib.rs
++++ b/third_party/codex/codex-rs/core-api/src/lib.rs
+@@ -28,6 +28,8 @@ pub use codex_config::types::UriBasedFileOpener;
+ pub use codex_core::CodexAppsToolsCache;
+ pub use codex_core::CodexThread;
+ pub use codex_core::CodexThreadSettingsOverrides;
++pub use codex_core::DurableTurnInspection;
++pub use codex_core::DurableTurnTerminal;
+ pub use codex_core::EnvironmentConfig;
+ pub use codex_core::EnvironmentMcpPolicy;
+ pub use codex_core::EnvironmentNetworkPolicy;
+@@ -50,6 +52,13 @@ pub use codex_core::StateDbHandle;
+ pub use codex_core::SteerSubmission;
+ pub use codex_core::ThreadManager;
+ pub use codex_core::ThreadShutdownReport;
++pub use codex_core::ToolCallGate;
++pub use codex_core::ToolCallGateAttachment;
++pub use codex_core::ToolCallGateFileChange;
++pub use codex_core::ToolCallGateFileOperation;
++pub use codex_core::ToolCallGatePayload;
++pub use codex_core::ToolCallGateRejection;
++pub use codex_core::ToolCallGateRequest;
+ pub use codex_core::TurnInput;
+ pub use codex_core::TurnInputRequest;
+ pub use codex_core::TurnInputSubmission;
+diff --git a/third_party/codex/codex-rs/core/src/client.rs b/third_party/codex/codex-rs/core/src/client.rs
+index 8686610e3548d9fb327ff81048fdbe6fb35bb4c1..f9ef3304685d37cfa74db2262fe8974398cc10c5 100644
+--- a/third_party/codex/codex-rs/core/src/client.rs
++++ b/third_party/codex/codex-rs/core/src/client.rs
+@@ -28,7 +28,6 @@ use std::sync::Arc;
+ use std::sync::Mutex as StdMutex;
+ use std::sync::OnceLock;
+ use std::sync::atomic::AtomicBool;
+-use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::Ordering;
+ 
+ use codex_api::AgentIdentityTelemetry;
+@@ -111,6 +110,7 @@ use tokio_util::sync::CancellationToken;
+ use tracing::instrument;
+ use tracing::trace;
+ use tracing::warn;
++use uuid::Uuid;
+ 
+ use crate::attestation::AttestationContext;
+ use crate::attestation::AttestationProvider;
+@@ -176,7 +176,7 @@ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
+ ///
+ /// The host receives the already-normalized Responses payload plus stable Codex identities. It
+ /// does not receive HTTP headers, authentication state, or provider credentials.
+-#[derive(Debug, Clone, Serialize)]
++#[derive(Clone, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct ModelStreamRequest {
+     pub request_id: String,
+@@ -187,6 +187,20 @@ pub struct ModelStreamRequest {
+     pub request: ResponsesApiRequest,
+ }
+ 
++impl std::fmt::Debug for ModelStreamRequest {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("ModelStreamRequest")
++            .field("request_id", &self.request_id)
++            .field("provider", &self.provider)
++            .field("session_id", &self.session_id)
++            .field("thread_id", &self.thread_id)
++            .field("turn_id", &self.turn_id)
++            .field("request", &"<private>")
++            .finish()
++    }
++}
++
+ /// Optional host-owned transport for streaming model inference without an HTTP compatibility
+ /// gateway. The default Codex construction leaves this unset and retains the upstream transport.
+ pub trait ModelStreamTransport: std::fmt::Debug + Send + Sync {
+@@ -245,7 +259,6 @@ struct ModelClientState {
+     cached_websocket_session: StdMutex<WebsocketSession>,
+     model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
+     model_stream_provider_id: String,
+-    model_stream_request_sequence: AtomicU64,
+ }
+ 
+ /// Resolved API client setup for a single request attempt.
+@@ -500,7 +513,6 @@ impl ModelClient {
+                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+                 model_stream_transport: None,
+                 model_stream_provider_id,
+-                model_stream_request_sequence: AtomicU64::new(0),
+             }),
+             agent_identity_policy,
+             prompt_cache_key_override: None,
+@@ -1931,14 +1943,21 @@ impl ModelClientSession {
+         let request_session_telemetry = session_telemetry_for_request(session_telemetry, &request);
+         let inference_trace_attempt = inference_trace.start_attempt();
+         inference_trace_attempt.record_started(&request);
+-        let sequence = self
+-            .client
+-            .state
+-            .model_stream_request_sequence
+-            .fetch_add(1, Ordering::Relaxed)
+-            .saturating_add(1);
++        // `request_id` is the durable Core model-call identity.  It is a
++        // deterministic UUID derived from the semantic request and stable
++        // turn/session identities; transport-only client metadata is omitted.
++        // A retry after a process restart therefore reopens the same Worker
++        // exchange, while two different in-flight requests receive different
++        // identities without relying on an in-memory counter.
++        let request_id = stable_model_call_id(
++            &self.client.state.thread_id,
++            &responses_metadata.session_id,
++            responses_metadata.turn_id.as_deref(),
++            &self.client.state.model_stream_provider_id,
++            &request,
++        );
+         let transport_request = ModelStreamRequest {
+-            request_id: format!("{}:{sequence}", self.client.state.thread_id),
++            request_id,
+             provider: self.client.state.model_stream_provider_id.clone(),
+             session_id: responses_metadata.session_id.clone(),
+             thread_id: responses_metadata.thread_id.clone(),
+@@ -2314,6 +2333,42 @@ impl PendingUnauthorizedRetry {
+     }
+ }
+ 
++fn stable_model_call_id(
++    thread_id: &ThreadId,
++    session_id: &str,
++    turn_id: Option<&str>,
++    provider: &str,
++    request: &ResponsesApiRequest,
++) -> String {
++    let mut semantic_request = request.clone();
++    // Core metadata contains timestamps, parent routing, and other transport
++    // projections.  It is carried in the envelope for authority checks but
++    // must not change the identity of an otherwise identical provider call.
++    semantic_request.client_metadata = None;
++    let request_bytes = serde_json::to_vec(&semantic_request)
++        .unwrap_or_else(|_| b"<invalid-semantic-model-request>".to_vec());
++    let mut identity = Vec::with_capacity(
++        thread_id.to_string().len()
++            + session_id.len()
++            + turn_id.map_or(0, str::len)
++            + provider.len()
++            + request_bytes.len()
++            + 64,
++    );
++    append_model_identity_part(&mut identity, thread_id.to_string().as_bytes());
++    append_model_identity_part(&mut identity, session_id.as_bytes());
++    append_model_identity_part(&mut identity, turn_id.unwrap_or_default().as_bytes());
++    append_model_identity_part(&mut identity, provider.as_bytes());
++    append_model_identity_part(&mut identity, &request_bytes);
++    let call_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, &identity);
++    format!("{}:{}", thread_id, call_id.simple())
++}
++
++fn append_model_identity_part(identity: &mut Vec<u8>, part: &[u8]) {
++    identity.extend_from_slice(&(part.len() as u64).to_be_bytes());
++    identity.extend_from_slice(part);
++}
++
+ #[derive(Clone, Debug, Default)]
+ struct AuthRequestTelemetryContext {
+     auth_mode: Option<&'static str>,
+diff --git a/third_party/codex/codex-rs/core/src/codex_thread.rs b/third_party/codex/codex-rs/core/src/codex_thread.rs
+index 2f5403c60437ace5f82c9302d21aca0c377f7408..1f51305b912dbd1ceff82fa93db626be9a6a26e6 100644
+--- a/third_party/codex/codex-rs/core/src/codex_thread.rs
++++ b/third_party/codex/codex-rs/core/src/codex_thread.rs
+@@ -30,6 +30,7 @@ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::EnvironmentConfig;
+ use codex_protocol::protocol::EnvironmentConfigState;
+ use codex_protocol::protocol::Event;
++use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::Op;
+ use codex_protocol::protocol::SandboxPolicy;
+@@ -59,6 +60,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::LegacyAppPathString;
+ use codex_utils_path_uri::PathUri;
+ use rmcp::model::ReadResourceRequestParams;
++use std::future::Future;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use tokio::sync::Mutex;
+@@ -69,6 +71,96 @@ use codex_rollout::state_db::StateDbHandle;
+ 
+ static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
+ 
++/// Durable state of one exact regular turn reconstructed from rollout facts.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum DurableTurnInspection {
++    Absent,
++    InProgress,
++    Completed(DurableTurnTerminal),
++    Failed(DurableTurnTerminal),
++}
++
++/// Terminal facts retained by Codex Core for one exact regular turn.
++#[derive(Clone, PartialEq, Eq)]
++pub struct DurableTurnTerminal {
++    pub turn_id: String,
++    pub last_agent_message: Option<String>,
++    pub token_usage: Option<TokenUsageInfo>,
++    pub started_at: Option<i64>,
++    pub completed_at: Option<i64>,
++    pub duration_ms: Option<i64>,
++    pub time_to_first_token_ms: Option<i64>,
++}
++
++impl std::fmt::Debug for DurableTurnTerminal {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("DurableTurnTerminal")
++            .field("turn_id", &self.turn_id)
++            .field("has_last_agent_message", &self.last_agent_message.is_some())
++            .field("token_usage", &self.token_usage)
++            .field("started_at", &self.started_at)
++            .field("completed_at", &self.completed_at)
++            .field("duration_ms", &self.duration_ms)
++            .field("time_to_first_token_ms", &self.time_to_first_token_ms)
++            .finish()
++    }
++}
++
++fn inspect_durable_turn_items(items: &[RolloutItem], turn_id: &str) -> DurableTurnInspection {
++    let mut seen = false;
++    let mut token_usage = None;
++    for item in items {
++        match item {
++            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == turn_id => {
++                seen = true;
++                token_usage = None;
++            }
++            RolloutItem::ResponseItem(envelope) if envelope.turn_id() == Some(turn_id) => {
++                seen = true;
++            }
++            RolloutItem::EventMsg(EventMsg::TokenCount(event)) if seen => {
++                token_usage = event.info.clone();
++            }
++            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) if event.turn_id == turn_id => {
++                let terminal = DurableTurnTerminal {
++                    turn_id: event.turn_id.clone(),
++                    last_agent_message: event.last_agent_message.clone(),
++                    token_usage,
++                    started_at: event.started_at,
++                    completed_at: event.completed_at,
++                    duration_ms: event.duration_ms,
++                    time_to_first_token_ms: event.time_to_first_token_ms,
++                };
++                return if event.error.is_some() {
++                    DurableTurnInspection::Failed(terminal)
++                } else {
++                    DurableTurnInspection::Completed(terminal)
++                };
++            }
++            RolloutItem::EventMsg(EventMsg::TurnAborted(event))
++                if event.turn_id.as_deref() == Some(turn_id) =>
++            {
++                return DurableTurnInspection::Failed(DurableTurnTerminal {
++                    turn_id: turn_id.to_string(),
++                    last_agent_message: None,
++                    token_usage,
++                    started_at: event.started_at,
++                    completed_at: event.completed_at,
++                    duration_ms: event.duration_ms,
++                    time_to_first_token_ms: None,
++                });
++            }
++            _ => {}
++        }
++    }
++    if seen {
++        DurableTurnInspection::InProgress
++    } else {
++        DurableTurnInspection::Absent
++    }
++}
++
+ #[derive(Clone, Debug)]
+ pub struct ThreadConfigSnapshot {
+     pub model: String,
+@@ -291,6 +383,54 @@ impl CodexThread {
+         }
+     }
+ 
++    /// Starts one turn under a host-reserved durable identity only when idle.
++    pub async fn start_turn_with_id_if_idle(
++        &self,
++        request: TurnInputRequest,
++        turn_id: String,
++    ) -> CodexResult<StartIfIdleSubmission> {
++        self.session
++            .services
++            .agent_control
++            .ensure_execution_capacity_for_turn_start(self)
++            .await?;
++        match self
++            .io
++            .submit_turn_input_with_id(request, TurnInputMode::StartIfIdle, turn_id)
++            .await?
++        {
++            TurnInputSubmission::Started { turn_id } => {
++                Ok(StartIfIdleSubmission::Started { turn_id })
++            }
++            TurnInputSubmission::NotSubmitted { reason } => {
++                Ok(StartIfIdleSubmission::NotSubmitted { reason })
++            }
++            TurnInputSubmission::Steered { .. } => {
++                unreachable!("idle-only submission cannot steer")
++            }
++        }
++    }
++
++    /// Reconstructs the exact durable state of one turn from persisted rollout facts.
++    pub fn inspect_durable_turn<'a>(
++        &'a self,
++        turn_id: &'a str,
++    ) -> std::pin::Pin<Box<dyn Future<Output = CodexResult<DurableTurnInspection>> + Send + 'a>>
++    {
++        Box::pin(async move {
++            // A brand-new thread intentionally defers rollout creation until its
++            // first input. Exact host reconciliation reserves the turn identity
++            // before that input, so materialize the empty rollout first. Real
++            // storage or decode failures still surface from `load_history`.
++            self.ensure_rollout_materialized().await;
++            let history = self
++                .load_history(/*include_archived*/ false)
++                .await
++                .map_err(|error| codex_protocol::error::CodexErr::Fatal(error.to_string()))?;
++            Ok(inspect_durable_turn_items(&history.items, turn_id))
++        })
++    }
++
+     /// Resumes an interrupted regular turn only when the thread is idle.
+     ///
+     /// Recovery starts no new user input and preserves the turn ID that was
+diff --git a/third_party/codex/codex-rs/core/src/lib.rs b/third_party/codex/codex-rs/core/src/lib.rs
+index f894c50a39bf3f9241f895cd0f55ebe190be7709..1b048e55d5ca0c1f7800f1327c0233177c7de370 100644
+--- a/third_party/codex/codex-rs/core/src/lib.rs
++++ b/third_party/codex/codex-rs/core/src/lib.rs
+@@ -42,6 +42,8 @@ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
+ pub use codex_thread::CodexThreadSettingsOverrides;
++pub use codex_thread::DurableTurnInspection;
++pub use codex_thread::DurableTurnTerminal;
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use session::turn_context::TurnContext;
+ mod agent;
+@@ -110,6 +112,7 @@ pub use codex_protocol::config_types::ModelProviderAuthInfo;
+ mod event_mapping;
+ pub use codex_prompts as review_prompts;
+ mod thread_manager;
++mod tool_call_gate;
+ pub(crate) mod web_search;
+ pub(crate) mod windows_sandbox_read_grants;
+ pub use thread_manager::ForkSnapshot;
+@@ -120,6 +123,13 @@ pub use thread_manager::ThreadShutdownReport;
+ pub use thread_manager::build_models_manager;
+ pub use thread_manager::local_agent_graph_store_from_state_db;
+ pub use thread_manager::thread_store_from_config;
++pub use tool_call_gate::ToolCallGate;
++pub use tool_call_gate::ToolCallGateAttachment;
++pub use tool_call_gate::ToolCallGateFileChange;
++pub use tool_call_gate::ToolCallGateFileOperation;
++pub use tool_call_gate::ToolCallGatePayload;
++pub use tool_call_gate::ToolCallGateRejection;
++pub use tool_call_gate::ToolCallGateRequest;
+ pub use tools::handlers::WaitForEnvironmentToolConfig;
+ pub use web_search::web_search_action_detail;
+ pub use windows_sandbox_read_grants::grant_read_root_non_elevated;
+diff --git a/third_party/codex/codex-rs/core/src/session/elicitation_holders_tests.rs b/third_party/codex/codex-rs/core/src/session/elicitation_holders_tests.rs
+index d4061176e095d250413896b83689699611ab58c0..0966b2339fc76ed27791ffde44a7493d61ac9101 100644
+--- a/third_party/codex/codex-rs/core/src/session/elicitation_holders_tests.rs
++++ b/third_party/codex/codex-rs/core/src/session/elicitation_holders_tests.rs
+@@ -193,3 +193,46 @@ async fn request_user_input_holds_an_elicitation_until_response() {
+     request.await.expect("request user input task");
+     wait_until_released(&mut pause_state).await;
+ }
++
++#[tokio::test]
++async fn request_user_input_response_waits_for_restarted_turn_waiter() {
++    let (session, turn_context, events) = make_session_and_context_with_rx().await;
++    let response = RequestUserInputResponse {
++        answers: HashMap::new(),
++    };
++
++    // The Worker can replay the durable response before the replacement
++    // Session has installed an ActiveTurn. The response must remain available
++    // for the exact request_user_input call created by that resumed turn.
++    session
++        .notify_user_input_response(&turn_context.sub_id, response.clone())
++        .await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++
++    let request = tokio::spawn({
++        let session = session.clone();
++        let turn_context = turn_context.clone();
++        async move {
++            session
++                .request_user_input(
++                    turn_context.as_ref(),
++                    "call-restarted".to_owned(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: true,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        }
++    });
++
++    events
++        .recv()
++        .await
++        .expect("restarted request user input event");
++    assert_eq!(
++        request.await.expect("restarted request task"),
++        Some(response)
++    );
++}
+diff --git a/third_party/codex/codex-rs/core/src/session/mod.rs b/third_party/codex/codex-rs/core/src/session/mod.rs
+index 0cf0ee495c6e348f241d933f66fa99c520f0f125..1a4b0f88787de067138e8bd235845826fd3bc2a7 100644
+--- a/third_party/codex/codex-rs/core/src/session/mod.rs
++++ b/third_party/codex/codex-rs/core/src/session/mod.rs
+@@ -865,6 +865,29 @@ impl SessionIo {
+         reply_rx.await.unwrap_or(Err(CodexErr::InternalAgentDied))
+     }
+ 
++    pub(crate) async fn submit_turn_input_with_id(
++        &self,
++        mut request: TurnInputRequest,
++        mode: TurnInputMode,
++        submission_id: String,
++    ) -> CodexResult<TurnInputSubmission> {
++        let (reply_tx, reply_rx) = oneshot::channel();
++        let trace = request.trace.take();
++        self.submit_with_id(Submission {
++            id: submission_id,
++            op: Op::TurnInput {
++                request: Box::new(request),
++                mode,
++                reply: reply_tx,
++            },
++            trace,
++            parent_turn_id: None,
++            root_turn_id: None,
++        })
++        .await?;
++        reply_rx.await.unwrap_or(Err(CodexErr::InternalAgentDied))
++    }
++
+     pub(crate) async fn submit_recover_turn(
+         &self,
+         thread_settings: ThreadSettingsOverrides,
+@@ -2688,14 +2711,28 @@ impl Session {
+         let sub_id = turn_context.sub_id.clone();
+         let (tx_response, rx_response) = oneshot::channel();
+         let event_id = sub_id.clone();
+-        let prev_entry = {
++        let (queued_response, prev_entry) = {
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
+                     let mut ts = at.turn_state.lock().await;
+-                    ts.insert_pending_user_input(sub_id, tx_response)
++                    if let Some(response) = ts.take_pending_user_input_response(&sub_id) {
++                        (Some(response), None)
++                    } else {
++                        let mut pending = self.pending_user_input_responses.lock().await;
++                        match pending.remove(&sub_id) {
++                            Some(response) => (Some(response), None),
++                            None => (
++                                None,
++                                ts.insert_pending_user_input(sub_id.clone(), tx_response),
++                            ),
++                        }
++                    }
++                }
++                None => {
++                    let mut pending = self.pending_user_input_responses.lock().await;
++                    (pending.remove(&sub_id), None)
+                 }
+-                None => None,
+             }
+         };
+         if prev_entry.is_some() {
+@@ -2713,7 +2750,10 @@ impl Session {
+             .turn_metadata_state
+             .mark_user_input_requested_during_turn();
+         self.send_event(turn_context, event).await;
+-        rx_response.await.ok()
++        match queued_response {
++            Some(response) => Some(response),
++            None => rx_response.await.ok(),
++        }
+     }
+ 
+     #[expect(
+@@ -2725,22 +2765,39 @@ impl Session {
+         sub_id: &str,
+         response: RequestUserInputResponse,
+     ) {
+-        let entry = {
++        let (entry, replaced_response, response_to_send) = {
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
+                     let mut ts = at.turn_state.lock().await;
+-                    ts.remove_pending_user_input(sub_id)
++                    match ts.remove_pending_user_input(sub_id) {
++                        Some(entry) => (Some(entry), None, Some(response)),
++                        None => {
++                            let replaced =
++                                ts.insert_pending_user_input_response(sub_id.to_string(), response);
++                            (None, replaced, None)
++                        }
++                    }
++                }
++                None => {
++                    let mut pending = self.pending_user_input_responses.lock().await;
++                    let replaced = pending.insert(sub_id.to_string(), response);
++                    (None, replaced, None)
+                 }
+-                None => None,
+             }
+         };
+         match entry {
+             Some(tx_response) => {
+-                tx_response.send(response).ok();
++                if let Some(response) = response_to_send {
++                    tx_response.send(response).ok();
++                }
+             }
+             None => {
+-                warn!("No pending user input found for sub_id: {sub_id}");
++                if replaced_response.is_some() {
++                    warn!("Overwriting queued user input response for sub_id: {sub_id}");
++                } else {
++                    debug!("Queued user input response until turn waiter is restored: {sub_id}");
++                }
+             }
+         }
+     }
+diff --git a/third_party/codex/codex-rs/core/src/session/session.rs b/third_party/codex/codex-rs/core/src/session/session.rs
+index af23bb0b3950d89c1cb7ce1b56552c23a881b87a..797991d3eca264b4f2539ec940df1f3bf01b9467 100644
+--- a/third_party/codex/codex-rs/core/src/session/session.rs
++++ b/third_party/codex/codex-rs/core/src/session/session.rs
+@@ -60,6 +60,10 @@ pub(crate) struct Session {
+     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+     pub(crate) conversation: Arc<RealtimeConversationManager>,
+     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
++    /// Input responses may be delivered by the host while a restarted turn
++    /// is still being installed. Keep those responses at session scope until
++    /// the exact turn recreates its in-memory waiter.
++    pub(crate) pending_user_input_responses: Mutex<HashMap<String, RequestUserInputResponse>>,
+     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+     pub(crate) input_queue: InputQueue,
+     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+@@ -1453,6 +1457,7 @@ impl Session {
+                 mcp_prewarm_task: std::sync::Mutex::new(None),
+                 conversation: Arc::new(RealtimeConversationManager::new()),
+                 active_turn: Mutex::new(None),
++                pending_user_input_responses: Mutex::new(HashMap::new()),
+                 async_hook_results,
+                 input_queue: InputQueue::new(),
+                 guardian_review_session: GuardianReviewSessionManager::default(),
+diff --git a/third_party/codex/codex-rs/core/src/session/tests.rs b/third_party/codex/codex-rs/core/src/session/tests.rs
+index 1a268f4c5921b2243478eb95579ba3e7459457b7..2b2a592a2481098b29249550ce255fae516ee496 100644
+--- a/third_party/codex/codex-rs/core/src/session/tests.rs
++++ b/third_party/codex/codex-rs/core/src/session/tests.rs
+@@ -1282,6 +1282,13 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
+             req
+         }
+ 
++        fn action_gate_payload(
++            &self,
++            _req: &TurnEnvironment,
++        ) -> Option<crate::ToolCallGatePayload> {
++            None
++        }
++
+         async fn run(
+             &mut self,
+             _req: &TurnEnvironment,
+@@ -6000,6 +6007,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
++        pending_user_input_responses: Mutex::new(HashMap::new()),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+@@ -8211,6 +8219,7 @@ where
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
++        pending_user_input_responses: Mutex::new(HashMap::new()),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+diff --git a/third_party/codex/codex-rs/core/src/session/turn_input.rs b/third_party/codex/codex-rs/core/src/session/turn_input.rs
+index 424faf3c3a0e298dc5c8e1f562c919388adb9c0e..23d37135f8d434c0abe32d20ac1b0261d6246de6 100644
+--- a/third_party/codex/codex-rs/core/src/session/turn_input.rs
++++ b/third_party/codex/codex-rs/core/src/session/turn_input.rs
+@@ -326,7 +326,7 @@ async fn start_if_idle(
+             .turn_metadata_state
+             .set_responsesapi_client_metadata(responsesapi_client_metadata);
+     }
+-    if has_user_input
++    if (has_user_input || is_recovery)
+         && can_start_root_turn
+         && turn_context
+             .turn_metadata_state
+diff --git a/third_party/codex/codex-rs/core/src/state/turn.rs b/third_party/codex/codex-rs/core/src/state/turn.rs
+index 056de27955ecf29aff9c0986aa41be1253557c10..c1119c88c63ff53abb5c5bdf6c04d238c717de8b 100644
+--- a/third_party/codex/codex-rs/core/src/state/turn.rs
++++ b/third_party/codex/codex-rs/core/src/state/turn.rs
+@@ -90,6 +90,10 @@ pub(crate) struct TurnState {
+     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
++    // A response can arrive during recovery before the resumed turn has
++    // recreated its in-memory waiter. Keep it on the turn so the next
++    // request_user_input call can consume it instead of dropping it.
++    pending_user_input_responses: HashMap<String, RequestUserInputResponse>,
+     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
+     mcp_tool_approval_metadata: HashMap<String, (Option<McpInvocation>, McpToolApprovalMetadata)>,
+     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+@@ -128,6 +132,7 @@ impl TurnState {
+         self.pending_approvals.clear();
+         self.pending_request_permissions.clear();
+         self.pending_user_input.clear();
++        self.pending_user_input_responses.clear();
+         self.pending_elicitations.clear();
+         self.mcp_tool_approval_metadata.clear();
+         self.pending_dynamic_tools.clear();
+@@ -164,6 +169,21 @@ impl TurnState {
+         self.pending_user_input.remove(key)
+     }
+ 
++    pub(crate) fn insert_pending_user_input_response(
++        &mut self,
++        key: String,
++        response: RequestUserInputResponse,
++    ) -> Option<RequestUserInputResponse> {
++        self.pending_user_input_responses.insert(key, response)
++    }
++
++    pub(crate) fn take_pending_user_input_response(
++        &mut self,
++        key: &str,
++    ) -> Option<RequestUserInputResponse> {
++        self.pending_user_input_responses.remove(key)
++    }
++
+     pub(crate) fn insert_pending_elicitation(
+         &mut self,
+         server_name: String,
+diff --git a/third_party/codex/codex-rs/core/src/thread_manager.rs b/third_party/codex/codex-rs/core/src/thread_manager.rs
+index 27c3dfb4957f38fc92ed5a4dd3480e9fd8d99525..79d10cc06ec95c55e29b7862cb9d837e2077495f 100644
+--- a/third_party/codex/codex-rs/core/src/thread_manager.rs
++++ b/third_party/codex/codex-rs/core/src/thread_manager.rs
+@@ -356,6 +356,7 @@ pub(crate) struct ThreadManagerState {
+     installation_id: String,
+     analytics_events_client: Option<AnalyticsEventsClient>,
+     model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
++    tool_call_gate: Option<Arc<dyn crate::ToolCallGate>>,
+     // Captures submitted ops for testing purpose when test mode is enabled.
+     ops_log: Option<SharedCapturedOps>,
+ }
+@@ -485,6 +486,7 @@ impl ThreadManager {
+                 installation_id,
+                 analytics_events_client,
+                 model_stream_transport: None,
++                tool_call_gate: None,
+                 ops_log: should_use_test_thread_manager_behavior()
+                     .then(|| Arc::new(std::sync::Mutex::new(Vec::new()))),
+             }),
+@@ -513,6 +515,15 @@ impl ThreadManager {
+         self
+     }
+ 
++    /// Inject a host-owned admission boundary before every root or descendant tool handler.
++    pub fn with_tool_call_gate(mut self, gate: Arc<dyn crate::ToolCallGate>) -> Self {
++        let Some(state) = Arc::get_mut(&mut self.state) else {
++            unreachable!("tool call gate must be set before thread manager is shared");
++        };
++        state.tool_call_gate = Some(gate);
++        self
++    }
++
+     /// Replaces the process-wide provider before this manager is shared with threads.
+     pub fn with_code_mode_session_provider(
+         mut self,
+@@ -644,6 +655,7 @@ impl ThreadManager {
+                 installation_id,
+                 analytics_events_client: None,
+                 model_stream_transport: None,
++                tool_call_gate: None,
+                 ops_log: should_use_test_thread_manager_behavior()
+                     .then(|| Arc::new(std::sync::Mutex::new(Vec::new()))),
+             }),
+@@ -1796,10 +1808,13 @@ impl ThreadManagerState {
+             metrics_service_name,
+             parent_trace,
+             environments,
+-            thread_extension_init,
++            mut thread_extension_init,
+             client_mcp_extensions,
+             reserved_thread_id,
+         } = options;
++        if let Some(gate) = self.tool_call_gate.as_ref() {
++            thread_extension_init.insert(crate::ToolCallGateAttachment::new(Arc::clone(gate)));
++        }
+         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
+         let environments = environments.unwrap_or_else(|| {
+             default_thread_environment_selections(
+diff --git a/third_party/codex/codex-rs/core/src/tool_call_gate.rs b/third_party/codex/codex-rs/core/src/tool_call_gate.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..569f12bd7fbac1f859f06beb1d7780dba16d9ef1
+--- /dev/null
++++ b/third_party/codex/codex-rs/core/src/tool_call_gate.rs
+@@ -0,0 +1,171 @@
++use std::fmt;
++use std::sync::Arc;
++
++use futures::future::BoxFuture;
++
++/// Host-owned request observed immediately before a Codex tool handler runs.
++#[derive(Clone, Eq, PartialEq)]
++pub struct ToolCallGateRequest {
++    pub thread_id: String,
++    pub turn_id: String,
++    pub call_id: String,
++    pub namespace: Option<String>,
++    pub tool_name: String,
++    pub payload: ToolCallGatePayload,
++}
++
++/// Exact raw or handler-parsed payload presented at the corresponding admission point.
++#[derive(Clone, Eq, PartialEq)]
++pub enum ToolCallGatePayload {
++    Function {
++        arguments: String,
++    },
++    ToolSearch {
++        arguments_json: String,
++    },
++    Custom {
++        input: String,
++    },
++    Shell {
++        program: String,
++        args: Vec<String>,
++        working_directory: String,
++    },
++    Files {
++        changes: Vec<ToolCallGateFileChange>,
++    },
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum ToolCallGateFileOperation {
++    Create,
++    Write,
++    Delete,
++}
++
++#[derive(Clone, Eq, PartialEq)]
++pub struct ToolCallGateFileChange {
++    pub operation: ToolCallGateFileOperation,
++    pub path: String,
++    pub move_path: Option<String>,
++}
++
++impl fmt::Debug for ToolCallGateFileChange {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("ToolCallGateFileChange")
++            .field("operation", &self.operation)
++            .field("path", &"<private>")
++            .field("move_path", &self.move_path.as_ref().map(|_| "<private>"))
++            .finish()
++    }
++}
++
++impl fmt::Debug for ToolCallGateRequest {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("ToolCallGateRequest")
++            .field("thread_id", &self.thread_id)
++            .field("turn_id", &self.turn_id)
++            .field("call_id", &self.call_id)
++            .field("namespace", &self.namespace)
++            .field("tool_name", &self.tool_name)
++            .field("payload", &self.payload)
++            .finish()
++    }
++}
++
++impl fmt::Debug for ToolCallGatePayload {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str(match self {
++            Self::Function { .. } => "Function(<private>)",
++            Self::ToolSearch { .. } => "ToolSearch(<private>)",
++            Self::Custom { .. } => "Custom(<private>)",
++            Self::Shell { .. } => "Shell(<private>)",
++            Self::Files { .. } => "Files(<private>)",
++        })
++    }
++}
++
++/// Stable host rejection returned before the tool handler can perform a side effect.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ToolCallGateRejection {
++    code: &'static str,
++    message: &'static str,
++}
++
++impl ToolCallGateRejection {
++    pub const fn new(code: &'static str, message: &'static str) -> Self {
++        Self { code, message }
++    }
++
++    pub const fn code(&self) -> &'static str {
++        self.code
++    }
++}
++
++impl fmt::Display for ToolCallGateRejection {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(formatter, "{}: {}", self.code, self.message)
++    }
++}
++
++impl std::error::Error for ToolCallGateRejection {}
++
++/// Typed host admission boundary invoked before every Codex tool handler.
++pub trait ToolCallGate: Send + Sync {
++    fn authorize(
++        &self,
++        request: ToolCallGateRequest,
++    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>>;
++
++    fn revalidate(
++        &self,
++        request: ToolCallGateRequest,
++    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>>;
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ToolCallGateFileChange, ToolCallGatePayload, ToolCallGateRequest};
++
++    #[test]
++    fn debug_output_redacts_exact_tool_payload() {
++        let request = ToolCallGateRequest {
++            thread_id: "thread".to_string(),
++            turn_id: "turn".to_string(),
++            call_id: "call".to_string(),
++            namespace: Some("functions".to_string()),
++            tool_name: "shell_command".to_string(),
++            payload: ToolCallGatePayload::Function {
++                arguments: "TOKEN=TOKEN_VALUE PAYLOAD=PAYLOAD_VALUE".to_string(),
++            },
++        };
++        let rendered = format!("{request:?}");
++        assert!(!rendered.contains("TOKEN_VALUE"));
++        assert!(!rendered.contains("PAYLOAD_VALUE"));
++
++        let path = ToolCallGateFileChange {
++            operation: super::ToolCallGateFileOperation::Write,
++            path: "/private/TOKEN_VALUE".to_string(),
++            move_path: Some("/private/PAYLOAD_VALUE".to_string()),
++        };
++        let rendered = format!("{path:?}");
++        assert!(!rendered.contains("TOKEN_VALUE"));
++        assert!(!rendered.contains("PAYLOAD_VALUE"));
++    }
++}
++
++/// Thread attachment installed by a host-owned [`ToolCallGate`].
++#[derive(Clone)]
++pub struct ToolCallGateAttachment(Arc<dyn ToolCallGate>);
++
++impl ToolCallGateAttachment {
++    pub fn new(gate: Arc<dyn ToolCallGate>) -> Self {
++        Self(gate)
++    }
++
++    pub fn gate(&self) -> Arc<dyn ToolCallGate> {
++        Arc::clone(&self.0)
++    }
++}
+diff --git a/third_party/codex/codex-rs/core/src/tools/orchestrator.rs b/third_party/codex/codex-rs/core/src/tools/orchestrator.rs
+index ad3ab60a9be945d5378c72e10e538b430a9b87b1..20730679a8daf2d0ed6bd7983bc611b7e9255715 100644
+--- a/third_party/codex/codex-rs/core/src/tools/orchestrator.rs
++++ b/third_party/codex/codex-rs/core/src/tools/orchestrator.rs
+@@ -100,6 +100,19 @@ impl ToolOrchestrator {
+                 .as_ref()
+                 .map(ActiveNetworkApproval::execution_proxy),
+         };
++        if let Some(payload) = tool.action_gate_payload(req)
++            && let Some(attachment) = tool_ctx
++                .session
++                .services
++                .thread_extension_data
++                .get::<crate::ToolCallGateAttachment>()
++            && let Err(error) = attachment
++                .gate()
++                .revalidate(action_gate_request(tool_ctx, payload))
++                .await
++        {
++            return (Err(ToolError::Rejected(error.to_string())), None);
++        }
+         let run_result = tool
+             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
+             .await;
+@@ -225,6 +238,20 @@ impl ToolOrchestrator {
+             }
+         }
+ 
++        if let Some(payload) = tool.action_gate_payload(req)
++            && let Some(attachment) = tool_ctx
++                .session
++                .services
++                .thread_extension_data
++                .get::<crate::ToolCallGateAttachment>()
++        {
++            attachment
++                .gate()
++                .authorize(action_gate_request(tool_ctx, payload))
++                .await
++                .map_err(|error| ToolError::Rejected(error.to_string()))?;
++        }
++
+         // 2) First attempt under the selected sandbox.
+         let sandbox_override = sandbox_override_for_first_attempt(
+             tool.sandbox_permissions(req),
+@@ -512,6 +539,20 @@ impl ToolOrchestrator {
+     }
+ }
+ 
++fn action_gate_request(
++    tool_ctx: &ToolCtx,
++    payload: crate::ToolCallGatePayload,
++) -> crate::ToolCallGateRequest {
++    crate::ToolCallGateRequest {
++        thread_id: tool_ctx.session.thread_id.to_string(),
++        turn_id: tool_ctx.step_context.turn.sub_id.clone(),
++        call_id: tool_ctx.call_id.clone(),
++        namespace: tool_ctx.tool_name.namespace.clone(),
++        tool_name: tool_ctx.tool_name.name.clone(),
++        payload,
++    }
++}
++
+ fn sandbox_outcome_from_tool_error(err: &ToolError) -> Option<&'static str> {
+     match err {
+         ToolError::Codex(err) => match err.details() {
+diff --git a/third_party/codex/codex-rs/core/src/tools/parallel.rs b/third_party/codex/codex-rs/core/src/tools/parallel.rs
+index 4f1d0b75a7bfb052b9dbed10fddc6257c30857bc..5cd3a9cc517e367514ae030a52a73fe8d53ddf08 100644
+--- a/third_party/codex/codex-rs/core/src/tools/parallel.rs
++++ b/third_party/codex/codex-rs/core/src/tools/parallel.rs
+@@ -132,6 +132,10 @@ impl ToolCallRuntime {
+         let terminal_outcome_reached = Arc::new(AtomicBool::new(false));
+         let dispatch_terminal_outcome_reached = Arc::clone(&terminal_outcome_reached);
+         let dispatch_call = call.clone();
++        let tool_call_gate = session
++            .services
++            .thread_extension_data
++            .get::<crate::ToolCallGateAttachment>();
+ 
+         let dispatch_span = trace_span!(
+             "dispatch_tool_call_with_code_mode_result",
+@@ -155,6 +159,47 @@ impl ToolCallRuntime {
+                 } else {
+                     Either::Right(lock.write().await)
+                 };
++                if let Some(attachment) = tool_call_gate
++                    && !runtime_gates_action(&dispatch_call)
++                {
++                    let payload = match &dispatch_call.payload {
++                        ToolPayload::Function { arguments } => {
++                            crate::ToolCallGatePayload::Function {
++                                arguments: arguments.clone(),
++                            }
++                        }
++                        ToolPayload::ToolSearch { arguments } => {
++                            crate::ToolCallGatePayload::ToolSearch {
++                                arguments_json: serde_json::to_string(arguments).map_err(|_| {
++                                    FunctionCallError::RespondToModel(
++                                        "tool authorization payload is invalid".to_string(),
++                                    )
++                                })?,
++                            }
++                        }
++                        ToolPayload::Custom { input } => crate::ToolCallGatePayload::Custom {
++                            input: input.clone(),
++                        },
++                    };
++                    let request = crate::ToolCallGateRequest {
++                        thread_id: session.thread_id.to_string(),
++                        turn_id: turn.sub_id.clone(),
++                        call_id: dispatch_call.call_id.clone(),
++                        namespace: dispatch_call.tool_name.namespace.clone(),
++                        tool_name: dispatch_call.tool_name.name.clone(),
++                        payload,
++                    };
++                    attachment
++                        .gate()
++                        .authorize(request.clone())
++                        .await
++                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
++                    attachment
++                        .gate()
++                        .revalidate(request)
++                        .await
++                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
++                }
+                 // Admission through the parallel-execution gate marks the end
+                 // of dispatch waiting and the start of handler execution.
+                 if let Some(execution_started_at) = execution_started_at {
+@@ -222,6 +267,14 @@ impl ToolCallRuntime {
+     }
+ }
+ 
++fn runtime_gates_action(call: &ToolCall) -> bool {
++    call.tool_name.is_default_namespace()
++        && matches!(
++            call.tool_name.name.as_str(),
++            "shell_command" | "exec_command" | "apply_patch"
++        )
++}
++
+ impl ToolCallRuntime {
+     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
+         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
+@@ -368,6 +421,7 @@ impl Drop for ToolCallTimingGuard {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use std::sync::atomic::AtomicUsize;
+     use std::time::Duration;
+ 
+     use crate::session::step_context::StepContext;
+@@ -386,6 +440,198 @@ mod tests {
+     use tokio::sync::oneshot;
+     use tracing_test::internal::MockWriter;
+ 
++    struct BlockingToolCallGate {
++        entered: std::sync::Mutex<Option<oneshot::Sender<crate::ToolCallGateRequest>>>,
++        release: Arc<Notify>,
++    }
++
++    impl crate::ToolCallGate for BlockingToolCallGate {
++        fn authorize(
++            &self,
++            request: crate::ToolCallGateRequest,
++        ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
++            let entered = self
++                .entered
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .take();
++            let release = Arc::clone(&self.release);
++            Box::pin(async move {
++                if let Some(entered) = entered {
++                    let _ = entered.send(request);
++                }
++                release.notified().await;
++                Ok(())
++            })
++        }
++
++        fn revalidate(
++            &self,
++            _request: crate::ToolCallGateRequest,
++        ) -> futures::future::BoxFuture<'static, Result<(), crate::ToolCallGateRejection>> {
++            Box::pin(async {
++                Err(crate::ToolCallGateRejection::new(
++                    "UNEXPECTED_REVALIDATION",
++                    "test gate did not expect revalidation",
++                ))
++            })
++        }
++    }
++
++    struct CountingHandler {
++        tool_name: codex_tools::ToolName,
++        calls: Arc<AtomicUsize>,
++    }
++
++    impl ToolExecutor<ToolInvocation> for CountingHandler {
++        fn tool_name(&self) -> codex_tools::ToolName {
++            self.tool_name.clone()
++        }
++
++        fn spec(&self) -> codex_tools::ToolSpec {
++            codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
++                name: self.tool_name.name.clone(),
++                description: "Counting test tool.".to_string(),
++                strict: false,
++                defer_loading: None,
++                parameters: codex_tools::JsonSchema::default(),
++                output_schema: None,
++            })
++        }
++
++        fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++            self.calls.fetch_add(1, Ordering::SeqCst);
++            Box::pin(async {
++                Ok(
++                    Box::new(FunctionToolOutput::from_text("ok".to_string(), Some(true)))
++                        as Box<dyn crate::tools::context::ToolOutput>,
++                )
++            })
++        }
++    }
++
++    impl CoreToolRuntime for CountingHandler {}
++
++    #[tokio::test]
++    async fn cancellation_while_action_gate_waits_never_enters_handler() -> anyhow::Result<()> {
++        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
++        let (entered_tx, entered_rx) = oneshot::channel();
++        let release = Arc::new(Notify::new());
++        session
++            .services
++            .thread_extension_data
++            .insert(crate::ToolCallGateAttachment::new(Arc::new(
++                BlockingToolCallGate {
++                    entered: std::sync::Mutex::new(Some(entered_tx)),
++                    release: Arc::clone(&release),
++                },
++            )));
++        let session = Arc::new(session);
++        let turn_context = Arc::new(turn_context);
++        let tool_name = codex_tools::ToolName::plain("test_tool");
++        let calls = Arc::new(AtomicUsize::new(0));
++        let handler = Arc::new(CountingHandler {
++            tool_name: tool_name.clone(),
++            calls: Arc::clone(&calls),
++        }) as Arc<dyn CoreToolRuntime>;
++        let step_context = StepContext::for_test(Arc::clone(&turn_context));
++        let router = Arc::new(ToolRouter::from_parts(
++            ToolRegistry::from_tools([handler]),
++            Vec::new(),
++        ));
++        let step_context = step_context.with_tool_router_for_test(router);
++        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
++        let runtime = ToolCallRuntime::new(session, step_context, tracker);
++        let cancellation_token = CancellationToken::new();
++        let call = ToolCall {
++            tool_name,
++            call_id: "call-typed".to_string(),
++            payload: ToolPayload::Function {
++                arguments: "{\"TOKEN\":\"exact\"}".to_string(),
++            },
++            encrypted_function_args: None,
++        };
++
++        let response_task =
++            tokio::spawn(runtime.handle_tool_call(call, cancellation_token.clone()));
++        let observed = tokio::time::timeout(Duration::from_secs(1), entered_rx)
++            .await
++            .expect("gate should receive request")
++            .expect("gate request channel should remain open");
++        assert_eq!(observed.call_id, "call-typed");
++        assert_eq!(
++            observed.payload,
++            crate::ToolCallGatePayload::Function {
++                arguments: "{\"TOKEN\":\"exact\"}".to_string(),
++            }
++        );
++        cancellation_token.cancel();
++        tokio::time::timeout(Duration::from_secs(1), response_task)
++            .await
++            .expect("cancelled call should finish")
++            .expect("cancelled call task should join")
++            .expect("cancelled call should produce an aborted response");
++        assert_eq!(calls.load(Ordering::SeqCst), 0);
++        release.notify_waiters();
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn rejected_action_revalidation_never_enters_handler() -> anyhow::Result<()> {
++        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
++        let (entered_tx, entered_rx) = oneshot::channel();
++        let release = Arc::new(Notify::new());
++        session
++            .services
++            .thread_extension_data
++            .insert(crate::ToolCallGateAttachment::new(Arc::new(
++                BlockingToolCallGate {
++                    entered: std::sync::Mutex::new(Some(entered_tx)),
++                    release: Arc::clone(&release),
++                },
++            )));
++        let session = Arc::new(session);
++        let turn_context = Arc::new(turn_context);
++        let tool_name = codex_tools::ToolName::plain("test_tool");
++        let calls = Arc::new(AtomicUsize::new(0));
++        let handler = Arc::new(CountingHandler {
++            tool_name: tool_name.clone(),
++            calls: Arc::clone(&calls),
++        }) as Arc<dyn CoreToolRuntime>;
++        let step_context = StepContext::for_test(Arc::clone(&turn_context));
++        let router = Arc::new(ToolRouter::from_parts(
++            ToolRegistry::from_tools([handler]),
++            Vec::new(),
++        ));
++        let step_context = step_context.with_tool_router_for_test(router);
++        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
++        let runtime = ToolCallRuntime::new(session, step_context, tracker);
++        let response_task = tokio::spawn(runtime.handle_tool_call(
++            ToolCall {
++                tool_name,
++                call_id: "call-stale".to_string(),
++                payload: ToolPayload::Function {
++                    arguments: "{}".to_string(),
++                },
++                encrypted_function_args: None,
++            },
++            CancellationToken::new(),
++        ));
++        let observed = tokio::time::timeout(Duration::from_secs(1), entered_rx)
++            .await
++            .expect("authorization should receive request")
++            .expect("authorization request channel should remain open");
++        assert_eq!(observed.call_id, "call-stale");
++        release.notify_one();
++        tokio::time::timeout(Duration::from_secs(1), response_task)
++            .await
++            .expect("rejected revalidation should finish")
++            .expect("rejected revalidation task should join")
++            .expect("rejection should be returned to the model");
++        assert_eq!(calls.load(Ordering::SeqCst), 0);
++        Ok(())
++    }
++
+     #[test]
+     fn tool_call_timing_guard_ignores_code_mode_source() {
+         let subscriber = tracing_subscriber::fmt()
+diff --git a/third_party/codex/codex-rs/core/src/tools/runtimes/apply_patch.rs b/third_party/codex/codex-rs/core/src/tools/runtimes/apply_patch.rs
+index 4446a0da0882f6c117061cb7c90cad86e6b25f65..e6e0151c734e64ec5271698647e2cd993e8e25ef 100644
+--- a/third_party/codex/codex-rs/core/src/tools/runtimes/apply_patch.rs
++++ b/third_party/codex/codex-rs/core/src/tools/runtimes/apply_patch.rs
+@@ -16,6 +16,7 @@ use crate::tools::sandboxing::ToolRuntime;
+ use crate::tools::sandboxing::executor_windows_sandbox_level;
+ use codex_apply_patch::AppliedPatchDelta;
+ use codex_apply_patch::ApplyPatchAction;
++use codex_apply_patch::ApplyPatchFileChange;
+ use codex_apply_patch::ApplyPatchOptions;
+ use codex_exec_server::FileSystemSandboxContext;
+ use codex_protocol::error::CodexErr;
+@@ -155,6 +156,37 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
+         &req.turn_environment
+     }
+ 
++    fn action_gate_payload(&self, req: &ApplyPatchRequest) -> Option<crate::ToolCallGatePayload> {
++        let mut changes = req
++            .action
++            .changes()
++            .iter()
++            .map(|(path, change)| {
++                let (operation, move_path) = match change {
++                    ApplyPatchFileChange::Add { .. } => {
++                        (crate::ToolCallGateFileOperation::Create, None)
++                    }
++                    ApplyPatchFileChange::Delete { .. } => {
++                        (crate::ToolCallGateFileOperation::Delete, None)
++                    }
++                    ApplyPatchFileChange::Update { move_path, .. } => (
++                        crate::ToolCallGateFileOperation::Write,
++                        move_path
++                            .as_ref()
++                            .map(|path| path.to_path_buf().to_string_lossy().into_owned()),
++                    ),
++                };
++                crate::ToolCallGateFileChange {
++                    operation,
++                    path: path.to_path_buf().to_string_lossy().into_owned(),
++                    move_path,
++                }
++            })
++            .collect::<Vec<_>>();
++        changes.sort_by(|left, right| left.path.cmp(&right.path));
++        Some(crate::ToolCallGatePayload::Files { changes })
++    }
++
+     fn uses_executor_managed_process_sandbox(&self, req: &ApplyPatchRequest) -> bool {
+         req.turn_environment.environment.is_remote()
+     }
+diff --git a/third_party/codex/codex-rs/core/src/tools/runtimes/shell.rs b/third_party/codex/codex-rs/core/src/tools/runtimes/shell.rs
+index 58fc9c4021d3fb3739892ba8fb4a1443c5c0494b..754f2ccd049652833fe5b353f683d4fef0baabae 100644
+--- a/third_party/codex/codex-rs/core/src/tools/runtimes/shell.rs
++++ b/third_party/codex/codex-rs/core/src/tools/runtimes/shell.rs
+@@ -157,6 +157,15 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+         &req.turn_environment
+     }
+ 
++    fn action_gate_payload(&self, req: &ShellRequest) -> Option<crate::ToolCallGatePayload> {
++        let (program, args) = req.command.split_first()?;
++        Some(crate::ToolCallGatePayload::Shell {
++            program: program.clone(),
++            args: args.to_vec(),
++            working_directory: req.cwd.to_string_lossy().into_owned(),
++        })
++    }
++
+     fn network_approval_spec(
+         &self,
+         req: &ShellRequest,
+diff --git a/third_party/codex/codex-rs/core/src/tools/runtimes/shell_tests.rs b/third_party/codex/codex-rs/core/src/tools/runtimes/shell_tests.rs
+index 217983a615f109f312aa29cbc54e54beaa25ebfc..179363d4c4a02b34ad5ccb2a40b03f8949161672 100644
+--- a/third_party/codex/codex-rs/core/src/tools/runtimes/shell_tests.rs
++++ b/third_party/codex/codex-rs/core/src/tools/runtimes/shell_tests.rs
+@@ -16,7 +16,7 @@ async fn approval_key_uses_path_uri_and_includes_environment_id() {
+     let cwd = AbsolutePathBuf::try_from(std::env::current_dir().expect("read current dir"))
+         .expect("current dir is absolute");
+     let mut request = ShellRequest {
+-        command: vec!["echo".to_string(), "hello".to_string()],
++        command: vec!["pnpm".to_string(), "add".to_string(), "exact".to_string()],
+         turn_environment: TurnEnvironment::new(
+             TurnEnvironmentSelection {
+                 environment_id: "remote".to_string(),
+@@ -57,6 +57,14 @@ async fn approval_key_uses_path_uri_and_includes_environment_id() {
+         },
+     };
+     let runtime = ShellRuntime::for_shell_command(ShellRuntimeBackend::ShellCommandClassic);
++    assert_eq!(
++        runtime.action_gate_payload(&request),
++        Some(crate::ToolCallGatePayload::Shell {
++            program: "pnpm".to_string(),
++            args: vec!["add".to_string(), "exact".to_string()],
++            working_directory: cwd.to_string_lossy().into_owned(),
++        })
++    );
+     let original_key = runtime
+         .approval_action(&request, "call-1")
+         .expect("build approval action")
+diff --git a/third_party/codex/codex-rs/core/src/tools/runtimes/unified_exec.rs b/third_party/codex/codex-rs/core/src/tools/runtimes/unified_exec.rs
+index e34360a67011c5cdbd7896b3af1b1c96596100b5..c381e39bfd32f32147dff6bd392b4f896ca3bc27 100644
+--- a/third_party/codex/codex-rs/core/src/tools/runtimes/unified_exec.rs
++++ b/third_party/codex/codex-rs/core/src/tools/runtimes/unified_exec.rs
+@@ -201,6 +201,15 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+         &req.turn_environment
+     }
+ 
++    fn action_gate_payload(&self, req: &UnifiedExecRequest) -> Option<crate::ToolCallGatePayload> {
++        let (program, args) = req.command.split_first()?;
++        Some(crate::ToolCallGatePayload::Shell {
++            program: program.clone(),
++            args: args.to_vec(),
++            working_directory: req.cwd.to_path_buf().to_string_lossy().into_owned(),
++        })
++    }
++
+     fn uses_executor_managed_process_sandbox(&self, req: &UnifiedExecRequest) -> bool {
+         req.turn_environment.environment.is_remote()
+     }
+@@ -618,7 +627,7 @@ mod tests {
+             shell_type: ShellType::Sh,
+             hook_command: "pwd".to_string(),
+             process_id: 1000,
+-            cwd: cwd.into(),
++            cwd: cwd.clone().into(),
+             sandbox_cwd: sandbox_cwd.clone().into(),
+             turn_environment: test_turn_environment(sandbox_cwd.clone().into()),
+             env: HashMap::new(),
+@@ -641,6 +650,14 @@ mod tests {
+             runtime.sandbox_cwd(&request),
+             Some(&PathUri::from_abs_path(&sandbox_cwd))
+         );
++        assert_eq!(
++            runtime.action_gate_payload(&request),
++            Some(crate::ToolCallGatePayload::Shell {
++                program: "pwd".to_string(),
++                args: Vec::new(),
++                working_directory: cwd.to_string_lossy().into_owned(),
++            })
++        );
+     }
+ 
+     #[tokio::test]
+diff --git a/third_party/codex/codex-rs/core/src/tools/sandboxing.rs b/third_party/codex/codex-rs/core/src/tools/sandboxing.rs
+index 6d5d89a6cc1e254eb625b063e3555c5b51ff33ef..6143450860e901fd4296085b1bfa8dc4be7f5c82 100644
+--- a/third_party/codex/codex-rs/core/src/tools/sandboxing.rs
++++ b/third_party/codex/codex-rs/core/src/tools/sandboxing.rs
+@@ -362,6 +362,8 @@ pub(crate) enum ToolError {
+ pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
+     fn turn_environment<'a>(&self, req: &'a Req) -> &'a TurnEnvironment;
+ 
++    fn action_gate_payload(&self, req: &Req) -> Option<crate::ToolCallGatePayload>;
++
+     fn uses_executor_managed_process_sandbox(&self, _req: &Req) -> bool {
+         false
+     }
+diff --git a/third_party/codex/codex-rs/core/tests/suite/turn_input_submission.rs b/third_party/codex/codex-rs/core/tests/suite/turn_input_submission.rs
+index 09d211f4b13d7c236e55c3292e55548c2e3272cc..1d73073f255322d4db50a455ad765e7322031838 100644
+--- a/third_party/codex/codex-rs/core/tests/suite/turn_input_submission.rs
++++ b/third_party/codex/codex-rs/core/tests/suite/turn_input_submission.rs
+@@ -1,3 +1,4 @@
++use codex_core::DurableTurnInspection;
+ use codex_core::NotSubmittedReason;
+ use codex_core::RecoverTurnRequest;
+ use codex_core::StartIfIdleSubmission;
+@@ -45,6 +46,157 @@ async fn submit_user_message(
+     codex.start_or_steer_turn(user_message_request(text)).await
+ }
+ 
++fn started_turn_id(submission: TurnInputSubmission) -> String {
++    let TurnInputSubmission::Started { turn_id } = submission else {
++        panic!("expected the test turn to start");
++    };
++    turn_id
++}
++
++#[tokio::test]
++async fn durable_turn_inspection_reports_absent() {
++    let absent_server = responses::start_mock_server().await;
++    let absent = test_codex()
++        .build_with_auto_env(&absent_server)
++        .await
++        .expect("build absent durable-turn session");
++    assert_eq!(
++        absent
++            .codex
++            .inspect_durable_turn("turn-that-was-never-submitted")
++            .await
++            .expect("inspect absent turn"),
++        DurableTurnInspection::Absent
++    );
++}
++
++#[tokio::test]
++async fn durable_turn_inspection_reports_in_progress() {
++    let (release_response, response_gate) = oneshot::channel();
++    let (in_progress_server, _completions) = start_streaming_sse_server(vec![vec![
++        StreamingSseChunk {
++            gate: None,
++            body: responses::sse(vec![ev_response_created("resp-in-progress")]),
++        },
++        StreamingSseChunk {
++            gate: Some(response_gate),
++            body: responses::sse(vec![ev_completed("resp-in-progress")]),
++        },
++    ]])
++    .await;
++    let in_progress = test_codex()
++        .build_with_streaming_server(&in_progress_server)
++        .await
++        .expect("build in-progress durable-turn session");
++    let in_progress_turn = started_turn_id(
++        submit_user_message(&in_progress.codex, "keep this turn open")
++            .await
++            .expect("submit in-progress turn"),
++    );
++    wait_for_event(&in_progress.codex, |event| {
++        matches!(event, EventMsg::TurnStarted(_))
++    })
++    .await;
++    assert_eq!(
++        in_progress
++            .codex
++            .inspect_durable_turn(&in_progress_turn)
++            .await
++            .expect("inspect in-progress turn"),
++        DurableTurnInspection::InProgress
++    );
++    release_response
++        .send(())
++        .expect("in-progress response gate should remain open");
++    wait_for_event(&in_progress.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++}
++
++#[tokio::test]
++async fn durable_turn_inspection_recovers_completed_terminal_and_usage() {
++    let completed_server = responses::start_mock_server().await;
++    responses::mount_sse_once(
++        &completed_server,
++        responses::sse(vec![
++            ev_response_created("resp-completed"),
++            responses::ev_assistant_message("message-completed", "durable final answer"),
++            responses::ev_completed_with_tokens("resp-completed", 17),
++        ]),
++    )
++    .await;
++    let completed = test_codex()
++        .build_with_auto_env(&completed_server)
++        .await
++        .expect("build completed durable-turn session");
++    let completed_turn = started_turn_id(
++        submit_user_message(&completed.codex, "finish this turn")
++            .await
++            .expect("submit completed turn"),
++    );
++    wait_for_event(&completed.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let DurableTurnInspection::Completed(completion) = completed
++        .codex
++        .inspect_durable_turn(&completed_turn)
++        .await
++        .expect("inspect completed turn")
++    else {
++        panic!("expected completed durable turn");
++    };
++    assert_eq!(completion.turn_id, completed_turn);
++    assert_eq!(
++        completion.last_agent_message.as_deref(),
++        Some("durable final answer")
++    );
++    assert_eq!(
++        completion
++            .token_usage
++            .as_ref()
++            .map(|usage| usage.last_token_usage.total_tokens),
++        Some(17)
++    );
++}
++
++#[tokio::test]
++async fn durable_turn_inspection_reports_failed() {
++    let failed_server = responses::start_mock_server().await;
++    responses::mount_response_once(
++        &failed_server,
++        responses::sse_response(responses::sse_failed(
++            "resp-failed",
++            "fixture_failure",
++            "fixture failure",
++        )),
++    )
++    .await;
++    let failed = test_codex()
++        .build_with_auto_env(&failed_server)
++        .await
++        .expect("build failed durable-turn session");
++    let failed_turn = started_turn_id(
++        submit_user_message(&failed.codex, "fail this turn")
++            .await
++            .expect("submit failed turn"),
++    );
++    wait_for_event(&failed.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let DurableTurnInspection::Failed(failure) = failed
++        .codex
++        .inspect_durable_turn(&failed_turn)
++        .await
++        .expect("inspect failed turn")
++    else {
++        panic!("expected failed durable turn");
++    };
++    assert_eq!(failure.turn_id, failed_turn);
++}
++
+ #[tokio::test]
+ async fn start_turn_if_idle_rejects_non_user_input_that_requests_plan_mode() {
+     let server = responses::start_mock_server().await;

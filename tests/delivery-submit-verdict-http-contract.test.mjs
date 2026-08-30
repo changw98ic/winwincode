@@ -246,7 +246,7 @@ test('all generated clients and docs expose only the canonical verdict request',
   assert.equal(generated.status, 0, `${generated.stdout}\n${generated.stderr}`)
 
   const rust = readFileSync(join(root, 'crates', 'winwincode-api', 'src', 'generated.rs'), 'utf8')
-  const typescript = readFileSync(join(root, 'apps', 'web', 'src', 'generated', 'contracts.ts'), 'utf8')
+  const typescript = readFileSync(join(root, 'apps', 'client', 'src', 'generated', 'contracts.ts'), 'utf8')
   const openapi = JSON.parse(readFileSync(join(schemaRoot, 'openapi.generated.json'), 'utf8'))
   const collection = JSON.parse(
     readFileSync(join(schemaRoot, 'schema-collection.generated.json'), 'utf8'),
@@ -266,7 +266,7 @@ test('all generated clients and docs expose only the canonical verdict request',
   const generatedClientPath = join(
     root,
     'apps',
-    'web',
+    'client',
     'src',
     'generated',
     'control-plane-client.ts',
@@ -303,11 +303,11 @@ test('all generated clients and docs expose only the canonical verdict request',
     type DeliverySubmitVerdictPayload = { deliveryId: string; candidateDigest: string }
   `, 'duplicate-verdict-dto.ts'), /redeclares generated DeliverySubmitVerdictPayload/u)
 
-  const webFiles = readdirSync(join(root, 'apps', 'web', 'src'), { recursive: true })
+  const webFiles = readdirSync(join(root, 'apps', 'client', 'src'), { recursive: true })
     .filter(path => typeof path === 'string' && /\.(?:ts|tsx)$/u.test(path))
     .filter(path => path.split(/[\\/]/u)[0] !== 'generated')
   for (const path of webFiles) {
-    const source = readFileSync(join(root, 'apps', 'web', 'src', path), 'utf8')
+    const source = readFileSync(join(root, 'apps', 'client', 'src', path), 'utf8')
     assertCanonicalHandwrittenVerdictRequests(source, path)
   }
 

@@ -1,49 +1,77 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { readdirSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const testsDirectory = join(root, 'tests')
-const serialProcessTests = Object.freeze([
-  'tests/live-evaluation-runner.test.mjs',
+
+// The TypeScript lane exercises the current Client and generated-contract
+// boundaries.  Product-process checks (Rust, Server API, and release assets)
+// have their own root scripts so this lane stays deterministic and does not
+// start a second process-boundary build.
+const canonicalTestFiles = Object.freeze([
+  'tests/api-production-vertical-runner.test.mjs',
+  'tests/architecture-documentation.test.mjs',
+  'tests/auth-session-client.test.mjs',
+  'tests/chat-control-plane-integration.test.mjs',
+  'tests/chat-page.test.mjs',
+  'tests/chat-view-model.test.mjs',
+  'tests/client-server-separation.test.mjs',
+  'tests/contract-codegen.test.mjs',
+  'tests/control-plane-api-coverage.test.mjs',
+  'tests/control-plane-client-facade.test.mjs',
+  'tests/control-plane-http-contract.test.mjs',
+  'tests/control-plane-web-client-preflight.test.mjs',
+  'tests/control-plane-websocket-contract.test.mjs',
+  'tests/credential-leak-gate.test.mjs',
+  'tests/delivery-evidence-verdict-rework-contract.test.mjs',
+  'tests/delivery-execution-job-schema.test.mjs',
+  'tests/delivery-rust-cutover-gate.test.mjs',
+  'tests/delivery-submit-verdict-http-contract.test.mjs',
+  'tests/domain-schema.test.mjs',
+  'tests/enterprise-application.test.mjs',
+  'tests/enterprise-management-view-model.test.mjs',
+  'tests/enterprise-operations-page.test.mjs',
+  'tests/enterprise-policy-contract.test.mjs',
+  'tests/enterprise-resource-page.test.mjs',
+  'tests/execution-port-contract.test.mjs',
+  'tests/generated-control-plane-client.test.mjs',
+  'tests/local-decisions-client.test.mjs',
+  'tests/local-operations-client.test.mjs',
+  'tests/pnpm-pack-report.test.mjs',
+  'tests/readme-quickstart.test.mjs',
+  'tests/rust-format-gate.test.mjs',
+  'tests/server-durable-event-hub-contract.test.mjs',
+  'tests/session-identity-contract.test.mjs',
+  'tests/settings-control-plane-integration.test.mjs',
+  'tests/strongflow-canonical-api-contract.test.mjs',
+  'tests/strongflow-delivery-advance-contract.test.mjs',
+  'tests/strongflow-delivery-api.test.mjs',
+  'tests/strongflow-projection-contract.test.mjs',
+  'tests/strongflow-role.test.mjs',
+  'tests/strongflow-view-model.test.mjs',
+  'tests/strongflow-workflow-integration.test.mjs',
 ])
-const testFiles = readdirSync(testsDirectory, { withFileTypes: true })
-  .filter(entry => entry.isFile() && entry.name.endsWith('.test.mjs'))
-  .map(entry => `tests/${entry.name}`)
-  .sort()
 
-for (const path of serialProcessTests) {
-  if (!testFiles.includes(path)) {
-    throw new Error(`required process-boundary test is missing: ${path}`)
+for (const path of canonicalTestFiles) {
+  if (!existsSync(join(root, path))) {
+    throw new Error(`canonical TypeScript test is missing: ${path}`)
   }
 }
 
-function runTests(arguments_) {
-  const result = spawnSync(process.execPath, arguments_, {
-    cwd: root,
-    stdio: 'inherit',
-  })
-  if (result.error !== undefined) throw result.error
-  if (result.signal !== null) {
-    throw new Error(`Node test runner ended with ${result.signal}`)
-  }
-  if (result.status !== 0) process.exit(result.status ?? 1)
+const result = spawnSync(process.execPath, [
+  '--test',
+  '--test-concurrency=1',
+  ...canonicalTestFiles,
+], {
+  cwd: root,
+  stdio: 'inherit',
+})
+if (result.error !== undefined) throw result.error
+if (result.signal !== null) {
+  throw new Error(`canonical TypeScript test runner ended with ${result.signal}`)
 }
+if (result.status !== 0) process.exit(result.status ?? 1)
 
-const parallelTests = testFiles.filter(path => !serialProcessTests.includes(path))
-runTests(['--test', '--test-concurrency=4', ...parallelTests])
-
-// Process-boundary tests run after the parallel suite so their nested gates
-// observe the repository without competing test-runner load.
-for (const path of serialProcessTests) runTests(['--test', path])
-
-// The full ten-scenario oracle runs after the parallel Node suite and reuses
-// the TypeScript build already produced by test:ts.
-runTests(['scripts/export-delivery-strongflow-oracle.mjs', '--check'])
-
-// The Rust differential gate validates the frozen migration plan until its
-// integration target appears. Once triggered, it executes Cargo and compares
-// the complete canonical result instead of trusting a Rust test name.
-runTests(['scripts/run-delivery-strongflow-rust-differential.mjs', '--check'])
+process.stdout.write(`canonical TypeScript tests passed: ${canonicalTestFiles.length}\n`)

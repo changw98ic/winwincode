@@ -1,12 +1,12 @@
 {
-  "schemaVersion": "winwincode.delivery-rust-cutover-gate.v1",
-  "issueId": "winwincode-9c4.16.2.7",
+  "schemaVersion": "winwincode.delivery-rust-cutover-gate.v2",
+  "issueId": "winwincode-9c4.16.6.6.5",
   "status": "implemented-enforced",
   "documentation": "docs/contracts/delivery-rust-cutover.md",
   "coverage": {
     "mode": "git-file-inventory+rg-direct-read-fallback",
     "symbolGraphComplete": false,
-    "reason": "The repository-local index script is absent; this gate claims file-level coverage only."
+    "reason": "The contract records repository-relative files and structural checks; it does not substitute for the source dependency graph."
   },
   "canonicalBackend": {
     "owner": "winwincode-control-plane",
@@ -29,18 +29,18 @@
       "command_receipts",
       "outbox_events"
     ],
-    "directSeedPolicy": "one-test-only-strict-snapshot-seed-for-the-task-dag-migration-scenario",
+    "directSeedPolicy": "one-test-only-strict-snapshot-seed-for-the-task-dag-scenario",
     "genericDeliveryMutationAllowed": false
   },
   "migration": {
-    "inputSchemaVersion": "winwincode.delivery-strongflow-differential-plan.v2",
-    "mappingVersion": "winwincode.delivery-strongflow-legacy-to-canonical.v1",
+    "planSchemaVersion": "winwincode.delivery-strongflow-rust-plan.v2",
+    "mappingVersion": "winwincode.delivery-strongflow-canonical.v1",
     "planAuthority": "node-authored-closed-plan-only",
-    "oldDtoPolicy": "one-time-test-migration-only",
+    "inputPolicy": "canonical-fixture-only",
     "runtimeFallbackAllowed": false,
     "expected": {
       "path": "tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json",
-      "sha256": "198c61015ff49885d1640c074f3927b4b5dbc98bf858fbb0cc5541b7ed5495d7"
+      "sha256": "246451128fbc0526b5f9c23377f63a2dca54921f58b6140cad7b0f3cf22a0aa7"
     },
     "checkpoints": [
       {
@@ -88,79 +88,88 @@
   "dependencyBoundaries": {
     "controlPlane": {
       "manifest": "crates/winwincode-control-plane/Cargo.toml",
-      "deniedDependencies": [
-        "codex-core",
-        "winwincode-worker",
-        "winwincode-native"
+      "allowedProductionDependencies": [
+        "winwincode-api",
+        "winwincode-audit",
+        "winwincode-delivery",
+        "winwincode-domain",
+        "winwincode-execution-port",
+        "winwincode-publication",
+        "winwincode-repository-context",
+        "winwincode-session",
+        "winwincode-storage"
       ]
     },
-    "delivery": {
-      "manifest": "crates/winwincode-delivery/Cargo.toml",
-      "deniedDependencies": [
+    "server": {
+      "manifest": "crates/winwincode-server/Cargo.toml",
+      "allowedProductionDependencies": [
         "winwincode-api",
         "winwincode-control-plane",
-        "winwincode-worker",
-        "winwincode-native"
+        "winwincode-codex",
+        "winwincode-domain",
+        "winwincode-execution-port",
+        "winwincode-local",
+        "winwincode-storage",
+        "winwincode-worker"
       ]
+    },
+    "worker": {
+      "manifest": "crates/winwincode-worker/Cargo.toml",
+      "allowedProductionDependencies": [
+        "winwincode-codex",
+        "winwincode-domain",
+        "winwincode-execution-port"
+      ]
+    },
+    "local": {
+      "manifest": "crates/winwincode-local/Cargo.toml",
+      "allowedProductionDependencies": [
+        "winwincode-control-plane",
+        "winwincode-observability",
+        "winwincode-worker"
+      ]
+    },
+    "helper": {
+      "manifest": "crates/helper/Cargo.toml",
+      "allowedProductionDependencies": []
     }
   },
-  "legacyBoundary": {
-    "phase2CutoverClaim": "canonical-rust-backend-only",
-    "browserHostCutoverComplete": false,
+  "releaseBoundary": {
+    "cutoverComplete": true,
     "newBackendCallersAllowed": false,
-    "allowedPurpose": "bounded-presentation-host-and-behavior-oracle-until-phase-6",
-    "uiCutoverTask": "winwincode-9c4.16.6.3",
-    "removalTask": "winwincode-9c4.16.6.6",
-    "strongFlowServiceConstructorPaths": [
-      "apps/host/src/cli.ts",
-      "packages/strongflow/src/index.ts",
-      "scripts/live-evaluation.mjs"
-    ],
-    "deliveryStoreWritePaths": [
-      "packages/dsh-profile/src/delivery-recovery.ts",
-      "packages/strongflow/src/delivery-service.ts"
-    ],
-    "deliveryStorePublicExportPaths": [
-      "packages/strongflow/src/index.ts"
-    ],
-    "deliveryStoreSymbolPaths": [
-      "packages/dsh-profile/src/delivery-recovery.ts",
-      "packages/strongflow/src/delivery-service.ts",
-      "packages/strongflow/src/delivery-store.ts"
-    ],
-    "deliveryStoreModuleReferencePaths": [
-      "packages/strongflow/src/delivery-service.ts",
-      "packages/strongflow/src/index.ts",
-      "scripts/verify-packages.mjs"
-    ],
-    "strongFlowServiceSymbolPaths": [
-      "apps/host/src/cli.ts",
-      "packages/strongflow/src/delivery-invoker.ts",
-      "packages/strongflow/src/delivery-service.ts",
-      "packages/strongflow/src/delivery-stage-coordinator.ts",
-      "packages/strongflow/src/index.ts",
-      "scripts/live-evaluation.mjs"
-    ]
+    "clientRoot": "apps/client",
+    "clientFacade": "apps/client/src/control-plane-client.ts",
+    "generatedNetworkOwner": "apps/client/src/generated/control-plane-client.ts",
+    "serverRoot": "crates/winwincode-server",
+    "controlPlaneRoot": "crates/winwincode-control-plane",
+    "workerRoot": "crates/winwincode-worker",
+    "localRoot": "crates/winwincode-local",
+    "helperRoot": "crates/helper",
+    "productWriter": "winwincode-control-plane",
+    "executionWriter": "winwincode-worker",
+    "executionSeam": "winwincode-execution-port",
+    "directClientNetworkAllowed": false,
+    "directWorkerProductWritesAllowed": false
   },
   "cleanup": {
-    "script": "scripts/verify-rust-delivery-cleanup.mjs",
-    "aggregateScript": "scripts/verify-runtime-cleanup.mjs",
-    "iterationsEnvironment": "WINWINCODE_CLEANUP_STRESS_ITERATIONS",
-    "defaultIterations": 4,
-    "maximumIterations": 32,
-    "command": "node scripts/run-delivery-strongflow-rust-differential.mjs --check",
-    "expectedOutput": "Rust differential runner matched all 10 canonical scenarios",
+    "gate": "scripts/phase-6-6-negative-gate.mjs",
+    "command": "corepack pnpm verify:phase-6.6",
+    "expectedOutput": "phase-6.6.6 negative gate GREEN",
     "isolation": "fresh-process-and-empty-TMPDIR-after-each-iteration",
     "exercisedRecoveryScenarios": [
       "corruption-recovery",
-      "request-id-replay"
+      "request-id-replay",
+      "cancel-replay",
+      "attempt-retry"
     ]
   },
   "verification": {
-    "cutoverCommand": "corepack pnpm verify:delivery-rust-cutover",
-    "cleanupCommand": "corepack pnpm verify:fixture-cleanup",
-    "fullCommand": "corepack pnpm verify",
+    "cutoverCommand": "corepack pnpm verify:phase-6.6",
+    "sourceCommand": "corepack pnpm verify:source",
+    "contractCommand": "corepack pnpm contracts:check",
+    "formatCommand": "corepack pnpm format:check",
     "gateTest": "tests/delivery-rust-cutover-gate.test.mjs",
-    "differentialTest": "tests/delivery-strongflow-rust-differential-gate.test.mjs"
+    "apiCoverageTest": "tests/control-plane-api-coverage.test.mjs",
+    "dependencyTest": "tests/control-plane-worker-dependency-contract.test.mjs"
   }
 }

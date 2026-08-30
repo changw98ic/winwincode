@@ -326,7 +326,7 @@ async fn start_if_idle(
             .turn_metadata_state
             .set_responsesapi_client_metadata(responsesapi_client_metadata);
     }
-    if has_user_input
+    if (has_user_input || is_recovery)
         && can_start_root_turn
         && turn_context
             .turn_metadata_state
