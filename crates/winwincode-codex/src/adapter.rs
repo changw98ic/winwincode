@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -2690,6 +2690,9 @@ fn number(value: &[u8], start: usize, end: usize) -> Option<u8> {
 const SEALED_HELPER_DIRECTORY: &str = "helper-installation";
 const SEALED_HELPER_NAME: &str = "winwincode-kernel-helper";
 
+#[cfg(unix)]
+static HELPER_VALIDATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[u8]>> {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return None;
@@ -2718,20 +2721,8 @@ fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[
     {
         return None;
     }
-    let Ok(bytes) = read_helper_bytes(&canonical_path) else {
-        return None;
-    };
-    if helper_digest(&bytes) != manifest.binary_digest().0 {
-        return None;
-    }
     #[cfg(unix)]
     {
-        if !canonical_path.metadata().is_ok_and(|metadata| {
-            metadata.permissions().mode() & 0o777 == manifest.binary_mode()
-                && manifest.binary_mode() == HELPER_RELEASE_BINARY_MODE
-        }) {
-            return None;
-        }
         let expected = format!(
             "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
             env!("CARGO_PKG_VERSION")
@@ -2741,13 +2732,12 @@ fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[
             env!("CARGO_PKG_VERSION"),
             env!("WINWINCODE_HELPER_SOURCE_SHA256")
         );
-        if bounded_helper_handshake(&canonical_path, expected.as_bytes())
-            && bounded_helper_identity(&canonical_path, identity.as_bytes())
-        {
-            Some(bytes.into())
-        } else {
-            None
-        }
+        validate_helper_image(
+            &canonical_path,
+            manifest,
+            expected.as_bytes(),
+            identity.as_bytes(),
+        )
     }
     #[cfg(not(unix))]
     {
@@ -2971,39 +2961,82 @@ fn bounded_helper_identity(path: &Path, expected: &[u8]) -> bool {
 }
 
 #[cfg(unix)]
+fn validate_helper_image(
+    path: &Path,
+    manifest: &HelperReleaseManifest,
+    handshake: &[u8],
+    identity: &[u8],
+) -> Option<Arc<[u8]>> {
+    let Ok(mut validated) = HELPER_VALIDATIONS.lock() else {
+        return None;
+    };
+    let bytes = read_helper_bytes(path).ok()?;
+    if helper_digest(&bytes) != manifest.binary_digest().0
+        || !path.metadata().is_ok_and(|metadata| {
+            metadata.permissions().mode() & 0o777 == manifest.binary_mode()
+                && manifest.binary_mode() == HELPER_RELEASE_BINARY_MODE
+        })
+    {
+        return None;
+    }
+    let validation_key = format!(
+        "{}\0{}\0{}",
+        manifest.binary_digest().0,
+        manifest.package_version(),
+        manifest.source_sha256()
+    );
+    if validated.contains(&validation_key) {
+        return Some(bytes.into());
+    }
+    let probes_succeeded =
+        || bounded_helper_handshake(path, handshake) && bounded_helper_identity(path, identity);
+    if !probes_succeeded() {
+        std::thread::yield_now();
+        if !probes_succeeded() {
+            return None;
+        }
+    }
+    if validated.len() >= 32 {
+        validated.remove(0);
+    }
+    validated.push(validation_key);
+    Some(bytes.into())
+}
+
+#[cfg(unix)]
 fn bounded_helper_probe(path: &Path, argument: &str, expected: &[u8]) -> bool {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
 
     const OUTPUT_LIMIT: u64 = 4096;
     const TIMEOUT: Duration = Duration::from_secs(2);
+    const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+    let Ok((stdout, helper_stdout)) = UnixStream::pair() else {
+        return false;
+    };
+    let Ok((stderr, helper_stderr)) = UnixStream::pair() else {
+        return false;
+    };
+    let output_deadline = std::time::Instant::now() + TIMEOUT + CLEANUP_TIMEOUT;
 
     let mut command = std::process::Command::new(path);
     command
         .arg(argument)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(OwnedFd::from(helper_stdout)))
+        .stderr(Stdio::from(OwnedFd::from(helper_stderr)))
         .process_group(0);
     let Ok(mut child) = command.spawn() else {
         return false;
     };
-    let Some(stdout) = child.stdout.take() else {
-        terminate_helper_process_group(&mut child);
-        return false;
-    };
-    let Some(stderr) = child.stderr.take() else {
-        terminate_helper_process_group(&mut child);
-        return false;
-    };
+    drop(command);
     let stdout = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.take(OUTPUT_LIMIT + 1).read_to_end(&mut bytes);
-        bytes
+        read_bounded_helper_output(stdout, OUTPUT_LIMIT, output_deadline)
     });
     let stderr = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.take(OUTPUT_LIMIT + 1).read_to_end(&mut bytes);
-        bytes
+        read_bounded_helper_output(stderr, OUTPUT_LIMIT, output_deadline)
     });
     let started = std::time::Instant::now();
     let status = loop {
@@ -3013,31 +3046,77 @@ fn bounded_helper_probe(path: &Path, argument: &str, expected: &[u8]) -> bool {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) | Err(_) => {
-                terminate_helper_process_group(&mut child);
                 break None;
             }
         }
     };
-    terminate_helper_process_group(&mut child);
-    let Ok(stdout) = stdout.join() else {
+    if !terminate_helper_process_group(&mut child, CLEANUP_TIMEOUT) {
+        return false;
+    }
+    let Ok(Ok(stdout)) = stdout.join() else {
         return false;
     };
-    let Ok(stderr) = stderr.join() else {
+    let Ok(Ok(stderr)) = stderr.join() else {
         return false;
     };
     status.is_some_and(|status| status.success()) && stderr.is_empty() && stdout == expected
 }
 
 #[cfg(unix)]
-fn terminate_helper_process_group(child: &mut std::process::Child) {
+fn read_bounded_helper_output(
+    mut output: std::os::unix::net::UnixStream,
+    limit: u64,
+    deadline: std::time::Instant,
+) -> std::io::Result<Vec<u8>> {
+    const READ_TIMEOUT: Duration = Duration::from_millis(25);
+
+    output.set_read_timeout(Some(READ_TIMEOUT))?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while std::time::Instant::now() < deadline && bytes.len() as u64 <= limit {
+        let remaining = usize::try_from(limit + 1 - bytes.len() as u64)
+            .unwrap_or(chunk.len())
+            .min(chunk.len());
+        match output.read(&mut chunk[..remaining]) {
+            Ok(0) => return Ok(bytes),
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if bytes.len() as u64 > limit {
+        Ok(bytes)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "helper output did not close before the deadline",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn terminate_helper_process_group(child: &mut std::process::Child, timeout: Duration) -> bool {
     let _ = std::process::Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        .args(["-KILL", "--", &format!("-{}", child.id())])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
     let _ = child.kill();
-    let _ = child.wait();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => return false,
+        }
+    }
 }
 
 fn decode_kernel_event(payload_json: &str) -> Result<CodexEvent, ProductionCodexError> {
@@ -3144,7 +3223,7 @@ mod tests {
     use super::{
         MAX_HELPER_BYTES, ProductionCodexErrorKind, bounded_helper_handshake, decode_kernel_event,
         project_helper, read_helper_bytes, seal_helper, submission_input_digest,
-        validate_sealed_helper,
+        terminate_helper_process_group, validate_helper_image, validate_sealed_helper,
     };
     use crate::helper_release::HelperReleaseManifest;
     use std::path::PathBuf;
@@ -3201,6 +3280,26 @@ mod tests {
             "winwincode-codex-helper-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    #[cfg(unix)]
+    fn process_is_running(process_id: u32) -> bool {
+        std::process::Command::new("/bin/kill")
+            .args(["-0", "--", &process_id.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn assert_process_stops(process_id: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while process_is_running(process_id) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!process_is_running(process_id));
     }
 
     #[test]
@@ -3371,20 +3470,142 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn helper_handshake_succeeds_without_waiting_for_the_cleanup_deadline() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = test_root("normal-handshake");
+        std::fs::create_dir_all(&root).expect("create helper fixture");
+        let helper = root.join("winwincode-kernel-helper");
+        let expected = b"exact helper handshake\n";
+        std::fs::write(&helper, "#!/bin/sh\nprintf 'exact helper handshake\\n'\n")
+            .expect("write normal helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("make normal helper runnable");
+
+        let started = std::time::Instant::now();
+        assert!(bounded_helper_handshake(&helper, expected));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        std::fs::remove_dir_all(root).expect("remove helper fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_release_probes_share_one_bounded_process_window() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Barrier};
+
+        const CONCURRENCY: usize = 8;
+        let root = test_root("concurrent-release-probes");
+        std::fs::create_dir_all(&root).expect("create helper fixture");
+        let helper = root.join("winwincode-kernel-helper");
+        let active = root.join("active");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nmkdir '{}' || exit 9\ntrap 'rmdir \"{}\"' EXIT\nsleep 0.05\ncase \"$1\" in\n  --winwincode-helper-handshake) printf 'exact helper handshake\\n' ;;\n  --winwincode-helper-identity) printf 'exact helper identity\\n' ;;\n  *) exit 2 ;;\nesac\n",
+                active.display(),
+                active.display(),
+            ),
+        )
+        .expect("write contention-sensitive helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("make helper executable");
+        let manifest = Arc::new(
+            HelperReleaseManifest::from_test_helper(&helper).expect("build helper manifest"),
+        );
+
+        let helper = Arc::new(helper);
+        let barrier = Arc::new(Barrier::new(CONCURRENCY + 1));
+        let threads = (0..CONCURRENCY)
+            .map(|_| {
+                let helper = Arc::clone(&helper);
+                let manifest = Arc::clone(&manifest);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    validate_helper_image(
+                        &helper,
+                        &manifest,
+                        b"exact helper handshake\n",
+                        b"exact helper identity\n",
+                    )
+                    .is_some()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        assert!(
+            threads
+                .into_iter()
+                .all(|thread| thread.join().expect("join release probe"))
+        );
+        assert!(!active.exists());
+        std::fs::remove_dir_all(root).expect("remove helper fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cold_release_probe_retries_once_without_weakening_the_exact_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = test_root("cold-release-probe");
+        std::fs::create_dir_all(&root).expect("create helper fixture");
+        let helper = root.join("winwincode-kernel-helper");
+        let first_probe = root.join("first-probe");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = '--winwincode-helper-handshake' ] && [ ! -e '{}' ]; then\n  : > '{}'\n  exit 9\nfi\ncase \"$1\" in\n  --winwincode-helper-handshake) printf 'exact helper handshake\\n' ;;\n  --winwincode-helper-identity) printf 'exact helper identity\\n' ;;\n  *) exit 2 ;;\nesac\n",
+                first_probe.display(),
+                first_probe.display(),
+            ),
+        )
+        .expect("write cold-start helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("make helper executable");
+        let manifest =
+            HelperReleaseManifest::from_test_helper(&helper).expect("build helper manifest");
+
+        assert!(
+            validate_helper_image(
+                &helper,
+                &manifest,
+                b"exact helper handshake\n",
+                b"exact helper identity\n",
+            )
+            .is_some()
+        );
+        assert!(first_probe.is_file());
+        std::fs::remove_dir_all(root).expect("remove helper fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn helper_handshake_has_a_bounded_timeout() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let root =
-            std::env::temp_dir().join(format!("winwincode-sleeping-helper-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = test_root("sleeping-helper");
         std::fs::create_dir_all(&root).expect("create helper fixture");
         let helper = root.join("winwincode-kernel-helper");
-        std::fs::write(&helper, "#!/bin/sh\nsleep 999\n").expect("write sleeping helper");
+        let process_id_path = root.join("helper.pid");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 999\n",
+                process_id_path.display()
+            ),
+        )
+        .expect("write sleeping helper");
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
             .expect("make sleeping helper runnable");
         let started = std::time::Instant::now();
         assert!(!bounded_helper_handshake(&helper, b"never"));
         assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        let process_id = std::fs::read_to_string(process_id_path)
+            .expect("read helper process id")
+            .parse::<u32>()
+            .expect("parse helper process id");
+        assert_process_stops(process_id);
         std::fs::remove_dir_all(root).expect("remove helper fixture");
     }
 
@@ -3393,17 +3614,19 @@ mod tests {
     fn helper_handshake_closes_inherited_descendant_pipes() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let root = std::env::temp_dir().join(format!(
-            "winwincode-descendant-helper-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = test_root("descendant-helper");
         std::fs::create_dir_all(&root).expect("create helper fixture");
         let helper = root.join("winwincode-kernel-helper");
+        let helper_process_id_path = root.join("helper.pid");
+        let descendant_process_id_path = root.join("descendant.pid");
         let expected = b"exact helper handshake\n";
         std::fs::write(
             &helper,
-            "#!/bin/sh\n(sleep 999) &\nprintf 'exact helper handshake\\n'\n",
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 999 &\nprintf '%s' \"$!\" > '{}'\nprintf 'exact helper handshake\\n'\n",
+                helper_process_id_path.display(),
+                descendant_process_id_path.display()
+            ),
         )
         .expect("write descendant helper");
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
@@ -3411,6 +3634,47 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(bounded_helper_handshake(&helper, expected));
         assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        let helper_process_id = std::fs::read_to_string(helper_process_id_path)
+            .expect("read helper process id")
+            .parse::<u32>()
+            .expect("parse helper process id");
+        let descendant_process_id = std::fs::read_to_string(descendant_process_id_path)
+            .expect("read descendant process id")
+            .parse::<u32>()
+            .expect("parse descendant process id");
+        assert_process_stops(helper_process_id);
+        assert_process_stops(descendant_process_id);
+        std::fs::remove_dir_all(root).expect("remove helper fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_timeout_does_not_terminate_a_foreign_process_group() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let mut foreign = std::process::Command::new("/bin/sleep");
+        foreign
+            .arg("999")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let mut foreign = foreign.spawn().expect("spawn foreign process group");
+
+        let root = test_root("foreign-process-group");
+        std::fs::create_dir_all(&root).expect("create helper fixture");
+        let helper = root.join("winwincode-kernel-helper");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 999\n").expect("write sleeping helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("make sleeping helper runnable");
+
+        assert!(!bounded_helper_handshake(&helper, b"never"));
+        assert!(foreign.try_wait().expect("query foreign process").is_none());
+        assert!(terminate_helper_process_group(
+            &mut foreign,
+            std::time::Duration::from_secs(1)
+        ));
         std::fs::remove_dir_all(root).expect("remove helper fixture");
     }
 }

@@ -1054,15 +1054,30 @@ fn concurrent_exact_completion_has_one_usage_fact_and_one_replay() {
             .count(),
         1
     );
+    assert_eq!(receipts[0].revision, receipts[1].revision);
+    assert_eq!(receipts[0].usage, receipts[1].usage);
+
+    let mut changed = command.clone();
+    let changed_charge = changed.gateway.charge.as_mut().expect("completion charge");
+    changed_charge.cost_micros += 1;
+    changed.gateway.admission_terminal.actual_cost_micros += 1;
     let mut storage = SqliteStorage::open(&root).expect("restart storage");
     assert_eq!(
         ModelRetryUsageService::new(&mut storage)
-            .reconcile(&ModelUsageFilter::default())
-            .expect("reconcile")
-            .totals
-            .entries,
-        1
+            .complete_attempt(&request, &changed)
+            .expect_err("changed completion conflicts")
+            .kind(),
+        ModelRetryUsageErrorKind::RequestConflict
     );
+    let totals = ModelRetryUsageService::new(&mut storage)
+        .reconcile(&ModelUsageFilter::default())
+        .expect("reconcile")
+        .totals;
+    assert_eq!(totals.entries, 1);
+    assert_eq!(totals.input_tokens, 9);
+    assert_eq!(totals.output_tokens, 1);
+    assert_eq!(totals.total_tokens, 10);
+    assert_eq!(totals.cost_micros, 100);
     drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");
 }

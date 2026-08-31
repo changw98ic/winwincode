@@ -87,6 +87,14 @@ impl HelperReleaseManifest {
     /// Returns an error when the manifest is missing, malformed, or fails any
     /// identity, digest, permission, or signature check.
     pub fn from_file(path: &Path) -> Result<Self, HelperReleaseManifestError> {
+        let public_key = verifying_key(COMPILED_PUBLIC_KEY_HEX)?;
+        Self::from_file_with_verifying_key(path, &public_key)
+    }
+
+    fn from_file_with_verifying_key(
+        path: &Path,
+        public_key: &VerifyingKey,
+    ) -> Result<Self, HelperReleaseManifestError> {
         let canonical_path = canonical_manifest_path(path)?;
         let document = parse_manifest(&canonical_path)?;
         let signature = decode_signature(&document.signature)?;
@@ -111,7 +119,7 @@ impl HelperReleaseManifest {
             binary_path: &document.binary_path,
             binary_mode: document.binary_mode,
         });
-        verify_signature(&signature, &signing_bytes)?;
+        verify_signature(&signature, &signing_bytes, public_key)?;
         Ok(Self {
             canonical_path,
             package_version: document.package_version,
@@ -302,14 +310,17 @@ fn decode_signature(value: &str) -> Result<[u8; 64], HelperReleaseManifestError>
 fn verify_signature(
     signature: &[u8; 64],
     signing_bytes: &[u8],
+    public_key: &VerifyingKey,
 ) -> Result<(), HelperReleaseManifestError> {
-    let public_key_bytes = decode_hex_32(COMPILED_PUBLIC_KEY_HEX)?;
-    let public_key = VerifyingKey::from_bytes(&public_key_bytes)
-        .map_err(|_| HelperReleaseManifestError::invalid())?;
     let signature = Signature::from_bytes(signature);
     public_key
         .verify(signing_bytes, &signature)
         .map_err(|_| HelperReleaseManifestError::invalid())
+}
+
+fn verifying_key(value: &str) -> Result<VerifyingKey, HelperReleaseManifestError> {
+    let public_key_bytes = decode_hex_32(value)?;
+    VerifyingKey::from_bytes(&public_key_bytes).map_err(|_| HelperReleaseManifestError::invalid())
 }
 
 fn decode_hex_32(value: &str) -> Result<[u8; 32], HelperReleaseManifestError> {
@@ -386,13 +397,17 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, HelperReleaseManifestError>
 #[cfg(test)]
 mod tests {
     use super::{
-        HELPER_RELEASE_BINARY_MODE, HELPER_RELEASE_BINARY_NAME, HELPER_RELEASE_MANIFEST_NAME,
-        HelperReleaseManifest, MANIFEST_PROTOCOL, MANIFEST_SCHEMA_VERSION, MANIFEST_VERSION,
+        COMPILED_PUBLIC_KEY_HEX, HELPER_RELEASE_BINARY_MODE, HELPER_RELEASE_BINARY_NAME,
+        HELPER_RELEASE_MANIFEST_NAME, HelperReleaseManifest, MANIFEST_PROTOCOL,
+        MANIFEST_SCHEMA_VERSION, MANIFEST_VERSION, verifying_key,
     };
     use base64::Engine as _;
     use serde_json::json;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
+
+    const TEST_PUBLIC_KEY_HEX: &str =
+        "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61";
 
     #[test]
     fn signed_manifest_round_trips_and_tampering_fails_closed() {
@@ -431,9 +446,17 @@ mod tests {
             serde_json::to_vec(&document).expect("encode manifest fixture"),
         )
         .expect("write manifest fixture");
-        let loaded = HelperReleaseManifest::from_file(&manifest_path)
-            .expect("verify signed manifest fixture");
+        let test_public_key =
+            verifying_key(TEST_PUBLIC_KEY_HEX).expect("decode fixed test public key");
+        let loaded =
+            HelperReleaseManifest::from_file_with_verifying_key(&manifest_path, &test_public_key)
+                .expect("verify signed manifest fixture");
         assert_eq!(loaded, signed);
+        assert_eq!(
+            HelperReleaseManifest::from_file(&manifest_path).is_ok(),
+            COMPILED_PUBLIC_KEY_HEX == TEST_PUBLIC_KEY_HEX,
+            "the production loader must use only the compiled release public key",
+        );
 
         let mut tampered = document;
         tampered["binarySha256"] = json!(format!("sha256:{}", "0".repeat(64)));
@@ -442,7 +465,10 @@ mod tests {
             serde_json::to_vec(&tampered).expect("encode tampered manifest"),
         )
         .expect("write tampered manifest");
-        assert!(HelperReleaseManifest::from_file(&manifest_path).is_err());
+        assert!(
+            HelperReleaseManifest::from_file_with_verifying_key(&manifest_path, &test_public_key,)
+                .is_err()
+        );
         std::fs::remove_dir_all(root).expect("remove helper manifest fixture");
     }
 }

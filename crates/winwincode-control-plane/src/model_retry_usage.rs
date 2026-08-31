@@ -975,27 +975,38 @@ impl<'a> ModelRetryUsageService<'a> {
             {
                 return settlement_from_receipt(&replay, true);
             }
-            let (mut state, expected_revision) = load_existing(self.storage, request)?;
-            let active_index = active_attempt_index(&state, &command.gateway.model_exchange_id)?;
-            validate_completion_terminal(request, &state, active_index, command)?;
-            let charge = command
-                .gateway
-                .charge
-                .as_ref()
-                .ok_or_else(ModelRetryUsageError::identity_mismatch)?;
-            let usage = settled_usage(&state, active_index, charge)?;
-            let usage_mutations = usage_mutations(self.storage, request, &command.gateway, &usage)?;
-            state.attempts[active_index].status = AttemptStatus::Succeeded;
-            state.usage.push(usage.clone());
-            state.terminal = true;
-            state.pending = None;
-            state.revision = next_revision(expected_revision)?;
-            let result = ModelUsageSettlementReceipt {
-                request_id: request.request_id.clone(),
-                model_exchange_id: command.gateway.model_exchange_id.clone(),
-                usage: usage.clone(),
-                revision: state.revision,
-                idempotent_replay: false,
+            let prepared = (|| {
+                let (mut state, expected_revision) = load_existing(self.storage, request)?;
+                let active_index =
+                    active_attempt_index(&state, &command.gateway.model_exchange_id)?;
+                validate_completion_terminal(request, &state, active_index, command)?;
+                let charge = command
+                    .gateway
+                    .charge
+                    .as_ref()
+                    .ok_or_else(ModelRetryUsageError::identity_mismatch)?;
+                let usage = settled_usage(&state, active_index, charge)?;
+                let usage_mutations =
+                    usage_mutations(self.storage, request, &command.gateway, &usage)?;
+                state.attempts[active_index].status = AttemptStatus::Succeeded;
+                state.usage.push(usage.clone());
+                state.terminal = true;
+                state.pending = None;
+                state.revision = next_revision(expected_revision)?;
+                let result = ModelUsageSettlementReceipt {
+                    request_id: request.request_id.clone(),
+                    model_exchange_id: command.gateway.model_exchange_id.clone(),
+                    usage: usage.clone(),
+                    revision: state.revision,
+                    idempotent_replay: false,
+                };
+                Ok((state, expected_revision, result, usage, usage_mutations))
+            })();
+            let (state, expected_revision, result, usage, usage_mutations) = match prepared {
+                Ok(prepared) => prepared,
+                Err(source) => {
+                    return recover_exact_completion(self.storage, &receipt, source);
+                }
             };
             match commit_state(
                 self.storage,
@@ -2122,6 +2133,17 @@ fn settlement_from_receipt(
         RetryUsageEvent::Started(_) | RetryUsageEvent::Failed(_) => {
             Err(ModelRetryUsageError::corrupt())
         }
+    }
+}
+
+fn recover_exact_completion(
+    storage: &dyn ProductStateStorage,
+    command: &CommandReceipt,
+    source: ModelRetryUsageError,
+) -> Result<ModelUsageSettlementReceipt, ModelRetryUsageError> {
+    match storage.load_receipt(&command.identity, &command.digest)? {
+        Some(replay) => settlement_from_receipt(&replay, true),
+        None => Err(source),
     }
 }
 
