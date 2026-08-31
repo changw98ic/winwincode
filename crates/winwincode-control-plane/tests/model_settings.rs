@@ -397,29 +397,31 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
     fs::remove_dir_all(root).expect("remove generated settings fixture");
 }
 
-#[test]
-fn concurrent_exact_full_replacement_has_one_revision_and_one_projection() {
+fn assert_concurrent_exact_full_replacement(round: u64) {
     const CALLERS: usize = 4;
     let root = temporary_directory("concurrent-generated-update");
-    let organization_api_scope = Scope::OrganizationScope(organization_scope(30));
+    let seed = 30 + round;
+    let organization_api_scope = Scope::OrganizationScope(organization_scope(seed));
+    let provider_id = format!("provider-concurrent-{round}");
+    let model_id = format!("model-concurrent-{round}");
     let mut setup = SqliteStorage::open(&root).expect("open concurrent settings setup");
     register_provider(
         &mut setup,
-        201,
+        20_100 + round,
         organization_api_scope.clone(),
-        "provider-concurrent",
-        "model-concurrent",
-        30,
+        &provider_id,
+        &model_id,
+        seed,
     );
     Box::new(setup).close().expect("close concurrent setup");
     let command = Arc::new(update_command(
-        202,
+        20_200 + round,
         organization_api_scope.clone(),
         0,
         Some(ModelRoute {
-            credential_reference_id: CredentialReferenceId(id("crd", 30)),
-            provider_id: "provider-concurrent".to_owned(),
-            model_id: "model-concurrent".to_owned(),
+            credential_reference_id: CredentialReferenceId(id("crd", seed)),
+            provider_id,
+            model_id,
         }),
         12,
     ));
@@ -453,13 +455,38 @@ fn concurrent_exact_full_replacement_has_one_revision_and_one_projection() {
     assert_eq!(responses[0].result.worker_concurrency_limit, 12);
 
     let mut storage = SqliteStorage::open(&root).expect("reopen concurrent settings storage");
+    let mut changed = command.as_ref().clone();
+    changed.payload.patch.worker_concurrency_limit = 13;
+    assert_eq!(
+        ModelSettingsService::new(&mut storage)
+            .update_generated(&changed)
+            .expect_err("changed concurrent replacement conflicts")
+            .kind(),
+        ModelSettingsErrorKind::RequestConflict
+    );
     let recovered = ModelSettingsService::new(&mut storage)
-        .get(&get_query(203, organization_api_scope))
+        .get(&get_query(20_300 + round, organization_api_scope))
         .expect("read one concurrent durable result");
     assert_eq!(recovered.result, responses[0].result);
     assert_eq!(storage.pending_events().expect("pending events").len(), 2);
     Box::new(storage).close().expect("close storage");
+    let event_count: i64 = Connection::open(root.join("control-plane.sqlite3"))
+        .expect("open concurrent settings event database")
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE topic = 'model.settings.changed.v1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count concurrent settings events");
+    assert_eq!(event_count, 1);
     fs::remove_dir_all(root).expect("remove concurrent settings fixture");
+}
+
+#[test]
+fn concurrent_exact_full_replacement_has_one_revision_and_one_projection() {
+    for round in 0..10 {
+        assert_concurrent_exact_full_replacement(round);
+    }
 }
 
 #[test]

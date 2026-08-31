@@ -5,6 +5,8 @@ import { cpSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, relative, resolve, sep } from 'node:path'
 
+import { reclaimReleaseCargoTarget } from './release-cargo-target-reclaim.mjs'
+
 const root = resolve(import.meta.dirname, '..')
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-clean-'))
 const temporaryCargoTarget = join(temporaryRoot, 'target')
@@ -92,6 +94,17 @@ function runCommand(args) {
 }
 
 try {
+  const reclaim = reclaimReleaseCargoTarget({
+    environment: process.env,
+    sourceRoot: root,
+  })
+  if (reclaim.reclaimed) {
+    process.stdout.write(
+      `release Cargo target reclaimed before clean checkout: ${reclaim.path}; `
+      + `available bytes ${reclaim.availableBytesBefore} -> ${reclaim.availableBytesAfter} `
+      + `(delta ${reclaim.availableBytesDelta})\n`,
+    )
+  }
   cpSync(root, temporaryRoot, {
     recursive: true,
     filter(source) {

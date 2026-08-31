@@ -12,7 +12,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -42,6 +45,11 @@ import {
   releaseSourcePaths,
   releaseSourceSha256,
 } from '../scripts/release-source-contract.mjs'
+import {
+  RELEASE_GATE_BUILD_ROOT_ENV,
+  ReleaseCargoTargetReclaimError,
+  reclaimReleaseCargoTarget,
+} from '../scripts/release-cargo-target-reclaim.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceCommit = '1234567890abcdef1234567890abcdef12345678'
@@ -277,6 +285,114 @@ test('release runner rejects source mutation around both isolated builds', () =>
     /function isolatedReleaseBuild[\s\S]*assertCleanCommit\([\s\S]*clientBuild[\s\S]*rustBuild[\s\S]*assertCleanCommit/u,
   )
   assert.match(runner, /SOURCE_MUTATION: release source changed/u)
+})
+
+test('release clean checkout reclaims only this gate\'s external Cargo target', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-release-reclaim-test-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = join(directory, 'source')
+  const buildRoot = join(directory, 'build', 'winwincode-release-valid')
+  const cargoTarget = join(buildRoot, 'cargo-target')
+  mkdirSync(sourceRoot, { recursive: true })
+  mkdirSync(cargoTarget, { recursive: true })
+  writeFileSync(join(cargoTarget, 'regenerable'), 'bytes')
+  const canonicalCargoTarget = realpathSync(cargoTarget)
+
+  const result = reclaimReleaseCargoTarget({
+    environment: {
+      [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
+      CARGO_TARGET_DIR: cargoTarget,
+    },
+    sourceRoot,
+  })
+
+  assert.equal(result.reclaimed, true)
+  assert.equal(result.path, canonicalCargoTarget)
+  assert.equal(existsSync(cargoTarget), false)
+  assert.equal(typeof result.availableBytesBefore, 'bigint')
+  assert.equal(typeof result.availableBytesAfter, 'bigint')
+})
+
+test('clean checkout without the explicit release marker preserves Cargo targets', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-nonrelease-reclaim-test-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = join(directory, 'source')
+  const cargoTarget = join(directory, 'arbitrary-target')
+  mkdirSync(sourceRoot, { recursive: true })
+  mkdirSync(cargoTarget, { recursive: true })
+  writeFileSync(join(cargoTarget, 'preserved'), 'bytes')
+
+  assert.deepEqual(
+    reclaimReleaseCargoTarget({ environment: { CARGO_TARGET_DIR: cargoTarget }, sourceRoot }),
+    { reclaimed: false, reason: 'not-release-gate' },
+  )
+  assert.equal(readFileSync(join(cargoTarget, 'preserved'), 'utf8'), 'bytes')
+})
+
+test('release Cargo target reclaim rejects arbitrary and unsafe paths without deleting them', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'winwincode-release-reclaim-reject-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const sourceRoot = join(directory, 'source')
+  const validBuildRoot = join(directory, 'build', 'winwincode-release-valid')
+  const validCargoTarget = join(validBuildRoot, 'cargo-target')
+  const outsideTarget = join(directory, 'outside', 'cargo-target')
+  const sourceBuildRoot = join(sourceRoot, 'winwincode-release-source')
+  const sourceTarget = join(sourceBuildRoot, 'cargo-target')
+  const realTarget = join(validBuildRoot, 'real-target')
+  for (const path of [sourceRoot, validCargoTarget, outsideTarget, sourceTarget, realTarget]) {
+    mkdirSync(path, { recursive: true })
+  }
+  writeFileSync(join(validCargoTarget, 'preserved'), 'valid')
+  writeFileSync(join(outsideTarget, 'preserved'), 'outside')
+  writeFileSync(join(sourceTarget, 'preserved'), 'source')
+  writeFileSync(join(realTarget, 'preserved'), 'linked')
+
+  const reject = (buildRoot, cargoTarget) => assert.throws(
+    () => reclaimReleaseCargoTarget({
+      environment: {
+        [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
+        CARGO_TARGET_DIR: cargoTarget,
+      },
+      sourceRoot,
+    }),
+    error => error instanceof ReleaseCargoTargetReclaimError
+      && error.code === 'RELEASE_CARGO_TARGET_RECLAIM_REJECTED',
+  )
+
+  reject('relative-release-root', validCargoTarget)
+  reject(validBuildRoot, 'relative-cargo-target')
+  reject(validBuildRoot, outsideTarget)
+  reject(sourceBuildRoot, sourceTarget)
+  rmSync(validCargoTarget, { recursive: true, force: true })
+  symlinkSync(realTarget, validCargoTarget)
+  reject(validBuildRoot, validCargoTarget)
+  unlinkSync(validCargoTarget)
+  symlinkSync(join(validBuildRoot, 'missing-target'), validCargoTarget)
+  reject(validBuildRoot, validCargoTarget)
+  unlinkSync(validCargoTarget)
+  writeFileSync(validCargoTarget, 'regular-file')
+  reject(validBuildRoot, validCargoTarget)
+
+  assert.equal(readFileSync(join(outsideTarget, 'preserved'), 'utf8'), 'outside')
+  assert.equal(readFileSync(join(sourceTarget, 'preserved'), 'utf8'), 'source')
+  assert.equal(readFileSync(join(realTarget, 'preserved'), 'utf8'), 'linked')
+  assert.equal(readFileSync(validCargoTarget, 'utf8'), 'regular-file')
+})
+
+test('release verify reclaims before clean install and rebuilds the outer target afterward', () => {
+  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  const cleanInstall = readFileSync(join(root, 'scripts/verify-clean-install.mjs'), 'utf8')
+  const workspace = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  assert.match(
+    runner,
+    /\[RELEASE_GATE_BUILD_ROOT_ENV\]: buildRoot[\s\S]*pnpm', 'verify'/u,
+  )
+  assert.match(
+    cleanInstall,
+    /reclaimReleaseCargoTarget\([\s\S]*cpSync\(root, temporaryRoot/u,
+  )
+  const verify = workspace.scripts.verify
+  assert.equal(verify.indexOf('pnpm verify:clean-install') < verify.indexOf('pnpm build'), true)
 })
 
 test('release runner cold-builds twice at one physical Cargo target outside its snapshot', () => {

@@ -31,6 +31,7 @@ import {
   targetConfiguration,
   verifyReleaseArtifactDirectory,
 } from './release-artifact-contract.mjs'
+import { RELEASE_GATE_BUILD_ROOT_ENV } from './release-cargo-target-reclaim.mjs'
 import { writeHelperReleaseManifest } from './run-api-production-vertical.mjs'
 import { releaseSourceSha256 } from './release-source-contract.mjs'
 
@@ -304,7 +305,10 @@ const rustSnapshot = resolve(buildRoot, 'rust-primary')
 const artifactRoot = resolve(output, target)
 
 try {
-  const gateEnvironment = releaseEnvironment(target, cargoTarget, sourceDateEpoch, buildPaths)
+  const gateEnvironment = {
+    ...releaseEnvironment(target, cargoTarget, sourceDateEpoch, buildPaths),
+    [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
+  }
   run('corepack', ['pnpm', 'verify'], { env: gateEnvironment })
 
   resetCargoTarget(cargoTarget)

@@ -357,7 +357,12 @@ impl<'a> ModelSettingsService<'a> {
             }
         }
         let mut state = self.load_or_empty(&request.target)?;
-        ensure_revision(request.expected_revision, state.revision)?;
+        if let Err(source) = ensure_revision(request.expected_revision, state.revision) {
+            return match self.replay(request, &command)? {
+                Some(replay) => Ok(replay),
+                None => Err(source),
+            };
+        }
         state.selection = selection;
         state.worker_concurrency_limit = values.worker_concurrency_limit;
         state.legacy_migration_completed = true;
@@ -488,7 +493,12 @@ impl<'a> ModelSettingsService<'a> {
             self.resolve_selection(&request.target, selection)?;
         }
         let mut state = self.load_or_empty(&request.target)?;
-        ensure_revision(request.expected_revision, state.revision)?;
+        if let Err(source) = ensure_revision(request.expected_revision, state.revision) {
+            return match self.replay(request, &command)? {
+                Some(replay) => Ok(replay),
+                None => Err(source),
+            };
+        }
         if state.legacy_migration_completed {
             return Err(ModelSettingsError::already_migrated());
         }

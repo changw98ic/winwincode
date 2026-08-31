@@ -1004,9 +1004,20 @@ impl<'a> ModelRetryUsageService<'a> {
             })();
             let (state, expected_revision, result, usage, usage_mutations) = match prepared {
                 Ok(prepared) => prepared,
-                Err(source) => {
-                    return recover_exact_completion(self.storage, &receipt, source);
-                }
+                Err(source) => match recover_exact_completion(self.storage, &receipt, source) {
+                    Ok(replay) => return Ok(replay),
+                    Err(source)
+                        if source.kind() == ModelRetryUsageErrorKind::UsageConflict
+                            && completion_usage_exists_exactly(
+                                self.storage,
+                                request,
+                                &command.gateway,
+                            )? =>
+                    {
+                        continue;
+                    }
+                    Err(source) => return Err(source),
+                },
             };
             match commit_state(
                 self.storage,
@@ -1027,11 +1038,10 @@ impl<'a> ModelRetryUsageService<'a> {
                     {
                         return settlement_from_receipt(&replay, true);
                     }
-                    if self
-                        .storage
-                        .load_state(&usage_identity_stream(&usage.provider_usage_id)?)?
-                        .is_some()
-                    {
+                    if completion_usage_exists_exactly(self.storage, request, &command.gateway)? {
+                        continue;
+                    }
+                    if usage_identity_exists(self.storage, Some(&usage))? {
                         return Err(ModelRetryUsageError::new(
                             ModelRetryUsageErrorKind::UsageConflict,
                             "Provider Usage identity already belongs to another settlement",
@@ -1958,6 +1968,40 @@ fn usage_identity_exists(
             .map(|state| state.is_some())
             .map_err(Into::into)
     })
+}
+
+fn completion_usage_exists_exactly(
+    storage: &dyn ProductStateStorage,
+    request: &ModelRetryUsageRequest,
+    gateway: &ProviderGatewaySettlement,
+) -> Result<bool, ModelRetryUsageError> {
+    let Some(charge) = gateway.charge.as_ref() else {
+        return Ok(false);
+    };
+    let Some(stored) = storage.load_state(&usage_identity_stream(&charge.provider_usage_id)?)?
+    else {
+        return Ok(false);
+    };
+    let indexed: ModelUsageSourceEntry =
+        serde_json::from_slice(&stored.payload).map_err(|_| ModelRetryUsageError::corrupt())?;
+    let entry = load_usage_entry(storage, indexed.sequence)?;
+    let expected_usage = normalized_usage(charge)?;
+    Ok(entry.request_id == request.request_id
+        && entry.attribution == request.attribution
+        && entry.model_exchange_id == gateway.model_exchange_id
+        && entry.route_authority_fingerprint
+            == gateway.admission_terminal.route_authority_fingerprint
+        && entry.settled_at == gateway.settled_at
+        && entry.usage.provider_usage_id == expected_usage.provider_usage_id
+        && entry.usage.provider_id == gateway.provider_id
+        && entry.usage.model_id == gateway.model_id
+        && entry.usage.input_tokens == expected_usage.input_tokens
+        && entry.usage.cached_input_tokens == expected_usage.cached_input_tokens
+        && entry.usage.cache_write_input_tokens == expected_usage.cache_write_input_tokens
+        && entry.usage.output_tokens == expected_usage.output_tokens
+        && entry.usage.reasoning_output_tokens == expected_usage.reasoning_output_tokens
+        && entry.usage.total_tokens == expected_usage.total_tokens
+        && entry.usage.cost_micros == expected_usage.cost_micros)
 }
 
 fn command_receipt(

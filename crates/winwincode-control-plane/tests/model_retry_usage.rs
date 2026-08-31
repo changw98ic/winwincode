@@ -1010,19 +1010,48 @@ fn reconciliation_uses_one_catalog_snapshot_while_another_usage_is_inserted() {
 #[test]
 fn concurrent_exact_completion_has_one_usage_fact_and_one_replay() {
     let fixture = Fixture::new("concurrent-terminal");
-    let request = request(plan(fixture.primary.clone(), 1, None), 1_000, None);
     let root = fixture.root.clone();
     let authority = fixture.primary.clone();
     let mut setup_storage = fixture.storage;
-    start(&mut setup_storage, &request, &authority, 1, 1_001);
+    for round in 0..10 {
+        verify_concurrent_exact_completion(
+            &root,
+            &mut setup_storage,
+            &authority,
+            1_000 + round * 10,
+        );
+    }
     drop(setup_storage);
 
-    let usage = charge(100, 9, 1, 100);
+    let mut storage = SqliteStorage::open(&root).expect("restart storage");
+    let totals = ModelRetryUsageService::new(&mut storage)
+        .reconcile(&ModelUsageFilter::default())
+        .expect("reconcile")
+        .totals;
+    assert_eq!(totals.entries, 10);
+    assert_eq!(totals.input_tokens, 90);
+    assert_eq!(totals.output_tokens, 10);
+    assert_eq!(totals.total_tokens, 100);
+    assert_eq!(totals.cost_micros, 1_000);
+    drop(storage);
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+fn verify_concurrent_exact_completion(
+    root: &PathBuf,
+    setup_storage: &mut SqliteStorage,
+    authority: &FrozenModelRouteAuthority,
+    seed: u64,
+) {
+    let request = request(plan(authority.clone(), 1, None), seed, None);
+    start(setup_storage, &request, authority, seed, seed + 1);
+
+    let usage = charge(seed, 9, 1, 100);
     let command = ModelAttemptCompletionCommand {
-        command_request_id: RequestId(id("req", 1_002)),
+        command_request_id: RequestId(id("req", seed + 2)),
         gateway: gateway(
-            &authority,
-            1,
+            authority,
+            seed,
             ModelReservationTerminalOutcome::Completed,
             None,
             Some(usage),
@@ -1061,7 +1090,7 @@ fn concurrent_exact_completion_has_one_usage_fact_and_one_replay() {
     let changed_charge = changed.gateway.charge.as_mut().expect("completion charge");
     changed_charge.cost_micros += 1;
     changed.gateway.admission_terminal.actual_cost_micros += 1;
-    let mut storage = SqliteStorage::open(&root).expect("restart storage");
+    let mut storage = SqliteStorage::open(root).expect("restart storage");
     assert_eq!(
         ModelRetryUsageService::new(&mut storage)
             .complete_attempt(&request, &changed)
@@ -1069,17 +1098,7 @@ fn concurrent_exact_completion_has_one_usage_fact_and_one_replay() {
             .kind(),
         ModelRetryUsageErrorKind::RequestConflict
     );
-    let totals = ModelRetryUsageService::new(&mut storage)
-        .reconcile(&ModelUsageFilter::default())
-        .expect("reconcile")
-        .totals;
-    assert_eq!(totals.entries, 1);
-    assert_eq!(totals.input_tokens, 9);
-    assert_eq!(totals.output_tokens, 1);
-    assert_eq!(totals.total_tokens, 10);
-    assert_eq!(totals.cost_micros, 100);
     drop(storage);
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[derive(Clone)]
