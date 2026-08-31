@@ -446,16 +446,7 @@ fn minimum_version_and_concurrent_exact_request_produce_one_rollout_revision() {
 
 #[test]
 fn locked_database_open_fails_within_the_configured_busy_timeout() {
-    let root = temporary_directory("bounded-locked-open");
-    let storage = SqliteStorage::open(&root).expect("initialize locked storage");
-    let database_path = storage.database_path().to_owned();
-    Box::new(storage)
-        .close()
-        .expect("close initialized storage");
-
-    let lock = rusqlite::Connection::open(database_path).expect("open lock connection");
-    lock.execute_batch("BEGIN IMMEDIATE")
-        .expect("hold database write lock");
+    let (root, lock) = initialize_locked_storage("bounded-locked-open");
     let barrier = Arc::new(Barrier::new(2));
     let worker_barrier = Arc::clone(&barrier);
     let (sender, receiver) = mpsc::channel();
@@ -485,6 +476,77 @@ fn locked_database_open_fails_within_the_configured_busy_timeout() {
     lock.execute_batch("ROLLBACK")
         .expect("release database lock");
     fs::remove_dir_all(root).expect("remove");
+}
+
+#[test]
+fn locked_databases_have_independent_bounded_open_deadlines() {
+    const DATABASE_COUNT: usize = 4;
+    let fixtures = (0..DATABASE_COUNT)
+        .map(|index| initialize_locked_storage(&format!("independent-locked-open-{index}")))
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(Barrier::new(DATABASE_COUNT + 1));
+    let (sender, receiver) = mpsc::channel();
+    let handles = fixtures
+        .iter()
+        .map(|(root, _)| {
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            let sender = sender.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                sender
+                    .send(
+                        SqliteStorage::open(root)
+                            .map(|_| ())
+                            .map_err(|error| error.kind()),
+                    )
+                    .expect("report independent bounded open result");
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(sender);
+
+    barrier.wait();
+    let deadline = std::time::Instant::now() + Duration::from_secs(7);
+    let mut results = Vec::with_capacity(DATABASE_COUNT);
+    while results.len() < DATABASE_COUNT {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        let Ok(result) = receiver.recv_timeout(remaining) else {
+            break;
+        };
+        results.push(result);
+    }
+
+    for (_, lock) in &fixtures {
+        lock.execute_batch("ROLLBACK")
+            .expect("release independent database lock");
+    }
+    for handle in handles {
+        handle.join().expect("join independent bounded open");
+    }
+    for (root, _) in fixtures {
+        fs::remove_dir_all(root).expect("remove independent fixture");
+    }
+
+    assert_eq!(results.len(), DATABASE_COUNT);
+    assert!(results.into_iter().all(|result| {
+        result.expect_err("each write lock must reject schema setup") == StorageErrorKind::Adapter
+    }));
+}
+
+fn initialize_locked_storage(name: &str) -> (PathBuf, rusqlite::Connection) {
+    let root = temporary_directory(name);
+    let storage = SqliteStorage::open(&root).expect("initialize locked storage");
+    let database_path = storage.database_path().to_owned();
+    Box::new(storage)
+        .close()
+        .expect("close initialized storage");
+    let lock = rusqlite::Connection::open(database_path).expect("open lock connection");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold database write lock");
+    (root, lock)
 }
 
 fn claim(
