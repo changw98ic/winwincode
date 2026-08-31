@@ -18,6 +18,7 @@ import {
   randomBytes,
   sign,
   verify,
+  X509Certificate,
 } from 'node:crypto'
 import { createServer as createNetServer } from 'node:net'
 import { request as httpsRequest } from 'node:https'
@@ -107,6 +108,10 @@ const IDS = Object.freeze({
   cancelSession: 'psn_01J00000000000000000000003',
   delivery: 'dlv_01J00000000000000000000001',
   credential: 'crd_01J00000000000000000000001',
+  remoteWorker: 'wrk_00000000000000000000000001',
+  remoteWorkerInstance: 'wki_00000000000000000000000001',
+  remoteWorkerPool: 'wpl_00000000000000000000000001',
+  reconnectSession: 'psn_01J00000000000000000000004',
 })
 
 const ACTOR = Object.freeze({ kind: 'user', id: IDS.actor })
@@ -199,6 +204,19 @@ function sha256File(path) {
     closeSync(descriptor)
   }
   return hash.digest('hex')
+}
+
+function canonicalProductVersion(root) {
+  const packageVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
+  const cargoManifest = readFileSync(join(root, 'Cargo.toml'), 'utf8')
+  const cargoVersion = cargoManifest
+    .match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/u)?.[1]
+  assert.equal(
+    cargoVersion,
+    packageVersion,
+    'Cargo workspace version must match the product package version',
+  )
+  return packageVersion
 }
 
 function fileIdentity(path, label) {
@@ -321,7 +339,7 @@ function readAndValidateHelperReleaseManifest({
   assert.equal(manifest.schemaVersion, 1)
   assert.equal(manifest.protocol, 'winwincode-kernel-helper-release')
   assert.equal(manifest.version, 1)
-  assert.equal(manifest.packageVersion, '0.0.0')
+  assert.equal(manifest.packageVersion, canonicalProductVersion(root))
   assert.equal(manifest.binaryPath, HELPER_RELEASE_BINARY_NAME)
   assert.equal(manifest.binaryMode, HELPER_RELEASE_BINARY_MODE)
   assert.match(manifest.sourceSha256, /^sha256:[0-9a-f]{64}$/u)
@@ -580,7 +598,7 @@ export function writeHelperReleaseManifest(root, helperExecutable) {
     schemaVersion: 1,
     protocol: 'winwincode-kernel-helper-release',
     version: 1,
-    packageVersion: '0.0.0',
+    packageVersion: canonicalProductVersion(root),
     sourceSha256,
     binarySha256: `sha256:${createHash('sha256').update(readFileSync(helperExecutable)).digest('hex')}`,
     binaryPath: HELPER_RELEASE_BINARY_NAME,
@@ -698,11 +716,12 @@ function requestJson(url, {
 }
 
 class ApiClient {
-  constructor(baseUrl, origin) {
+  constructor(baseUrl, origin, nextRequest = 1) {
+    assert.equal(Number.isSafeInteger(nextRequest) && nextRequest > 0, true)
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
     this.origin = origin
     this.cookie = null
-    this.nextRequest = 1
+    this.nextRequest = nextRequest
     this.actor = ACTOR
     this.scope = SCOPE
     this.session = null
@@ -1016,6 +1035,85 @@ function spawnStandaloneServer({
   return { child, controlUrl, errors }
 }
 
+function prepareRemoteWorkerFixture({ certificate, directory }) {
+  const credential = randomBytes(32).toString('base64url')
+  const credentialFile = resolve(directory, 'remote-worker.credential')
+  const tlsRootDerFile = resolve(directory, 'remote-worker-root.der')
+  writeFileSync(credentialFile, credential, { mode: 0o600 })
+  chmodSync(credentialFile, 0o600)
+  const certificateDer = new X509Certificate(readFileSync(certificate.cert)).raw
+  writeFileSync(tlsRootDerFile, certificateDer, { mode: 0o644 })
+  return {
+    credential,
+    credentialFile,
+    startedAt: new Date().toISOString(),
+    tlsRootDerFile,
+  }
+}
+
+function spawnStandaloneWorker({
+  controlUrl,
+  directory,
+  fixture,
+  helperExecutable,
+  helperReleaseManifest,
+  modelRoute,
+  root,
+  sourceRoot,
+  workerBinary,
+}) {
+  const errors = []
+  const publicControlUrl = controlUrl.replace('127.0.0.1', 'control.localhost')
+  const child = spawn(workerBinary, ['--remote'], {
+    cwd: root,
+    detached: process.platform !== 'win32',
+    env: {
+      ...process.env,
+      WWC_WORKER_ID: IDS.remoteWorker,
+      WWC_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
+      WWC_WORKER_STARTED_AT: fixture.startedAt,
+      WWC_WORKER_DATA_DIRECTORY: resolve(directory, 'worker-data'),
+      WWC_WORKER_SOURCE_ROOT: sourceRoot,
+      WWC_WORKER_SERVER_ORIGIN: publicControlUrl,
+      WWC_WORKER_TLS_ROOT_DER_FILE: fixture.tlsRootDerFile,
+      WWC_WORKER_CREDENTIAL_FILE: fixture.credentialFile,
+      WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
+      WWC_WORKER_HELPER_EXECUTABLE: helperExecutable,
+      WWC_WORKER_MODEL_PROVIDER_ID: modelRoute.providerId,
+      WWC_WORKER_MODEL_ID: modelRoute.modelId,
+      WWC_WORKER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
+      WWC_WORKER_EXECUTION_ENVELOPE_DIGEST: `sha256:${'a'.repeat(64)}`,
+      GIT_CONFIG_NOSYSTEM: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => errors.push(chunk))
+  child.stderr.on('data', chunk => errors.push(chunk))
+  return { child, errors }
+}
+
+async function stopWorker(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise(resolvePromise => child.once('exit', resolvePromise))
+  child.kill('SIGINT')
+  const graceful = await Promise.race([
+    exited.then(() => true),
+    new Promise(resolvePromise => setTimeout(resolvePromise, 10_000, false)),
+  ])
+  if (!graceful) child.kill('SIGKILL')
+  await Promise.race([
+    exited,
+    new Promise(resolvePromise => setTimeout(resolvePromise, 5_000)),
+  ])
+  assert.equal(
+    child.exitCode !== null || child.signalCode !== null,
+    true,
+    'standalone Worker process must stop',
+  )
+}
+
 async function waitForServer(baseUrl, origin, child, errors, proof, timeoutMillis) {
   return waitFor(async () => {
     if (child.exitCode !== null) {
@@ -1080,14 +1178,15 @@ async function startServer({
   sourceRoot,
   serverEnvironment,
   timeoutMillis,
+  port = null,
 }) {
-  const port = await freePort()
-  const origin = `https://api.localhost:${String(port)}`
+  const selectedPort = port ?? await freePort()
+  const origin = `https://api.localhost:${String(selectedPort)}`
   const started = spawnStandaloneServer({
     certificate,
     directory,
     origin,
-    port,
+    port: selectedPort,
     proof,
     root,
     checkoutRevision,
@@ -1503,6 +1602,7 @@ export async function runApiProductionVertical({
   directory = null,
   root = ROOT,
   serverBinary = null,
+  workerBinary = null,
   restart = true,
   repeat = true,
   includeStrongFlow = true,
@@ -1511,6 +1611,9 @@ export async function runApiProductionVertical({
 } = {}) {
   const modelRoute = configuredModelRoute(serverEnvironment)
   const binary = serverBinary ?? resolve(serverTargetDirectory(root), 'debug/winwincode-server')
+  const remoteWorkerBinary = workerBinary === null
+    ? null
+    : workerBinary
   const buildSourceIdentity = build ? sourceTreeIdentity(root) : null
   let helperReleaseManifest
   let sourceSeal
@@ -1525,6 +1628,13 @@ export async function runApiProductionVertical({
       '--locked', '--offline',
     ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
     assert.equal(result.status, 0, 'winwincode-server production binary build failed')
+    if (remoteWorkerBinary !== null) {
+      const workerResult = spawnSync('cargo', [
+        'build', '-p', 'winwincode-worker', '--bin', 'winwincode-worker',
+        '--locked', '--offline',
+      ], { cwd: root, encoding: 'utf8', env: buildEnvironment, stdio: 'inherit' })
+      assert.equal(workerResult.status, 0, 'winwincode-worker production binary build failed')
+    }
     // The production adapter intentionally rejects oversized debug helpers.
     // Build the compact release helper, then co-locate it with the debug
     // Server so the runner exercises the same signed helper boundary as the
@@ -1540,6 +1650,11 @@ export async function runApiProductionVertical({
     chmodSync(colocatedHelper, 0o755)
   }
   assert.equal(existsSync(binary), true, `server binary is missing: ${binary}`)
+  let workerIdentity = null
+  if (remoteWorkerBinary !== null) {
+    workerIdentity = fileIdentity(remoteWorkerBinary, 'Worker binary')
+    assert.notEqual(workerIdentity.mode & 0o111, 0, 'Worker binary must be executable')
+  }
   // Keep the helper and Server in one executable directory.  The production
   // adapter authenticates that both paths share the running executable's
   // directory; deriving the helper from CARGO_TARGET_DIR would silently pick
@@ -1567,6 +1682,20 @@ export async function runApiProductionVertical({
   const fixtureDirectory = directory ?? mkdtempSync(join(tmpdir(), 'winwincode-api-production-'))
   mkdirSync(fixtureDirectory, { recursive: true })
   const certificate = createCertificate(fixtureDirectory)
+  const remoteFixture = remoteWorkerBinary === null
+    ? null
+    : prepareRemoteWorkerFixture({ certificate, directory: fixtureDirectory })
+  const effectiveServerEnvironment = remoteFixture === null
+    ? serverEnvironment
+    : {
+        ...serverEnvironment,
+        WWC_SERVER_WORKER_MODE: 'remote',
+        WWC_SERVER_WORKER_ID: IDS.remoteWorker,
+        WWC_SERVER_WORKER_INSTANCE_ID: IDS.remoteWorkerInstance,
+        WWC_SERVER_WORKER_POOL_ID: IDS.remoteWorkerPool,
+        WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE: remoteFixture.credentialFile,
+        WWC_SERVER_REMOTE_WORKER_EXPIRES_AT: '2099-01-01T00:00:00Z',
+      }
   const proof = randomBytes(32).toString('base64url')
   const proofs = [proof]
   const controlledRepository = prepareControlledRepository({
@@ -1574,8 +1703,10 @@ export async function runApiProductionVertical({
   })
   const baseline = controlledRepository.revision
   let started = null
+  let workerStarted = null
   let api = null
   let serverOutput = ''
+  let workerOutput = ''
   let failure = null
   const report = {
     schemaVersion: 'winwincode.api-production-vertical.v1',
@@ -1588,12 +1719,16 @@ export async function runApiProductionVertical({
         sourceSha256: sourceSeal.seal.sourceSha256,
         trackedDiffSha256: sourceSeal.seal.trackedDiffSha256,
       },
+      workerBinarySha256: workerIdentity?.sha256 ?? null,
     },
     flow: {},
     health: { initial: null, afterRestart: null },
     restart: null,
     deterministic: null,
+    remoteWorker: null,
   }
+
+  const stableServerPort = remoteWorkerBinary === null ? null : await freePort()
 
   try {
     started = await startServer({
@@ -1606,13 +1741,35 @@ export async function runApiProductionVertical({
       helperReleaseManifest,
       repositoryRoot: controlledRepository.repository,
       sourceRoot: controlledRepository.sourceRoot,
-      serverEnvironment,
+      serverEnvironment: effectiveServerEnvironment,
       serverBinary: binary,
       timeoutMillis,
+      port: stableServerPort,
     })
     report.health.initial = started.health.status
     api = new ApiClient(started.controlUrl, started.origin)
     await api.bootstrap(proof)
+
+    if (remoteWorkerBinary !== null) {
+      workerStarted = spawnStandaloneWorker({
+        controlUrl: started.controlUrl,
+        directory: fixtureDirectory,
+        fixture: remoteFixture,
+        helperExecutable,
+        helperReleaseManifest,
+        modelRoute,
+        root,
+        sourceRoot: controlledRepository.sourceRoot,
+        workerBinary: remoteWorkerBinary,
+      })
+      report.remoteWorker = {
+        initialPid: workerStarted.child.pid,
+        restartedPid: null,
+        survivedServerRestartPid: null,
+        terminalAfterWorkerRestart: false,
+        terminalAfterServerRestart: false,
+      }
+    }
 
     const chat = await runChat(api, timeoutMillis, { modelRoute })
     report.flow.chat = {
@@ -1633,6 +1790,22 @@ export async function runApiProductionVertical({
     }
 
     if (repeat) {
+      if (workerStarted !== null) {
+        await stopWorker(workerStarted.child)
+        workerOutput += workerStarted.errors.join('')
+        workerStarted = spawnStandaloneWorker({
+          controlUrl: started.controlUrl,
+          directory: fixtureDirectory,
+          fixture: remoteFixture,
+          helperExecutable,
+          helperReleaseManifest,
+          modelRoute,
+          root,
+          sourceRoot: controlledRepository.sourceRoot,
+          workerBinary: remoteWorkerBinary,
+        })
+        report.remoteWorker.restartedPid = workerStarted.child.pid
+      }
       const repeated = await runChat(api, timeoutMillis, {
         modelRoute,
         productSessionId: IDS.repeatSession,
@@ -1646,6 +1819,9 @@ export async function runApiProductionVertical({
         contentEqual: true,
         firstSessionId: IDS.session,
         repeatSessionId: IDS.repeatSession,
+      }
+      if (report.remoteWorker !== null) {
+        report.remoteWorker.terminalAfterWorkerRestart = true
       }
     }
 
@@ -1710,13 +1886,26 @@ export async function runApiProductionVertical({
         helperReleaseManifest,
         repositoryRoot: controlledRepository.repository,
         sourceRoot: controlledRepository.sourceRoot,
-        serverEnvironment,
+        serverEnvironment: effectiveServerEnvironment,
         serverBinary: binary,
         timeoutMillis,
+        port: stableServerPort,
       })
       report.health.afterRestart = started.health.status
-      const restartedApi = new ApiClient(started.controlUrl, started.origin)
+      // Request receipts survive the Server process. Use a disjoint request
+      // namespace for new work after restart while retaining the original ids
+      // only for the explicit terminal replay assertion below.
+      const restartedApi = new ApiClient(started.controlUrl, started.origin, 1_000_001)
       await restartedApi.bootstrap(restartProof)
+      if (workerStarted !== null) {
+        report.remoteWorker.survivedServerRestartPid = workerStarted.child.pid
+        const reconnected = await runChat(restartedApi, timeoutMillis, {
+          modelRoute,
+          productSessionId: IDS.reconnectSession,
+        })
+        assert.equal(reconnected.assistant.state, 'completed')
+        report.remoteWorker.terminalAfterServerRestart = true
+      }
       const reloadedMessages = (await restartedApi.query(
         'session.messages.list',
         { productSessionId: IDS.session },
@@ -1755,6 +1944,10 @@ export async function runApiProductionVertical({
   } catch (error) {
     failure = error
   } finally {
+    if (workerStarted !== null) {
+      await stopWorker(workerStarted.child).catch(() => {})
+      workerOutput += workerStarted.errors.join('')
+    }
     if (started !== null) {
       serverOutput += started.errors.join('')
       await stopServer(started.child).catch(() => {})
@@ -1763,15 +1956,32 @@ export async function runApiProductionVertical({
       (output, secret) => redactedOutput(output, secret),
       serverOutput,
     )
+    const combinedWorkerOutput = remoteFixture === null
+      ? workerOutput
+      : redactedOutput(workerOutput, remoteFixture.credential)
     assert.equal(
       proofs.some(secret => serverOutput.includes(secret)),
       false,
       'Server output must not contain bootstrap proof',
     )
-    if (failure !== null && combinedOutput.trim().length > 0) {
+    assert.equal(
+      remoteFixture !== null && workerOutput.includes(remoteFixture.credential),
+      false,
+      'Worker output must not contain its credential',
+    )
+    assert.equal(
+      remoteFixture !== null && serverOutput.includes(remoteFixture.credential),
+      false,
+      'Server output must not contain the Worker credential',
+    )
+    if (
+      failure !== null
+      && (combinedOutput.trim().length > 0 || combinedWorkerOutput.trim().length > 0)
+    ) {
       const diagnostic = combinedOutput.trim().slice(-8_000)
       if (failure instanceof Error) {
-        failure.message = `${failure.message}\nServer output:\n${diagnostic}`
+        const workerDiagnostic = combinedWorkerOutput.trim().slice(-8_000)
+        failure.message = `${failure.message}\nServer output:\n${diagnostic}\nWorker output:\n${workerDiagnostic}`
       } else {
         failure = new Error(`${String(failure)}\nServer output:\n${diagnostic}`)
       }
@@ -1799,10 +2009,19 @@ function parseArguments(arguments_) {
       options.repeat = false
       continue
     }
-    if (argument === '--server-binary' || argument === '--directory') {
+    if (
+      argument === '--server-binary'
+      || argument === '--worker-binary'
+      || argument === '--directory'
+    ) {
       const value = arguments_[index + 1]
       if (value === undefined || value.startsWith('--')) fail(`${argument} requires a value`)
-      options[argument === '--server-binary' ? 'serverBinary' : 'directory'] = resolve(value)
+      const option = argument === '--server-binary'
+        ? 'serverBinary'
+        : argument === '--worker-binary'
+          ? 'workerBinary'
+          : 'directory'
+      options[option] = resolve(value)
       index += 1
       continue
     }

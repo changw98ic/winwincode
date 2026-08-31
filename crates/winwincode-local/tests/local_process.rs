@@ -930,7 +930,11 @@ async fn run_remote() -> Vec<u8> {
         .expect("open remote fixture workspaces");
     let port = RemotePort::new();
     let handle = port.clone();
-    let mut worker = WorkerMain::new(worker_config(), port, FixtureCodex::completed(), workspaces);
+    let config = worker_config();
+    let registration_instance = config.worker_instance_id.clone();
+    let registration_started_at = config.started_at.clone();
+    let mut worker = WorkerMain::new(config, port, FixtureCodex::completed(), workspaces)
+        .with_registration_request_namespace(&registration_instance, &registration_started_at);
     worker.start(now()).await.unwrap();
     Box::pin(drain_remote(&mut worker, &handle)).await;
     handle.route_control(ExecutionPortMessage::JobDispatchMessage(dispatch()));

@@ -1,6 +1,6 @@
 # 参与 WinWinCode
 
-感谢你改进 WinWinCode。本仓库同时包含 TypeScript 产品层和 Rust 执行边界。提交前请先阅读 [产品架构、交付流程与安全模型](docs/architecture.md)：Codex Core 负责执行，DeepSeek Harness（DSH）负责产品外壳，WinWinCode 负责交付目标、跨 Session 阶段、业务 Attention、Evidence 和 Verdict。
+感谢你改进 WinWinCode。本仓库包含 TypeScript Client 和 Rust Server、Control Plane、Worker、Local、Kernel。提交前请先阅读[产品架构、交付流程与安全模型](docs/architecture.md)：Codex Core 负责执行事实，Control Plane 负责产品状态，Worker 负责受租约约束的执行，Client 只负责页面和请求。
 
 ## 准备开发环境
 
@@ -9,10 +9,10 @@
 ```bash
 corepack pnpm install --frozen-lockfile
 corepack pnpm build
-corepack pnpm fixture:delivery
+corepack pnpm verify:api-production-vertical
 ```
 
-无密钥 Delivery 成功结束并输出 `finalStatus: "delivered"` 后，说明本机的 DSH Session、内嵌 Codex Core、StrongFlow 阶段控制和验收计算可以一起运行。
+生产纵向检查通过后，说明 Client 可用的 Chat/StrongFlow API、Server、Control Plane、Worker、内嵌 Codex Core 和 Delivery 结算可以沿同一条路径运行。
 
 ## 领取工作
 
@@ -35,14 +35,16 @@ bd close ISSUE_ID --reason="Completed and verified"
 
 | 目录 | 内容 |
 | --- | --- |
-| `apps/host/` | DSH Web 主机和 `winwincode` 命令 |
-| `packages/contracts/` | Delivery、运行事件和 StrongFlow API 数据结构 |
-| `packages/dsh-profile/` | DSH Session、模型调用和 Codex 事件接入 |
-| `packages/strongflow/` | Delivery 服务、阶段控制、Evidence、Verdict 和工作台 |
-| `packages/native/`、`packages/native-*` | Node 到 Rust 的接口和四个平台包 |
-| `crates/` | 内嵌 Codex Core、helper 和 Node 原生模块 |
+| `apps/client/` | Chat、StrongFlow、设置、审批和企业管理页面 |
+| `packages/contracts/` | Client 使用的共享 TypeScript 合同 |
+| `packages/strongflow/` | StrongFlow 展示与投影合同 |
+| `crates/winwincode-server/` | HTTP、WebSocket、认证、健康检查和进程入口 |
+| `crates/winwincode-control-plane/` | 产品状态、Provider、调度、Delivery、Publication 和 Audit |
+| `crates/winwincode-worker/` | Job、Lease、工作区、执行事件、结果和清理 |
+| `crates/winwincode-local/` | 本地同进程组合与生命周期 |
+| `crates/kernel/`、`crates/helper/` | 内嵌 Codex Core 边界和 Worker 内部 helper |
 | `upstream/`、`third_party/codex/` | 固定上游身份、补丁、许可记录和 Codex 源码 |
-| `tests/` | 无密钥流程、恢复、安全、界面、打包和发布检查 |
+| `tests/` | Client、合同、安全、上游和发布检查 |
 
 TypeScript 使用严格模式和 ESM，缩进两个空格；Rust 使用工作区固定的 `rustfmt` 和 Clippy 配置。行为变化要修改生产代码并添加聚焦测试，不通过修改 fixture、快照或替身来掩盖产品结果。
 
@@ -59,7 +61,7 @@ corepack pnpm build
 corepack pnpm verify
 ```
 
-`corepack pnpm verify` 会再次检查格式、类型、Rust Clippy、测试、CPB 设计边界、包内容、当前平台原生安装、真实 DSH Host、上游固定项和干净目录安装。平台发布证据另按 [发布流程](docs/releasing.md) 生成。
+`corepack pnpm verify` 会再次检查格式、类型、Rust Clippy、测试、当前 Client/Server/Worker/Local 边界、包内容、上游固定项、生产纵向和干净目录安装。平台发布证据另按[发布流程](docs/releasing.md)生成。
 
 ## 修改 Delivery 数据结构
 
@@ -75,9 +77,9 @@ corepack pnpm verify
 
 迁移完成后，产品中保留一个当前读取路径和一个当前写入路径。版本之间不保留双读、双写、静默回退或长期适配器。
 
-## 更新 Codex 或 DSH
+## 更新 Codex 或 vendored Cargo source
 
-每次只更新一个上游来源。候选源码、固定提交、闭包、补丁、DSH profile、许可通知、检查命令和回滚点见 [上游更新手册](docs/upstream-updates.md)。上游身份或行为发生变化时，必须同时更新 `upstream/sources.lock.json` 和直接受影响的测试、通知或决策记录。
+每次只更新一个上游来源。候选源码、固定身份、生产闭包、补丁、许可通知、检查命令和回滚点见[上游更新手册](docs/upstream-updates.md)。上游身份或行为发生变化时，必须同时更新 `upstream/sources.lock.json` 和直接受影响的 manifest、lock、测试、通知或决策记录。
 
 ## 准备 Pull Request
 

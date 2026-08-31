@@ -104,6 +104,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), AdapterStoreError> {
                    frame_json BLOB NOT NULL,
                    UNIQUE(family, correlation_key)
                  );
+                 CREATE TABLE IF NOT EXISTS worker_transport_state (
+                   state_key TEXT PRIMARY KEY NOT NULL,
+                   sequence INTEGER NOT NULL CHECK(sequence >= 0)
+                 );
                  CREATE TABLE IF NOT EXISTS approval_operation (
                    approval_id TEXT PRIMARY KEY NOT NULL,
                    run_key TEXT NOT NULL,

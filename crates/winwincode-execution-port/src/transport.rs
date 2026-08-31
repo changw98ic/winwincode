@@ -11,8 +11,242 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use winwincode_domain::{ExecutionMessageId, WorkerId, WorkerInstanceId};
 
 use crate::generated::ExecutionPortMessage;
+
+/// Maximum canonical frame size accepted by the remote exchange endpoint.
+pub const MAX_REMOTE_FRAME_BYTES: usize = 256 * 1024;
+/// Maximum number of delivery acknowledgements accepted in one exchange.
+pub const MAX_REMOTE_ACKNOWLEDGEMENTS: usize = 128;
+/// Maximum number of Control Plane deliveries returned by one exchange.
+pub const MAX_REMOTE_DELIVERIES: usize = 128;
+
+/// One Worker request to the authenticated remote Execution Port exchange.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteExchangeRequest {
+    schema_version: String,
+    worker_id: WorkerId,
+    worker_instance_id: WorkerInstanceId,
+    acknowledgements: Vec<ExecutionMessageId>,
+    frame: Vec<u8>,
+}
+
+impl RemoteExchangeRequest {
+    /// Creates one bounded request. The frame must be one canonical
+    /// Worker-to-Control Plane frame.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid frame direction and unbounded acknowledgement batches.
+    pub fn new(
+        worker_id: WorkerId,
+        worker_instance_id: WorkerInstanceId,
+        acknowledgements: Vec<ExecutionMessageId>,
+        frame: Vec<u8>,
+    ) -> Result<Self, FrameError> {
+        if acknowledgements.len() > MAX_REMOTE_ACKNOWLEDGEMENTS
+            || frame.is_empty()
+            || frame.len() > MAX_REMOTE_FRAME_BYTES
+        {
+            return Err(FrameError::Malformed(
+                "remote exchange request exceeds a transport bound".to_owned(),
+            ));
+        }
+        let typed = RemoteTransportAdapter::<NoopCore>::decode(&frame)?;
+        if typed.direction() != FrameDirection::WorkerToControlPlane {
+            return Err(FrameError::DirectionMismatch {
+                declared: typed.direction(),
+                expected: FrameDirection::WorkerToControlPlane,
+            });
+        }
+        Ok(Self {
+            schema_version: "execution-port.remote-exchange.v1".to_owned(),
+            worker_id,
+            worker_instance_id,
+            acknowledgements,
+            frame,
+        })
+    }
+
+    /// Decodes and validates one bounded JSON request body.
+    ///
+    /// # Errors
+    ///
+    /// Rejects oversized, malformed, version-skewed, or wrong-direction input.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
+        if bytes.is_empty() || bytes.len() > MAX_REMOTE_FRAME_BYTES + 64 * 1024 {
+            return Err(FrameError::Malformed(
+                "remote exchange body exceeds a transport bound".to_owned(),
+            ));
+        }
+        let request: Self = serde_json::from_slice(bytes)
+            .map_err(|error| FrameError::Malformed(error.to_string()))?;
+        if request.schema_version != "execution-port.remote-exchange.v1" {
+            return Err(FrameError::Malformed(
+                "unsupported remote exchange schema".to_owned(),
+            ));
+        }
+        Self::new(
+            request.worker_id,
+            request.worker_instance_id,
+            request.acknowledgements,
+            request.frame,
+        )
+    }
+
+    /// Encodes the bounded request for HTTPS transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the request cannot be represented.
+    pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
+        serde_json::to_vec(self).map_err(|error| FrameError::Serialization(error.to_string()))
+    }
+
+    #[must_use]
+    pub const fn worker_id(&self) -> &WorkerId {
+        &self.worker_id
+    }
+
+    #[must_use]
+    pub const fn worker_instance_id(&self) -> &WorkerInstanceId {
+        &self.worker_instance_id
+    }
+
+    #[must_use]
+    pub fn acknowledgements(&self) -> &[ExecutionMessageId] {
+        &self.acknowledgements
+    }
+
+    #[must_use]
+    pub fn frame(&self) -> &[u8] {
+        &self.frame
+    }
+}
+
+/// One replay-stable Control Plane delivery returned to a remote Worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteExchangeDelivery {
+    pub delivery_id: ExecutionMessageId,
+    pub frame: Vec<u8>,
+}
+
+/// One bounded response from the authenticated remote exchange.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteExchangeResponse {
+    schema_version: String,
+    deliveries: Vec<RemoteExchangeDelivery>,
+}
+
+impl RemoteExchangeResponse {
+    /// Creates one bounded response containing only canonical Control Plane to
+    /// Worker frames.
+    ///
+    /// # Errors
+    ///
+    /// Rejects oversized batches, frames, and mismatched delivery identities.
+    pub fn new(deliveries: Vec<RemoteExchangeDelivery>) -> Result<Self, FrameError> {
+        if deliveries.len() > MAX_REMOTE_DELIVERIES {
+            return Err(FrameError::Malformed(
+                "remote exchange response exceeds a transport bound".to_owned(),
+            ));
+        }
+        for delivery in &deliveries {
+            if delivery.frame.is_empty() || delivery.frame.len() > MAX_REMOTE_FRAME_BYTES {
+                return Err(FrameError::Malformed(
+                    "remote exchange delivery exceeds a transport bound".to_owned(),
+                ));
+            }
+            let typed = RemoteTransportAdapter::<NoopCore>::decode(&delivery.frame)?;
+            if typed.direction() != FrameDirection::ControlPlaneToWorker {
+                return Err(FrameError::DirectionMismatch {
+                    declared: typed.direction(),
+                    expected: FrameDirection::ControlPlaneToWorker,
+                });
+            }
+            if execution_message_id(typed.message())? != delivery.delivery_id {
+                return Err(FrameError::Malformed(
+                    "remote delivery identity does not match its frame".to_owned(),
+                ));
+            }
+        }
+        Ok(Self {
+            schema_version: "execution-port.remote-exchange.v1".to_owned(),
+            deliveries,
+        })
+    }
+
+    /// Decodes and validates one bounded JSON response.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, version-skewed, wrong-direction, or oversized input.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
+        if bytes.is_empty()
+            || bytes.len() > MAX_REMOTE_DELIVERIES * (MAX_REMOTE_FRAME_BYTES + 1024) + 64 * 1024
+        {
+            return Err(FrameError::Malformed(
+                "remote exchange response exceeds a transport bound".to_owned(),
+            ));
+        }
+        let response: Self = serde_json::from_slice(bytes)
+            .map_err(|error| FrameError::Malformed(error.to_string()))?;
+        if response.schema_version != "execution-port.remote-exchange.v1" {
+            return Err(FrameError::Malformed(
+                "unsupported remote exchange schema".to_owned(),
+            ));
+        }
+        Self::new(response.deliveries)
+    }
+
+    /// Encodes this response for HTTPS transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the response cannot be represented.
+    pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
+        serde_json::to_vec(self).map_err(|error| FrameError::Serialization(error.to_string()))
+    }
+
+    #[must_use]
+    pub fn deliveries(&self) -> &[RemoteExchangeDelivery] {
+        &self.deliveries
+    }
+}
+
+/// Returns the generated message identity used for transport confirmation.
+///
+/// # Errors
+///
+/// Rejects a generated value without its canonical `messageId` field.
+pub fn execution_message_id(
+    message: &ExecutionPortMessage,
+) -> Result<ExecutionMessageId, FrameError> {
+    let value = serde_json::to_value(message)
+        .map_err(|error| FrameError::Serialization(error.to_string()))?;
+    value
+        .get("messageId")
+        .cloned()
+        .ok_or_else(|| FrameError::Malformed("messageId is required".to_owned()))
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|error| FrameError::Malformed(error.to_string()))
+        })
+}
+
+struct NoopCore;
+
+impl ExecutionPortCore for NoopCore {
+    type Output = ();
+    type Error = std::convert::Infallible;
+
+    fn accept(&mut self, _message: &ExecutionPortMessage) -> Result<Self::Output, Self::Error> {
+        Ok(())
+    }
+}
 
 /// The direction encoded in an `ExecutionPort` frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

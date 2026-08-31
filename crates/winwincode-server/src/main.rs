@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![recursion_limit = "256"]
+
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -40,23 +42,26 @@ use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
     action_gateway::ExecutionEnvelopeToken,
     generated::{
-        ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet,
+        ExecutionPortMessage, ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet,
         WorkerCapabilitySetPlatform,
     },
+    transport::ExecutionPortCore,
 };
 use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, DurableEventHub, DurableEventHubConfig,
     DurableEventPublisher, EnterpriseIdentityManagementApplication,
     EnterpriseIdentityProtocolApplication, EnterpriseRbacManagementApplication,
-    EnterpriseRequestAuthenticator, GeneratedContractDispatcher, LocalRuntimeSupervisor,
+    EnterpriseRequestAuthenticator, FileRemoteWorkerAuthenticator, GeneratedContractDispatcher,
+    LocalRuntimeSupervisor, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
     RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig, ServerExecutionPortCore,
     ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
     StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
-    UnavailableEnterpriseManagementApplication, start_server,
+    UnavailableEnterpriseManagementApplication, start_server, start_server_with_remote_worker,
 };
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
+    WorkerRegistryScope,
 };
 use winwincode_worker::WorkerConfig;
 
@@ -75,12 +80,10 @@ fn main() {
     }
 }
 
-type ProductionSupervisor = LocalRuntimeSupervisor<
-    ServerExecutionPortCore<
-        ProductSessionExecutionApplication<StandaloneModelExecutionApplication>,
-    >,
-    ProductionCodexAdapter,
+type ProductionExecutionPort = ServerExecutionPortCore<
+    ProductSessionExecutionApplication<StandaloneModelExecutionApplication>,
 >;
+type ProductionSupervisor = LocalRuntimeSupervisor<ProductionExecutionPort, ProductionCodexAdapter>;
 
 struct ProductionStartup {
     config: ServerConfig,
@@ -315,12 +318,94 @@ async fn run_composed_server(
     let scheduler = RepositoryRuntimeScheduler::from_application(
         &application,
         repository_scope.clone(),
-        worker_id,
+        worker_id.clone(),
         worker_instance_id,
         scheduler_generation,
         Duration::from_secs(30),
     )?
     .with_admission_identity(UserId(subject.clone()), worker_pool_id)?;
+    let worker_mode = required_environment_or("WWC_SERVER_WORKER_MODE", "local")?;
+    if worker_mode != "local" && worker_mode != "remote" {
+        return Err("WWC_SERVER_WORKER_MODE must be local or remote".into());
+    }
+    if worker_mode == "remote" {
+        return Box::pin(run_remote_composition(RemoteRuntimeComposition {
+            config,
+            repository_scope,
+            subject,
+            auth_bootstrap,
+            auth_config,
+            application,
+            identities,
+            rbac,
+            worker_id,
+            scheduler,
+            execution_port,
+            clock,
+        }))
+        .await;
+    }
+    Box::pin(run_local_composition(LocalRuntimeComposition {
+        config,
+        repository_scope,
+        subject,
+        model_route,
+        auth_bootstrap,
+        auth_config,
+        application,
+        identities,
+        rbac,
+        capabilities,
+        action_signing_key,
+        launcher_config,
+        worker_config,
+        execution_port,
+        scheduler,
+        clock,
+    }))
+    .await
+}
+
+struct LocalRuntimeComposition {
+    config: ServerConfig,
+    repository_scope: RepositoryScope,
+    subject: String,
+    model_route: LocalModelRoute,
+    auth_bootstrap: AuthSessionBootstrap,
+    auth_config: AuthSessionConfig,
+    application: StandaloneControlPlaneApplication,
+    identities: Arc<EnterpriseIdentityService>,
+    rbac: Arc<EnterpriseRbacService>,
+    capabilities: WorkerCapabilitySet,
+    action_signing_key: ActionEnforcementSigningKey,
+    launcher_config: LocalLauncherConfig,
+    worker_config: WorkerConfig,
+    execution_port: ProductionExecutionPort,
+    scheduler: RepositoryRuntimeScheduler,
+    clock: Arc<dyn StandaloneApplicationClock>,
+}
+
+async fn run_local_composition(
+    composition: LocalRuntimeComposition,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let LocalRuntimeComposition {
+        config,
+        repository_scope,
+        subject,
+        model_route,
+        auth_bootstrap,
+        auth_config,
+        application,
+        identities,
+        rbac,
+        capabilities,
+        action_signing_key,
+        launcher_config,
+        worker_config,
+        execution_port,
+        scheduler,
+        clock,
+    } = composition;
     let codex = open_production_codex(&config, &model_route, capabilities, action_signing_key)?;
     let supervisor = Box::pin(LocalRuntimeSupervisor::start_with_scheduler(
         launcher_config,
@@ -351,15 +436,130 @@ async fn run_composed_server(
         identities,
         rbac,
     )?;
-    Box::pin(serve_runtime(
+    serve_runtime(
         config,
         auth_sessions,
         authenticator,
         api,
         enterprise_identity,
         supervisor,
-    ))
+    )
     .await
+}
+
+struct RemoteRuntimeComposition<Core> {
+    config: ServerConfig,
+    repository_scope: RepositoryScope,
+    subject: String,
+    auth_bootstrap: AuthSessionBootstrap,
+    auth_config: AuthSessionConfig,
+    application: StandaloneControlPlaneApplication,
+    identities: Arc<EnterpriseIdentityService>,
+    rbac: Arc<EnterpriseRbacService>,
+    worker_id: WorkerId,
+    scheduler: RepositoryRuntimeScheduler,
+    execution_port: Core,
+    clock: Arc<dyn StandaloneApplicationClock>,
+}
+
+async fn run_remote_composition<Core>(
+    composition: RemoteRuntimeComposition<Core>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Core: ExecutionPortCore<Output = Vec<ExecutionPortMessage>> + Send + 'static,
+    Core::Error: Send + std::fmt::Display,
+{
+    let RemoteRuntimeComposition {
+        config,
+        repository_scope,
+        subject,
+        auth_bootstrap,
+        auth_config,
+        application,
+        identities,
+        rbac,
+        worker_id,
+        scheduler,
+        execution_port,
+        clock,
+    } = composition;
+    let remote_worker_scope = WorkerRegistryScope::Repository {
+        organization_id: repository_scope.organization_id.clone(),
+        workspace_id: repository_scope.workspace_id.clone(),
+        project_id: repository_scope.project_id.clone(),
+        repository_id: repository_scope.repository_id.clone(),
+    };
+    let remote_authenticator = Arc::new(FileRemoteWorkerAuthenticator::open(
+        PathBuf::from(required_environment(
+            "WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE",
+        )?),
+        worker_id,
+        WorkerPoolId(required_environment_or(
+            "WWC_SERVER_WORKER_POOL_ID",
+            "wpl_00000000000000000000000001",
+        )?),
+        remote_worker_scope,
+        required_environment_or("WWC_SERVER_REMOTE_WORKER_ISSUER", "winwincode-server")?,
+        required_environment_or("WWC_SERVER_REMOTE_WORKER_SUBJECT", "remote-worker")?,
+        required_environment_or("WWC_SERVER_REMOTE_WORKER_SECURITY_ZONE", "default")?,
+        winwincode_domain::Instant(required_environment("WWC_SERVER_REMOTE_WORKER_EXPIRES_AT")?),
+        &clock.now_instant(),
+    )?);
+    let exchange: Arc<dyn RemoteWorkerExchangePort> =
+        Arc::new(ProductionRemoteWorkerExchange::new(
+            config.data_directory(),
+            remote_authenticator,
+            scheduler,
+            execution_port,
+        ));
+    let api = Arc::new(GeneratedContractDispatcher::new(Arc::new(application)));
+    let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
+        config.data_directory().join("auth-sessions"),
+        vec![auth_bootstrap],
+        auth_config,
+    )?);
+    let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
+        EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
+    );
+    let enterprise_identity = compose_enterprise_identity_protocol(
+        &config,
+        &subject,
+        &repository_scope.organization_id,
+        Arc::clone(&auth_sessions),
+        identities,
+        rbac,
+    )?;
+    serve_remote_runtime(
+        config,
+        auth_sessions,
+        authenticator,
+        api,
+        enterprise_identity,
+        exchange,
+    )
+    .await
+}
+
+async fn serve_remote_runtime(
+    config: ServerConfig,
+    auth_sessions: Arc<SqliteAuthSessionManager>,
+    authenticator: Arc<dyn RequestAuthenticator>,
+    api: Arc<GeneratedContractDispatcher>,
+    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
+    exchange: Arc<dyn RemoteWorkerExchangePort>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let running = start_server_with_remote_worker(
+        config,
+        auth_sessions,
+        authenticator,
+        api,
+        enterprise_identity,
+        Some(exchange),
+    )
+    .await?;
+    tokio::signal::ctrl_c().await?;
+    running.shutdown().await?;
+    Ok(())
 }
 
 async fn serve_runtime(

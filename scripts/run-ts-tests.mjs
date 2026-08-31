@@ -37,10 +37,14 @@ const canonicalTestFiles = Object.freeze([
   'tests/enterprise-resource-page.test.mjs',
   'tests/execution-port-contract.test.mjs',
   'tests/generated-control-plane-client.test.mjs',
+  'tests/i18n-embed-fl-reproducibility.test.mjs',
   'tests/local-decisions-client.test.mjs',
   'tests/local-operations-client.test.mjs',
+  'tests/open-source-governance.test.mjs',
   'tests/pnpm-pack-report.test.mjs',
   'tests/readme-quickstart.test.mjs',
+  'tests/release-artifact-contract.test.mjs',
+  'tests/release-artifact-security.test.mjs',
   'tests/rust-format-gate.test.mjs',
   'tests/server-durable-event-hub-contract.test.mjs',
   'tests/session-identity-contract.test.mjs',
@@ -52,6 +56,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/strongflow-role.test.mjs',
   'tests/strongflow-view-model.test.mjs',
   'tests/strongflow-workflow-integration.test.mjs',
+  'tests/workspace-smoke.test.mjs',
 ])
 
 for (const path of canonicalTestFiles) {

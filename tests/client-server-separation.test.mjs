@@ -31,20 +31,26 @@ test('static Client permits only secure remote Control Plane connections', () =>
 })
 
 test('Client and Server expose independent version and rollback coordinates', () => {
+  const rootPackage = JSON.parse(source('package.json'))
   const clientPackage = JSON.parse(source('apps/client/package.json'))
   const workspaceManifest = source('Cargo.toml')
   const server = source('crates/winwincode-server/src/server.rs')
   const build = source('apps/client/scripts/build.mjs')
+  const releaseArtifacts = source('scripts/release-artifact-contract.mjs')
 
   const serverVersion = workspaceManifest.match(/\[workspace\.package\][\s\S]*?version = "([^"]+)"/u)?.[1]
   assert.ok(serverVersion)
-  assert.notEqual(clientPackage.version, serverVersion)
+  assert.equal(clientPackage.version, rootPackage.version)
+  assert.equal(serverVersion, rootPackage.version)
   assert.match(server, /"serverVersion": env!\("CARGO_PKG_VERSION"\)/u)
   assert.match(server, /"schemaVersion": SUPPORTED_SCHEMA_VERSION/u)
   assert.match(build, /version: manifest\.version/u)
   assert.match(build, /controlPlaneSchemaVersion: 'winwincode\/v1'/u)
   assert.match(build, /mutableAtDeployment: true/u)
   assert.match(build, /!\['asset-manifest\.json', 'runtime-config\.js'\]\.includes\(path\)/u)
+  assert.match(releaseArtifacts, /rust: Object\.freeze\(rust\)/u)
+  assert.match(releaseArtifacts, /package: '@winwincode\/client'/u)
+  assert.match(releaseArtifacts, /files: Object\.freeze\(client\)/u)
 })
 
 test('browser boundary has one serverUrl and no internal Worker or Provider route', () => {

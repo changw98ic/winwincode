@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
-    ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL, COOKIE, ORIGIN, SET_COOKIE, VARY,
+    ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ORIGIN,
+    SET_COOKIE, VARY,
 };
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -31,6 +32,7 @@ use winwincode_api::generated::{
 use winwincode_control_plane::{CredentialLeakGate, CredentialOutputBoundary};
 use winwincode_domain::{RequestId, SchemaVersion};
 
+use crate::application::{StandaloneApplicationClock, SystemStandaloneApplicationClock};
 use crate::auth_session::{
     AuthSessionError, SqliteAuthSessionManager, cleared_session_cookie_header,
 };
@@ -38,6 +40,7 @@ use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
     EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
 };
+use crate::remote_worker_transport::RemoteWorkerExchangePort;
 use crate::transport::{
     ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, RequestAuthenticator,
     TransportCredentials,
@@ -101,6 +104,7 @@ struct ServerState {
     auth_sessions: Arc<SqliteAuthSessionManager>,
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
+    remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -181,12 +185,44 @@ pub async fn start_server(
     api: Arc<dyn ControlPlaneApiPort>,
     enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
 ) -> Result<RunningServer, ServerError> {
+    start_server_with_remote_worker(
+        config,
+        auth_sessions,
+        authenticator,
+        api,
+        enterprise_identity,
+        None,
+    )
+    .await
+}
+
+/// Starts the public origin with the private authenticated remote Worker
+/// exchange attached to the same TLS listener.
+///
+/// # Errors
+///
+/// Fails closed when remote Worker mode is configured without TLS, or when
+/// the listener cannot start.
+pub async fn start_server_with_remote_worker(
+    config: ServerConfig,
+    auth_sessions: Arc<SqliteAuthSessionManager>,
+    authenticator: Arc<dyn RequestAuthenticator>,
+    api: Arc<dyn ControlPlaneApiPort>,
+    enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
+    remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
+) -> Result<RunningServer, ServerError> {
+    if remote_worker.is_some() && matches!(config.tls(), ServerTls::Disabled) {
+        return Err(ServerError::new(
+            "remote Worker exchange requires the Server TLS listener",
+        ));
+    }
     let config = Arc::new(config);
     let state = ServerState {
         config: Arc::clone(&config),
         auth_sessions,
         authenticator,
         api: Arc::clone(&api),
+        remote_worker,
     };
     let router = router(state, enterprise_identity);
     let handle = Handle::new();
@@ -268,12 +304,52 @@ fn router(
         .route("/api/v1/commands", post(command).options(preflight))
         .route("/api/v1/queries", post(query).options(preflight))
         .route("/api/v1/events", get(events).options(preflight))
+        .route(
+            "/internal/v1/execution-port/exchange",
+            post(remote_worker_exchange),
+        )
         .fallback(not_found)
         .with_state(state);
     let router = enterprise_identity.map_or(router.clone(), |application| {
         router.merge(enterprise_identity_router(application))
     });
     router.layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+}
+
+async fn remote_worker_exchange(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(exchange) = &state.remote_worker else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(credential) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    // Registry ordering compares the canonical millisecond `Instant` text.
+    // Reuse the application clock so a registration and its placement cannot
+    // acquire different fractional-second widths at the HTTP boundary.
+    let now = SystemStandaloneApplicationClock.now_instant();
+    match exchange.exchange(credential.as_bytes().to_vec(), &body, now) {
+        Ok(response) => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "application/json")],
+            response,
+        )
+            .into_response(),
+        Err(error) => {
+            if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
+                eprintln!("remote Worker exchange error: {error}");
+            }
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+    }
 }
 
 async fn health(State(state): State<ServerState>) -> Response {

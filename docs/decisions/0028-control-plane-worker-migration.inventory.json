@@ -180,8 +180,10 @@
       "kind": "release",
       "sourcePaths": [
         "tests/api-production-vertical-runner.test.mjs",
-        "tests/product-release-gate.test.mjs",
-        "scripts/run-api-production-vertical.mjs"
+        "tests/release-artifact-contract.test.mjs",
+        "scripts/run-api-production-vertical.mjs",
+        "scripts/run-release-artifact-gate.mjs",
+        "scripts/verify-release-artifacts.mjs"
       ],
       "currentEntryPoints": [
         "winwincode-server",
@@ -685,6 +687,7 @@
         "crates/winwincode-worker/src/action_enforcement.rs",
         "crates/winwincode-worker/src/lib.rs",
         "crates/winwincode-worker/src/main.rs",
+        "crates/winwincode-worker/src/remote_transport.rs",
         "crates/winwincode-worker/src/stage_product.rs",
         "crates/winwincode-worker/src/workspace.rs",
         "crates/winwincode-worker/src/workspace_runtime.rs"
@@ -994,6 +997,7 @@
         "crates/winwincode-server/src/identity_authenticator.rs",
         "crates/winwincode-server/src/lib.rs",
         "crates/winwincode-server/src/main.rs",
+        "crates/winwincode-server/src/remote_worker_transport.rs",
         "crates/winwincode-server/src/runtime.rs",
         "crates/winwincode-server/src/server.rs",
         "crates/winwincode-server/src/transport.rs"

@@ -1,4 +1,4 @@
-name: Native release matrix
+name: Product release matrix
 
 on:
   workflow_dispatch:
@@ -16,11 +16,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-release-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
+  group: product-release-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
   cancel-in-progress: true
 
 jobs:
-  native-package:
+  product-release:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
@@ -43,7 +43,7 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Install Linux native build dependencies
+      - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
@@ -59,6 +59,7 @@ jobs:
         shell: bash
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt,rust-src
+          rustup target add "${{ matrix.target }}" --toolchain 1.95.0
           rustup override set 1.95.0
           rustc -Vv
           cargo -V
@@ -69,18 +70,47 @@ jobs:
           corepack enable
           corepack pnpm install --frozen-lockfile
 
-      - name: Run the complete native release lane and write evidence
+      - name: Build product release artifacts and write evidence
         shell: bash
+        env:
+          WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}
+          WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}
         run: |
           set -euo pipefail
-          node scripts/run-native-release-gate.mjs \
+          node scripts/run-release-artifact-gate.mjs \
             --target ${{ matrix.target }} \
             --source-commit "${GITHUB_SHA}" \
+            --source-date-epoch "$(git show -s --format=%ct "${GITHUB_SHA}")" \
             --output release-artifacts
+
+      - name: Verify release artifact security
+        shell: bash
+        env:
+          WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}
+        run: |
+          set -euo pipefail
+          key_file="${RUNNER_TEMP}/helper-release-private-input"
+          umask 077
+          trap 'rm -f -- "$key_file"' EXIT
+          printf '%s' "${WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX}" > "$key_file"
+          node scripts/verify-release-artifact-security.mjs \
+            --target "${{ matrix.target }}" \
+            --expected-commit "${GITHUB_SHA}" \
+            --source-date-epoch "$(git show -s --format=%ct "${GITHUB_SHA}")" \
+            --evidence release-artifacts \
+            --output release-artifact-security-report.json \
+            --sensitive-input "$key_file"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: native-${{ matrix.target }}
-          path: release-artifacts/
+          name: ${{ matrix.target }}
+          path: release-artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+
+      - name: Upload release artifact security report
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-security-${{ matrix.target }}
+          path: release-artifact-security-report.json
           if-no-files-found: error

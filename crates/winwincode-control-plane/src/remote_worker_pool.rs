@@ -339,6 +339,85 @@ impl<'storage, 'authenticator> RemoteWorkerPoolAdapter<'storage, 'authenticator>
         })
     }
 
+    /// Re-authenticates a transport request and restores its exact durable
+    /// Worker process binding after the previous network connection ended.
+    ///
+    /// This does not register a new process and does not change Registry
+    /// health.  The credential principal, Worker record, and authenticated
+    /// pool placement must all describe the same process.
+    ///
+    /// # Errors
+    ///
+    /// Rejects revoked credentials and any principal, instance, pool, scope,
+    /// or authentication identity mismatch.
+    pub fn resume(
+        &mut self,
+        credential: &RemoteWorkerCredential,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+        now: &Instant,
+    ) -> Result<RemoteWorkerConnection, RemoteWorkerPoolError> {
+        let principal = self
+            .authenticator
+            .authenticate(credential, now)
+            .map_err(authentication_error)?;
+        if principal.worker_id() != worker_id {
+            return Err(RemoteWorkerPoolError::new(
+                RemoteWorkerPoolErrorKind::InvalidConnection,
+            ));
+        }
+        let registry = ExecutionRegistry::new(self.storage).map_err(registry_error)?;
+        let worker = registry
+            .load_worker(worker_id)
+            .map_err(registry_error)?
+            .ok_or_else(|| {
+                RemoteWorkerPoolError::new(RemoteWorkerPoolErrorKind::InvalidConnection)
+            })?;
+        let placement = registry
+            .load_authenticated_worker_placement(worker_id, worker_instance_id)
+            .map_err(registry_error)?
+            .ok_or_else(|| {
+                RemoteWorkerPoolError::new(RemoteWorkerPoolErrorKind::InvalidConnection)
+            })?;
+        if worker.worker_instance_id != *worker_instance_id
+            || worker.management_scope != *principal.scope()
+            || worker.authentication_identity != principal.authentication_identity()
+            || placement.worker_pool_id != *principal.worker_pool_id()
+            || placement.management_scope != *principal.scope()
+            || placement.authentication_identity != principal.authentication_identity()
+        {
+            return Err(RemoteWorkerPoolError::new(
+                RemoteWorkerPoolErrorKind::InvalidConnection,
+            ));
+        }
+        Ok(RemoteWorkerConnection {
+            principal,
+            state: RemoteWorkerConnectionState::Registered,
+            binding: Some(RegisteredWorkerBinding {
+                worker_id: worker_id.clone(),
+                worker_instance_id: worker_instance_id.clone(),
+            }),
+        })
+    }
+
+    /// Revalidates one registered request before its canonical frame is
+    /// forwarded to the shared Execution Port ingress.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a revoked identity, disconnected connection, or foreign Worker
+    /// process binding.
+    pub fn authorize_registered_message(
+        &mut self,
+        connection: &mut RemoteWorkerConnection,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+        now: &Instant,
+    ) -> Result<(), RemoteWorkerPoolError> {
+        self.ensure_connection_active(connection, now)?;
+        require_binding(connection, worker_id, worker_instance_id)
+    }
+
     /// Applies one generated Worker message through the canonical Execution Port.
     ///
     /// # Errors

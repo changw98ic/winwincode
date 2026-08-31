@@ -44,7 +44,7 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     id: 'chat',
     path: '/chat',
     label: 'Chat',
-    description: 'DSH conversation workspace',
+    description: 'Conversation workspace',
     default: true,
   }),
   Object.freeze({

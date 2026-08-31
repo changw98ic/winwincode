@@ -24,11 +24,15 @@ export const PRODUCT_RELEASE_REQUIRED_CHECKS = Object.freeze([
 
 const releaseRootFiles = Object.freeze([
   '.gitignore',
+  '.node-version',
+  'CODE_OF_CONDUCT.md',
+  'CONTRIBUTING.md',
   'Cargo.lock',
   'Cargo.toml',
   'LICENSE',
   'NOTICE',
   'README.md',
+  'SECURITY.md',
   'THIRD_PARTY_NOTICES.md',
   'package.json',
   'pnpm-lock.yaml',
@@ -40,10 +44,14 @@ const releaseRootFiles = Object.freeze([
 ])
 
 const releaseRoots = Object.freeze([
+  '.github',
   'apps',
   'crates',
+  'docs',
   'packages',
+  'schema',
   'scripts',
+  'tests',
   'upstream',
 ])
 

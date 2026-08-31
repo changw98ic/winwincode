@@ -88,16 +88,13 @@ test('contribution guide provides the Beads path, exact checks, and one Delivery
   ]) assert.equal(guide.includes(policy), true, policy)
 })
 
-test('upstream guide has independent Codex and DSH checks with concrete rollback points', () => {
+test('upstream guide has independent Codex and vendored-source checks with rollback points', () => {
   const guide = read('docs/upstream-updates.md')
   for (const command of [
-    '--codex-root third_party/codex',
-    '--codex-archive "$CODEX_ARCHIVE"',
-    '--dsh-root "$DSH_CANDIDATE"',
-    '--dsh-archive "$DSH_ARCHIVE"',
-    'corepack pnpm verify:upstream',
-    'corepack pnpm verify:installed-host',
-    'corepack pnpm fixture:delivery',
+    'cargo metadata --locked --offline --format-version 1',
+    'cargo check --workspace --all-targets --all-features --locked --offline',
+    'cargo update --offline -p PACKAGE --precise VERSION',
+    'node --test tests/i18n-embed-fl-reproducibility.test.mjs',
     'corepack pnpm verify',
   ]) assert.equal(guide.includes(command), true, command)
   assert.match(guide, /回滚点 A/gu)
@@ -106,13 +103,23 @@ test('upstream guide has independent Codex and DSH checks with concrete rollback
   for (const path of [
     'third_party/codex/',
     'third_party/codex.UPSTREAM.json',
-    'packages/dsh-profile/cordis.patch.yml',
-    'pnpm-lock.yaml',
+    'upstream/vendor/PACKAGE-VERSION/',
+    'upstream/patches/PACKAGE/',
+    'Cargo.lock',
     'upstream/sources.lock.json',
   ]) assert.equal(guide.includes(path), true, path)
+
+  for (const obsolete of [
+    'apps/host',
+    'packages/dsh-profile',
+    'packages/native',
+    'verify:installed-host',
+    '--dsh-root',
+    'N-API',
+  ]) assert.equal(guide.includes(obsolete), false, obsolete)
 })
 
-test('release guide fixes one version, four native lanes, ten package order, and rollback', () => {
+test('release guide fixes one version, four target artifacts, and rollback', () => {
   const guide = read('docs/releasing.md')
   for (const marker of [
     'corepack pnpm version:set 0.1.0-alpha.1',
@@ -120,56 +127,64 @@ test('release guide fixes one version, four native lanes, ten package order, and
     'x86_64-apple-darwin',
     'aarch64-unknown-linux-gnu',
     'x86_64-unknown-linux-gnu',
-    'corepack pnpm verify:release',
-    '@winwincode/contracts',
-    '@winwincode/native-darwin-arm64',
-    '@winwincode/native-darwin-x64',
-    '@winwincode/native-linux-arm64',
-    '@winwincode/native-linux-x64',
-    '@winwincode/native',
-    '@winwincode/strongflow',
-    '@winwincode/dsh-profile',
-    '@winwincode/client',
-    '10. winwincode',
-    'npm deprecate PACKAGE@VERSION',
+    'pnpm verify:release-artifacts',
+    'pnpm verify:release-artifact-security',
+    'winwincode-server',
+    'winwincode-worker',
+    'winwincode-kernel-helper',
+    'winwincode-local',
+    'SOURCE_DATE_EPOCH',
+    '新的 SemVer',
   ]) assert.equal(guide.includes(marker), true, marker)
 })
 
 test('documented pnpm release commands forward script options without a separator token', () => {
+  assert.doesNotMatch(
+    read('docs/release-gate.md'),
+    /pnpm (?:release:artifact|verify:release-artifacts|verify:release-artifact-security) --/gu,
+  )
   const commands = [
     {
-      script: 'evaluate:live',
+      script: 'release:artifact',
       arguments: [
-        '--live',
-        '--config',
-        '/definitely/missing/winwincode-live.json',
+        '--target',
+        'x86_64-pc-windows-msvc',
+        '--source-commit',
+        '0000000000000000000000000000000000000000',
+        '--source-date-epoch',
+        '1700000000',
         '--output',
-        '/tmp/winwincode-live-output',
+        '/tmp/winwincode-release-artifacts',
       ],
-      parsedFailure: '"code":"ENOENT"',
+      parsedFailure: 'TARGET_UNSUPPORTED',
     },
     {
-      script: 'measure:evaluation',
-      arguments: [
-        '--result',
-        '/definitely/missing/winwincode-result.json',
-        '--check',
-      ],
-      parsedFailure: 'ENOENT',
-    },
-    {
-      script: 'verify:release',
+      script: 'verify:release-artifacts',
       arguments: [
         '--expected-commit',
         '0000000000000000000000000000000000000000',
-        '--native-evidence',
-        '/definitely/missing/winwincode-native',
-        '--live-evaluation',
-        '/definitely/missing/winwincode-live-result.json',
+        '--source-date-epoch',
+        '1700000000',
+        '--evidence',
+        '/definitely/missing/winwincode-release-artifacts',
         '--output',
         '/tmp/winwincode-release-report.json',
       ],
-      parsedFailure: '"code":"RELEASE_GATE_FAILED"',
+      parsedFailure: 'ARTIFACT_MISSING',
+    },
+    {
+      script: 'verify:release-artifact-security',
+      arguments: [
+        '--expected-commit',
+        '0000000000000000000000000000000000000000',
+        '--source-date-epoch',
+        '1700000000',
+        '--evidence',
+        '/definitely/missing/winwincode-release-artifacts',
+        '--output',
+        '/tmp/winwincode-release-artifact-security-report.json',
+      ],
+      parsedFailure: 'ARTIFACT_MISSING',
     },
   ]
 
@@ -194,12 +209,13 @@ test('current release notes match the package version and public alpha scope', (
   const notes = read(path)
   for (const marker of [
     `# WinWinCode ${manifest.version}`,
-    'DELIVERY_SCHEMA_VERSION = 3',
+    'Delivery 数据结构版本为 3',
     'aarch64-apple-darwin',
     'x86_64-apple-darwin',
     'aarch64-unknown-linux-gnu',
     'x86_64-unknown-linux-gnu',
-    '私有漏洞报告',
+    'SOURCE_DATE_EPOCH',
+    'ExecutionPort v1',
   ]) assert.equal(notes.includes(marker), true, marker)
 })
 
@@ -227,12 +243,59 @@ test('release source and package metadata retain the Apache-2.0 project boundary
     )),
   ]
   const version = manifests[0].version
-  assert.equal(manifests.length, 11)
+  assert.equal(manifests.length, 4)
   assert.equal(manifests.every(manifest => manifest.version === version), true)
   assert.equal(manifests.every(manifest => manifest.license === 'Apache-2.0'), true)
   assert.match(read('LICENSE'), /Apache License\s+Version 2\.0/u)
-  assert.match(read('THIRD_PARTY_NOTICES.md'), /DeepSeek Harness and Ratatui MIT terms/u)
+  assert.match(
+    read('THIRD_PARTY_NOTICES.md'),
+    /Ratatui and historical DeepSeek Harness MIT terms/u,
+  )
+  assert.match(
+    read('THIRD_PARTY_NOTICES.md'),
+    /do not ship or execute DeepSeek Harness or Cordis\s+packages/u,
+  )
   assert.match(read('THIRD_PARTY_NOTICES.md'), /Permission is hereby granted/u)
+})
+
+test('upstream records distinguish current dependencies from historical attribution', () => {
+  const sourceLock = JSON.parse(read('upstream/sources.lock.json'))
+  assert.equal(Object.hasOwn(sourceLock, 'dsh'), false)
+  assert.equal(sourceLock.patches.some(({ id }) => id === 'dsh-winwincode-profile'), false)
+  assert.deepEqual(sourceLock.historicalSources, [
+    {
+      id: 'deepseek-harness-pre-cutover-evaluation',
+      repository: 'https://github.com/deepseek-ai/deepseek-harness',
+      tag: 'dsh-v0.1.0-rc.8',
+      version: '0.1.0-rc.8',
+      commit: '141eb6fef83422698aef7a981029e843e8161534',
+      archiveSha256: '46fb9d6f103bb7033d066de637069918012a4986aa1f53de793f1f5bdb2d95f1',
+      license: 'MIT',
+      status: 'historical-attribution-only',
+      distributedInCurrentProduct: false,
+      workspaceDependency: false,
+    },
+  ])
+
+  const currentRecords = JSON.stringify({
+    codex: sourceLock.codex,
+    vendoredCargoSources: sourceLock.vendoredCargoSources,
+    patches: sourceLock.patches,
+  })
+  for (const obsolete of ['apps/host', 'packages/dsh-profile', 'packages/native', 'crates/native']) {
+    assert.equal(currentRecords.includes(obsolete), false, obsolete)
+  }
+
+  for (const document of [
+    'CONTRIBUTING.md',
+    'docs/decisions/0001-upstream-integration.md',
+    'docs/upstream-updates.md',
+  ]) {
+    const text = read(document)
+    for (const obsolete of ['apps/host', 'packages/dsh-profile', 'packages/native', 'crates/native']) {
+      assert.equal(text.includes(obsolete), false, `${document}: ${obsolete}`)
+    }
+  }
 })
 
 test('product version command updates every manifest and rejects invalid versions', () => {
@@ -252,14 +315,33 @@ test('product version command updates every manifest and rejects invalid version
         license: 'Apache-2.0',
       }, null, 2)}\n`)
     }
+    writeFileSync(join(fixture, 'Cargo.toml'), [
+      '[workspace.package]',
+      'version = "0.0.0-dev.0"',
+      '',
+    ].join('\n'))
+    mkdirSync(join(fixture, 'crates/winwincode-delivery'), { recursive: true })
+    writeFileSync(join(fixture, 'crates/winwincode-delivery/Cargo.toml'), [
+      '[dependencies]',
+      'winwincode-storage = { version = "0.0.0-dev.0", path = "../winwincode-storage" }',
+      '',
+    ].join('\n'))
     const updated = setProductVersion(fixture, '1.2.3-rc.1')
-    assert.equal(updated.length, 11)
+    assert.equal(updated.length, 6)
     for (const directory of directories) {
       const manifest = JSON.parse(
         readFileSync(join(fixture, directory, 'package.json'), 'utf8'),
       )
       assert.equal(manifest.version, '1.2.3-rc.1')
     }
+    assert.match(
+      readFileSync(join(fixture, 'Cargo.toml'), 'utf8'),
+      /\[workspace\.package\]\nversion = "1\.2\.3-rc\.1"/u,
+    )
+    assert.match(
+      readFileSync(join(fixture, 'crates/winwincode-delivery/Cargo.toml'), 'utf8'),
+      /winwincode-storage = \{ version = "1\.2\.3-rc\.1"/u,
+    )
   } finally {
     rmSync(fixture, { recursive: true, force: true })
   }

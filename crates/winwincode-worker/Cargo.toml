@@ -26,7 +26,8 @@ required-features = ["test-support"]
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-rustls.workspace = true
 winwincode-codex = { path = "../winwincode-codex" }
 winwincode-domain = { path = "../winwincode-domain" }
 winwincode-execution-port = { path = "../winwincode-execution-port" }

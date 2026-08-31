@@ -107,6 +107,24 @@ test('field policy permits references and fails closed for malformed or secret-b
   }
 })
 
+test('minified equality checks are not reported as unquoted secret assignments', () => {
+  const safe = scanCredentialLeakBytes({
+    bytes: Buffer.from([
+      'if(token===event.providerToken){return true}',
+      'if(password==candidate.value){return false}',
+    ].join('\n')),
+    label: 'client-bundle.js',
+  })
+  assert.equal(safe.status, 'passed')
+
+  const leaked = scanCredentialLeakBytes({
+    bytes: Buffer.from('TOKEN=fixtureSecretValue123'),
+    label: 'environment.txt',
+  })
+  assert.equal(leaked.status, 'rejected')
+  assert.equal(leaked.findings.some(entry => entry.rule === 'text.assignment'), true)
+})
+
 test('release archive scan checks unpacked entries and rejects malformed archives', () => {
   const safe = scanCredentialLeakBytes({
     bytes: tarGzip('package/result.json', '{"credentialReferenceId":"crd_fixture"}'),

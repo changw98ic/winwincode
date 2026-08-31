@@ -261,6 +261,69 @@ fn repeat_registration_is_idempotent_and_disconnect_updates_exact_health() {
 }
 
 #[test]
+fn authenticated_request_resumes_only_the_exact_durable_process_binding() {
+    let root = temporary_directory("resume");
+    let mut storage = SqliteStorage::open(&root).expect("storage open");
+    let authenticator = FixedAuthenticator::new(principal());
+    let message: WorkerRegisterMessage = fixture_message("worker.register");
+    {
+        let mut adapter = RemoteWorkerPoolAdapter::new(&mut storage, &authenticator);
+        let mut initial = adapter
+            .connect(&credential(SECRET_PROOF), &message.sent_at)
+            .expect("authenticated connection");
+        register(&mut adapter, &mut initial, &message);
+    }
+    {
+        let mut adapter = RemoteWorkerPoolAdapter::new(&mut storage, &authenticator);
+        let mut resumed = adapter
+            .resume(
+                &credential(SECRET_PROOF),
+                &message.worker_id,
+                &message.worker_instance_id,
+                &message.sent_at,
+            )
+            .expect("exact process resume");
+        assert_eq!(resumed.state(), RemoteWorkerConnectionState::Registered);
+        adapter
+            .authorize_registered_message(
+                &mut resumed,
+                &message.worker_id,
+                &message.worker_instance_id,
+                &message.sent_at,
+            )
+            .expect("active exact binding");
+
+        let foreign_instance = WorkerInstanceId("wki_00000000000000000000000009".to_owned());
+        let Err(error) = adapter.resume(
+            &credential(SECRET_PROOF),
+            &message.worker_id,
+            &foreign_instance,
+            &message.sent_at,
+        ) else {
+            panic!("foreign process must not resume")
+        };
+        assert_eq!(error.kind(), RemoteWorkerPoolErrorKind::InvalidConnection);
+
+        authenticator.revoke();
+        let error = adapter
+            .authorize_registered_message(
+                &mut resumed,
+                &message.worker_id,
+                &message.worker_instance_id,
+                &message.sent_at,
+            )
+            .expect_err("revoked resumed request");
+        assert_eq!(
+            error.kind(),
+            RemoteWorkerPoolErrorKind::AuthenticationRevoked
+        );
+    }
+    Box::new(storage).close().expect("storage close");
+    assert!(!directory_contains(&root, SECRET_PROOF));
+    fs::remove_dir_all(root).expect("directory release");
+}
+
+#[test]
 fn authenticated_foreign_principal_cannot_take_over_an_existing_worker_identity() {
     let root = temporary_directory("foreign-principal");
     let mut storage = SqliteStorage::open(&root).expect("storage open");

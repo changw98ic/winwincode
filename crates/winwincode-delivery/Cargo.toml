@@ -19,7 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 winwincode-domain.workspace = true
-winwincode-storage = { version = "0.0.0", path = "../winwincode-storage" }
+winwincode-storage = { version = "0.1.0-alpha.1", path = "../winwincode-storage" }
 
 [[test]]
 name = "stage_task_lifecycle"

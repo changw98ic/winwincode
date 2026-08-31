@@ -1,63 +1,14 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { describeHost } from '../apps/host/dist/index.js'
-import {
-  UnsupportedPlatformError,
-  nativePackageName,
-  resolveReleaseTarget,
-} from '../packages/native/dist/index.js'
-
 const root = resolve(import.meta.dirname, '..')
+const workflowPath = resolve(root, '.github/workflows/native-release.yml')
+const workflow = readFileSync(workflowPath, 'utf8')
 
-test('maps every first-release host to its Rust target', () => {
-  assert.equal(resolveReleaseTarget('darwin', 'arm64'), 'aarch64-apple-darwin')
-  assert.equal(resolveReleaseTarget('darwin', 'x64'), 'x86_64-apple-darwin')
-  assert.equal(resolveReleaseTarget('linux', 'arm64'), 'aarch64-unknown-linux-gnu')
-  assert.equal(resolveReleaseTarget('linux', 'x64'), 'x86_64-unknown-linux-gnu')
-})
-
-test('rejects an unsupported platform with an actionable message', () => {
-  assert.throws(
-    () => resolveReleaseTarget('win32', 'x64'),
-    error => error instanceof UnsupportedPlatformError
-      && error.message.includes('macOS and Linux')
-      && error.message.includes('win32/x64'),
-  )
-})
-
-test('keeps DSH chat as default and StrongFlow as advanced surface', () => {
-  const host = describeHost('linux', 'x64')
-  assert.equal(host.defaultSurface.id, 'chat')
-  assert.deepEqual(host.surfaces.map(surface => surface.id), ['chat', 'strongflow'])
-  assert.equal(host.surfaces[1]?.default, false)
-})
-
-test('maps every Rust target to one deterministic optional package', () => {
-  assert.deepEqual(
-    [
-      'aarch64-apple-darwin',
-      'x86_64-apple-darwin',
-      'aarch64-unknown-linux-gnu',
-      'x86_64-unknown-linux-gnu',
-    ].map(target => [target, nativePackageName(target)]),
-    [
-      ['aarch64-apple-darwin', '@winwincode/native-darwin-arm64'],
-      ['x86_64-apple-darwin', '@winwincode/native-darwin-x64'],
-      ['aarch64-unknown-linux-gnu', '@winwincode/native-linux-arm64'],
-      ['x86_64-unknown-linux-gnu', '@winwincode/native-linux-x64'],
-    ],
-  )
-})
-
-test('native release workflow exposes separate manual Linux and macOS lanes', () => {
-  const workflow = readFileSync(
-    resolve(root, '.github/workflows/native-release.yml'),
-    'utf8',
-  )
+test('product release workflow exposes separate manual Linux and macOS lanes', () => {
+  assert.match(workflow, /^name: Product release matrix$/mu)
   assert.match(workflow, /^  workflow_dispatch:$/mu)
   assert.doesNotMatch(workflow, /^  (?:pull_request|push):$/mu)
   const platformOptions = [...workflow.matchAll(/^          - (linux|macos)$/gmu)]
@@ -77,76 +28,86 @@ test('native release workflow exposes separate manual Linux and macOS lanes', ()
       `native release workflow is missing ${target} on ${runner}`,
     )
   }
-  assert.equal(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '24.19.0')
-  assert.ok(workflow.includes('node scripts/run-native-release-gate.mjs'))
-  assert.ok(workflow.includes('--source-commit "${GITHUB_SHA}"'))
-  assert.ok(workflow.includes('--output release-artifacts'))
-  const releaseRunner = readFileSync(
-    resolve(root, 'scripts/run-native-release-gate.mjs'),
-    'utf8',
-  )
-  for (const command of [
-    "['pnpm', 'format:check']",
-    "['pnpm', 'lint']",
-    "['pnpm', 'verify:fixture-cleanup']",
-    "['pnpm', 'test']",
-    "['scripts/verify-cpb-boundary.mjs']",
-    "['scripts/verify-upstream-lock.mjs']",
-    "['scripts/verify-native-package.mjs', '--target', options.target, '--require-release']",
-    "['scripts/verify-native-install.mjs', '--target', options.target, '--require-release']",
-    "['scripts/verify-installed-host.mjs', '--target', options.target, '--require-release']",
-    "['scripts/pack-native-release.mjs', '--target', options.target, '--output', options.output]",
-  ]) {
-    assert.ok(releaseRunner.includes(command), `native release runner is missing ${command}`)
-  }
+  assert.notEqual(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '')
+  assert.ok(workflow.includes('node-version-file: .node-version'))
+  assert.ok(workflow.includes('rustup toolchain install 1.95.0'))
+  assert.ok(workflow.includes('rustup target add "${{ matrix.target }}" --toolchain 1.95.0'))
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
 })
 
-test('CLI package smoke exposes version and scaffold descriptor', () => {
-  const hostManifest = JSON.parse(
-    readFileSync(resolve(root, 'apps/host/package.json'), 'utf8'),
+test('product release workflow passes immutable source identity to the canonical gate', () => {
+  assert.ok(existsSync(resolve(root, 'scripts/run-release-artifact-gate.mjs')))
+  assert.ok(workflow.includes('node scripts/run-release-artifact-gate.mjs'))
+  assert.ok(workflow.includes('--source-commit "${GITHUB_SHA}"'))
+  assert.ok(workflow.includes('--source-date-epoch "$(git show -s --format=%ct "${GITHUB_SHA}")"'))
+  assert.ok(workflow.includes('--output release-artifacts'))
+  const productUploadStep = workflow.match(
+    /      - name: Upload release artifacts\n[\s\S]*?(?=\n      - name:)/u,
+  )?.[0]
+  assert.notEqual(productUploadStep, undefined)
+  assert.ok(productUploadStep.includes('name: ${{ matrix.target }}'))
+  assert.doesNotMatch(workflow, /name: release-\$\{\{ matrix\.target \}\}/u)
+  assert.ok(workflow.includes('path: release-artifacts/${{ matrix.target }}/'))
+  assert.ok(workflow.includes('if-no-files-found: error'))
+  assert.doesNotMatch(workflow, /run-native-release-gate|native-package|name: native-/u)
+})
+
+test('product release workflow binds the helper signing keys without embedding key material', () => {
+  const releaseStep = workflow.match(
+    /      - name: Build product release artifacts and write evidence\n[\s\S]*?(?=\n      - name:)/u,
+  )?.[0]
+  assert.notEqual(releaseStep, undefined)
+  assert.ok(releaseStep.includes(
+    'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}',
+  ))
+  assert.ok(releaseStep.includes(
+    'WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}',
+  ))
+  assert.doesNotMatch(
+    releaseStep,
+    /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX:\s*["']?[0-9a-f]{64}["']?/u,
   )
-  const version = spawnSync(process.execPath, ['apps/host/dist/cli.js', '--version'], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(version.status, 0, version.stderr)
-  assert.equal(version.stdout.trim(), hostManifest.version)
-
-  const descriptor = spawnSync(process.execPath, ['apps/host/dist/cli.js', '--print-scaffold'], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(descriptor.status, 0, descriptor.stderr)
-  const parsed = JSON.parse(descriptor.stdout)
-  assert.equal(parsed.defaultSurface.id, 'chat')
-  assert.equal(parsed.components.length, 3)
 })
 
-test('preinstall guard fails clearly on unsupported hosts', () => {
-  const result = spawnSync(process.execPath, [
-    'scripts/check-runtime.mjs',
-    '--platform',
-    'win32',
-    '--arch',
-    'x64',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /Unsupported platform win32\/x64/u)
+test('product release workflow blocks uploads until target security verification passes', () => {
+  const securityCommand = 'node scripts/verify-release-artifact-security.mjs'
+  const securityStep = workflow.match(
+    /      - name: Verify release artifact security\n[\s\S]*?(?=\n      - name:)/u,
+  )?.[0]
+  assert.notEqual(securityStep, undefined)
+  assert.ok(securityStep.includes(
+    'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}',
+  ))
+  assert.ok(workflow.includes(securityCommand))
+  assert.ok(workflow.includes('--target "${{ matrix.target }}"'))
+  assert.ok(workflow.includes('--expected-commit "${GITHUB_SHA}"'))
+  assert.ok(workflow.includes('--evidence release-artifacts'))
+  assert.ok(workflow.includes('--output release-artifact-security-report.json'))
+  const securityOffset = workflow.indexOf(securityCommand)
+  const productUploadOffset = workflow.indexOf('      - name: Upload release artifacts')
+  const securityUploadOffset = workflow.indexOf('name: release-security-${{ matrix.target }}')
+  assert.ok(securityOffset < productUploadOffset)
+  assert.ok(securityOffset < securityUploadOffset)
+  assert.ok(workflow.includes('path: release-artifact-security-report.json'))
+  assert.ok(workflow.includes('key_file="${RUNNER_TEMP}/helper-release-private-input"'))
+  assert.ok(workflow.includes('umask 077'))
+  assert.ok(workflow.includes('trap \'rm -f -- "$key_file"\' EXIT'))
+  assert.ok(workflow.includes(
+    'printf \'%s\' "${WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX}" > "$key_file"',
+  ))
+  assert.ok(workflow.includes('--sensitive-input "$key_file"'))
+  assert.doesNotMatch(
+    workflow,
+    /--output\s+["']?release-artifacts[/\\]release-artifact-security/u,
+  )
 })
 
-test('preinstall guard fails clearly outside Node 24', () => {
-  const result = spawnSync(process.execPath, [
-    'scripts/check-runtime.mjs',
-    '--node-version',
-    '22.19.0',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /requires Node\.js 24\.x/u)
+test('release download instructions recreate the exact aggregate evidence roots', () => {
+  const releasing = readFileSync(resolve(root, 'docs/releasing.md'), 'utf8')
+  assert.ok(releasing.includes('gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"'))
+  assert.ok(releasing.includes(
+    'gh run download "$RUN_ID" --name "release-security-$TARGET" --dir "release-security-reports/$TARGET"',
+  ))
+  assert.ok(releasing.includes('release-artifacts/` 的一级目录因此精确为四个 Rust target'))
+  assert.ok(releasing.includes('release-security-reports/` 与产品 evidence root 分离'))
 })

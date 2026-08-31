@@ -9,6 +9,7 @@
 //! same generated `ExecutionPortMessage` values to [`WorkerMain`].
 
 pub mod action_enforcement;
+pub mod remote_transport;
 pub mod stage_product;
 pub mod workspace_runtime;
 
@@ -246,12 +247,14 @@ pub struct WorkerMain<Port, Codex> {
     workspaces: JobWorkspaceRuntime,
     lifecycle: WorkerLifecycleState,
     registration_request_id: Option<RequestId>,
-    /// Optional process-scoped namespace for registration request ids.
+    /// Optional process-scoped namespace for an exact registration frame.
     ///
     /// The lightweight Worker fixtures intentionally keep their historical
     /// sequence ids.  The local production launcher opts into this namespace
     /// so a replacement process cannot collide with a predecessor's durable
-    /// `(worker_id, request_id)` registration receipt.
+    /// `(worker_id, request_id)` registration receipt. Restarting the same
+    /// process identity reconstructs the exact request id, message id, and
+    /// timestamp for Registry replay.
     registration_request_namespace: Option<String>,
     heartbeat_interval_ms: Option<u64>,
     heartbeat_sequence: i64,
@@ -302,6 +305,8 @@ where
         workspaces: JobWorkspaceRuntime,
     ) -> Self {
         let message_sequence = recover_message_sequence(&mut codex);
+        let heartbeat_sequence =
+            recover_heartbeat_sequence(&mut codex, &config.worker_id, &config.worker_instance_id);
         Self {
             config,
             port,
@@ -311,7 +316,7 @@ where
             registration_request_id: None,
             registration_request_namespace: None,
             heartbeat_interval_ms: None,
-            heartbeat_sequence: 0,
+            heartbeat_sequence,
             request_sequence: 0,
             message_sequence,
             active: HashMap::new(),
@@ -403,13 +408,22 @@ where
             return self.send_retained_delivery(delivery).await;
         }
         let request_id = self.next_request_id();
+        let (message_id, sent_at) =
+            if let Some(namespace) = self.registration_request_namespace.as_deref() {
+                (
+                    namespaced_registration_message_id(namespace),
+                    self.config.started_at.clone(),
+                )
+            } else {
+                (self.next_message_id(), now)
+            };
         let message = WorkerRegisterMessage {
             capabilities: self.config.capabilities.clone(),
             kind: WorkerRegisterMessageKind::WorkerRegister,
-            message_id: self.next_message_id(),
+            message_id,
             request_id: request_id.clone(),
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now,
+            sent_at,
             started_at: self.config.started_at.clone(),
             worker_id: self.config.worker_id.clone(),
             worker_instance_id: self.config.worker_instance_id.clone(),
@@ -2245,6 +2259,17 @@ where
     }
 }
 
+fn namespaced_registration_message_id(namespace: &str) -> ExecutionMessageId {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode.worker-registration-message.v1\0");
+    digest.update((namespace.len() as u64).to_be_bytes());
+    digest.update(namespace.as_bytes());
+    ExecutionMessageId(format!(
+        "xmsg_{}",
+        &format!("{:x}", digest.finalize())[..26].to_ascii_uppercase()
+    ))
+}
+
 fn active_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
     match message {
         ExecutionPortMessage::RuntimeEventMessage(event) => Some(&event.lease.job_id.0),
@@ -2282,6 +2307,17 @@ fn candidate_delivery_job_id(message: &ExecutionPortMessage) -> Option<&str> {
 /// participate in this local cursor.
 fn recover_message_sequence<Codex: CodexCoreAdapter>(codex: &mut Codex) -> u64 {
     codex.recovered_message_sequence().unwrap_or(0)
+}
+
+fn recover_heartbeat_sequence<Codex: CodexCoreAdapter>(
+    codex: &mut Codex,
+    worker_id: &WorkerId,
+    worker_instance_id: &WorkerInstanceId,
+) -> i64 {
+    codex
+        .recovered_heartbeat_sequence(worker_id, worker_instance_id)
+        .unwrap_or(0)
+        .max(0)
 }
 
 fn candidate_writer_role(profile: &str) -> bool {

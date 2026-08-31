@@ -1038,7 +1038,10 @@ async fn session_cookie_preflight_and_version_negotiation_are_explicit() {
     )
     .await;
     assert!(health.contains(r#""schemaVersion":"winwincode/v1""#));
-    assert!(health.contains(r#""serverVersion":"0.0.0""#));
+    assert!(health.contains(&format!(
+        r#""serverVersion":"{}""#,
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(!health.contains("workerAddress"));
     assert!(!health.contains("providerAddress"));
 

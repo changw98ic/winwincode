@@ -229,7 +229,7 @@ Server 启动先恢复持久 state、receipt、outbox、SessionBinding 和事件
 | Worker 通过 ExecutionPort 与 Control Plane 通信 | [`crates/winwincode-execution-port/src/lib.rs`](../crates/winwincode-execution-port/src/lib.rs) | [`tests/execution-port-contract.test.mjs`](../tests/execution-port-contract.test.mjs) |
 | Codex 适配器连接唯一 Kernel | [`crates/winwincode-codex/src/adapter.rs`](../crates/winwincode-codex/src/adapter.rs) | [`tests/api-production-vertical.test.mjs`](../tests/api-production-vertical.test.mjs) |
 | Kernel 保存 Plan、工具和权限事实 | [`crates/kernel/src/lib.rs`](../crates/kernel/src/lib.rs) | [`crates/winwincode-codex/src/adapter.rs`](../crates/winwincode-codex/src/adapter.rs) |
-| Helper 身份在执行前校验 | [`crates/helper/src/main.rs`](../crates/helper/src/main.rs) | [`tests/product-release-gate.test.mjs`](../tests/product-release-gate.test.mjs) |
+| Helper 身份在执行前校验 | [`crates/helper/src/main.rs`](../crates/helper/src/main.rs) | [`crates/winwincode-codex/src/helper_release.rs`](../crates/winwincode-codex/src/helper_release.rs) |
 | Local 只组装两个 Rust 运行模块 | [`crates/winwincode-local/src/lib.rs`](../crates/winwincode-local/src/lib.rs) | [`tests/browser-local-controls-production.test.mjs`](../tests/browser-local-controls-production.test.mjs) |
 | ProductSession 与绑定身份可恢复 | [`crates/winwincode-session/src/lib.rs`](../crates/winwincode-session/src/lib.rs) | [`crates/winwincode-control-plane/tests/session_identity_vertical.rs`](../crates/winwincode-control-plane/tests/session_identity_vertical.rs) |
 | Provider Gateway 集中模型和凭据引用 | [`crates/winwincode-control-plane/src/provider_gateway.rs`](../crates/winwincode-control-plane/src/provider_gateway.rs) | [`crates/winwincode-control-plane/tests/provider_production.rs`](../crates/winwincode-control-plane/tests/provider_production.rs) |

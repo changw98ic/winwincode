@@ -338,7 +338,16 @@ impl<'storage> ExecutionPortService<'storage> {
             receipt.status,
             WorkerRegistrationStatus::Accepted | WorkerRegistrationStatus::Duplicate
         ) {
-            let placed_at = self.server_time.clone();
+            let placed_at = if receipt.status == WorkerRegistrationStatus::Duplicate {
+                self.registry()?
+                    .load_authenticated_worker_placement(
+                        &receipt.worker.worker_id,
+                        &receipt.worker.worker_instance_id,
+                    )?
+                    .map_or_else(|| self.server_time.clone(), |placement| placement.placed_at)
+            } else {
+                self.server_time.clone()
+            };
             self.registry()?.record_authenticated_worker_placement(
                 &AuthenticatedWorkerPlacement {
                     worker_id: receipt.worker.worker_id.clone(),

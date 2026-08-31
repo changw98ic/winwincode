@@ -18,6 +18,9 @@ target/
 coverage/
 test-results/
 playwright-report/
+release-artifacts/
+release-report.json
+release-artifact-security-report.json
 server-data/
 publication-secrets/
 source-repositories/

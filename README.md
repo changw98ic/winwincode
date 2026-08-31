@@ -63,7 +63,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm build
 ```
 
-构建会生成 `apps/client` 的部署文件和 Rust Server、Worker、Local、Kernel Helper 所需的二进制。Server 启动前必须配置仓库根目录、租户范围、数据目录、认证信息、Helper 路径以及模型路由；配置名和安全边界见 [`crates/winwincode-server/README.md`](crates/winwincode-server/README.md)。
+构建会生成 `apps/client` 的部署文件，以及 Rust Server、Worker 和 Worker 内部 Kernel Helper 二进制。Local 模式以 `winwincode-server` 为启动入口，由 Server 通过 `winwincode-local` library 在同一进程内组装。Server 启动前必须配置仓库根目录、租户范围、数据目录、认证信息、Helper 路径以及模型路由；配置名和安全边界见 [`crates/winwincode-server/README.md`](crates/winwincode-server/README.md)。
 
 ### 3. 启动产品
 
@@ -171,3 +171,5 @@ tests/                                Client、Server、Worker 和合同检查
 详细设计见[产品架构](docs/architecture.md)、[ADR-0023 Delivery 所有权](docs/decisions/0023-canonical-delivery-ownership.md)和 [ADR-0027 发布门禁](docs/decisions/0027-product-release-gate.md)。上游 Codex 的版本、补丁和许可证义务见 [upstream 记录](upstream/sources.lock.json)。
 
 WinWinCode 自有代码使用 [Apache License 2.0](LICENSE)。Codex 和其他第三方组件的归属要求记录在 [NOTICE](NOTICE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 中。
+
+公开协作与发布信息见[参与指南](CONTRIBUTING.md)、[安全报告](SECURITY.md)、[行为准则](CODE_OF_CONDUCT.md)、[发布说明](docs/releases/0.1.0-alpha.1.md)、[发布流程](docs/releasing.md)和[上游更新流程](docs/upstream-updates.md)。

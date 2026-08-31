@@ -26,11 +26,14 @@ members = [
   "crates/winwincode-test-assets",
   "crates/winwincode-worker",
 ]
-exclude = ["third_party/codex/codex-rs"]
+exclude = [
+  "third_party/codex/codex-rs",
+  "upstream/vendor/i18n-embed-fl-0.9.4",
+]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -93,6 +96,7 @@ strip = "symbols"
 strip = "symbols"
 
 [patch.crates-io]
+i18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
 

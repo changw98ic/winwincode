@@ -18,26 +18,29 @@ OpenAI Codex includes code derived from Ratatui.
 Copyright (c) 2016-2022 Florian Dehau
 Copyright (c) 2023-2025 The Ratatui Developers
 
-Linux native packages also include Bubblewrap 0.11.2, built from the source
+Linux artifacts also include Bubblewrap 0.11.2, built from the source
 pinned inside the OpenAI Codex source tree. Bubblewrap is licensed under
 LGPL-2.0-or-later.
 
 Bubblewrap
 Copyright (C) 2016 Alexander Larsson
 
-The complete Bubblewrap license is included in Linux native packages at
+The complete Bubblewrap license is included in Linux artifacts at
 `codex-resources/bwrap.LICENSE`. The corresponding source is available in this
 repository at `third_party/codex/codex-rs/vendor/bubblewrap`.
 
-## DeepSeek Harness and Ratatui MIT terms
+## Ratatui and historical DeepSeek Harness MIT terms
 
-WinWinCode uses DeepSeek Harness packages from release `0.1.0-rc.8` and Cordis
-`4.0.1`.
+Current WinWinCode artifacts use the project-owned Client and the Rust
+Server/Worker/Local path. They do not ship or execute DeepSeek Harness or Cordis
+packages. The immutable DeepSeek Harness `0.1.0-rc.8` source identity remains in
+`upstream/sources.lock.json` only to preserve attribution for the earlier design
+evaluation. Its MIT notice is retained here as historical third-party notice.
 
 DeepSeek Harness
 Copyright (c) 2026 DeepSeek
 
-Ratatui portions identified above are also distributed under these MIT terms.
+Ratatui portions identified above are distributed under these MIT terms.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -57,9 +60,21 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Native Rust dependency notices
+## i18n-embed-fl
 
-Every generated platform package contains a target-specific
+WinWinCode vendors `i18n-embed-fl 0.9.4` from the `cargo-i18n` project and
+applies the reproducible macro-generation patch recorded in
+`upstream/sources.lock.json`. The preserved upstream license is at
+`upstream/vendor/i18n-embed-fl-0.9.4/LICENSE.txt`.
+
+i18n-embed-fl
+Copyright 2020 Luke Frisken
+
+This component is licensed under the MIT terms reproduced above.
+
+## Rust dependency notices
+
+Every generated platform artifact contains a target-specific
 `rust-dependencies.json`. It records each linked Cargo package's exact name,
 version, source, authors, declared license expression, and the SHA-256 identity
 of every license, notice, copying, or copyright file included by that package's

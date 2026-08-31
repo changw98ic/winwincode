@@ -18,7 +18,8 @@ use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use winwincode_api::generated::{RepositoryScope, RepositoryScopeKind};
 use winwincode_control_plane::{
-    DurableExecutionPortDelegate, DurableExecutionPortIngress, RepositoryExecutionScheduler,
+    DurableExecutionPortDelegate, DurableExecutionPortIngress, DurableWorkerExecutionLifecycle,
+    RepositoryExecutionScheduler, WorkerEnterpriseQuotaClaim,
 };
 use winwincode_domain::{ExecutionJobId, Instant, RequestId, UserId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::generated::{
@@ -29,11 +30,11 @@ use winwincode_local::{
 };
 use winwincode_storage::{
     ExecutionAdmissionBoundary, ExecutionAdmissionErrorCode, ExecutionAdmissionLimits,
-    ExecutionAdmissionPolicy, ExecutionJobRecord, ExecutionJobState, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationStart, ExecutionReservationState,
-    RepositorySchedulerClaimRequest, RepositorySchedulerScope, WorkerOutboundAuthority,
-    WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits,
-    WorkerSlotResources,
+    ExecutionAdmissionPolicy, ExecutionJobRecord, ExecutionJobState, ExecutionLeaseClaim,
+    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
+    ExecutionReservationState, RepositorySchedulerClaimRequest, RepositorySchedulerScope,
+    WorkerOutboundAuthority, WorkerPoolId, WorkerSlotAuthority, WorkerSlotOpenRequest,
+    WorkerSlotResourceLimits, WorkerSlotResources,
 };
 use winwincode_worker::composition::ExecutionPortCore;
 use winwincode_worker::{CodexCoreAdapter, WorkerConfig, canonical_dispatch_session_identity};
@@ -107,6 +108,13 @@ impl RuntimeSupervisorError {
     #[must_use]
     pub const fn kind(self) -> RuntimeSupervisorErrorKind {
         self.kind
+    }
+
+    pub(crate) const fn transport_unavailable() -> Self {
+        Self::new(
+            RuntimeSupervisorErrorKind::Launcher,
+            "remote execution-port queue is unavailable",
+        )
     }
 }
 
@@ -204,6 +212,28 @@ pub trait LocalRuntimeScheduler: Send + 'static {
     /// cannot be committed.
     fn complete(&mut self, _now: Instant) -> Result<(), RuntimeSupervisorError> {
         Ok(())
+    }
+}
+
+/// Minimal Control Plane-to-Worker queue used by both the same-process
+/// launcher and the authenticated remote exchange.
+pub trait RuntimeControlOutbound {
+    /// Retains one canonical control message until its transport accepts it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded runtime error when the transport queue is unavailable.
+    fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), RuntimeSupervisorError>;
+}
+
+impl RuntimeControlOutbound for LocalExecutionPortHandle {
+    fn enqueue_control(&self, message: ExecutionPortMessage) -> Result<(), RuntimeSupervisorError> {
+        LocalExecutionPortHandle::enqueue_control(self, message).map_err(|_| {
+            RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Launcher,
+                "local execution-port queue is unavailable",
+            )
+        })
     }
 }
 
@@ -671,13 +701,10 @@ impl RepositoryRuntimeScheduler {
         &mut self,
         state: &mut ApplicationState,
         now: &Instant,
-        execution_port: &LocalExecutionPortHandle,
+        execution_port: &dyn RuntimeControlOutbound,
     ) -> Result<(), RuntimeSupervisorError> {
         if !self.pending_interaction_acknowledgements.is_empty() {
-            return Err(RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Driver,
-                "repository runtime scheduler has unacknowledged Worker interactions",
-            ));
+            return Ok(());
         }
         for authority in self.active_worker_authorities.clone() {
             let mut cursor = None;
@@ -692,9 +719,7 @@ impl RepositoryRuntimeScheduler {
                     )
                     .map_err(|_| scheduler_failure())?;
                 for claim in page.claims {
-                    execution_port
-                        .enqueue_control(claim.typed_frame().message().clone())
-                        .map_err(|_| scheduler_failure())?;
+                    execution_port.enqueue_control(claim.typed_frame().message().clone())?;
                     self.pending_interaction_acknowledgements
                         .push((authority.clone(), claim.message_id().clone()));
                 }
@@ -765,8 +790,9 @@ impl RepositoryRuntimeScheduler {
         &mut self,
         state: &mut ApplicationState,
         now: &Instant,
-        execution_port: &LocalExecutionPortHandle,
+        execution_port: &dyn RuntimeControlOutbound,
         admission_ready: bool,
+        authenticated_remote: bool,
     ) -> Result<(), RuntimeSupervisorError> {
         let expires_at = add_millis(now, self.lease_duration_millis).ok_or_else(|| {
             RuntimeSupervisorError::new(
@@ -785,12 +811,7 @@ impl RepositoryRuntimeScheduler {
                 })?
         };
         for cancellation in cancellations {
-            execution_port
-                .enqueue_control(ExecutionPortMessage::JobCancelMessage(cancellation))
-                .map_err(|error| {
-                    debug_scheduler_error("enqueue cancellation", &error);
-                    scheduler_failure()
-                })?;
+            execution_port.enqueue_control(ExecutionPortMessage::JobCancelMessage(cancellation))?;
         }
         // A queued Job may be waiting for an admission timestamp or for
         // ordinary concurrency/budget capacity.  Cancellation and interaction
@@ -824,17 +845,146 @@ impl RepositoryRuntimeScheduler {
                 scheduler_failure()
             })?;
         if let Some(dispatch) = dispatch {
+            if authenticated_remote {
+                let data_directory = state
+                    .storage
+                    .database_path()
+                    .parent()
+                    .ok_or_else(scheduler_failure)?;
+                let claim = ExecutionLeaseClaim {
+                    expires_at: dispatch.lease.expires_at.clone(),
+                    fencing_token: dispatch.lease.fencing_token.clone(),
+                    issued_at: dispatch.lease.issued_at.clone(),
+                    job_id: dispatch.lease.job_id.clone(),
+                    lease_id: dispatch.lease.lease_id.clone(),
+                    message_id: dispatch.message_id.clone(),
+                    payload_digest: dispatch.job.payload_digest.clone(),
+                    request_id: dispatch.request_id.clone(),
+                    worker_id: dispatch.lease.worker_id.clone(),
+                    worker_instance_id: dispatch.lease.worker_instance_id.clone(),
+                    attempt: u64::try_from(dispatch.lease.attempt)
+                        .map_err(|_| scheduler_failure())?,
+                };
+                match DurableWorkerExecutionLifecycle::open(data_directory)
+                    .and_then(|lifecycle| lifecycle.claim(&claim))
+                    .map_err(|error| {
+                        debug_scheduler_error("reserve remote Worker quota", &error);
+                        scheduler_failure()
+                    })? {
+                    WorkerEnterpriseQuotaClaim::Claimed { .. } => {}
+                    WorkerEnterpriseQuotaClaim::Denied
+                    | WorkerEnterpriseQuotaClaim::TerminalReplay(_) => {
+                        return Err(scheduler_failure());
+                    }
+                }
+            }
             let authority = self
                 .ensure_worker_slot(&mut state.storage, &dispatch, now)
                 .inspect_err(|error| debug_scheduler_error("ensure Worker slot", error))?;
-            execution_port
-                .enqueue_control(ExecutionPortMessage::JobDispatchMessage(dispatch))
-                .map_err(|error| {
-                    debug_scheduler_error("enqueue dispatch", &error);
-                    scheduler_failure()
-                })?;
+            execution_port.enqueue_control(ExecutionPortMessage::JobDispatchMessage(dispatch))?;
             self.remember_worker_authority(authority);
         }
+        Ok(())
+    }
+}
+
+impl RepositoryRuntimeScheduler {
+    /// Drives the canonical repository scheduler into a separated Worker
+    /// transport without changing its durable queue, lease, or slot owners.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same durable scheduling failures as the local driver.
+    pub fn drive_remote(
+        &mut self,
+        now: &Instant,
+        outbound: &dyn RuntimeControlOutbound,
+    ) -> Result<(), RuntimeSupervisorError> {
+        self.drive_outbound(now, outbound, true)
+    }
+
+    /// Commits only interaction receipts explicitly confirmed by the remote
+    /// Worker. Unconfirmed messages remain claimed for exact replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a durable queue failure without dropping remaining receipts.
+    pub fn acknowledge_remote(
+        &mut self,
+        now: &Instant,
+        confirmed: &[winwincode_domain::ExecutionMessageId],
+    ) -> Result<(), RuntimeSupervisorError> {
+        if confirmed.is_empty() {
+            return Ok(());
+        }
+        let state_handle = Arc::clone(&self.state);
+        let mut guard = state_handle.lock().map_err(|_| {
+            RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Driver,
+                "repository runtime scheduler state is unavailable",
+            )
+        })?;
+        let state = guard.as_mut().ok_or_else(|| {
+            RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Shutdown,
+                "repository runtime scheduler application has stopped",
+            )
+        })?;
+        let mut remaining = Vec::new();
+        for (authority, message_id) in
+            std::mem::take(&mut self.pending_interaction_acknowledgements)
+        {
+            if confirmed.contains(&message_id) {
+                if state
+                    .worker_outbound
+                    .acknowledge(&authority, &message_id, now)
+                    .is_err()
+                {
+                    remaining.push((authority, message_id));
+                }
+            } else {
+                remaining.push((authority, message_id));
+            }
+        }
+        self.pending_interaction_acknowledgements = remaining;
+        Ok(())
+    }
+
+    fn drive_outbound(
+        &mut self,
+        now: &Instant,
+        execution_port: &dyn RuntimeControlOutbound,
+        authenticated_remote: bool,
+    ) -> Result<(), RuntimeSupervisorError> {
+        let state_handle = Arc::clone(&self.state);
+        let mut guard = state_handle.lock().map_err(|_| {
+            RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Driver,
+                "repository runtime scheduler state is unavailable",
+            )
+        })?;
+        let state = guard.as_mut().ok_or_else(|| {
+            RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Shutdown,
+                "repository runtime scheduler application has stopped",
+            )
+        })?;
+        self.prune_worker_authorities(&mut state.storage)?;
+        let admission_ready = self.ensure_queued_admission(state, now)?;
+        self.dispatch_scheduler_messages(
+            state,
+            now,
+            execution_port,
+            admission_ready,
+            authenticated_remote,
+        )?;
+        self.dispatch_interactions(state, now, execution_port)?;
+        self.hub
+            .publish_pending(&mut state.storage)
+            .map_err(|error| {
+                debug_scheduler_error("publish pending events", &error);
+                scheduler_failure()
+            })?;
         Ok(())
     }
 }
@@ -912,30 +1062,7 @@ impl LocalRuntimeScheduler for RepositoryRuntimeScheduler {
         now: Instant,
         execution_port: &LocalExecutionPortHandle,
     ) -> Result<(), RuntimeSupervisorError> {
-        let state_handle = Arc::clone(&self.state);
-        let mut guard = state_handle.lock().map_err(|_| {
-            RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Driver,
-                "repository runtime scheduler state is unavailable",
-            )
-        })?;
-        let state = guard.as_mut().ok_or_else(|| {
-            RuntimeSupervisorError::new(
-                RuntimeSupervisorErrorKind::Shutdown,
-                "repository runtime scheduler application has stopped",
-            )
-        })?;
-        self.prune_worker_authorities(&mut state.storage)?;
-        let admission_ready = self.ensure_queued_admission(state, &now)?;
-        self.dispatch_scheduler_messages(state, &now, execution_port, admission_ready)?;
-        self.dispatch_interactions(state, &now, execution_port)?;
-        self.hub
-            .publish_pending(&mut state.storage)
-            .map_err(|error| {
-                debug_scheduler_error("publish pending events", &error);
-                scheduler_failure()
-            })?;
-        Ok(())
+        self.drive_outbound(&now, execution_port, false)
     }
 
     fn complete(&mut self, now: Instant) -> Result<(), RuntimeSupervisorError> {
@@ -1037,7 +1164,10 @@ where
                 "Server Worker ingress configuration is invalid",
             )
         })?;
-        let responses = ingress.handle(message).map_err(|_error| {
+        let responses = ingress.handle(message).map_err(|error| {
+            if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
+                eprintln!("Server Worker ingress category: {error}");
+            }
             ServerExecutionPortError::new(
                 ServerExecutionPortErrorKind::Ingress,
                 "Server Worker ingress rejected a typed frame",

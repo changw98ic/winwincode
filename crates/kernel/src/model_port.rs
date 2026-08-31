@@ -42,15 +42,15 @@ impl fmt::Debug for ModelPortRequest {
 /// Serializable failure facts retained across the host/native boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPortFailure {
-    /// Stable DSH or bridge failure category.
+    /// Stable Kernel model-port failure category.
     pub code: String,
     /// Human-readable diagnostic that must not contain provider credentials.
     pub message: String,
-    /// Provider HTTP status, when supplied by DSH.
+    /// Provider HTTP status, when supplied by the model runtime.
     pub status: Option<u16>,
-    /// Provider-requested retry delay, when supplied by DSH.
+    /// Provider-requested retry delay, when supplied by the model runtime.
     pub provider_retry_after_millis: Option<u64>,
-    /// Provider-issued request identity, when supplied by DSH.
+    /// Provider-issued request identity, when supplied by the model runtime.
     pub provider_request_id: Option<String>,
 }
 
@@ -70,7 +70,11 @@ impl ModelPortFailure {
 
 impl fmt::Display for ModelPortFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "[DSH:{}] {}", self.code, self.message)
+        write!(
+            formatter,
+            "[WINWINCODE_KERNEL:{}] {}",
+            self.code, self.message
+        )
     }
 }
 
@@ -110,7 +114,7 @@ impl ModelStreamTransport for KernelModelStreamTransport {
             let request_id = request.request_id.clone();
             let payload_json =
                 serde_json::to_string(&request).map_err(|error| ApiError::InvalidRequest {
-                    message: format!("[DSH:MODEL_PORT_REQUEST_INVALID] {error}"),
+                    message: format!("[WINWINCODE_KERNEL:MODEL_PORT_REQUEST_INVALID] {error}"),
                 })?;
             let stream = port
                 .stream(ModelPortRequest {
@@ -287,7 +291,7 @@ async fn forward_model_stream(
                 Err(error) => {
                     let _ = tx_event
                         .send(Err(ApiError::Stream(format!(
-                            "[DSH:MODEL_PORT_PROTOCOL_INVALID] {error}"
+                            "[WINWINCODE_KERNEL:MODEL_PORT_PROTOCOL_INVALID] {error}"
                         ))))
                         .await;
                     return;
@@ -308,7 +312,8 @@ async fn forward_model_stream(
     }
     let _ = tx_event
         .send(Err(ApiError::Stream(
-            "[DSH:STREAM_CLOSED] model stream ended without a terminal message".to_string(),
+            "[WINWINCODE_KERNEL:STREAM_CLOSED] model stream ended without a terminal message"
+                .to_string(),
         )))
         .await;
 }
@@ -381,10 +386,25 @@ mod tests {
         failure.provider_retry_after_millis = Some(750);
         match model_port_api_error(&failure) {
             ApiError::Retryable { message, delay } => {
-                assert!(message.starts_with("[DSH:RATE_LIMIT]"));
+                assert_eq!(message, "[WINWINCODE_KERNEL:RATE_LIMIT] slow down");
                 assert_eq!(delay.map(|value| value.as_millis()), Some(750));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_stream_uses_the_canonical_kernel_error_namespace() {
+        let stream: ModelPortStream = Box::pin(futures::stream::empty());
+        let (sender, mut receiver) = mpsc::channel(1);
+        forward_model_stream(stream, sender).await;
+
+        match receiver.recv().await.expect("terminal stream error") {
+            Err(ApiError::Stream(message)) => assert_eq!(
+                message,
+                "[WINWINCODE_KERNEL:STREAM_CLOSED] model stream ended without a terminal message"
+            ),
+            other => panic!("unexpected stream result: {other:?}"),
         }
     }
 

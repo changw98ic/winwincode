@@ -10,6 +10,7 @@ mod durable_event_hub;
 mod enterprise_identity_protocol;
 mod enterprise_management;
 mod identity_authenticator;
+mod remote_worker_transport;
 mod runtime;
 mod server;
 mod transport;
@@ -38,13 +39,17 @@ pub use enterprise_management::{
     EnterpriseRbacManagementApplication, UnavailableEnterpriseManagementApplication,
 };
 pub use identity_authenticator::EnterpriseRequestAuthenticator;
+pub use remote_worker_transport::{
+    FileRemoteWorkerAuthenticator, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
+    RemoteWorkerTransportError,
+};
 pub use runtime::{
     HealthyRuntimeHealth, LocalRuntimeScheduler, LocalRuntimeSupervisor,
-    RepositoryRuntimeScheduler, RuntimeHealthHandle, RuntimeHealthPort, RuntimeSupervisorError,
-    RuntimeSupervisorErrorKind, ServerExecutionPortCore, ServerExecutionPortError,
-    ServerExecutionPortErrorKind,
+    RepositoryRuntimeScheduler, RuntimeControlOutbound, RuntimeHealthHandle, RuntimeHealthPort,
+    RuntimeSupervisorError, RuntimeSupervisorErrorKind, ServerExecutionPortCore,
+    ServerExecutionPortError, ServerExecutionPortErrorKind,
 };
-pub use server::{RunningServer, ServerError, start_server};
+pub use server::{RunningServer, ServerError, start_server, start_server_with_remote_worker};
 pub use transport::{
     ApiError, AuthError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription,
     RequestAuthenticator, TransportCredentials,

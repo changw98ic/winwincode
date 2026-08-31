@@ -194,7 +194,13 @@ pub(crate) fn verifier_policy_authority_at(
     let (durable, job) = load_durable_execution_job(storage, &message.lease.job_id)?;
     let context = TerminalContext::from_durable(scope, &durable, &job)?;
     let current = load_current_delivery(storage, &context.delivery_id)?;
-    let session_identity = validate_current_job_binding(&current, &job, &context)?;
+    let session_identity = match validate_current_job_binding(&current, &job, &context) {
+        Ok(identity) => identity,
+        Err(source) => {
+            recover_raced_receipt(storage, &phase, message, source)?;
+            return Ok(None);
+        }
+    };
     validate_message_authority(message, &job, &context, facts, &session_identity)?;
     let PublicEventActor::User { id: user_id } =
         public_actor_from_receipt_key(durable.receipt_identity().actor_key())?

@@ -31,17 +31,40 @@ export function assertProductVersion(version) {
 
 export function setProductVersion(root, version) {
   assertProductVersion(version)
-  const paths = [
+  const manifestPaths = [
     resolve(root, 'package.json'),
     ...PRODUCT_PACKAGE_DIRECTORIES.map(directory => resolve(root, directory, 'package.json')),
   ]
-  const updates = paths.map(path => {
+  const updates = manifestPaths.map(path => {
     const manifest = readManifest(path)
     return Object.freeze({
       path,
       text: `${JSON.stringify({ ...manifest, version }, null, 2)}\n`,
     })
   })
+  const cargoManifestPath = resolve(root, 'Cargo.toml')
+  const cargoManifest = readFileSync(cargoManifestPath, 'utf8')
+  const workspacePackageVersion = /(\[workspace\.package\][\s\S]*?\nversion\s*=\s*)"[^"]+"/u
+  if (!workspacePackageVersion.test(cargoManifest)) {
+    throw new Error('Cargo.toml is missing [workspace.package].version')
+  }
+  updates.push(Object.freeze({
+    path: cargoManifestPath,
+    text: cargoManifest.replace(workspacePackageVersion, `$1"${version}"`),
+  }))
+  const internalDependencyManifestPath = resolve(
+    root,
+    'crates/winwincode-delivery/Cargo.toml',
+  )
+  const internalDependencyManifest = readFileSync(internalDependencyManifestPath, 'utf8')
+  const internalDependencyVersion = /(winwincode-storage\s*=\s*\{[^\n]*\bversion\s*=\s*)"[^"]+"/u
+  if (!internalDependencyVersion.test(internalDependencyManifest)) {
+    throw new Error('winwincode-delivery is missing its exact winwincode-storage version')
+  }
+  updates.push(Object.freeze({
+    path: internalDependencyManifestPath,
+    text: internalDependencyManifest.replace(internalDependencyVersion, `$1"${version}"`),
+  }))
   for (const update of updates) writeFileSync(update.path, update.text)
   return Object.freeze(updates.map(update => update.path))
 }

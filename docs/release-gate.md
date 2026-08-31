@@ -1,105 +1,89 @@
-# 产品发布门禁
+# 产品发布证据门禁
 
-这个流程用于生成“当前源码和四个平台产物可以进入发布审批”的证据。它不会上传 npm 包、创建 Git tag 或发布 GitHub Release。
+阶段 6.7 为同一个源码 commit 生成四个平台的可复核产物证据。门禁只生成和验证文件，不发布包、Git tag 或 GitHub Release。
 
-## 1. 生成四个平台证据
+## 单平台证据
 
-在 GitHub Actions 中手动运行 `Native release matrix` 两次：
+GitHub Actions 的 `Product release matrix` 分别在以下原生 runner 上运行：
 
-1. `platform=linux`，生成 Linux arm64 与 x64 两个 artifact；
-2. `platform=macos`，生成 macOS arm64 与 x64 两个 artifact。
+| Rust target | runner | 产品文件 |
+| --- | --- | --- |
+| `aarch64-apple-darwin` | `macos-15` | Server、Worker、Worker 内部 Kernel helper、Client 静态文件 |
+| `x86_64-apple-darwin` | `macos-15-intel` | 同上 |
+| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | 同上 |
+| `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | 同上 |
 
-每个 job 使用固定 Node.js 24.19.0 和 Rust 1.95.0，在目标原生 runner 上执行完整发布检查。成功 artifact 包含：
+每个 job 使用 Node.js 24、pnpm 11.7.0 和 Rust 1.95.0。`SOURCE_DATE_EPOCH` 必须等于候选 commit 的提交时间。runner 调用：
 
-```text
-native-release-evidence.json
-release-packages.json
-SHA256SUMS
-winwincode-*.tgz
-winwincode-contracts-*.tgz
-winwincode-dsh-profile-*.tgz
-winwincode-native-*.tgz
-winwincode-strongflow-*.tgz
-winwincode-native-PLATFORM-*.tgz
-```
-
-下载四个 artifact，保持每个目标一个独立目录。不要把同名的公共包 tarball 覆盖到一个目录。
-
-## 2. 生成当前真实模型结果
-
-按 [`docs/live-evaluation.md`](live-evaluation.md) 运行至少一次真实 DSH 提供商评估。使用的 WinWinCode 源码必须与四个平台 job 完全相同。最终 `result.json` 必须是 `completed`，并且 Delivery 已通过独立 Reviewer、Verifier 和人工交付审核。
-
-真实评估后发生任何项目源码、测试、脚本、文档或 CI 变化，旧结果都会因源码摘要不同而失效。此时重新运行真实评估。
-
-## 3. 准备本地检查环境
-
-在四个平台 job 使用的同一个 commit 上安装和构建：
+仓库为发布环境配置 `WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX` secret 和对应的 `WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX` variable。public key 编译进 Server 和 Worker，用于验证随 helper 分发的签名清单；helper 是被签名的对象。private key 只在 runner 内为 helper 清单签名，不写入 artifact 或报告。
 
 ```bash
-corepack pnpm install --frozen-lockfile
-corepack pnpm build:ts
+corepack pnpm release:artifact \
+  --target TARGET \
+  --source-commit SOURCE_COMMIT \
+  --source-date-epoch SOURCE_DATE_EPOCH \
+  --output release-artifacts
 ```
 
-`build:ts` 是必需的，因为门禁会核对真实评估实际执行的测量模块文件。
+命令先运行完整 `pnpm verify`，再在同一个物理 Cargo target 中完成两次冷构建：第一次产物复制到只读快照后，runner 完整删除并重建 target，才开始第二次构建。两次 Rust 二进制和 Client 静态文件的 SHA-256 会逐项比较；macOS 还比较 linker `LC_UUID`。任何差异都会失败。
 
-目录示例：
+每个 target 的上传目录固定为：
 
 ```text
-/evidence/native/aarch64-apple-darwin/native-release-evidence.json
-/evidence/native/x86_64-apple-darwin/native-release-evidence.json
-/evidence/native/aarch64-unknown-linux-gnu/native-release-evidence.json
-/evidence/native/x86_64-unknown-linux-gnu/native-release-evidence.json
-/evidence/live/RUN_ID/result.json
+release-artifacts/TARGET/
+  release-artifact-manifest.json
+  SHA256SUMS
+  bin/winwincode-server
+  bin/winwincode-worker
+  bin/winwincode-kernel-helper
+  bin/winwincode-kernel-helper.release.json
+  client/
+  legal/LICENSE
+  legal/NOTICE
+  legal/THIRD_PARTY_NOTICES.md
 ```
 
-## 4. 运行产品门禁
+`winwincode-kernel-helper` 是 Worker 的内部随附文件。Local 模式以 `winwincode-server` 为启动入口，通过 `winwincode-local` Rust library 在同一进程组装 Worker。manifest 会记录 Local crate 源码摘要、Cargo.lock 摘要和 `server-local-composition` 模式。
 
-把 `SOURCE_COMMIT` 替换成四个 GitHub Actions job 记录的完整小写 commit：
+## Manifest 绑定内容
+
+`release-artifact-manifest.json` 至少绑定：
+
+- 完整小写源码 commit、唯一产品版本和 Apache-2.0；
+- `SOURCE_DATE_EPOCH`、release source、Cargo/pnpm manifest 与 lock SHA-256；
+- Control Plane `winwincode/v1` OpenAPI 和 ExecutionPort v1 schema 的版本与 SHA-256；
+- Server、Worker、内部 helper 和每个 Client 静态文件的字节数与 SHA-256；
+- helper 签名清单、发布 public key、helper 源码/二进制身份与 Ed25519 验证结果；
+- Local 同进程组成身份；
+- `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`；
+- 同一物理 Cargo target 完整清空前后的两次冷构建完全相同。
+
+`SHA256SUMS` 从 manifest 的文件描述符机械生成。手改文件、清单或 checksum 都会失败。
+
+## 汇总四平台报告
+
+下载四个 target artifact，保持目录名不变，然后运行：
 
 ```bash
-corepack pnpm verify:release \
+corepack pnpm verify:release-artifacts \
   --expected-commit SOURCE_COMMIT \
-  --native-evidence /evidence/native \
-  --live-evaluation /evidence/live/RUN_ID/result.json \
-  --output /evidence/product-release-gate.json
+  --source-date-epoch SOURCE_DATE_EPOCH \
+  --evidence release-artifacts \
+  --output release-report.json
 ```
 
-通过时标准输出包含：
+汇总门禁要求四个 target 恰好各一份，逐文件重算 SHA-256，并确认四个平台使用同一 source、版本、协议、lock、法律文件和完全相同的 Client 静态包。已有 `release-report.json` 内容不同时命令会失败，避免混入旧证据。
 
-- `status: passed`；
-- 精确源码 commit；
-- 四个 Rust 目标；
-- 使用的真实评估 run ID；
-- 最终报告 SHA-256 和文件位置。
+上传前，workflow 还会运行单 target artifact security verifier，检查实际 Mach-O/ELF 平台身份、动态库、Client 文件类型、构建路径和凭据泄漏。下载四份证据后再次运行汇总安全检查：
 
-同一输入重复运行会复用字节完全相同的输出。已有输出内容不同会失败，避免新旧证据被静默混合。
+```bash
+corepack pnpm verify:release-artifact-security \
+  --expected-commit SOURCE_COMMIT \
+  --source-date-epoch SOURCE_DATE_EPOCH \
+  --evidence release-artifacts \
+  --output release-artifact-security-report.json
+```
 
-门禁在读取证据、真实评估和 tarball 后、生成通过报告前运行 Credential 泄漏扫描。扫描会展开 gzip/tar、检查 JSON 字段策略、已知 Provider 凭据编码和显式秘密指纹；命中时只报告文件与规则，不回显匹配值。损坏或不支持的压缩条目按失败处理。
+安全报告写到 target 目录外，因此不会改变已经封存的 target 文件集合；它通过 `canonicalEvidenceSha256` 绑定同一份四平台汇总结果。
 
-## 5. 人工审核报告
-
-发布批准人至少检查：
-
-1. `source.commit` 是准备发布的 commit；
-2. `nativeTargets` 恰好包含四个支持目标，且 CI runner 与目标对应；
-3. 每个目标有六个 tarball 和独立确定性 Delivery 结果；
-4. `evaluations.live` 指向当前候选、Spec revision、Verdict 和可重算测量；
-5. `falseSuccessRisk` 与 `falseFailureRisk` 均为 `false`；
-6. `boundaries` 显示内嵌 Codex Core、DSH 外壳、WinWinCode Delivery、Apache-2.0，且不依赖外部编程 Agent 或 CPB runtime。
-
-## 常见失败
-
-| 错误 | 具体含义 |
-| --- | --- |
-| `NATIVE_MATRIX_INCOMPLETE` | 四个目标中有缺失、重复或混入其他目标 |
-| `SOURCE_MISMATCH` | 平台证据来自另一个 commit 或另一份源码 |
-| `ARTIFACT_MISMATCH` | tarball、清单或 SHA256SUMS 在 CI 后被改变 |
-| `CHECK_MISSING` | 单平台 job 没有完成当前固定检查集合 |
-| `LIVE_EVALUATION_STALE` | 真实评估使用的源码、评估器或原生目标已经过期 |
-| `LIVE_EVALUATION_FAILED` | Delivery、人工决定、用量或最终结论没有完整通过 |
-| `EVALUATION_MISMATCH` | 保存的测量不能从原始结果重新算出 |
-| `LEGAL_BOUNDARY_FAILED` | 项目许可证或必要第三方通知不完整 |
-| `DESIGN_BOUNDARY_FAILED` | 当前源码重新引入了已排除的 CPB 运行依赖或状态路径 |
-| `CREDENTIAL_LEAK_DETECTED` | 证据、真实评估或发布包命中 Credential 泄漏门禁 |
-
-失败报告区分产物、源码、真实评估和法律边界。修复对应事实并重新生成证据；不要手改 evidence JSON 或最终报告。
+真实 API→Control Plane→Worker→内嵌 Codex Kernel→Provider→Delivery 纵向、本地同进程模式、分离模式与 Client 远程 Server 直连证据必须绑定相同 commit；它们是阶段 6.7 的并列验收，不用 JSON 声明代替实际运行。

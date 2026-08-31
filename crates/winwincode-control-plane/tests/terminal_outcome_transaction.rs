@@ -18,8 +18,8 @@ use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::{
     ArtifactEnterpriseQuotaAdmission, ArtifactEnterpriseQuotaSaga, CommitError, ControlPlane,
     ControlPlaneConfig, DeliveryTerminalOutcomeCommitError, DurableArtifactEnterpriseUsage,
-    DurableEnterpriseQuotaAdmission, EventPublishError, EventPublisher, ExecutionPortService,
-    LocalDeliveryAdapterConfig, OutboxEvent, StateChange,
+    DurableEnterpriseQuotaAdmission, DurableExecutionPortIngress, EventPublishError,
+    EventPublisher, ExecutionPortService, LocalDeliveryAdapterConfig, OutboxEvent, StateChange,
 };
 use winwincode_delivery::{
     application::{
@@ -48,8 +48,10 @@ use winwincode_domain::{
 use winwincode_execution_port::generated::{
     ArtifactReference, DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob,
     ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcome, ExecutionOutcomeStatus,
-    ExecutionOutcomeUsage, ExecutionPortError, ExecutionPortErrorCode, ExecutionScope,
-    ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobOutcomeMessage, JobOutcomeMessageKind,
+    ExecutionOutcomeUsage, ExecutionPortError, ExecutionPortErrorCode, ExecutionPortMessage,
+    ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobDispatchResultMessage,
+    JobDispatchResultMessageKind, JobDispatchResultMessageStatus, JobOutcomeAckMessageStatus,
+    JobOutcomeMessage, JobOutcomeMessageKind,
 };
 use winwincode_storage::PublicEventSource;
 use winwincode_storage::{
@@ -61,14 +63,14 @@ use winwincode_storage::{
     EnterprisePolicyKind, EnterprisePolicyMode, EnterprisePolicyScope, EnterprisePolicyState,
     EnterprisePolicyVersionSource, EnterprisePolicyWrite, EnterpriseQuotaReleaseReason,
     EnterpriseQuotaReservationState, EnterpriseQuotaTerminal, ExecutionAdmissionBoundary,
-    ExecutionAdmissionLimits, ExecutionAdmissionPolicy, ExecutionJobSubmission,
-    ExecutionLeaseClaim, ExecutionQueueScope, ExecutionRepositoryAccess,
-    ExecutionReservationRequest, ExecutionReservationStart, FakeArtifactObjectStore,
-    LocalArtifactObjectStore, NewOutboxEvent, ProductStateStorage, PublicEventActor,
-    ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit, WorkerAuthenticationIdentity,
-    WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId, WorkerRegistrationRequest,
-    WorkerRegistryScope, WorkerSlotAuthority, WorkerSlotOpenRequest, WorkerSlotResourceLimits,
-    WorkerSlotResources,
+    ExecutionAdmissionLimits, ExecutionAdmissionPolicy, ExecutionJobState, ExecutionJobSubmission,
+    ExecutionJobTransitionRequest, ExecutionLeaseClaim, ExecutionQueueScope,
+    ExecutionRepositoryAccess, ExecutionReservationRequest, ExecutionReservationStart,
+    FakeArtifactObjectStore, LocalArtifactObjectStore, NewOutboxEvent, ProductStateStorage,
+    PublicEventActor, ReceiptIdentity, ReceiptScopeKey, SqliteStorage, StateCommit,
+    WorkerAuthenticationIdentity, WorkerHeartbeatRequest, WorkerPlatform, WorkerPoolId,
+    WorkerRegistrationRequest, WorkerRegistryScope, WorkerSlotAuthority, WorkerSlotOpenRequest,
+    WorkerSlotResourceLimits, WorkerSlotResources,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -392,9 +394,26 @@ fn seed_authenticated_worker_execution(
         worker_instance_id: message.lease.worker_instance_id.clone(),
         attempt: u64::try_from(message.lease.attempt).expect("lease attempt"),
     };
-    ExecutionPortService::new(&mut storage, claim.issued_at.clone())
+    let dispatch = ExecutionPortService::new(&mut storage, claim.issued_at.clone())
         .claim_execution_job(job.clone(), claim)
         .expect("production enterprise dispatch");
+    let dispatch_result = JobDispatchResultMessage {
+        error: None,
+        job_id: dispatch.job.job_id.clone(),
+        kind: JobDispatchResultMessageKind::JobDispatchResult,
+        lease: dispatch.lease,
+        message_id: ExecutionMessageId(canonical_id("xmsg", seed + 9_007)),
+        payload_digest: dispatch.job.payload_digest,
+        request_id: dispatch.request_id,
+        schema_version: SchemaVersion::WinwincodeV1,
+        sent_at: Instant("2027-01-15T08:00:00.250Z".into()),
+        status: JobDispatchResultMessageStatus::Accepted,
+        worker_session_id: Some(message.worker_session_id.clone()),
+    };
+    let accepted = ExecutionPortService::new(&mut storage, dispatch_result.sent_at.clone())
+        .accept_dispatch_result(dispatch_result)
+        .expect("accepted production dispatch");
+    assert_eq!(accepted.status, JobDispatchResultMessageStatus::Accepted);
     seed_worker_slot(&mut storage, message, seed);
 }
 
@@ -449,7 +468,7 @@ fn seed_worker_execution_admission(
         product_session_id: job_scope.product_session_id.clone(),
     };
     let submitted_at = Instant("2027-01-15T08:00:00.000Z".into());
-    storage
+    let submitted = storage
         .execution_queue()
         .expect("execution queue")
         .submit(&ExecutionJobSubmission {
@@ -464,6 +483,19 @@ fn seed_worker_execution_admission(
             submitted_at: submitted_at.clone(),
         })
         .expect("execution queue submission");
+    storage
+        .execution_queue()
+        .expect("execution queue")
+        .transition(&ExecutionJobTransitionRequest {
+            scope: queue_scope.clone(),
+            job_id: job.job_id.clone(),
+            request_id: RequestId(canonical_id("req", seed + 9_008)),
+            expected_revision: submitted.job.revision,
+            from: ExecutionJobState::Queued,
+            to: ExecutionJobState::Leased,
+            occurred_at: Instant("2027-01-15T08:00:00.200Z".into()),
+        })
+        .expect("execution queue lease");
     let mut admission = storage.execution_admission().expect("execution admission");
     for boundary in worker_admission_boundaries(scope, job_scope, pool_id) {
         admission
@@ -1799,26 +1831,18 @@ fn a_new_message_cannot_resettle_an_already_terminal_stage_run() {
     fs::remove_dir_all(root).expect("database directory release");
 }
 
-#[test]
-fn concurrent_exact_message_returns_one_commit_and_only_durable_replays() {
-    let seed = 4;
-    let root = temporary_directory("concurrent-exact-message");
-    let scope = repository_scope(seed);
-    let (delivery, _candidate) = running_final_verifier(seed);
-    let job = execution_job(&delivery, &scope);
-    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
-    let facts = outcome_facts(&delivery, &message);
-    seed_delivery_and_job(&root, &delivery, &job);
-
-    let root = Arc::new(root);
+fn concurrently_accept_terminal_message(
+    root: &Arc<PathBuf>,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+) -> Vec<JobOutcomeAckMessageStatus> {
     let barrier = Arc::new(Barrier::new(8));
-    let handles = (0..8)
+    (0..8)
         .map(|_| {
-            let root = Arc::clone(&root);
+            let root = Arc::clone(root);
             let barrier = Arc::clone(&barrier);
             let scope = scope.clone();
             let message = message.clone();
-            let facts = facts.clone();
             thread::spawn(move || {
                 barrier.wait();
                 let mut control_plane = ControlPlane::start_local(
@@ -1826,22 +1850,182 @@ fn concurrent_exact_message_returns_one_commit_and_only_durable_replays() {
                     Box::new(RecordingPublisher),
                 )
                 .expect("Control Plane start");
-                let receipt = control_plane
-                    .commit_delivery_terminal_outcome(&scope, &message, &facts, &message.sent_at)
-                    .expect("concurrent terminal outcome");
-                let replayed = receipt.receipt().idempotent_replay;
+                let mut storage = SqliteStorage::open(root.as_path()).expect("ingress storage");
+                let response = DurableExecutionPortIngress::new(
+                    &mut control_plane,
+                    &mut storage,
+                    &scope,
+                    message.sent_at.clone(),
+                )
+                .expect("durable ingress")
+                .handle(&ExecutionPortMessage::JobOutcomeMessage(message))
+                .expect("concurrent terminal outcome");
+                let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = response.as_slice() else {
+                    panic!("one terminal acknowledgement")
+                };
+                let status = ack.status.clone();
+                Box::new(storage).close().expect("ingress storage close");
                 control_plane.shutdown().expect("shutdown");
-                replayed
+                status
             })
         })
-        .collect::<Vec<_>>();
-    let replayed = handles
+        .collect::<Vec<_>>()
         .into_iter()
         .map(|handle| handle.join().expect("terminal outcome thread"))
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    assert_eq!(replayed.iter().filter(|value| !**value).count(), 1);
-    assert_eq!(replayed.iter().filter(|value| **value).count(), 7);
+fn changed_terminal_replay_status(
+    root: &Path,
+    scope: &RepositoryScope,
+    message: &JobOutcomeMessage,
+) -> JobOutcomeAckMessageStatus {
+    let mut changed = message.clone();
+    changed.outcome.summary = "changed body under the committed messageId".into();
+    let mut control_plane = ControlPlane::start_local(
+        ControlPlaneConfig::local(root),
+        Box::new(RecordingPublisher),
+    )
+    .expect("changed replay Control Plane");
+    let mut storage = SqliteStorage::open(root).expect("changed replay ingress storage");
+    let response = DurableExecutionPortIngress::new(
+        &mut control_plane,
+        &mut storage,
+        scope,
+        changed.sent_at.clone(),
+    )
+    .expect("changed replay ingress")
+    .handle(&ExecutionPortMessage::JobOutcomeMessage(changed))
+    .expect("changed replay response");
+    let [ExecutionPortMessage::JobOutcomeAckMessage(ack)] = response.as_slice() else {
+        panic!("one changed replay acknowledgement")
+    };
+    let status = ack.status.clone();
+    Box::new(storage)
+        .close()
+        .expect("changed replay storage close");
+    control_plane
+        .shutdown()
+        .expect("changed replay Control Plane shutdown");
+    status
+}
+
+fn assert_one_terminal_resource_transition(
+    root: &Path,
+    delivery: &Delivery,
+    job: &ExecutionJob,
+    message: &JobOutcomeMessage,
+) {
+    let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
+        .expect("terminal resource inspection");
+    let queue: (String, i64) = connection
+        .query_row(
+            "SELECT state, revision FROM scheduler_execution_jobs WHERE job_id = ?1",
+            [&job.job_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("terminal scheduler Job");
+    let slot: (String, i64) = connection
+        .query_row(
+            "SELECT state, revision FROM worker_session_slots WHERE worker_session_id = ?1",
+            [&message.worker_session_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("terminal Worker slot");
+    let operational: (String, i64) = connection
+        .query_row(
+            "SELECT state, revision FROM execution_admission_reservations WHERE job_id = ?1",
+            [&job.job_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("terminal operational admission");
+    let enterprise: (String, i64) = connection
+        .query_row(
+            "SELECT state, revision FROM enterprise_quota_reservations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("terminal enterprise admission");
+    let lease_terminals: (i64, String) = connection
+        .query_row(
+            "SELECT COUNT(*), outcome FROM execution_lease_terminals WHERE job_id = ?1",
+            [&job.job_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("terminal execution lease");
+    let usage_sources: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM execution_admission_settlement_sources WHERE job_id = ?1",
+            [&job.job_id.0],
+            |row| row.get(0),
+        )
+        .expect("terminal Usage source");
+    assert_eq!(queue, ("completed".into(), 4));
+    assert_eq!(slot, ("completed".into(), 2));
+    assert_eq!(operational, ("settled".into(), 3));
+    assert_eq!(enterprise, ("settled".into(), 2));
+    assert_eq!(lease_terminals, (1, "completed".into()));
+    assert_eq!(usage_sources, 1);
+    connection.close().expect("terminal resource close");
+
+    let storage = SqliteStorage::open(root).expect("terminal Delivery inspection");
+    let state = storage
+        .load_state(&format!("delivery:{}", delivery.id().0))
+        .expect("terminal Delivery state")
+        .expect("terminal Delivery exists");
+    let current = Delivery::decode_json(&state.payload).expect("terminal Delivery JSON");
+    let ExecutionScope::DeliveryStageExecutionScope(job_scope) = &job.scope else {
+        panic!("terminal Delivery job scope")
+    };
+    let run = current
+        .snapshot()
+        .stage_runs
+        .iter()
+        .find(|run| run.id == job_scope.stage_run_id)
+        .expect("terminal StageRun");
+    let bindings = current
+        .snapshot()
+        .session_bindings
+        .iter()
+        .filter(|binding| binding.stage_run_id == run.id)
+        .collect::<Vec<_>>();
+    assert_eq!(run.status, StageRunStatus::Succeeded);
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].execution_job_id, job.job_id);
+    Box::new(storage)
+        .close()
+        .expect("terminal Delivery inspection close");
+}
+
+fn assert_concurrent_exact_terminal_round(seed: u64) {
+    let root = temporary_directory("concurrent-exact-message");
+    let scope = repository_scope(seed);
+    let (delivery, _candidate) = running_final_verifier(seed);
+    let job = execution_job(&delivery, &scope);
+    let message = terminal_message(&job, &delivery, seed, ExecutionOutcomeStatus::Succeeded);
+    seed_delivery_and_job(&root, &delivery, &job);
+    seed_authenticated_worker_execution(&root, &scope, &job, &message, seed);
+
+    let root = Arc::new(root);
+    let statuses = concurrently_accept_terminal_message(&root, &scope, &message);
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == JobOutcomeAckMessageStatus::Accepted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == JobOutcomeAckMessageStatus::Duplicate)
+            .count(),
+        7
+    );
+    assert_eq!(
+        changed_terminal_replay_status(root.as_path(), &scope, &message),
+        JobOutcomeAckMessageStatus::RejectedConflict
+    );
     let connection = rusqlite::Connection::open(root.join("control-plane.sqlite3"))
         .expect("durable count connection");
     let state_revision: i64 = connection
@@ -1882,7 +2066,15 @@ fn concurrent_exact_message_returns_one_commit_and_only_durable_replays() {
         (2, 2, 1, 3)
     );
     connection.close().expect("durable count close");
+    assert_one_terminal_resource_transition(root.as_path(), &delivery, &job, &message);
     fs::remove_dir_all(root.as_path()).expect("database directory release");
+}
+
+#[test]
+fn concurrent_exact_message_returns_one_commit_and_only_durable_replays() {
+    for seed in 4..14 {
+        assert_concurrent_exact_terminal_round(seed);
+    }
 }
 
 #[test]

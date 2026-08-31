@@ -354,9 +354,9 @@ impl KernelOptions {
 pub struct SessionOptions {
     /// Absolute workspace path.
     pub cwd: PathBuf,
-    /// Exact DSH provider route.
+    /// Exact Kernel model provider route.
     pub provider: String,
-    /// Exact model identifier within the DSH provider route.
+    /// Exact model identifier within the Kernel provider route.
     pub model: String,
     /// Optional `StrongFlow` role policy applied through Codex Core before thread startup.
     pub role_policy: Option<RoleSessionPolicy>,
@@ -393,7 +393,7 @@ impl RoleSessionPolicy {
 pub struct ForkOptions {
     /// Optional replacement workspace path.
     pub cwd: Option<PathBuf>,
-    /// Optional replacement DSH provider route. Must be supplied with `model`.
+    /// Optional replacement Kernel provider route. Must be supplied with `model`.
     pub provider: Option<String>,
     /// Optional replacement model.
     pub model: Option<String>,
@@ -767,7 +767,8 @@ impl Kernel {
             config.analytics_enabled = Some(false);
             config.feedback_enabled = false;
             config.check_for_update_on_startup = false;
-            // DSH exposes portable JSON-schema tools, not provider-native Responses web search.
+            // The Kernel exposes portable JSON-schema tools, not provider-native Responses web
+            // search.
             // Search remains available through ordinary host/MCP function tools.
             config.web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
             // The product ExecutionPort contract exposes RequestUserInput in
@@ -862,7 +863,7 @@ impl Kernel {
         let mut config = runtime.base_config.clone();
         set_workspace(&mut config, &options.cwd)?;
         let (provider, model) = model_route(&options.provider, &options.model)?;
-        config.model_provider = dsh_provider_info(&provider);
+        config.model_provider = kernel_provider_info(&provider);
         config.model_provider_id = provider;
         config.model = Some(model);
         if let Some(policy) = &options.role_policy {
@@ -1014,7 +1015,7 @@ impl Kernel {
             match (options.provider, options.model) {
                 (Some(provider), Some(model)) => {
                     let (provider, model) = model_route(&provider, &model)?;
-                    config.model_provider = dsh_provider_info(&provider);
+                    config.model_provider = kernel_provider_info(&provider);
                     config.model_provider_id = provider;
                     config.model = Some(model);
                 }
@@ -1738,9 +1739,9 @@ fn codex_review_decision(decision: ApprovalDecision) -> KernelResult<CodexReview
     }
 }
 
-fn dsh_provider_info(provider: &str) -> ModelProviderInfo {
+fn kernel_provider_info(provider: &str) -> ModelProviderInfo {
     ModelProviderInfo {
-        name: format!("DSH route {provider}"),
+        name: format!("WinWinCode Kernel route {provider}"),
         ..ModelProviderInfo::default()
     }
 }
@@ -1861,6 +1862,7 @@ mod tests {
     use super::canonical_role_policy;
     use super::codex_review_decision;
     use super::descriptor;
+    use super::kernel_provider_info;
     use super::model_route;
     use super::serialize_codex_event;
     use super::set_workspace;
@@ -2039,7 +2041,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_exact_dsh_model_routes() {
+    fn validates_exact_kernel_model_routes() {
         assert_eq!(
             model_route(" deepseek ", " deepseek-chat ").expect("valid route"),
             ("deepseek".to_string(), "deepseek-chat".to_string())
@@ -2049,6 +2051,10 @@ mod tests {
                 .expect_err("blank provider")
                 .code(),
             "INVALID_MODEL_ROUTE"
+        );
+        assert_eq!(
+            kernel_provider_info("deepseek").name,
+            "WinWinCode Kernel route deepseek"
         );
     }
 

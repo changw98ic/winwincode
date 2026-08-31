@@ -132,7 +132,7 @@ function inspectRecognizedText(bytes, label, findings) {
     ['text.jwt', /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu],
     ['text.provider-token', /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[A-Za-z0-9-]{10,}|npm_[A-Za-z0-9]{20,})\b/gu],
     ['text.url-userinfo', /\b(?:https?|wss?):\/\/[^/\s:@]+:[^/\s@]+@/giu],
-    ['text.assignment', /\b(?:api[-_]?key|authorization|client[-_]?secret|password|passwd|private[-_]?key|secret|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|token)(?:(?:\s*[=:]\s*["'](?!\[REDACTED\]|<redacted>|redacted\b)[A-Za-z0-9._~+/=-]{8,}["'])|(?:[=:](?!\[REDACTED\]|<redacted>|redacted\b)[A-Za-z0-9._~+/=-]{8,}))/giu],
+    ['text.assignment', /\b(?:api[-_]?key|authorization|client[-_]?secret|password|passwd|private[-_]?key|secret|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|token)(?:(?:\s*[=:]\s*["'](?!\[REDACTED\]|<redacted>|redacted\b)[A-Za-z0-9._~+/=-]{8,}["'])|(?:[=:](?!=)(?!\[REDACTED\]|<redacted>|redacted\b)[A-Za-z0-9._~+/=-]{8,}))/giu],
   ]
   for (const [rule, pattern] of rules) {
     const match = pattern.exec(text)

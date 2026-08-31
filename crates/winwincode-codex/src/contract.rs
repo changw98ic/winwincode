@@ -5,7 +5,7 @@
 use std::{fmt, future::Future, path::Path, sync::Arc};
 
 use sha2::{Digest as _, Sha256};
-use winwincode_domain::{CodexThreadId, Instant, WorkerSessionId};
+use winwincode_domain::{CodexThreadId, Instant, WorkerId, WorkerInstanceId, WorkerSessionId};
 use winwincode_execution_port::{
     generated::{
         ActionEnforcementReceiptMessage, ApprovalDecisionMessage, ArtifactAckMessage,
@@ -224,6 +224,23 @@ pub trait CodexCoreAdapter {
     /// Returns the adapter error when the durable delivery ledger cannot be
     /// read.
     fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+
+    /// Returns the highest heartbeat sequence retained in the Worker's
+    /// canonical durable store. A replacement process with the same Worker
+    /// instance continues after this cursor rather than changing an already
+    /// accepted Registry request.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the durable transport cursor cannot be
+    /// read.
+    fn recovered_heartbeat_sequence(
+        &mut self,
+        _worker_id: &WorkerId,
+        _worker_instance_id: &WorkerInstanceId,
+    ) -> Result<i64, Self::Error> {
         Ok(0)
     }
 

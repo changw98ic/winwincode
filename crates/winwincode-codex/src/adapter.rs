@@ -33,7 +33,7 @@ use uuid::Uuid;
 use winwincode_domain::{
     ApprovalId, CodexThreadId, ExecutionEventId, ExecutionMessageId, ExecutionSequence,
     InputRequestId, Instant, InteractiveInputMode, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest,
+    Sha256Digest, WorkerId, WorkerInstanceId,
 };
 use winwincode_execution_port::{
     action_enforcement::ActionEnforcementSigningKey,
@@ -2073,6 +2073,16 @@ impl CodexCoreAdapter for ProductionCodexAdapter {
     fn recovered_message_sequence(&mut self) -> Result<u64, Self::Error> {
         self.outbox
             .highest_numeric_message_sequence()
+            .map_err(map_store_error)
+    }
+
+    fn recovered_heartbeat_sequence(
+        &mut self,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+    ) -> Result<i64, Self::Error> {
+        self.outbox
+            .heartbeat_sequence_highwater(worker_id, worker_instance_id)
             .map_err(map_store_error)
     }
 

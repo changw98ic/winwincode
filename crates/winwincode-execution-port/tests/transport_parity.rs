@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use winwincode_execution_port::generated::ExecutionPortMessage;
 use winwincode_execution_port::transport::{
     AdapterError, EndpointSide, ExecutionPortCore, FrameDirection, FrameError, LocalWorkerAdapter,
-    RemoteTransportAdapter, TypedFrame,
+    RemoteExchangeDelivery, RemoteExchangeRequest, RemoteExchangeResponse, RemoteTransportAdapter,
+    TypedFrame, execution_message_id,
 };
 
 const VALID_FIXTURE: &str =
@@ -115,6 +116,39 @@ fn all_canonical_fixture_messages_round_trip_through_remote_json() {
             .expect("canonical frame decoding");
         assert_eq!(decoded, frame);
     }
+}
+
+#[test]
+fn remote_exchange_round_trips_bounded_canonical_frames_and_exact_delivery_ids() {
+    let worker = worker_frame();
+    let worker_bytes =
+        RemoteTransportAdapter::<ScriptedCore>::encode(&worker).expect("canonical Worker frame");
+    let request = RemoteExchangeRequest::new(
+        winwincode_domain::WorkerId("wrk_00000000000000000000000001".to_owned()),
+        winwincode_domain::WorkerInstanceId("wki_00000000000000000000000001".to_owned()),
+        Vec::new(),
+        worker_bytes,
+    )
+    .expect("bounded request");
+    let decoded = RemoteExchangeRequest::decode(&request.encode().expect("request encode"))
+        .expect("request decode");
+    assert_eq!(decoded, request);
+
+    let (direction, message) = fixture_messages()
+        .into_iter()
+        .find(|(direction, _)| *direction == FrameDirection::ControlPlaneToWorker)
+        .expect("Control Plane fixture");
+    let id = execution_message_id(&message).expect("message identity");
+    let frame = TypedFrame::new(direction, message).expect("typed response frame");
+    let response = RemoteExchangeResponse::new(vec![RemoteExchangeDelivery {
+        delivery_id: id,
+        frame: RemoteTransportAdapter::<ScriptedCore>::encode(&frame)
+            .expect("canonical response frame"),
+    }])
+    .expect("bounded response");
+    let decoded = RemoteExchangeResponse::decode(&response.encode().expect("response encode"))
+        .expect("response decode");
+    assert_eq!(decoded, response);
 }
 
 #[test]

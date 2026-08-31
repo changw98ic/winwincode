@@ -11,7 +11,7 @@ use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use winwincode_domain::ModelExchangeId;
+use winwincode_domain::{ModelExchangeId, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::{
     generated::{
         ExecutionPortErrorCode, ExecutionPortMessage, JobOutcomeAckMessageStatus, LeaseWriteStatus,
@@ -25,6 +25,7 @@ use crate::{DurableExecutionDelivery, store::AdapterStoreError};
 
 const PENDING: &str = "pending";
 const SENT_ATTEMPT: &str = "sent_attempt";
+const HEARTBEAT_SEQUENCE_KEY_PREFIX: &str = "worker-heartbeat-sequence:";
 
 /// Durable delivery operations over the adapter's one private `SQLite` store.
 #[derive(Clone, Debug)]
@@ -122,6 +123,21 @@ impl ExecutionOutbox {
                 ],
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
+        if let ExecutionPortMessage::WorkerHeartbeatMessage(heartbeat) = message {
+            if heartbeat.heartbeat_sequence.0 <= 0 {
+                return Err(AdapterStoreError::Conflict);
+            }
+            let state_key =
+                heartbeat_sequence_key(&heartbeat.worker_id, &heartbeat.worker_instance_id)?;
+            transaction
+                .execute(
+                    "INSERT INTO worker_transport_state(state_key, sequence) VALUES (?1, ?2)
+                     ON CONFLICT(state_key) DO UPDATE SET sequence = excluded.sequence
+                     WHERE worker_transport_state.sequence < excluded.sequence",
+                    params![state_key, heartbeat.heartbeat_sequence.0],
+                )
+                .map_err(|_| AdapterStoreError::Unavailable)?;
+        }
         Ok(DurableExecutionDelivery {
             delivery_id: metadata.delivery_id,
             message: message.clone(),
@@ -180,6 +196,19 @@ impl ExecutionOutbox {
             }
         }
         Ok(highest)
+    }
+
+    /// Returns the highest heartbeat sequence committed with its canonical
+    /// outbound frame. The cursor remains after an accepted acknowledgement
+    /// compacts that frame, allowing the same Worker instance to continue
+    /// monotonically after an operating-system process restart.
+    pub(crate) fn heartbeat_sequence_highwater(
+        &self,
+        worker_id: &WorkerId,
+        worker_instance_id: &WorkerInstanceId,
+    ) -> Result<i64, AdapterStoreError> {
+        let connection = self.store.lock()?;
+        stored_heartbeat_sequence(&connection, worker_id, worker_instance_id)
     }
 
     pub(crate) fn record_sent(&self, delivery_id: &str) -> Result<(), AdapterStoreError> {
@@ -252,17 +281,50 @@ impl ExecutionOutbox {
             )
             .map_err(|_| AdapterStoreError::Unavailable)?;
         if changed != 1 {
+            if let ExecutionPortMessage::WorkerHeartbeatAckMessage(acknowledgement) =
+                acknowledgement
+                && acknowledgement.heartbeat_sequence.0 > 0
+                && acknowledgement.heartbeat_sequence.0
+                    <= stored_heartbeat_sequence(
+                        &connection,
+                        &acknowledgement.worker_id,
+                        &acknowledgement.worker_instance_id,
+                    )?
+            {
+                // A replacement process can receive the predecessor's exact
+                // Registry acknowledgement after the predecessor compacted
+                // its durable request but before its transport confirmation
+                // reached the Server. The authority-scoped high-water mark
+                // proves this sequence was retained by the same Worker
+                // instance; do not disturb any newer pending heartbeat.
+                return Ok(());
+            }
+            let pending_same_family = connection
+                .query_row(
+                    "SELECT 1 FROM execution_outbox
+                     WHERE family = ?1 AND acknowledgement_required = 1 LIMIT 1",
+                    params![family.as_str()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|_| AdapterStoreError::Unavailable)?
+                .is_some();
+            if pending_same_family {
+                return Err(AdapterStoreError::Conflict);
+            }
             // Input responses are first applied through the durable input
-            // operation ledger.  That ledger accepts the exact same
-            // response after a Worker restart, so a response whose first
-            // delivery already compacted the request is an idempotent ACK
-            // replay, not a missing-authority error.  The adapter has
-            // already checked the response identity and resolution digest
-            // before this method is reached; changed, foreign, and expired
-            // responses never reach this branch.
+            // operation ledger. Terminal Job acknowledgements carry no new
+            // mutable state after an accepted/duplicate result. In both
+            // cases, the Control Plane can replay the exact response after
+            // the Worker compacted its request but before the transport ACK
+            // reached the Server. Treat that post-compaction response as the
+            // expected idempotent no-op. Rejected terminal results are
+            // excluded by `accepted_response` above, while a first response
+            // still has to match the retained correlation exactly.
             if matches!(
                 acknowledgement,
                 ExecutionPortMessage::InputResponseMessage(_)
+                    | ExecutionPortMessage::JobOutcomeAckMessage(_)
             ) {
                 return Ok(());
             }
@@ -634,6 +696,37 @@ fn correlation(value: &impl Serialize) -> Result<String, AdapterStoreError> {
     Ok(digest(&bytes))
 }
 
+fn heartbeat_sequence_key(
+    worker_id: &WorkerId,
+    worker_instance_id: &WorkerInstanceId,
+) -> Result<String, AdapterStoreError> {
+    Ok(format!(
+        "{HEARTBEAT_SEQUENCE_KEY_PREFIX}{}",
+        correlation(&(worker_id, worker_instance_id))?
+    ))
+}
+
+fn stored_heartbeat_sequence(
+    connection: &rusqlite::Connection,
+    worker_id: &WorkerId,
+    worker_instance_id: &WorkerInstanceId,
+) -> Result<i64, AdapterStoreError> {
+    let state_key = heartbeat_sequence_key(worker_id, worker_instance_id)?;
+    let sequence = connection
+        .query_row(
+            "SELECT sequence FROM worker_transport_state WHERE state_key = ?1",
+            params![state_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|_| AdapterStoreError::Unavailable)?
+        .unwrap_or(0);
+    if sequence < 0 {
+        return Err(AdapterStoreError::Corrupt);
+    }
+    Ok(sequence)
+}
+
 fn digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
@@ -879,19 +972,93 @@ mod tests {
                 .acknowledge_response(&fixture(response_kind))
                 .expect("exact response");
             assert!(outbox.pending().expect("compacted pending").is_empty());
-            if response_kind == "input.response" {
+            if matches!(response_kind, "input.response" | "job.outcome_ack") {
                 // The Kernel/input ledger has already accepted this exact
                 // response.  Replaying the Control Plane frame after the
                 // Worker lost its ACK must remain an idempotent no-op even
                 // though the durable request row is compacted.
                 outbox
                     .acknowledge_response(&fixture(response_kind))
-                    .expect("exact input response replay after compaction");
+                    .expect("exact terminal response replay after compaction");
                 assert!(outbox.pending().expect("replayed input pending").is_empty());
             }
             drop(outbox);
             std::fs::remove_dir_all(root).expect("remove fixture");
         }
+    }
+
+    #[test]
+    fn heartbeat_highwater_survives_ack_compaction_and_process_restart() {
+        let root = test_root("heartbeat-highwater");
+        {
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).expect("open store"))
+                .expect("open outbox");
+            let first = fixture("worker.heartbeat");
+            let ExecutionPortMessage::WorkerHeartbeatMessage(first_heartbeat) = &first else {
+                panic!("heartbeat fixture")
+            };
+            let worker_id = first_heartbeat.worker_id.clone();
+            let worker_instance_id = first_heartbeat.worker_instance_id.clone();
+            outbox.retain(&first).expect("retain first heartbeat");
+            assert_eq!(
+                outbox.heartbeat_sequence_highwater(&worker_id, &worker_instance_id),
+                Ok(1)
+            );
+            outbox
+                .acknowledge_response(&fixture("worker.heartbeat_ack"))
+                .expect("lost heartbeat acknowledgement replay");
+            let ExecutionPortMessage::WorkerHeartbeatAckMessage(mut foreign) =
+                fixture("worker.heartbeat_ack")
+            else {
+                panic!("heartbeat acknowledgement fixture")
+            };
+            foreign.worker_instance_id.0.push('X');
+            assert_eq!(
+                outbox.acknowledge_response(&ExecutionPortMessage::WorkerHeartbeatAckMessage(
+                    foreign
+                )),
+                Err(AdapterStoreError::Conflict)
+            );
+            outbox
+                .acknowledge_response(&fixture("worker.heartbeat_ack"))
+                .expect("ack first heartbeat");
+            assert!(outbox.pending().expect("compacted heartbeat").is_empty());
+            assert_eq!(
+                outbox.heartbeat_sequence_highwater(&worker_id, &worker_instance_id),
+                Ok(1)
+            );
+        }
+        {
+            let outbox = ExecutionOutbox::open(AdapterStore::open(&root).expect("restart store"))
+                .expect("restart outbox");
+            let ExecutionPortMessage::WorkerHeartbeatMessage(first) = fixture("worker.heartbeat")
+            else {
+                panic!("heartbeat fixture")
+            };
+            assert_eq!(
+                outbox.heartbeat_sequence_highwater(&first.worker_id, &first.worker_instance_id),
+                Ok(1)
+            );
+            let ExecutionPortMessage::WorkerHeartbeatMessage(mut second) =
+                fixture("worker.heartbeat")
+            else {
+                panic!("heartbeat fixture")
+            };
+            second.heartbeat_sequence = ExecutionSequence(2);
+            second.message_id = ExecutionMessageId("xmsg_0000000000000000000000002H".to_owned());
+            outbox
+                .retain(&ExecutionPortMessage::WorkerHeartbeatMessage(second))
+                .expect("retain second heartbeat");
+            outbox
+                .acknowledge_response(&fixture("worker.heartbeat_ack"))
+                .expect("stale acknowledgement does not disturb next heartbeat");
+            assert_eq!(outbox.pending().expect("second heartbeat pending").len(), 1);
+            assert_eq!(
+                outbox.heartbeat_sequence_highwater(&first.worker_id, &first.worker_instance_id),
+                Ok(2)
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
@@ -1189,6 +1356,13 @@ mod tests {
                 .acknowledge_response(&fixture("job.outcome_ack"))
                 .expect("exact terminal receipt");
             assert!(outbox.pending().expect("terminal compacted").is_empty());
+            outbox
+                .acknowledge_response(&fixture("job.outcome_ack"))
+                .expect("lost terminal response replays after compaction");
+            assert_eq!(
+                outbox.acknowledge_response(&rejected_ack),
+                Err(AdapterStoreError::Conflict)
+            );
         }
         std::fs::remove_dir_all(root).expect("remove fixture");
     }

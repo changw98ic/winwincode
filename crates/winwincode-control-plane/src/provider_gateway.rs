@@ -32,10 +32,10 @@ use crate::{
     ModelReservationTerminalReceipt, ModelRetrySettlementContextPort, ModelSettingsError,
     ModelSettingsErrorKind, ModelSettingsService, ModelSettingsTarget, ProviderAdmissionError,
     ProviderAdmissionErrorKind, ProviderAdmissionOpenRequest, ProviderCatalogError,
-    ProviderCatalogErrorKind, ProviderCatalogService, ProviderEnterpriseQuotaOpen,
-    ProviderEnterpriseQuotaSaga, ProviderGatewayAdmissionPort, ProviderOperationalAdmissionError,
-    ProviderOperationalAdmissionPort, ProviderTokenUsage, ResolvedSecret, SecretStoreError,
-    SecretStorePort,
+    ProviderCatalogErrorKind, ProviderCatalogService, ProviderEnterpriseQuotaErrorKind,
+    ProviderEnterpriseQuotaOpen, ProviderEnterpriseQuotaSaga, ProviderGatewayAdmissionPort,
+    ProviderOperationalAdmissionError, ProviderOperationalAdmissionPort, ProviderTokenUsage,
+    ResolvedSecret, SecretStoreError, SecretStorePort,
 };
 
 const MAX_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -910,20 +910,30 @@ struct GatewayQuotaOperational<'gateway, 'storage> {
     message: &'gateway ModelOpenMessage,
     reservation: &'gateway crate::ProviderAdmissionOpenReceipt,
     adapter_request_id: &'gateway str,
+    failure: Option<ProviderGatewayError>,
 }
 
 impl ProviderOperationalAdmissionPort for GatewayQuotaOperational<'_, '_> {
     type Receipt = ProviderGatewayOpenReceipt;
 
     fn reserve(&mut self) -> Result<Self::Receipt, ProviderOperationalAdmissionError> {
-        self.gateway
-            .open_after_reservation(self.message, self.reservation, self.adapter_request_id)
-            .map_err(|error| match error.kind() {
-                ProviderGatewayErrorKind::AdmissionDenied => {
-                    ProviderOperationalAdmissionError::Denied
-                }
-                _ => ProviderOperationalAdmissionError::Unavailable,
-            })
+        match self.gateway.open_after_reservation(
+            self.message,
+            self.reservation,
+            self.adapter_request_id,
+        ) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                let kind = match error.kind() {
+                    ProviderGatewayErrorKind::AdmissionDenied => {
+                        ProviderOperationalAdmissionError::Denied
+                    }
+                    _ => ProviderOperationalAdmissionError::Unavailable,
+                };
+                self.failure = Some(error);
+                Err(kind)
+            }
+        }
     }
 }
 
@@ -1232,6 +1242,7 @@ impl<'a> ProviderGateway<'a> {
             message,
             reservation,
             adapter_request_id,
+            failure: None,
         };
         match ProviderEnterpriseQuotaSaga::new(enterprise_quota).reserve_durable_then_admit(
             contexts,
@@ -1246,6 +1257,16 @@ impl<'a> ProviderGateway<'a> {
                 ProviderGatewayErrorKind::AdmissionDenied,
                 "Provider enterprise quota did not admit this exchange",
             )),
+            Err(error)
+                if error.kind() == ProviderEnterpriseQuotaErrorKind::OperationalAdmission =>
+            {
+                Err(operational.failure.take().unwrap_or_else(|| {
+                    ProviderGatewayError::new(
+                        ProviderGatewayErrorKind::AdmissionUnavailable,
+                        "Provider operational admission failed without a bounded cause",
+                    )
+                }))
+            }
             Err(_) => Err(ProviderGatewayError::new(
                 ProviderGatewayErrorKind::AdmissionUnavailable,
                 "Provider enterprise quota operation failed",
