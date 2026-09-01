@@ -36,7 +36,9 @@ import {
   createReleaseArtifactManifest,
   createReleaseReport,
   descriptorForFile,
+  helperReleaseBuildBaseEnvironment,
   helperReleaseManifestArtifactPath,
+  helperReleaseVerificationBaseEnvironment,
   machoUuidForFile,
   releaseChecksums,
   targetConfiguration,
@@ -269,11 +271,30 @@ test('release source identity excludes generated output and remains deterministi
   assert.equal(releaseSourceSha256(root), releaseSourceSha256(root))
 })
 
-test('release runner keeps the private signing key inside the signing process', () => {
+test('release verification isolates both helper keys while release builds receive only the public key', () => {
+  const baseEnvironment = {
+    HOME: '/fixture-home',
+    WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: 'fixture-private-key',
+    WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: 'fixture-public-key',
+  }
+  assert.deepEqual(helperReleaseVerificationBaseEnvironment(baseEnvironment), {
+    HOME: '/fixture-home',
+  })
+  assert.deepEqual(helperReleaseBuildBaseEnvironment(baseEnvironment), {
+    HOME: '/fixture-home',
+    WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: 'fixture-public-key',
+  })
+  assert.equal(baseEnvironment.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX, 'fixture-private-key')
+  assert.equal(baseEnvironment.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX, 'fixture-public-key')
+
   const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(
     runner,
-    /delete environment\.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX/u,
+    /\.\.\.verificationEnvironment\(target, cargoTarget, sourceDateEpoch, buildPaths\)/u,
+  )
+  assert.match(
+    runner,
+    /baseEnvironment: helperReleaseBuildBaseEnvironment\(process\.env\)/u,
   )
   assert.match(
     runner,

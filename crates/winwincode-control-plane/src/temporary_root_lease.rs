@@ -509,16 +509,16 @@ impl TemporaryRootLeaseManager {
         expected_lease_bytes: &[u8],
         expected_claim: &ReleaseClaim,
     ) -> Result<bool, TemporaryRootLeaseError> {
-        let lease_bytes = match read_bounded(&quarantine.join(TEMPORARY_ROOT_LEASE_FILE)) {
-            Ok(bytes) => bytes,
-            Err(_error) if !quarantine.exists() => return Ok(false),
-            Err(error) => return Err(error),
+        let Some(lease_bytes) =
+            read_bounded_if_present(&quarantine.join(TEMPORARY_ROOT_LEASE_FILE))?
+        else {
+            return Ok(false);
         };
-        let claim = match read_bounded(&quarantine.join(RELEASE_CLAIM_FILE)) {
-            Ok(bytes) => decode_canonical::<ReleaseClaim>(&bytes)?,
-            Err(_error) if !quarantine.exists() => return Ok(false),
-            Err(error) => return Err(error),
+        let Some(claim_bytes) = read_bounded_if_present(&quarantine.join(RELEASE_CLAIM_FILE))?
+        else {
+            return Ok(false);
         };
+        let claim = decode_canonical::<ReleaseClaim>(&claim_bytes)?;
         if lease_bytes != expected_lease_bytes || claim != *expected_claim {
             return Err(TemporaryRootLeaseError::ownership_lost());
         }
@@ -923,6 +923,9 @@ fn renewal_loop(
         let Ok(state) = status.state.lock() else {
             return;
         };
+        if state.stop {
+            return;
+        }
         let Ok((state, _timeout)) = status.changed.wait_timeout(state, wait) else {
             return;
         };
@@ -1076,12 +1079,24 @@ fn read_lease(root: &Path) -> Result<LeaseRecord, TemporaryRootLeaseError> {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, TemporaryRootLeaseError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| TemporaryRootLeaseError::io())?;
+    read_bounded_if_present(path)?.ok_or_else(TemporaryRootLeaseError::io)
+}
+
+fn read_bounded_if_present(path: &Path) -> Result<Option<Vec<u8>>, TemporaryRootLeaseError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_error) => return Err(TemporaryRootLeaseError::io()),
+    };
     let max_record_bytes = u64::try_from(MAX_RECORD_BYTES).expect("record bound fits u64");
     if !metadata.file_type().is_file() || metadata.len() > max_record_bytes {
         return Err(TemporaryRootLeaseError::corrupt());
     }
-    fs::read(path).map_err(|_| TemporaryRootLeaseError::io())
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_error) => Err(TemporaryRootLeaseError::io()),
+    }
 }
 
 fn create_record(path: &Path, bytes: &[u8]) -> Result<(), TemporaryRootLeaseError> {
@@ -1140,6 +1155,7 @@ mod tests {
     use std::{
         os::unix::fs::PermissionsExt,
         sync::atomic::{AtomicU64, Ordering},
+        sync::mpsc,
     };
 
     use super::*;
@@ -1206,6 +1222,93 @@ mod tests {
             );
         }
         lease.release().expect("test release");
+        fs::remove_dir_all(parent).expect("remove test parent");
+    }
+
+    #[test]
+    fn concurrent_release_completion_treats_a_vanished_record_as_contested() {
+        let parent = std::env::temp_dir().join(format!(
+            "winwincode-lease-release-contention-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos()
+        ));
+        let runtime = Arc::new(ModeRuntime(AtomicU64::new(1)));
+        let runtime_port: Arc<dyn TemporaryRootLeaseRuntime> = runtime.clone();
+        let manager = TemporaryRootLeaseManager::open(
+            &parent,
+            TemporaryRootLeaseConfig::try_new(100, 50, 5, TemporaryRootTarget::Aarch64AppleDarwin)
+                .expect("test config"),
+            runtime_port,
+        )
+        .expect("test manager");
+        let lease = manager.acquire().expect("test lease");
+        let lease_bytes = encode_lease(&lease.record).expect("encode lease");
+        let releaser_id = "f".repeat(TOKEN_HEX_LEN);
+        let release_claim = ReleaseClaim {
+            schema: RELEASE_SCHEMA.to_owned(),
+            lease_sha256: sha256(&lease_bytes),
+            releaser_id: releaser_id.clone(),
+            released_at_millis: 1_000,
+        };
+        create_record(
+            &lease.path.join(RELEASE_CLAIM_FILE),
+            &serde_json::to_vec(&release_claim).expect("encode release claim"),
+        )
+        .expect("write release claim");
+        let quarantine = parent.join(format!(
+            "{RELEASE_PREFIX}{}-{releaser_id}",
+            lease.record.instance_id
+        ));
+        fs::rename(&lease.path, &quarantine).expect("quarantine release");
+        fs::remove_file(quarantine.join(TEMPORARY_ROOT_LEASE_FILE))
+            .expect("simulate another verified finisher removing the record");
+
+        assert!(
+            !TemporaryRootLeaseManager::finish_release(&quarantine, &lease_bytes, &release_claim,)
+                .expect("a competing exact release is not a filesystem failure")
+        );
+
+        fs::remove_dir_all(parent).expect("remove test parent");
+    }
+
+    #[test]
+    fn renewal_task_observes_a_stop_requested_before_its_first_wait() {
+        let parent = std::env::temp_dir().join(format!(
+            "winwincode-lease-prewait-stop-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos()
+        ));
+        let runtime: Arc<dyn TemporaryRootLeaseRuntime> = Arc::new(ModeRuntime(AtomicU64::new(1)));
+        let manager = TemporaryRootLeaseManager::open(
+            &parent,
+            TemporaryRootLeaseConfig::try_new(100, 50, 5, TemporaryRootTarget::Aarch64AppleDarwin)
+                .expect("test config"),
+            runtime,
+        )
+        .expect("test manager");
+        let status = Arc::new(RenewalStatus::default());
+        status.state.lock().expect("renewal state").stop = true;
+        let task_status = Arc::clone(&status);
+        let (finished, completion) = mpsc::channel();
+        thread::spawn(move || {
+            renewal_loop(
+                &manager,
+                &Mutex::new(None),
+                &task_status,
+                Duration::from_mins(1),
+            );
+            finished.send(()).expect("report renewal task completion");
+        });
+
+        completion
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a prior stop request must not wait for the renewal interval");
         fs::remove_dir_all(parent).expect("remove test parent");
     }
 }

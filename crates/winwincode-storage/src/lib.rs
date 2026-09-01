@@ -181,6 +181,7 @@ pub use worker_session_slots::{
     WorkerSlotResources, WorkerSlotState,
 };
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -201,7 +202,13 @@ use winwincode_domain::{
 const DATABASE_FILE_NAME: &str = "control-plane.sqlite3";
 const SCHEMA_VERSION: i64 = 6;
 static SQLITE_OPEN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+// SQLite's default busy timeout accumulates requested sleeps and is not a wall-clock deadline.
+// The open-only handler reads this thread-local monotonic deadline on every busy callback.
+thread_local! {
+    static SQLITE_OPEN_BUSY_DEADLINE: Cell<Option<StdInstant>> = const { Cell::new(None) };
+}
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const SQLITE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 const ACTOR_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.actor.v1";
 const SCOPE_KEY_PREFIX: &[u8] = b"winwincode.command-receipt.scope.v1";
@@ -2286,7 +2293,7 @@ impl SqliteStorage {
     /// Returns an adapter-neutral error when the directory, connection,
     /// durability settings, or schema migration cannot be prepared.
     pub fn open(data_directory: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let open_started_at = StdInstant::now();
+        let open_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
         let data_directory = data_directory.as_ref();
         fs::create_dir_all(data_directory).map_err(|error| {
             StorageError::adapter(format!("failed to create the data directory: {error}"))
@@ -2298,35 +2305,35 @@ impl SqliteStorage {
         // SQLite schema and journal-mode setup acquire database-wide locks. Serialize only
         // callers opening the same canonical database; unrelated repositories must not consume
         // one another's bounded initialization window.
-        let open_lock = sqlite_open_lock(&database_path, open_started_at)?;
-        let _open_guard = acquire_mutex_before_open_deadline(&open_lock, open_started_at)?;
+        let open_lock = sqlite_open_lock(&database_path, open_deadline)?;
+        let _open_guard = acquire_mutex_before_open_deadline(&open_lock, open_deadline)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
         let mut connection =
             Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
-        set_remaining_open_busy_timeout(&connection, open_started_at)?;
+        set_open_busy_deadline(&connection, open_deadline)?;
         connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(sql_error)?;
-        set_remaining_open_busy_timeout(&connection, open_started_at)?;
+        set_open_busy_deadline(&connection, open_deadline)?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(sql_error)?;
-        set_remaining_open_busy_timeout(&connection, open_started_at)?;
+        set_open_busy_deadline(&connection, open_deadline)?;
         connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
-        set_remaining_open_busy_timeout(&connection, open_started_at)?;
+        set_open_busy_deadline(&connection, open_deadline)?;
         apply_migrations(&mut connection)?;
 
         let read_connection =
             Connection::open_with_flags(&database_path, flags).map_err(sql_error)?;
-        set_remaining_open_busy_timeout(&read_connection, open_started_at)?;
+        set_open_busy_deadline(&read_connection, open_deadline)?;
         read_connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(sql_error)?;
-        set_remaining_open_busy_timeout(&read_connection, open_started_at)?;
+        set_open_busy_deadline(&read_connection, open_deadline)?;
         read_connection
             .pragma_update(None, "synchronous", "FULL")
             .map_err(sql_error)?;
@@ -2360,10 +2367,10 @@ impl SqliteStorage {
 
 fn sqlite_open_lock(
     database_path: &Path,
-    open_started_at: StdInstant,
+    open_deadline: StdInstant,
 ) -> Result<Arc<Mutex<()>>, StorageError> {
     let locks = SQLITE_OPEN_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut locks = acquire_mutex_before_open_deadline(locks, open_started_at)?;
+    let mut locks = acquire_mutex_before_open_deadline(locks, open_deadline)?;
     locks.retain(|_, lock| lock.strong_count() != 0);
     if let Some(lock) = locks.get(database_path).and_then(Weak::upgrade) {
         return Ok(lock);
@@ -2375,32 +2382,44 @@ fn sqlite_open_lock(
 
 fn acquire_mutex_before_open_deadline<T>(
     mutex: &Mutex<T>,
-    open_started_at: StdInstant,
+    open_deadline: StdInstant,
 ) -> Result<MutexGuard<'_, T>, StorageError> {
     loop {
         match mutex.try_lock() {
             Ok(guard) => return Ok(guard),
             Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
             Err(TryLockError::WouldBlock) => {
-                let remaining = remaining_sqlite_open_time(open_started_at)?;
+                let remaining = remaining_sqlite_open_time(open_deadline)?;
                 thread::sleep(remaining.min(SQLITE_OPEN_RETRY_INTERVAL));
             }
         }
     }
 }
 
-fn set_remaining_open_busy_timeout(
+fn set_open_busy_deadline(
     connection: &Connection,
-    open_started_at: StdInstant,
+    open_deadline: StdInstant,
 ) -> Result<(), StorageError> {
+    remaining_sqlite_open_time(open_deadline)?;
+    SQLITE_OPEN_BUSY_DEADLINE.set(Some(open_deadline));
     connection
-        .busy_timeout(remaining_sqlite_open_time(open_started_at)?)
+        .busy_handler(Some(sqlite_open_busy_handler))
         .map_err(sql_error)
 }
 
-fn remaining_sqlite_open_time(open_started_at: StdInstant) -> Result<Duration, StorageError> {
-    SQLITE_BUSY_TIMEOUT
-        .checked_sub(open_started_at.elapsed())
+fn sqlite_open_busy_handler(_prior_calls: i32) -> bool {
+    SQLITE_OPEN_BUSY_DEADLINE.get().is_some_and(|deadline| {
+        let Some(remaining) = deadline.checked_duration_since(StdInstant::now()) else {
+            return false;
+        };
+        thread::sleep(remaining.min(SQLITE_OPEN_RETRY_INTERVAL));
+        true
+    })
+}
+
+fn remaining_sqlite_open_time(open_deadline: StdInstant) -> Result<Duration, StorageError> {
+    open_deadline
+        .checked_duration_since(StdInstant::now())
         .filter(|remaining| *remaining >= Duration::from_millis(1))
         .ok_or_else(|| StorageError::adapter("SQLite storage open exceeded its five-second limit"))
 }
@@ -4476,4 +4495,23 @@ fn sql_error(error: rusqlite::Error) -> StorageError {
     let message = format!("SQLite operation failed: {error}");
     drop(error);
     StorageError::adapter(message)
+}
+
+#[cfg(test)]
+mod sqlite_open_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn busy_handler_install_does_not_rebase_the_absolute_open_deadline() {
+        let connection = Connection::open_in_memory().expect("open in-memory SQLite");
+        let absolute_deadline = StdInstant::now() + SQLITE_OPEN_TIMEOUT;
+
+        set_open_busy_deadline(&connection, absolute_deadline).expect("install open busy handler");
+
+        assert_eq!(SQLITE_OPEN_BUSY_DEADLINE.get(), Some(absolute_deadline));
+        connection
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .expect("restore runtime busy handler");
+        SQLITE_OPEN_BUSY_DEADLINE.set(None);
+    }
 }

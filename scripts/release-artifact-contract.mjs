@@ -20,6 +20,20 @@ export const RELEASE_REPORT_KIND = 'winwincode.release-report.v1'
 export const RELEASE_ARTIFACT_MANIFEST = 'release-artifact-manifest.json'
 export const RELEASE_CHECKSUMS = 'SHA256SUMS'
 export const HELPER_RELEASE_MANIFEST_NAME = 'winwincode-kernel-helper.release.json'
+const HELPER_RELEASE_PRIVATE_KEY_ENV = 'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX'
+const HELPER_RELEASE_PUBLIC_KEY_ENV = 'WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX'
+
+export function helperReleaseBuildBaseEnvironment(baseEnvironment) {
+  const environment = { ...baseEnvironment }
+  delete environment[HELPER_RELEASE_PRIVATE_KEY_ENV]
+  return environment
+}
+
+export function helperReleaseVerificationBaseEnvironment(baseEnvironment) {
+  const environment = helperReleaseBuildBaseEnvironment(baseEnvironment)
+  delete environment[HELPER_RELEASE_PUBLIC_KEY_ENV]
+  return environment
+}
 
 export function helperReleaseManifestArtifactPath(artifactRoot) {
   return resolve(artifactRoot, 'bin', HELPER_RELEASE_MANIFEST_NAME)

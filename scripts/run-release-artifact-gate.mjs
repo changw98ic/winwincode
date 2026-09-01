@@ -25,7 +25,9 @@ import {
   createReleaseArtifactManifest,
   descriptorForFile,
   descriptorsBelow,
+  helperReleaseBuildBaseEnvironment,
   helperReleaseManifestArtifactPath,
+  helperReleaseVerificationBaseEnvironment,
   machoUuidForFile,
   releaseChecksums,
   targetConfiguration,
@@ -37,10 +39,8 @@ import { releaseSourceSha256 } from './release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
-function childEnvironment() {
-  const environment = { ...process.env }
-  delete environment.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX
-  return environment
+function verificationChildEnvironment() {
+  return helperReleaseVerificationBaseEnvironment(process.env)
 }
 
 function parseArguments(argv) {
@@ -76,7 +76,7 @@ function parseArguments(argv) {
 function run(command, arguments_, options = {}) {
   const result = spawnSync(command, arguments_, {
     cwd: root,
-    env: options.env ?? childEnvironment(),
+    env: options.env ?? verificationChildEnvironment(),
     encoding: 'utf8',
     stdio: options.capture === true ? 'pipe' : 'inherit',
     maxBuffer: 64 * 1_024 * 1_024,
@@ -94,7 +94,21 @@ function run(command, arguments_, options = {}) {
 
 function releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {
   return createReleaseBuildEnvironment({
-    baseEnvironment: childEnvironment(),
+    baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
+    root,
+    buildRoot: buildPaths.buildRoot,
+    targetDirectory,
+    targetDirectories: buildPaths.targetDirectories,
+    target,
+    runnerTemp: process.env.RUNNER_TEMP,
+    home: process.env.HOME,
+    sourceDateEpoch,
+  })
+}
+
+function verificationEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {
+  return createReleaseBuildEnvironment({
+    baseEnvironment: verificationChildEnvironment(),
     root,
     buildRoot: buildPaths.buildRoot,
     targetDirectory,
@@ -253,7 +267,7 @@ function resetCargoTarget(targetDirectory) {
 function clientBuild(sourceDateEpoch) {
   run('corepack', ['pnpm', 'build:ts'], {
     env: {
-      ...childEnvironment(),
+      ...verificationChildEnvironment(),
       CI: '1',
       SOURCE_DATE_EPOCH: String(sourceDateEpoch),
     },
@@ -306,7 +320,7 @@ const artifactRoot = resolve(output, target)
 
 try {
   const gateEnvironment = {
-    ...releaseEnvironment(target, cargoTarget, sourceDateEpoch, buildPaths),
+    ...verificationEnvironment(target, cargoTarget, sourceDateEpoch, buildPaths),
     [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
   }
   run('corepack', ['pnpm', 'verify'], { env: gateEnvironment })
