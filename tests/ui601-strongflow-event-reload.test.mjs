@@ -179,6 +179,7 @@ class FakeElement {
   disabled = false
   hidden = false
   type = ''
+  value = ''
   #textContent = ''
 
   get textContent() { return this.#textContent }
@@ -257,6 +258,10 @@ class FakeStrongFlowViewModel {
 
   async start() {}
   async refresh() {}
+  async loadCandidateFiles() {}
+  async loadMoreCandidateFiles() {}
+  async selectCandidateFile() {}
+  async loadMoreCandidateDiff() {}
   async decideSolutionReview() {}
   async approveTaskBreakdown() {}
   async resolveAttention() {}
@@ -277,6 +282,26 @@ function state(overrides = {}) {
     status: 'ready',
     realtime: 'subscribed',
     projection: projection(),
+    candidateFiles: {
+      status: 'idle',
+      items: [],
+      hasMore: false,
+      previewLimited: false,
+      selectedPath: null,
+      diff: {
+        status: 'idle',
+        path: null,
+        content: '',
+        loadedBytes: 0,
+        totalBytes: null,
+        hasMore: false,
+        previewLimited: false,
+        fileDiffSha256: null,
+        unavailableReason: null,
+        error: null,
+      },
+      error: null,
+    },
     interaction: { status: 'idle', error: null },
     error: null,
     ...overrides,
@@ -303,6 +328,7 @@ test('UI-601: realtime event reload keeps the solution review draft and Diff Vie
     status: 'refreshing',
     realtime: 'reloading',
     projection: model.state.projection,
+    candidateFiles: model.state.candidateFiles,
     interaction: { status: 'idle', error: null },
     error: null,
   })
@@ -345,6 +371,7 @@ test('UI-601: repeated realtime events keep DOM node identity bounded to one reb
       status: 'refreshing',
       realtime: 'reloading',
       projection: model.state.projection,
+      candidateFiles: model.state.candidateFiles,
       interaction: { status: 'idle', error: null },
       error: null,
     })
@@ -365,7 +392,7 @@ test('UI-601: repeated realtime events keep DOM node identity bounded to one reb
   mounted.close()
 })
 
-test('UI-601: artifact DOM rebuilds only when its rendered content changes', () => {
+test('UI-601: mounted artifact views retain identity while their content changes', () => {
   const document = new FakeDocument()
   const root = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
@@ -396,7 +423,7 @@ test('UI-601: artifact DOM rebuilds only when its rendered content changes', () 
   candidateChanged.currentCandidate.diffSha256 = `sha256:${'4'.repeat(64)}`
   model.publish(state({ projection: candidateChanged }))
   assert.equal(findByClass(root, 'wwc-strongflow-diagrams'), diagramsAfterRuntime)
-  assert.notEqual(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
+  assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
   assert.equal(comments.value, '')
   mounted.close()
 })
