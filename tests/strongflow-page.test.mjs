@@ -486,11 +486,17 @@ test('empty StrongFlow keeps one complete creation draft through command errors'
   const title = findByClass(rootElement, 'wwc-strongflow-create-title')
   const goal = findByClass(rootElement, 'wwc-strongflow-create-goal')
   const baseline = findByClass(rootElement, 'wwc-strongflow-create-baseline')
+  const deliveryScope = findByClass(rootElement, 'wwc-strongflow-create-delivery-scope')
+  const outOfScope = findByClass(rootElement, 'wwc-strongflow-create-out-of-scope')
+  const constraints = findByClass(rootElement, 'wwc-strongflow-create-constraints')
   const criteria = findByClass(rootElement, 'wwc-strongflow-create-criteria')
   const scopeValue = findByClass(rootElement, 'wwc-strongflow-create-scope')
   title.value = 'First StrongFlow Delivery'
   goal.value = 'Open the advanced workspace.'
   baseline.value = '0123456789abcdef0123456789abcdef01234567'
+  deliveryScope.value = 'Open the advanced workspace.'
+  outOfScope.value = 'Replace the default Chat surface.'
+  constraints.value = 'Keep the exact repository binding.'
   criteria.value = 'Load the real Delivery snapshot.\nSubscribe to Delivery events.'
 
   findByClass(rootElement, 'wwc-strongflow-create-form').emit('submit', {
@@ -500,6 +506,10 @@ test('empty StrongFlow keeps one complete creation draft through command errors'
     title: 'First StrongFlow Delivery',
     goal: 'Open the advanced workspace.',
     baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Open the advanced workspace.'],
+    outOfScope: ['Replace the default Chat surface.'],
+    constraints: ['Keep the exact repository binding.'],
+    sourceProductSessionId: null,
     acceptanceCriteria: [
       'Load the real Delivery snapshot.',
       'Subscribe to Delivery events.',
@@ -515,6 +525,9 @@ test('empty StrongFlow keeps one complete creation draft through command errors'
   assert.equal(title.value, 'First StrongFlow Delivery')
   assert.equal(goal.value, 'Open the advanced workspace.')
   assert.equal(baseline.value, '0123456789abcdef0123456789abcdef01234567')
+  assert.equal(deliveryScope.value, 'Open the advanced workspace.')
+  assert.equal(outOfScope.value, 'Replace the default Chat surface.')
+  assert.equal(constraints.value, 'Keep the exact repository binding.')
   assert.equal(criteria.value, 'Load the real Delivery snapshot.\nSubscribe to Delivery events.')
   assert.match(findByClass(rootElement, 'wwc-strongflow-create-error').textContent, /retry/iu)
 

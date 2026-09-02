@@ -2,7 +2,9 @@
 
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    ApprovalDecidePayload, ChatInteractionListQuery, ChatInteractionProjection, InputRespondPayload,
+    ApprovalDecidePayload, ApprovalEffectiveDecisionScope, ApprovalProjectionCategory,
+    ApprovalSanitizedDetailProjectionKind, ApprovalSanitizedDetailUnavailableReason,
+    ChatInteractionListQuery, ChatInteractionProjection, InputRespondPayload,
 };
 use winwincode_control_plane::chat_interaction_projection::{
     ChatInteractionProjectionError, ChatInteractionProjectionLedger, ProjectionWriteStatus,
@@ -120,6 +122,19 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
             ChatInteractionProjection::ChatInputInteractionProjection(value) => value.binding,
             ChatInteractionProjection::ChatApprovalInteractionProjection(value) => {
                 assert_eq!(value.approval.subject, "Run the approved test command.");
+                assert_eq!(value.approval.category, ApprovalProjectionCategory::Shell);
+                assert_eq!(
+                    value.approval.effective_decision_scope,
+                    ApprovalEffectiveDecisionScope::Once
+                );
+                assert_eq!(
+                    value.approval.sanitized_detail.kind,
+                    ApprovalSanitizedDetailProjectionKind::Unavailable
+                );
+                assert_eq!(
+                    value.approval.sanitized_detail.reason,
+                    ApprovalSanitizedDetailUnavailableReason::EncodedPayloadRedacted
+                );
                 value.approval.binding
             }
         };
@@ -131,6 +146,28 @@ fn restart_rebuilds_pending_input_and_approval_without_private_details() {
         assert_eq!(binding.worker_session_id, input.worker_session_id);
         assert_eq!(binding.session_identity, input.session_identity);
     }
+}
+
+#[test]
+fn approval_without_typed_producer_detail_is_explicitly_unavailable() {
+    let (_, approval) = worker_messages();
+    assert!(approval.action.details.is_none());
+    let mut ledger = ChatInteractionProjectionLedger::default();
+    ledger
+        .record_approval_request(&approval)
+        .expect("record approval without detail");
+    let projection = ledger
+        .approval(
+            &approval.approval_id,
+            &Instant("2026-08-24T12:01:00.000Z".to_owned()),
+        )
+        .expect("read approval")
+        .expect("approval projection");
+    assert_eq!(projection.category, ApprovalProjectionCategory::Shell);
+    assert_eq!(
+        projection.sanitized_detail.reason,
+        ApprovalSanitizedDetailUnavailableReason::ProducerUnavailable
+    );
 }
 
 #[test]

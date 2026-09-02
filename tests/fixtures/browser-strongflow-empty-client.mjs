@@ -410,6 +410,8 @@ globalThis.runEmptyStrongFlowScenario = async () => {
     = 'Enter StrongFlow from an empty repository.'
   document.querySelector('.wwc-strongflow-create-baseline').value
     = '0123456789abcdef0123456789abcdef01234567'
+  document.querySelector('.wwc-strongflow-create-delivery-scope').value
+    = 'Enter StrongFlow from an empty repository.'
   document.querySelector('.wwc-strongflow-create-criteria').value
     = 'The real Delivery snapshot opens.\nDelivery events are subscribed.'
   document.querySelector('.wwc-strongflow-create-submit').click()

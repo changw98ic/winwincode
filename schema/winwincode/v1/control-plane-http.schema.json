@@ -1145,6 +1145,10 @@
         "goal",
         "repositoryId",
         "baseRevision",
+        "scope",
+        "outOfScope",
+        "constraints",
+        "sourceProductSessionId",
         "acceptanceCriteria",
         "publicationTarget"
       ],
@@ -1165,6 +1169,47 @@
         "baseRevision": {
           "type": "string",
           "pattern": "^[A-Fa-f0-9]{7,128}$"
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "outOfScope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "sourceProductSessionId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "acceptanceCriteria": {
           "type": "array",
@@ -2933,6 +2978,9 @@
         "requestedAt",
         "expiresAt",
         "subject",
+        "category",
+        "effectiveDecisionScope",
+        "sanitizedDetail",
         "binding"
       ],
       "properties": {
@@ -2962,10 +3010,20 @@
           "minLength": 1,
           "maxLength": 2000
         },
+        "category": {
+          "$ref": "#/$defs/ApprovalProjectionCategory"
+        },
+        "effectiveDecisionScope": {
+          "$ref": "#/$defs/ApprovalEffectiveDecisionScope"
+        },
+        "sanitizedDetail": {
+          "$ref": "#/$defs/ApprovalSanitizedDetailProjection"
+        },
         "binding": {
           "$ref": "#/$defs/ChatInteractionBindingProjection"
         }
-      }
+      },
+      "description": "Secret-safe, restart-stable Approval read model. It carries no arbitrary Worker payload, operator reason, or selectable decision scope."
     },
     "WorkerProjection": {
       "type": "object",
@@ -3404,6 +3462,7 @@
         "scope",
         "outOfScope",
         "constraints",
+        "sourceProductSessionId",
         "acceptanceCriteria",
         "sourceRef",
         "publicationTarget",
@@ -3438,7 +3497,9 @@
             "minLength": 1,
             "maxLength": 65536
           },
-          "maxItems": 1000
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
         },
         "outOfScope": {
           "type": "array",
@@ -3447,7 +3508,8 @@
             "minLength": 1,
             "maxLength": 65536
           },
-          "maxItems": 1000
+          "maxItems": 1000,
+          "uniqueItems": true
         },
         "constraints": {
           "type": "array",
@@ -3456,7 +3518,18 @@
             "minLength": 1,
             "maxLength": 65536
           },
-          "maxItems": 1000
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "sourceProductSessionId": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "acceptanceCriteria": {
           "type": "array",
@@ -5683,7 +5756,7 @@
               "const": "publication.get"
             },
             "result": {
-              "$ref": "#/$defs/PublicationProjection"
+              "$ref": "#/$defs/PublicationDetailProjection"
             }
           },
           "type": "object"
@@ -11173,6 +11246,277 @@
           "$ref": "#/$defs/EvidenceArtifactUnavailableProjection"
         }
       ]
+    },
+    "ApprovalProjectionCategory": {
+      "type": "string",
+      "enum": [
+        "filesystem_write",
+        "mcp",
+        "network",
+        "shell",
+        "unavailable"
+      ],
+      "description": "Closed, secret-safe action category. unavailable is the sole meaning for a persisted legacy source that did not record a category."
+    },
+    "ApprovalEffectiveDecisionScope": {
+      "type": "string",
+      "enum": [
+        "once"
+      ],
+      "description": "The only decision scope accepted by approval.decide. This is descriptive and is not selectable by the client."
+    },
+    "ApprovalSanitizedDetailUnavailableReason": {
+      "type": "string",
+      "enum": [
+        "producer_unavailable",
+        "encoded_payload_redacted",
+        "source_not_recorded"
+      ]
+    },
+    "ApprovalSanitizedDetailProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "properties": {
+        "kind": {
+          "const": "unavailable"
+        },
+        "reason": {
+          "$ref": "#/$defs/ApprovalSanitizedDetailUnavailableReason"
+        }
+      },
+      "description": "Typed detail availability for the current producer set. Arbitrary EncodedPayload bytes and metadata are never decoded or forwarded."
+    },
+    "PublicationStepStateProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "state"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "branch",
+            "pull_request",
+            "issue_comment",
+            "commit_status"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applying",
+            "unknown",
+            "succeeded",
+            "rejected"
+          ]
+        }
+      },
+      "description": "Closed status of one ordered publication step. Provider operation keys, requests, payloads, and digests are excluded."
+    },
+    "PublicationStepProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "state",
+        "outcomeCode",
+        "resourceRef",
+        "remoteWritePerformed",
+        "retryable"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "branch",
+            "pull_request",
+            "issue_comment",
+            "commit_status"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applying",
+            "unknown",
+            "succeeded",
+            "rejected"
+          ]
+        },
+        "outcomeCode": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resourceRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicationResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remoteWritePerformed": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "description": "Current secret-safe result for one canonical publication step. It exposes only a stable code, closed resource identity, and write outcome."
+    },
+    "PublicationStatusHistoryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "state",
+        "updatedAt",
+        "stepStates",
+        "retryable",
+        "cancellable"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "publishing",
+            "published",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "stepStates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicationStepStateProjection"
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "cancellable": {
+          "type": "boolean"
+        }
+      },
+      "description": "One verified publication journal revision with only closed state and step-state facts."
+    },
+    "PublicationCancellationProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "cancelledAt",
+        "reason"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "cancelledAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      },
+      "description": "User-facing cancellation result from the verified terminal journal revision. Request identity, actor digest, and receipt data are excluded."
+    },
+    "PublicationDetailProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "summary",
+        "steps",
+        "history",
+        "historyTruncated",
+        "cancellation",
+        "retryable",
+        "cancellable"
+      ],
+      "properties": {
+        "kind": {
+          "const": "publication_detail"
+        },
+        "summary": {
+          "$ref": "#/$defs/PublicationProjection"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicationStepProjection"
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicationStatusHistoryProjection"
+          },
+          "minItems": 1,
+          "maxItems": 200
+        },
+        "historyTruncated": {
+          "type": "boolean"
+        },
+        "cancellation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicationCancellationProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "cancellable": {
+          "type": "boolean"
+        }
+      },
+      "description": "Bounded detail from the fully verified durable Publication journal. Current steps and the newest 200 state revisions contain no provider request, credential, idempotency key, arbitrary URL, raw receipt, or raw actor digest."
     }
   },
   "x-winwincode-openapi": {

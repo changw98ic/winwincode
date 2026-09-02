@@ -231,7 +231,7 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'worker.list': '#/$defs/WorkerPage',
     'worker.get': '#/$defs/WorkerProjection',
     'publication.list': '#/$defs/PublicationPage',
-    'publication.get': '#/$defs/PublicationProjection',
+    'publication.get': '#/$defs/PublicationDetailProjection',
     'enterprise.organization.list': '#/$defs/EnterpriseOrganizationPage',
     'enterprise.membership.list': '#/$defs/EnterpriseMembershipPage',
     'enterprise.team.list': '#/$defs/EnterpriseTeamPage',
@@ -353,6 +353,78 @@ test('HTTP query contract covers every current read surface with an opaque stabl
   )
 })
 
+test('publication.get exposes one bounded secret-safe detail while publication.list stays compact', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const detail = schema.$defs.PublicationDetailProjection
+  assert.equal(detail.additionalProperties, false)
+  assert.equal(detail.properties.kind.const, 'publication_detail')
+  assert.equal(detail.properties.summary.$ref, '#/$defs/PublicationProjection')
+  assert.equal(detail.properties.steps.maxItems, 4)
+  assert.equal(detail.properties.steps.items.$ref, '#/$defs/PublicationStepProjection')
+  assert.equal(detail.properties.history.maxItems, 200)
+  assert.equal(
+    detail.properties.history.items.$ref,
+    '#/$defs/PublicationStatusHistoryProjection',
+  )
+  assert.deepEqual(detail.properties.cancellation.oneOf, [
+    { $ref: '#/$defs/PublicationCancellationProjection' },
+    { type: 'null' },
+  ])
+  assert.ok(detail.required.includes('historyTruncated'))
+  assert.ok(detail.required.includes('retryable'))
+  assert.ok(detail.required.includes('cancellable'))
+
+  const step = schema.$defs.PublicationStepProjection
+  assert.deepEqual(step.properties.kind.enum, [
+    'branch',
+    'pull_request',
+    'issue_comment',
+    'commit_status',
+  ])
+  assert.deepEqual(step.properties.state.enum, [
+    'pending',
+    'applying',
+    'unknown',
+    'succeeded',
+    'rejected',
+  ])
+  assert.equal(step.properties.outcomeCode.oneOf[0].pattern, '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+  assert.deepEqual(step.properties.resourceRef.oneOf, [
+    { $ref: '#/$defs/PublicationResourceRef' },
+    { type: 'null' },
+  ])
+
+  const history = schema.$defs.PublicationStatusHistoryProjection
+  assert.equal(history.properties.stepStates.maxItems, 4)
+  assert.equal(
+    history.properties.stepStates.items.$ref,
+    '#/$defs/PublicationStepStateProjection',
+  )
+  assert.equal(history.properties.revision.$ref, './domain.schema.json#/$defs/Revision')
+  assert.equal(history.properties.updatedAt.$ref, './domain.schema.json#/$defs/Instant')
+
+  const listItems = schema.$defs.PublicationPage.properties.items.items
+  assert.equal(listItems.$ref, '#/$defs/PublicationProjection')
+  const forbidden = JSON.stringify([
+    detail.properties,
+    step.properties,
+    history.properties,
+    schema.$defs.PublicationCancellationProjection.properties,
+  ])
+  for (const name of [
+    'providerRequest',
+    'providerResponse',
+    'credential',
+    'idempotencyKey',
+    'operationKey',
+    'requestSha256',
+    'rawReceipt',
+    'rawRequest',
+    'actorDigest',
+    'url',
+  ]) assert.doesNotMatch(forbidden, new RegExp(name, 'iu'))
+})
+
 test('HTTP input responses are bound and cannot inject an ExecutionPort message', async () => {
   const schema = await json('control-plane-http.schema.json')
   const input = schema.$defs.InputRespondPayload
@@ -406,6 +478,42 @@ test('HTTP input responses are bound and cannot inject an ExecutionPort message'
   assert.equal(JSON.stringify(input).includes('kind'), false)
 })
 
+test('Delivery Spec input carries editable scope and one explicit ProductSession source', async () => {
+  const schema = await json('control-plane-http.schema.json')
+  const input = schema.$defs.DeliverySpecInput
+  for (const field of ['scope', 'outOfScope', 'constraints', 'sourceProductSessionId']) {
+    assert.ok(input.required.includes(field), `${field} is canonical input`)
+  }
+  assert.deepEqual(input.properties.scope, {
+    type: 'array',
+    items: { type: 'string', minLength: 1, maxLength: 65536 },
+    minItems: 1,
+    maxItems: 1000,
+    uniqueItems: true,
+  })
+  for (const field of ['outOfScope', 'constraints']) {
+    assert.deepEqual(input.properties[field], {
+      type: 'array',
+      items: { type: 'string', minLength: 1, maxLength: 65536 },
+      maxItems: 1000,
+      uniqueItems: true,
+    })
+  }
+  assert.deepEqual(input.properties.sourceProductSessionId.oneOf, [
+    { $ref: './domain.schema.json#/$defs/ProductSessionId' },
+    { type: 'null' },
+  ])
+
+  const output = schema.$defs.DeliveryRequirementsProjection
+  assert.ok(output.required.includes('sourceProductSessionId'))
+  assert.deepEqual(output.properties.sourceProductSessionId, {
+    oneOf: [
+      { $ref: './domain.schema.json#/$defs/ProductSessionId' },
+      { type: 'null' },
+    ],
+  })
+})
+
 test('enterprise identity contract returns metadata without API Token material', async () => {
   const schema = await json('control-plane-http.schema.json')
   const semantics = schema['x-winwincode-semantics'].enterpriseIdentity
@@ -452,8 +560,36 @@ test('Chat interaction snapshots expose one complete secret-safe binding contrac
     'requestedAt',
     'expiresAt',
     'subject',
+    'category',
+    'effectiveDecisionScope',
+    'sanitizedDetail',
     'binding',
   ])
+  assert.deepEqual(schema.$defs.ApprovalProjectionCategory.enum, [
+    'filesystem_write',
+    'mcp',
+    'network',
+    'shell',
+    'unavailable',
+  ])
+  assert.deepEqual(schema.$defs.ApprovalEffectiveDecisionScope.enum, ['once'])
+  assert.deepEqual(schema.$defs.ApprovalSanitizedDetailUnavailableReason.enum, [
+    'producer_unavailable',
+    'encoded_payload_redacted',
+    'source_not_recorded',
+  ])
+  assert.deepEqual(schema.$defs.ApprovalSanitizedDetailProjection.required, [
+    'kind',
+    'reason',
+  ])
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.kind.const, 'unavailable')
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.command, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.cwd, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.files, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.network, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.mcp, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.risk, undefined)
+  assert.equal(schema.$defs.ApprovalSanitizedDetailProjection.properties.reasonText, undefined)
   assert.ok(schema.$defs.ApprovalDecidePayload.required.includes('binding'))
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.details, undefined)
   assert.equal(schema.$defs.ChatInputInteractionProjection.properties.payload, undefined)
@@ -707,6 +843,9 @@ test('positive and negative samples pin retries, conflicts, cursors, and secret-
       'sha256:0000000000000000000000000000000000000000000000000000000000000000',
   })
   assert.equal(examples.responses.chatMessagesPage.result.kind, 'chat_message_page')
+  assert.equal(examples.responses.publicationDetail.result.kind, 'publication_detail')
+  assert.equal(examples.responses.publicationDetail.result.historyTruncated, true)
+  assert.equal(examples.responses.publicationDetail.result.history.at(-1).revision, 201)
   assert.equal(
     examples.responses.deliveryDetailPendingReview.result.solutionReview.reviewStatus,
     'pending',

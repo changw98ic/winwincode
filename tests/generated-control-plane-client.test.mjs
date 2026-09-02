@@ -84,6 +84,76 @@ function queryResponse(request, result) {
   }
 }
 
+function publicationSummary(revision = 2, state = 'cancelled') {
+  return {
+    id: 'pub_00000000000000000000000001',
+    revision,
+    deliveryId,
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    deliveryVerdictId: 'verdict:current:pass',
+    verdictStatus: 'pass',
+    approvalAttentionItemId: 'att_00000000000000000000000001',
+    approvedBy: actor.id,
+    approvedAt: '2026-08-25T00:00:00.000Z',
+    publicationSetSha256: `sha256:${'b'.repeat(64)}`,
+    target: {
+      provider: 'github',
+      repository: 'example/widget',
+      baseBranch: 'main',
+      headRepository: 'example/widget',
+      headBranch: 'winwincode/delivery',
+    },
+    state,
+    resourceRef: null,
+    updatedAt: '2026-08-25T00:00:02.000Z',
+  }
+}
+
+function publicationStepStates(state = 'pending') {
+  return ['branch', 'pull_request', 'issue_comment', 'commit_status']
+    .map(kind => ({ kind, state }))
+}
+
+function publicationDetail() {
+  const steps = publicationStepStates().map(step => ({
+    ...step,
+    outcomeCode: null,
+    resourceRef: null,
+    remoteWritePerformed: null,
+    retryable: false,
+  }))
+  return {
+    kind: 'publication_detail',
+    summary: publicationSummary(),
+    steps,
+    history: [{
+      revision: 1,
+      state: 'pending',
+      updatedAt: '2026-08-25T00:00:01.000Z',
+      stepStates: publicationStepStates(),
+      retryable: true,
+      cancellable: true,
+    }, {
+      revision: 2,
+      state: 'cancelled',
+      updatedAt: '2026-08-25T00:00:02.000Z',
+      stepStates: publicationStepStates(),
+      retryable: false,
+      cancellable: false,
+    }],
+    historyTruncated: false,
+    cancellation: {
+      revision: 2,
+      cancelledAt: '2026-08-25T00:00:02.000Z',
+      reason: 'Operator cancelled publication.',
+    },
+    retryable: false,
+    cancellable: false,
+  }
+}
+
 function readCursor(suffix = '1') {
   const sequence = Number(suffix)
   return {
@@ -131,6 +201,7 @@ function deliveryProjection(cursor) {
         verificationMethod: 'Focused generated client tests',
         required: true,
       }],
+      sourceProductSessionId: null,
       sourceRef: null,
       publicationTarget: null,
       repository: { kind: 'local-git', locator: 'workspace://repository' },
@@ -194,6 +265,33 @@ function productRuntimeProjection(revision = 1) {
     },
     rebuiltAt: '2026-08-25T00:00:00.000Z',
     sessions: [],
+  }
+}
+
+function approvalProjection() {
+  return {
+    binding: {
+      executionJobId: canonicalId('job', 1),
+      productSessionId,
+      sessionIdentity: {
+        codexThreadId: canonicalId('cdx', 1),
+        productSessionId,
+        workerSessionId: canonicalId('wsn', 1),
+      },
+      workerSessionId: canonicalId('wsn', 1),
+    },
+    category: 'shell',
+    effectiveDecisionScope: 'once',
+    expiresAt: '2026-08-25T00:10:00.000Z',
+    id: canonicalId('apr', 1),
+    requestedAt: '2026-08-25T00:00:00.000Z',
+    revision: 1,
+    sanitizedDetail: {
+      kind: 'unavailable',
+      reason: 'producer_unavailable',
+    },
+    state: 'pending',
+    subject: 'Approve embedded shell execution.',
   }
 }
 

@@ -15,9 +15,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    ApprovalDecidePayload, ApprovalGetQuery, ApprovalGetResultResponse,
-    ApprovalGetResultResponseQuery, ApprovalListQuery, ApprovalListResultResponse,
-    ApprovalListResultResponseQuery, ApprovalPage, ApprovalPageKind, ApprovalProjection,
+    ApprovalDecidePayload, ApprovalEffectiveDecisionScope, ApprovalGetQuery,
+    ApprovalGetResultResponse, ApprovalGetResultResponseQuery, ApprovalListQuery,
+    ApprovalListResultResponse, ApprovalListResultResponseQuery, ApprovalPage, ApprovalPageKind,
+    ApprovalProjection, ApprovalProjectionCategory, ApprovalSanitizedDetailProjection,
+    ApprovalSanitizedDetailProjectionKind, ApprovalSanitizedDetailUnavailableReason,
     ChatApprovalInteractionProjection, ChatApprovalInteractionProjectionKind,
     ChatInputInteractionProjection, ChatInputInteractionProjectionKind,
     ChatInteractionBindingProjection, ChatInteractionListQuery, ChatInteractionListResultResponse,
@@ -32,7 +34,9 @@ use winwincode_domain::{
     ApprovalId, ExecutionMessageId, InputRequestId, Instant, OpaqueCursor, ProductSessionId,
     Revision, SchemaVersion, Sha256Digest,
 };
-use winwincode_execution_port::generated::{ApprovalRequestMessage, InputRequestMessage};
+use winwincode_execution_port::generated::{
+    ApprovalActionCategory, ApprovalRequestMessage, InputRequestMessage,
+};
 
 /// Durable, secret-safe event used to rebuild the browser projection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -256,10 +260,20 @@ impl ChatInteractionProjectionLedger {
                 &request.worker_session_id,
                 &request.session_identity,
             ),
+            category: projection_category(&request.action.category),
+            effective_decision_scope: ApprovalEffectiveDecisionScope::Once,
             expires_at: request.expires_at.clone(),
             id: request.approval_id.clone(),
             requested_at: request.sent_at.clone(),
             revision: revision.clone(),
+            sanitized_detail: ApprovalSanitizedDetailProjection {
+                kind: ApprovalSanitizedDetailProjectionKind::Unavailable,
+                reason: if request.action.details.is_some() {
+                    ApprovalSanitizedDetailUnavailableReason::EncodedPayloadRedacted
+                } else {
+                    ApprovalSanitizedDetailUnavailableReason::ProducerUnavailable
+                },
+            },
             state: "pending".to_owned(),
             subject: request.action.summary.clone(),
         };
@@ -763,6 +777,15 @@ fn binding_from_request(
         product_session_id: session_identity.product_session_id.clone(),
         session_identity: session_identity.clone(),
         worker_session_id: worker_session_id.clone(),
+    }
+}
+
+fn projection_category(category: &ApprovalActionCategory) -> ApprovalProjectionCategory {
+    match category {
+        ApprovalActionCategory::FilesystemWrite => ApprovalProjectionCategory::FilesystemWrite,
+        ApprovalActionCategory::Mcp => ApprovalProjectionCategory::Mcp,
+        ApprovalActionCategory::Network => ApprovalProjectionCategory::Network,
+        ApprovalActionCategory::Shell => ApprovalProjectionCategory::Shell,
     }
 }
 

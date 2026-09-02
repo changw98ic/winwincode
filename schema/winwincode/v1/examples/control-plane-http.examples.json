@@ -668,6 +668,7 @@
               "required": true
             }
           ],
+          "sourceProductSessionId": "psn_00000000000000000000000000",
           "sourceRef": null,
           "publicationTarget": null,
           "repository": {
@@ -837,37 +838,109 @@
         "hasMore": false
       }
     },
-    "publicationProjection": {
+    "publicationDetail": {
       "schemaVersion": "winwincode/v1",
       "requestId": "req_01J0000000000000000000000C",
       "query": "publication.get",
       "result": {
-        "id": "pub_00000000000000000000000000",
-        "revision": 1,
-        "deliveryId": "dlv_00000000000000000000000000",
-        "deliverySpecId": "spec:current",
-        "deliverySpecRevision": 3,
-        "candidateRef": "git-candidate:sha256:2222222222222222222222222222222222222222222222222222222222222222",
-        "deliveryVerdictId": "verdict:current",
-        "verdictStatus": "pass",
-        "approvalAttentionItemId": "att_00000000000000000000000000",
-        "approvedBy": "usr_00000000000000000000000000",
-        "approvedAt": "2026-08-24T10:05:00.000Z",
-        "publicationSetSha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-        "target": {
-          "provider": "github",
-          "repository": "openai/winwincode",
-          "baseBranch": "main",
-          "headRepository": "contributor/winwincode",
-          "headBranch": "delivery/bounded-strongflow-read"
+        "kind": "publication_detail",
+        "summary": {
+          "id": "pub_00000000000000000000000000",
+          "revision": 201,
+          "deliveryId": "dlv_00000000000000000000000000",
+          "deliverySpecId": "spec:current",
+          "deliverySpecRevision": 3,
+          "candidateRef": "git-candidate:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "deliveryVerdictId": "verdict:current",
+          "verdictStatus": "pass",
+          "approvalAttentionItemId": "att_00000000000000000000000000",
+          "approvedBy": "usr_00000000000000000000000000",
+          "approvedAt": "2026-08-24T10:05:00.000Z",
+          "publicationSetSha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "target": {
+            "provider": "github",
+            "repository": "openai/winwincode",
+            "baseBranch": "main",
+            "headRepository": "contributor/winwincode",
+            "headBranch": "delivery/bounded-strongflow-read"
+          },
+          "state": "published",
+          "resourceRef": {
+            "kind": "github_pull_request",
+            "repository": "openai/winwincode",
+            "number": 42
+          },
+          "updatedAt": "2026-08-24T10:06:00.000Z"
         },
-        "state": "published",
-        "resourceRef": {
-          "kind": "github_pull_request",
-          "repository": "openai/winwincode",
-          "number": 42
-        },
-        "updatedAt": "2026-08-24T10:06:00.000Z"
+        "steps": [
+          {
+            "kind": "branch",
+            "state": "succeeded",
+            "outcomeCode": null,
+            "resourceRef": null,
+            "remoteWritePerformed": true,
+            "retryable": false
+          },
+          {
+            "kind": "pull_request",
+            "state": "succeeded",
+            "outcomeCode": null,
+            "resourceRef": {
+              "kind": "github_pull_request",
+              "repository": "openai/winwincode",
+              "number": 42
+            },
+            "remoteWritePerformed": true,
+            "retryable": false
+          },
+          {
+            "kind": "issue_comment",
+            "state": "succeeded",
+            "outcomeCode": null,
+            "resourceRef": null,
+            "remoteWritePerformed": true,
+            "retryable": false
+          },
+          {
+            "kind": "commit_status",
+            "state": "succeeded",
+            "outcomeCode": null,
+            "resourceRef": null,
+            "remoteWritePerformed": true,
+            "retryable": false
+          }
+        ],
+        "history": [
+          {
+            "revision": 201,
+            "state": "published",
+            "updatedAt": "2026-08-24T10:06:00.000Z",
+            "stepStates": [
+              {
+                "kind": "branch",
+                "state": "succeeded"
+              },
+              {
+                "kind": "pull_request",
+                "state": "succeeded"
+              },
+              {
+                "kind": "issue_comment",
+                "state": "succeeded"
+              },
+              {
+                "kind": "commit_status",
+                "state": "succeeded"
+              }
+            ],
+            "retryable": false,
+            "cancellable": false
+          }
+        ],
+        "historyTruncated": true,
+        "cancellation": null,
+        "retryable": false,
+        "cancellable": false
       },
       "page": {
         "nextCursor": null,

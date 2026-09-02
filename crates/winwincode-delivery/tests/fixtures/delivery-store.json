@@ -28,6 +28,7 @@
         "required": true
       }
     ],
+    "sourceProductSessionId": null,
     "sourceRef": null,
     "publicationTarget": null,
     "repository": {

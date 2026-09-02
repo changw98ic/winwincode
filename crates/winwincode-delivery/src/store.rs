@@ -2579,8 +2579,8 @@ mod tests {
                 .map(|record| record.digest.as_str())
                 .collect::<Vec<_>>(),
             [
-                "2e15941dc69500ae73cf21052ea3378c337599463a544d2ea162634b7c8368de",
-                "ad36db8bd4f227c9a7d0fa24e70191b0f694b3f7f4af8ffa139d809b6d481f8e",
+                "be85db816694f0d825833958b5e2237d07796e8e2162ce2f7803cbee5a4a368a",
+                "f4c1a4226f21462a34ca98d613cbf82b4fb8bfd4ef7880622b5ccb0cf36397ac",
             ]
         );
     }

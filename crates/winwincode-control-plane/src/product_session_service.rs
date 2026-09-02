@@ -420,6 +420,7 @@ impl DurableSessionBinding {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProductSessionRecord {
     session: ProductSession,
+    owner_actor: PublicEventActor,
     forked_from: Option<ProductSessionId>,
     model_route: ModelRoute,
     bindings: Vec<DurableSessionBinding>,
@@ -433,6 +434,12 @@ impl ProductSessionRecord {
     #[must_use]
     pub const fn session(&self) -> &ProductSession {
         &self.session
+    }
+
+    /// Returns the actor that created this exact `ProductSession` identity.
+    #[must_use]
+    pub const fn owner_actor(&self) -> &PublicEventActor {
+        &self.owner_actor
     }
 
     #[must_use]
@@ -511,6 +518,57 @@ pub struct ProductSessionAuthoritySeal {
     pub target_revision: u64,
     pub target_sha256: Sha256Digest,
     pub state_guard: StateRevisionGuard,
+}
+
+/// Loads one `ProductSession` and the exact repository-catalog guard protecting it.
+///
+/// This read-only entry point needs only canonical product-state storage, so
+/// another aggregate can validate a source-session binding without acquiring
+/// `ProductSession` mutation or Worker authority.
+///
+/// # Errors
+///
+/// Returns not-found, corruption, or storage errors without searching another
+/// repository scope.
+pub fn load_product_session_authority_seal(
+    storage: &dyn ProductStateStorage,
+    scope: &ReceiptScopeKey,
+    product_session_id: &ProductSessionId,
+) -> Result<ProductSessionAuthoritySeal, ProductSessionServiceError> {
+    let stream_id = catalog_stream_id(scope);
+    let stored = storage
+        .load_state(&stream_id)
+        .map_err(|error| storage_error(&error))?
+        .ok_or_else(|| {
+            service_error(
+                ProductSessionServiceErrorCode::NotFound,
+                "ProductSession was not found in this repository scope",
+            )
+        })?;
+    let catalog: PersistedProductSessionCatalog = serde_json::from_slice(&stored.payload)
+        .map_err(|error| corrupt(format!("ProductSession catalog cannot be decoded: {error}")))?;
+    catalog.validate(stored.revision)?;
+    if stored.stream_id != stream_id {
+        return Err(corrupt("ProductSession catalog stream identity is corrupt"));
+    }
+    let persisted = catalog.sessions.get(&product_session_id.0).ok_or_else(|| {
+        service_error(
+            ProductSessionServiceErrorCode::NotFound,
+            "ProductSession was not found in this repository scope",
+        )
+    })?;
+    let target_bytes = serde_json::to_vec(persisted).map_err(|error| {
+        corrupt(format!(
+            "ProductSession authority cannot be encoded: {error}"
+        ))
+    })?;
+    Ok(ProductSessionAuthoritySeal {
+        record: persisted.to_record()?,
+        target_revision: persisted.session.revision(),
+        target_sha256: Sha256Digest(format!("sha256:{:x}", Sha256::digest(target_bytes))),
+        state_guard: StateRevisionGuard::new(stored.stream_id, stored.revision)
+            .map_err(|error| storage_error(&error))?,
+    })
 }
 
 /// Stable command/read failure code.
@@ -630,6 +688,7 @@ impl<'storage> ProductSessionService<'storage> {
         .map_err(|error| domain_error(&error))?;
         let persisted = PersistedProductSession {
             session,
+            owner_actor: command.context.public_actor.clone(),
             forked_from: None,
             model_route: command.model_route.clone(),
             bindings: Vec::new(),
@@ -880,6 +939,7 @@ impl<'storage> ProductSessionService<'storage> {
         let model_route = source.model_route.clone();
         let persisted = PersistedProductSession {
             session,
+            owner_actor: command.context.public_actor.clone(),
             forked_from: Some(command.source_product_session_id.clone()),
             model_route,
             bindings: Vec::new(),
@@ -971,43 +1031,7 @@ impl<'storage> ProductSessionService<'storage> {
         scope: &ReceiptScopeKey,
         product_session_id: &ProductSessionId,
     ) -> Result<ProductSessionAuthoritySeal, ProductSessionServiceError> {
-        let stream_id = catalog_stream_id(scope);
-        let stored = self
-            .storage
-            .load_state(&stream_id)
-            .map_err(|error| storage_error(&error))?
-            .ok_or_else(|| {
-                service_error(
-                    ProductSessionServiceErrorCode::NotFound,
-                    "ProductSession was not found in this repository scope",
-                )
-            })?;
-        let catalog: PersistedProductSessionCatalog = serde_json::from_slice(&stored.payload)
-            .map_err(|error| {
-                corrupt(format!("ProductSession catalog cannot be decoded: {error}"))
-            })?;
-        catalog.validate(stored.revision)?;
-        if stored.stream_id != stream_id {
-            return Err(corrupt("ProductSession catalog stream identity is corrupt"));
-        }
-        let persisted = catalog.sessions.get(&product_session_id.0).ok_or_else(|| {
-            service_error(
-                ProductSessionServiceErrorCode::NotFound,
-                "ProductSession was not found in this repository scope",
-            )
-        })?;
-        let target_bytes = serde_json::to_vec(persisted).map_err(|error| {
-            corrupt(format!(
-                "ProductSession authority cannot be encoded: {error}"
-            ))
-        })?;
-        Ok(ProductSessionAuthoritySeal {
-            record: persisted.to_record()?,
-            target_revision: persisted.session.revision(),
-            target_sha256: Sha256Digest(format!("sha256:{:x}", Sha256::digest(target_bytes))),
-            state_guard: StateRevisionGuard::new(stored.stream_id, stored.revision)
-                .map_err(|error| storage_error(&error))?,
-        })
+        load_product_session_authority_seal(self.storage, scope, product_session_id)
     }
 
     /// Lists all sessions in deterministic ProductSession-id order.
@@ -1196,6 +1220,7 @@ impl PersistedProductSessionCatalog {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PersistedProductSession {
     session: ProductSession,
+    owner_actor: PublicEventActor,
     forked_from: Option<ProductSessionId>,
     model_route: ModelRoute,
     bindings: Vec<PersistedSessionBinding>,
@@ -1214,9 +1239,12 @@ impl PersistedProductSession {
             return Err(corrupt("ProductSession cannot be forked from itself"));
         }
         validate_model_route(&self.model_route)?;
+        winwincode_storage::receipt_actor_key(&self.owner_actor)
+            .map_err(|error| storage_error(&error))?;
         chat::validate_persisted_chat(self)?;
         Ok(ProductSessionRecord {
             session: self.session.clone(),
+            owner_actor: self.owner_actor.clone(),
             forked_from: self.forked_from.clone(),
             model_route: self.model_route.clone(),
             bindings: self

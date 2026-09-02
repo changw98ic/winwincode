@@ -435,6 +435,10 @@ impl LiveConfigFile {
                         "Deliver the approved scope from GitHub Issue {}#{}",
                         self.repository, self.webhook.issue_number
                     ),
+                    scope: vec!["approved GitHub Issue scope".to_owned()],
+                    out_of_scope: Vec::new(),
+                    constraints: vec!["repository verification passes".to_owned()],
+                    source_product_session_id: None,
                     publication_target: Some(api_target),
                     repository_id: repository_scope.repository_id.clone(),
                     title: format!("GitHub Issue #{} Delivery", self.webhook.issue_number),

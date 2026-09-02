@@ -23,6 +23,10 @@ export interface ChatDeliveryCreateInput {
   readonly title: string
   readonly goal: string
   readonly baseRevision: string
+  readonly scope: readonly string[]
+  readonly outOfScope: readonly string[]
+  readonly constraints: readonly string[]
+  readonly sourceProductSessionId: ProductSessionId | null
   readonly acceptanceCriteria: readonly string[]
 }
 
@@ -316,6 +320,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const conversionScope = element(document, 'input', 'wwc-chat-convert-scope')
   const conversionModel = element(document, 'input', 'wwc-chat-convert-model')
   const conversionBaseline = element(document, 'input', 'wwc-chat-convert-baseline')
+  const conversionDeliveryScope = element(document, 'textarea', 'wwc-chat-convert-delivery-scope')
+  const conversionOutOfScope = element(document, 'textarea', 'wwc-chat-convert-out-of-scope')
+  const conversionConstraints = element(document, 'textarea', 'wwc-chat-convert-constraints')
   const conversionCriteria = element(document, 'textarea', 'wwc-chat-convert-criteria')
   const confirmationLabel = element(document, 'label', 'wwc-chat-convert-confirm-label')
   const confirmation = element(document, 'input', 'wwc-chat-convert-confirm')
@@ -393,6 +400,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   conversionModel.readOnly = true
   conversionBaseline.type = 'text'
   conversionBaseline.required = true
+  conversionDeliveryScope.required = true
   conversionCriteria.required = true
   confirmation.type = 'checkbox'
   confirmationText.textContent = 'I confirmed this target and Repository Scope.'
@@ -427,6 +435,34 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         label: 'Baseline revision',
         control: conversionBaseline,
         required: true,
+      },
+    }),
+    mountFormField({
+      document,
+      props: {
+        id: 'chat-convert-delivery-scope',
+        label: 'In scope',
+        help: 'Enter one confirmed result per line.',
+        control: conversionDeliveryScope,
+        required: true,
+      },
+    }),
+    mountFormField({
+      document,
+      props: {
+        id: 'chat-convert-out-of-scope',
+        label: 'Out of scope',
+        help: 'Enter one explicit exclusion per line.',
+        control: conversionOutOfScope,
+      },
+    }),
+    mountFormField({
+      document,
+      props: {
+        id: 'chat-convert-constraints',
+        label: 'Constraints',
+        help: 'Enter one confirmed constraint per line.',
+        control: conversionConstraints,
       },
     }),
     mountFormField({
@@ -570,6 +606,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       conversionTitle.value = ''
       conversionGoal.value = ''
       conversionBaseline.value = ''
+      conversionDeliveryScope.value = ''
+      conversionOutOfScope.value = ''
+      conversionConstraints.value = ''
       conversionCriteria.value = ''
       confirmation.checked = false
     }
@@ -667,6 +706,9 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
             ? 'Model context unavailable'
             : `${route.providerId} / ${route.modelId}`
           conversionBaseline.value = ''
+          conversionDeliveryScope.value = requirement
+          conversionOutOfScope.value = ''
+          conversionConstraints.value = ''
           conversionCriteria.value = ''
           confirmation.checked = false
         }
@@ -748,6 +790,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     if (
       options.deliveryCreator === undefined
       || !conversionOpen
+      || conversionSessionId === null
       || !confirmation.checked
       || ['submitting', 'waiting', 'created', 'closed'].includes(
         options.deliveryCreator.state.status,
@@ -757,6 +800,10 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       title: conversionTitle.value,
       goal: conversionGoal.value,
       baseRevision: conversionBaseline.value,
+      scope: conversionDeliveryScope.value.split(/\r?\n/u),
+      outOfScope: conversionOutOfScope.value.split(/\r?\n/u),
+      constraints: conversionConstraints.value.split(/\r?\n/u),
+      sourceProductSessionId: conversionSessionId,
       acceptanceCriteria: conversionCriteria.value.split(/\r?\n/u),
     })
   }

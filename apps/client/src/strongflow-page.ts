@@ -168,11 +168,26 @@ export function mountStrongFlowCreatePage(
     'input',
     'wwc-strongflow-create-baseline',
   ) as HTMLInputElement
-  const scope = strongFlowElement(
+  const repositoryScope = strongFlowElement(
     document,
     'input',
     'wwc-strongflow-create-scope',
   ) as HTMLInputElement
+  const deliveryScope = strongFlowElement(
+    document,
+    'textarea',
+    'wwc-strongflow-create-delivery-scope',
+  ) as HTMLTextAreaElement
+  const outOfScope = strongFlowElement(
+    document,
+    'textarea',
+    'wwc-strongflow-create-out-of-scope',
+  ) as HTMLTextAreaElement
+  const constraints = strongFlowElement(
+    document,
+    'textarea',
+    'wwc-strongflow-create-constraints',
+  ) as HTMLTextAreaElement
   const criteria = strongFlowElement(
     document,
     'textarea',
@@ -192,14 +207,15 @@ export function mountStrongFlowCreatePage(
   repository.value = options.scope.repositoryId
   baseline.type = 'text'
   baseline.required = true
-  scope.type = 'text'
-  scope.readOnly = true
-  scope.value = [
+  repositoryScope.type = 'text'
+  repositoryScope.readOnly = true
+  repositoryScope.value = [
     options.scope.organizationId,
     options.scope.workspaceId,
     options.scope.projectId,
     options.scope.repositoryId,
   ].join(' / ')
+  deliveryScope.required = true
   criteria.required = true
 
   const titleField = mountFormField({
@@ -246,7 +262,35 @@ export function mountStrongFlowCreatePage(
       id: 'strongflow-create-scope',
       label: 'Repository Scope',
       help: 'Organization / workspace / project / repository',
-      control: scope,
+      control: repositoryScope,
+    },
+  })
+  const deliveryScopeField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-delivery-scope',
+      label: 'In scope',
+      help: 'Enter one result that this Delivery includes per line.',
+      control: deliveryScope,
+      required: true,
+    },
+  })
+  const outOfScopeField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-out-of-scope',
+      label: 'Out of scope',
+      help: 'Enter one explicit exclusion per line.',
+      control: outOfScope,
+    },
+  })
+  const constraintsField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-constraints',
+      label: 'Constraints',
+      help: 'Enter one implementation or operating constraint per line.',
+      control: constraints,
     },
   })
   const criteriaField = mountFormField({
@@ -292,6 +336,9 @@ export function mountStrongFlowCreatePage(
     repositoryField.root,
     baselineField.root,
     scopeField.root,
+    deliveryScopeField.root,
+    outOfScopeField.root,
+    constraintsField.root,
     criteriaField.root,
     error,
     submit.root,
@@ -307,6 +354,10 @@ export function mountStrongFlowCreatePage(
       title: title.value,
       goal: goal.value,
       baseRevision: baseline.value,
+      scope: deliveryScope.value.split(/\r?\n/u),
+      outOfScope: outOfScope.value.split(/\r?\n/u),
+      constraints: constraints.value.split(/\r?\n/u),
+      sourceProductSessionId: null,
       acceptanceCriteria: criteria.value.split(/\r?\n/u),
     })
   }

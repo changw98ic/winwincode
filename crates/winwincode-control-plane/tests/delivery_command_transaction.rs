@@ -91,6 +91,10 @@ fn create_command(seed: u64) -> CommandEnvelope {
                 "goal": "Persist one canonical Delivery without a TypeScript business writer.",
                 "repositoryId": scope.repository_id,
                 "baseRevision": "abcdef0",
+                "scope": ["Implement and verify the accepted Delivery goal."],
+                "outOfScope": ["Unreviewed product changes."],
+                "constraints": ["Preserve the canonical Control Plane authority boundary."],
+                "sourceProductSessionId": null,
                 "acceptanceCriteria": [{
                     "id": "criterion-required",
                     "title": "The Delivery is stored atomically.",
@@ -158,9 +162,6 @@ fn facts_with_authority(
                 locator,
             },
             source_ref,
-            scope: vec!["Implement and verify the accepted Delivery goal.".into()],
-            out_of_scope: vec!["Unreviewed product changes.".into()],
-            constraints: vec!["Preserve the canonical Control Plane authority boundary.".into()],
             max_rework_attempts: 2,
             criterion_verification_methods,
         },
@@ -353,6 +354,10 @@ fn update_spec_command(seed: u64) -> CommandEnvelope {
                 "goal": "Replace the whole canonical specification before planning.",
                 "repositoryId": scope.repository_id,
                 "baseRevision": "abcdef1",
+                "scope": ["Replace the accepted Delivery goal."],
+                "outOfScope": ["Unreviewed product changes."],
+                "constraints": ["Preserve the canonical Control Plane authority boundary."],
+                "sourceProductSessionId": null,
                 "acceptanceCriteria": [{
                     "id": "criterion-updated",
                     "title": "The replacement specification is authoritative.",
@@ -565,6 +570,19 @@ fn update_spec_replaces_only_the_canonical_spec_and_replays_the_exact_receipt() 
         "Updated Rust Delivery transaction"
     );
     assert_eq!(delivery.snapshot().spec.base_revision, "abcdef1");
+    assert_eq!(
+        delivery.snapshot().spec.scope,
+        ["Replace the accepted Delivery goal."]
+    );
+    assert_eq!(
+        delivery.snapshot().spec.out_of_scope,
+        ["Unreviewed product changes."]
+    );
+    assert_eq!(
+        delivery.snapshot().spec.constraints,
+        ["Preserve the canonical Control Plane authority boundary."]
+    );
+    assert!(delivery.snapshot().spec.source_product_session_id.is_none());
     assert!(delivery.snapshot().tasks.is_empty());
     assert!(delivery.snapshot().stage_runs.is_empty());
     assert!(delivery.snapshot().session_bindings.is_empty());
@@ -1076,6 +1094,9 @@ fn spec_authority_requires_exact_ordered_verification_methods_and_preserves_all_
             "required": true
         }
     ]);
+    command.payload["spec"]["scope"] = serde_json::json!(["Implement both accepted behaviors."]);
+    command.payload["spec"]["outOfScope"] = serde_json::json!(["A third unreviewed behavior."]);
+    command.payload["spec"]["constraints"] = serde_json::json!(["Keep both checks deterministic."]);
     let fixture = |methods: Vec<(String, String)>| DeliverySpecFactsFixture {
         repository_scope: repository_scope(45),
         now_millis: 1_800_000_000_045,
@@ -1085,9 +1106,6 @@ fn spec_authority_requires_exact_ordered_verification_methods_and_preserves_all_
             locator: "/trusted/repository-45".into(),
         },
         source_ref: None,
-        scope: vec!["Implement both accepted behaviors.".into()],
-        out_of_scope: vec!["A third unreviewed behavior.".into()],
-        constraints: vec!["Keep both checks deterministic.".into()],
         max_rework_attempts: 3,
         criterion_verification_methods: methods,
     };

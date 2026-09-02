@@ -579,6 +579,9 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   const title = findByClass(rootElement, 'wwc-chat-convert-title')
   const goal = findByClass(rootElement, 'wwc-chat-convert-goal')
   const baseline = findByClass(rootElement, 'wwc-chat-convert-baseline')
+  const deliveryScope = findByClass(rootElement, 'wwc-chat-convert-delivery-scope')
+  const outOfScope = findByClass(rootElement, 'wwc-chat-convert-out-of-scope')
+  const constraints = findByClass(rootElement, 'wwc-chat-convert-constraints')
   const criteria = findByClass(rootElement, 'wwc-chat-convert-criteria')
   const source = findByClass(rootElement, 'wwc-chat-convert-source-session')
   const repositoryScope = findByClass(rootElement, 'wwc-chat-convert-scope')
@@ -588,6 +591,7 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   assert.equal(findByClass(rootElement, 'wwc-chat-convert-submit').disabled, false)
   assert.equal(title.value, 'Primary Chat')
   assert.equal(goal.value, 'Implement the requirement confirmed in this Chat.')
+  assert.equal(deliveryScope.value, 'Implement the requirement confirmed in this Chat.')
   assert.equal(source.value, productSessionId)
   assert.equal(source.readOnly, true)
   assert.match(repositoryScope.value, /rep_00000000000000000000000001/u)
@@ -596,6 +600,9 @@ test('Chat confirms one editable requirement draft before converting it to Stron
   assert.doesNotMatch(modelContext.value, /PRIVATE_REFERENCE/u)
 
   baseline.value = '0123456789abcdef0123456789abcdef01234567'
+  deliveryScope.value = 'Implement the confirmed requirement.'
+  outOfScope.value = 'Replace Chat.'
+  constraints.value = 'Keep the repository binding.'
   criteria.value = 'The confirmed result is delivered.\nThe real snapshot is subscribed.'
   form.emit('submit')
   assert.equal(deliveryCreator.calls.length, 0, 'explicit confirmation is required')
@@ -606,6 +613,10 @@ test('Chat confirms one editable requirement draft before converting it to Stron
     title: 'Primary Chat',
     goal: 'Implement the requirement confirmed in this Chat.',
     baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Implement the confirmed requirement.'],
+    outOfScope: ['Replace Chat.'],
+    constraints: ['Keep the repository binding.'],
+    sourceProductSessionId: productSessionId,
     acceptanceCriteria: [
       'The confirmed result is delivered.',
       'The real snapshot is subscribed.',

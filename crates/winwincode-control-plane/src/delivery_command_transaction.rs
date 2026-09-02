@@ -28,7 +28,9 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{DeliveryId, Sha256Digest};
-use winwincode_storage::{CommitReceipt, ProductStateStorage, ReceiptIdentity, StorageError};
+use winwincode_storage::{
+    CommitReceipt, ProductStateStorage, ReceiptIdentity, StateRevisionGuard, StorageError,
+};
 
 use crate::{
     DeliveryChangeKind, DeliveryCommandCommitError, StateChange, command_receipt,
@@ -39,15 +41,38 @@ use crate::{
 
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+#[derive(Clone, Copy, Default)]
+struct DeliveryCommitGuards<'authority> {
+    source_session: Option<&'authority StateRevisionGuard>,
+    terminal_handoff:
+        Option<&'authority crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
+}
+
+impl<'authority> DeliveryCommitGuards<'authority> {
+    const fn source_session(guard: Option<&'authority StateRevisionGuard>) -> Self {
+        Self {
+            source_session: guard,
+            terminal_handoff: None,
+        }
+    }
+
+    const fn terminal_handoff(
+        handoff: Option<&'authority crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
+    ) -> Self {
+        Self {
+            source_session: None,
+            terminal_handoff: handoff,
+        }
+    }
+}
+
 /// Opaque product-owned semantic facts omitted from the public Spec command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliverySpecFacts {
     now_millis: u64,
     repository: RepositoryRef,
     source_ref: Option<DeliverySourceRef>,
-    scope: Vec<String>,
-    out_of_scope: Vec<String>,
-    constraints: Vec<String>,
+    source_session_guard: Option<StateRevisionGuard>,
     max_rework_attempts: u64,
     criterion_verification_methods: Vec<(String, String)>,
 }
@@ -56,9 +81,7 @@ pub(crate) struct TrustedDeliverySpecFacts {
     pub(crate) now_millis: u64,
     pub(crate) repository: RepositoryRef,
     pub(crate) source_ref: Option<DeliverySourceRef>,
-    pub(crate) scope: Vec<String>,
-    pub(crate) out_of_scope: Vec<String>,
-    pub(crate) constraints: Vec<String>,
+    pub(crate) source_session_guard: Option<StateRevisionGuard>,
     pub(crate) max_rework_attempts: u64,
     pub(crate) criterion_verification_methods: Vec<(String, String)>,
 }
@@ -69,9 +92,7 @@ impl DeliverySpecFacts {
             now_millis: facts.now_millis,
             repository: facts.repository,
             source_ref: facts.source_ref,
-            scope: facts.scope,
-            out_of_scope: facts.out_of_scope,
-            constraints: facts.constraints,
+            source_session_guard: facts.source_session_guard,
             max_rework_attempts: facts.max_rework_attempts,
             criterion_verification_methods: facts.criterion_verification_methods,
         }
@@ -402,15 +423,13 @@ fn create(
         journal,
         &mutation,
         DeliveryChangeKind::Created,
-        None,
+        DeliveryCommitGuards::source_session(spec_facts.source_session_guard.as_ref()),
     ) {
         Ok(receipt) => Ok(receipt),
         Err(error)
-            if matches!(
-                error.kind(),
-                winwincode_storage::StorageErrorKind::RevisionConflict
-                    | winwincode_storage::StorageErrorKind::JournalAlreadyExists
-            ) =>
+            if (error.kind() == winwincode_storage::StorageErrorKind::RevisionConflict
+                && !error.is_state_guard_conflict())
+                || error.kind() == winwincode_storage::StorageErrorKind::JournalAlreadyExists =>
         {
             exact_create_replay_or_already_exists(
                 storage,
@@ -508,6 +527,12 @@ fn update_spec(
         )
         .into());
     }
+    if payload.spec.source_product_session_id != current.snapshot().spec.source_product_session_id {
+        return Err(StorageError::invalid_input(
+            "delivery.update_spec cannot replace the source ProductSession",
+        )
+        .into());
+    }
     let mut snapshot = current.clone().into_snapshot();
     snapshot.revision = expected_revision.saturating_add(1);
     snapshot.status = DeliveryStatus::Ready;
@@ -543,7 +568,7 @@ fn update_spec(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-        None,
+        DeliveryCommitGuards::source_session(spec_facts.source_session_guard.as_ref()),
     )?)
 }
 
@@ -613,7 +638,7 @@ fn advance_human_stage(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-        handoff,
+        DeliveryCommitGuards::terminal_handoff(handoff),
     )?)
 }
 
@@ -705,7 +730,7 @@ fn resolve_business_attention(
         journal,
         &mutation,
         DeliveryChangeKind::Advanced,
-        None,
+        DeliveryCommitGuards::default(),
     )?)
 }
 
@@ -754,7 +779,7 @@ fn commit_mutation(
     journal: StagedDeliveryJournal,
     mutation: &DeliveryStoreMutationResult,
     change_kind: DeliveryChangeKind,
-    handoff: Option<&crate::terminal_outcome_transaction::DeliveryTerminalHandoff>,
+    guards: DeliveryCommitGuards<'_>,
 ) -> Result<CommitReceipt, StorageError> {
     let (receipt_identity, _) = command_receipt(command)?;
     if mutation.replayed {
@@ -785,6 +810,9 @@ fn commit_mutation(
             StorageError::invalid_input("new Delivery mutation did not stage a journal record")
         })?;
     commit = commit.with_journal_publication(publication);
+    if let Some(state_guard) = guards.source_session {
+        commit = commit.with_state_guard(state_guard.clone());
+    }
     if change_kind == DeliveryChangeKind::Created {
         let Scope::RepositoryScope(scope) = &command.scope else {
             return Err(StorageError::invalid_input(
@@ -795,7 +823,7 @@ fn commit_mutation(
             crate::delivery_application::delivery_catalog_mutation(scope, delivery_id)?,
         );
     }
-    if let Some(handoff) = handoff {
+    if let Some(handoff) = guards.terminal_handoff {
         commit = commit.with_state_mutation(handoff.consumption());
     }
     let receipt = storage.commit(&commit)?;
@@ -866,10 +894,11 @@ fn map_spec(
         revision,
         title: input.title,
         goal: input.goal,
-        scope: facts.scope.clone(),
-        out_of_scope: facts.out_of_scope.clone(),
-        constraints: facts.constraints.clone(),
+        scope: input.scope,
+        out_of_scope: input.out_of_scope,
+        constraints: input.constraints,
         acceptance_criteria: criteria,
+        source_product_session_id: input.source_product_session_id,
         source_ref: facts.source_ref.clone(),
         publication_target,
         repository: facts.repository.clone(),

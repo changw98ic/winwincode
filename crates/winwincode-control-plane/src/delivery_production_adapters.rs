@@ -9,7 +9,6 @@
 //! durable facts are available.
 
 use std::{
-    collections::BTreeSet,
     fmt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -457,20 +456,12 @@ impl DeliveryAuthorityPort for LocalDeliveryAuthority {
         }
         let context = self.inspect(&baseline)?;
         let verification = select_verification_command(&context)?;
-        let scope = repository_scope_paths(&context);
-        let constraints = vec![
-            format!("checkout exact baseline {}", context.baseline_sha),
-            format!("verify with {}", verification),
-        ];
         Ok(DeliverySpecificationAuthority {
             now_millis: Self::now_millis(request.delivery())?,
             repository: self.repository_ref(),
             source_ref: request
                 .delivery()
                 .and_then(|delivery| delivery.snapshot().spec.source_ref.clone()),
-            scope,
-            out_of_scope: Vec::new(),
-            constraints,
             max_rework_attempts: self.config.max_rework_attempts,
             criterion_verification_methods: criteria
                 .into_iter()
@@ -968,21 +959,6 @@ fn select_verification_command(
                 "repository baseline exposes no trusted verification command",
             )
         })
-}
-
-fn repository_scope_paths(context: &RepositoryContext) -> Vec<String> {
-    let mut roots = BTreeSet::new();
-    for file in &context.files {
-        if let Some(root) = file.path.split('/').next()
-            && !root.is_empty()
-        {
-            roots.insert(root.to_owned());
-        }
-        if roots.len() == 64 {
-            break;
-        }
-    }
-    roots.into_iter().collect()
 }
 
 fn decode_payload<T: serde::de::DeserializeOwned + Serialize>(

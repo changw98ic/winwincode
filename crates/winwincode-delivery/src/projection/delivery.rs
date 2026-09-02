@@ -62,6 +62,7 @@ pub struct SpecProjection {
     out_of_scope: Vec<String>,
     constraints: Vec<String>,
     acceptance_criteria: Vec<AcceptanceCriterionProjection>,
+    source_product_session_id: Option<ProductSessionId>,
     source_ref: Option<DeliverySourceRef>,
     publication_target: Option<DeliveryPublicationTarget>,
     repository: RepositoryRef,
@@ -108,6 +109,11 @@ impl SpecProjection {
     #[must_use]
     pub fn acceptance_criteria(&self) -> &[AcceptanceCriterionProjection] {
         &self.acceptance_criteria
+    }
+
+    #[must_use]
+    pub const fn source_product_session_id(&self) -> Option<&ProductSessionId> {
+        self.source_product_session_id.as_ref()
     }
 
     #[must_use]
@@ -728,6 +734,7 @@ pub(super) fn project_delivery_sections(
                     required: criterion.required,
                 })
                 .collect(),
+            source_product_session_id: snapshot.spec.source_product_session_id.clone(),
             source_ref: snapshot.spec.source_ref.clone(),
             publication_target: snapshot.spec.publication_target.clone(),
             repository: snapshot.spec.repository.clone(),

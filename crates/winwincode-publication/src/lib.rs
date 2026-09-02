@@ -10,9 +10,10 @@ mod operation;
 mod policy;
 
 pub use coordinator::{
-    Publication, PublicationCancelCommand, PublicationCommandContext, PublicationCoordinator,
-    PublicationError, PublicationErrorKind, PublicationLedger, PublicationPublishCommand,
-    PublicationReadLedger, PublicationState,
+    MAX_PUBLICATION_DETAIL_HISTORY, Publication, PublicationCancelCommand,
+    PublicationCommandContext, PublicationCoordinator, PublicationDetail, PublicationError,
+    PublicationErrorKind, PublicationLedger, PublicationPublishCommand, PublicationReadLedger,
+    PublicationState, PublicationStatusHistory, PublicationStepDetail, PublicationStepState,
 };
 pub use facts::{
     PublicationAuthorization, PublicationFactBinding, PublicationResourceFact,

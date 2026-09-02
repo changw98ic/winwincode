@@ -882,6 +882,31 @@ mod aggregate_tests {
         let mut value: serde_json::Value =
             serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
                 .expect("fixture json");
+        value["spec"]
+            .as_object_mut()
+            .expect("spec")
+            .remove("sourceProductSessionId");
+        assert_eq!(
+            Delivery::decode_json(&serde_json::to_vec(&value).expect("json"))
+                .expect_err("missing source ProductSession field")
+                .code(),
+            DeliveryValidationErrorCode::InvalidShape
+        );
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
+                .expect("fixture json");
+        value["spec"]["sourceProductSessionId"] = serde_json::json!("psn_invalid");
+        assert_eq!(
+            Delivery::decode_json(&serde_json::to_vec(&value).expect("json"))
+                .expect_err("invalid source ProductSession identity")
+                .code(),
+            DeliveryValidationErrorCode::InvalidIdentifier
+        );
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/delivery-main.json"))
+                .expect("fixture json");
         value["codexPlan"] = serde_json::json!([{ "step": "execution-owned" }]);
         assert_eq!(
             Delivery::decode_json(&serde_json::to_vec(&value).expect("json"))

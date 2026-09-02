@@ -535,6 +535,10 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
     title: '  First StrongFlow Delivery  ',
     goal: '  Enter the advanced workspace without a reload.  ',
     baseRevision: '  0123456789abcdef0123456789abcdef01234567  ',
+    scope: ['  Open the advanced workspace.  '],
+    outOfScope: ['  Replace the default Chat surface.  '],
+    constraints: ['  Keep the exact repository binding.  '],
+    sourceProductSessionId: null,
     acceptanceCriteria: [
       '  The created Delivery is loaded from the Control Plane.  ',
       'The Delivery event stream is subscribed.',
@@ -561,9 +565,13 @@ test('empty StrongFlow creates and advances one Delivery with exact authority an
           title: 'The Delivery event stream is subscribed.',
         }],
         baseRevision: '0123456789abcdef0123456789abcdef01234567',
+        constraints: ['Keep the exact repository binding.'],
         goal: 'Enter the advanced workspace without a reload.',
+        outOfScope: ['Replace the default Chat surface.'],
         publicationTarget: null,
         repositoryId: scope.repositoryId,
+        scope: ['Open the advanced workspace.'],
+        sourceProductSessionId: null,
         title: 'First StrongFlow Delivery',
       },
       tasks: [],
@@ -665,6 +673,10 @@ test('Delivery conversion retries the same create and advance requests without d
     title: 'Confirmed Chat requirement',
     goal: 'Implement the requirement confirmed in Chat.',
     baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Implement the confirmed requirement.'],
+    outOfScope: [],
+    constraints: ['Keep the source session binding.'],
+    sourceProductSessionId: productSessionId,
     acceptanceCriteria: ['The confirmed result is delivered.'],
   }
 
@@ -754,6 +766,10 @@ test('cancelling and duplicate activation retain one Delivery attempt for exact 
     title: 'Cancelable conversion',
     goal: 'Retry the exact request.',
     baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Retry the submitted conversion.'],
+    outOfScope: [],
+    constraints: [],
+    sourceProductSessionId: null,
     acceptanceCriteria: ['Only one Delivery is created.'],
   }
 
@@ -839,6 +855,10 @@ test('an accepted Delivery command can be cancelled and retried with its exact r
     title: 'Accepted conversion',
     goal: 'Retry a command accepted by the server.',
     baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    scope: ['Retry the accepted command.'],
+    outOfScope: [],
+    constraints: [],
+    sourceProductSessionId: null,
     acceptanceCriteria: ['The exact accepted request is retried.'],
   }
 

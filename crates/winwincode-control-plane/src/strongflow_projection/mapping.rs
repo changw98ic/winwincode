@@ -110,6 +110,7 @@ fn requirements(
         scope: spec.scope().to_vec(),
         out_of_scope: spec.out_of_scope().to_vec(),
         constraints: spec.constraints().to_vec(),
+        source_product_session_id: spec.source_product_session_id().cloned(),
         acceptance_criteria: spec
             .acceptance_criteria()
             .iter()

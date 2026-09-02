@@ -213,6 +213,10 @@ export interface StrongFlowCreateInput {
   readonly title: string
   readonly goal: string
   readonly baseRevision: string
+  readonly scope: readonly string[]
+  readonly outOfScope: readonly string[]
+  readonly constraints: readonly string[]
+  readonly sourceProductSessionId: ProductSessionId | null
   readonly acceptanceCriteria: readonly string[]
 }
 
@@ -763,6 +767,9 @@ export function createStrongFlowCreateViewModel(
     const title = input.title.trim()
     const goal = input.goal.trim()
     const baseRevision = input.baseRevision.trim()
+    const deliveryScope = [...new Set(input.scope.map(value => value.trim()).filter(Boolean))]
+    const outOfScope = [...new Set(input.outOfScope.map(value => value.trim()).filter(Boolean))]
+    const constraints = [...new Set(input.constraints.map(value => value.trim()).filter(Boolean))]
     const acceptanceCriteria = input.acceptanceCriteria
       .map(value => value.trim())
       .filter(value => value.length > 0)
@@ -778,6 +785,10 @@ export function createStrongFlowCreateViewModel(
       invalid('STRONGFLOW_CREATE_BASE_REVISION_REQUIRED', 'Enter the repository baseline revision.')
       return
     }
+    if (deliveryScope.length === 0) {
+      invalid('STRONGFLOW_CREATE_SCOPE_REQUIRED', 'Enter at least one in-scope result.')
+      return
+    }
     if (acceptanceCriteria.length === 0) {
       invalid(
         'STRONGFLOW_CREATE_ACCEPTANCE_REQUIRED',
@@ -785,7 +796,16 @@ export function createStrongFlowCreateViewModel(
       )
       return
     }
-    const inputKey = JSON.stringify({ title, goal, baseRevision, acceptanceCriteria })
+    const inputKey = JSON.stringify({
+      title,
+      goal,
+      baseRevision,
+      deliveryScope,
+      outOfScope,
+      constraints,
+      sourceProductSessionId: input.sourceProductSessionId,
+      acceptanceCriteria,
+    })
     if (attempt !== null && attempt.inputKey !== inputKey) {
       invalid(
         'STRONGFLOW_CREATE_DRAFT_CHANGED_AFTER_SUBMIT',
@@ -814,9 +834,13 @@ export function createStrongFlowCreateViewModel(
                 title: criterion,
               })),
               baseRevision,
+              constraints,
               goal,
+              outOfScope,
               publicationTarget: null,
               repositoryId: options.scope.repositoryId,
+              scope: deliveryScope,
+              sourceProductSessionId: input.sourceProductSessionId,
               title,
             },
             tasks: [],

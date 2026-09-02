@@ -104,6 +104,11 @@ impl TypedControlPlaneApiPort for RecordingApplication {
             .lock()
             .expect("query families")
             .push(family);
+        if family == QueryFamily::Publication
+            && matches!(&request, QueryRequest::PublicationGetQuery(_))
+        {
+            return Ok(publication_detail_response());
+        }
         if family == QueryFamily::Enterprise {
             assert!(matches!(
                 request,
@@ -172,6 +177,94 @@ impl TypedControlPlaneApiPort for RecordingApplication {
     }
 }
 
+fn publication_detail_response() -> QueryResultResponse {
+    serde_json::from_value(json!({
+        "schemaVersion": "winwincode/v1",
+        "requestId": REQUEST_ID,
+        "query": "publication.get",
+        "page": { "nextCursor": null, "hasMore": false },
+        "result": {
+            "kind": "publication_detail",
+            "summary": {
+                "id": "pub_00000000000000000000000001",
+                "revision": 1,
+                "deliveryId": "dlv_00000000000000000000000001",
+                "deliverySpecId": "spec:current",
+                "deliverySpecRevision": 1,
+                "candidateRef": concat!("git-candidate:sha256:", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                "deliveryVerdictId": "verdict:current:pass",
+                "verdictStatus": "pass",
+                "approvalAttentionItemId": "att_00000000000000000000000001",
+                "approvedBy": USER_ID,
+                "approvedAt": "2026-08-27T00:00:00.000Z",
+                "publicationSetSha256": concat!("sha256:", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                "target": {
+                    "provider": "github",
+                    "repository": "example/widget",
+                    "baseBranch": "main",
+                    "headRepository": "example/widget",
+                    "headBranch": "winwincode/delivery"
+                },
+                "state": "pending",
+                "resourceRef": null,
+                "updatedAt": "2026-08-27T00:00:00.000Z"
+            },
+            "steps": [
+                {
+                    "kind": "branch",
+                    "state": "pending",
+                    "outcomeCode": null,
+                    "resourceRef": null,
+                    "remoteWritePerformed": null,
+                    "retryable": false
+                },
+                {
+                    "kind": "pull_request",
+                    "state": "pending",
+                    "outcomeCode": null,
+                    "resourceRef": null,
+                    "remoteWritePerformed": null,
+                    "retryable": false
+                },
+                {
+                    "kind": "issue_comment",
+                    "state": "pending",
+                    "outcomeCode": null,
+                    "resourceRef": null,
+                    "remoteWritePerformed": null,
+                    "retryable": false
+                },
+                {
+                    "kind": "commit_status",
+                    "state": "pending",
+                    "outcomeCode": null,
+                    "resourceRef": null,
+                    "remoteWritePerformed": null,
+                    "retryable": false
+                }
+            ],
+            "history": [{
+                "revision": 1,
+                "state": "pending",
+                "updatedAt": "2026-08-27T00:00:00.000Z",
+                "stepStates": [
+                    { "kind": "branch", "state": "pending" },
+                    { "kind": "pull_request", "state": "pending" },
+                    { "kind": "issue_comment", "state": "pending" },
+                    { "kind": "commit_status", "state": "pending" }
+                ],
+                "retryable": true,
+                "cancellable": true
+            }],
+            "historyTruncated": false,
+            "cancellation": null,
+            "retryable": true,
+            "cancellable": true
+        }
+    }))
+    .expect("publication detail response fixture")
+}
+
 fn principal() -> AuthenticatedPrincipal {
     let actor =
         serde_json::from_value(json!({ "kind": "user", "id": USER_ID })).expect("generated Actor");
@@ -238,6 +331,14 @@ fn query_fixture(query: &str, scope: &Value, parameters: &Value) -> Value {
 
 fn settings_query() -> Value {
     query_fixture("settings.get", &organization_scope(), &json!({}))
+}
+
+fn publication_get_query() -> Value {
+    query_fixture(
+        "publication.get",
+        &repository_scope(),
+        &json!({ "publicationId": "pub_00000000000000000000000001" }),
+    )
 }
 
 fn enterprise_organization_command() -> Value {
@@ -620,6 +721,27 @@ fn enterprise_contracts_use_the_one_generated_http_dispatcher() {
     assert_eq!(
         *application.command_families.lock().expect("commands"),
         vec![CommandFamily::Enterprise]
+    );
+}
+
+#[test]
+fn publication_get_dispatches_one_bounded_detail_projection() {
+    let application = Arc::new(RecordingApplication::default());
+    let dispatcher = GeneratedContractDispatcher::new(application.clone());
+
+    let query = dispatcher
+        .query(&principal(), publication_get_query())
+        .expect("publication detail response");
+
+    assert_eq!(query["query"], "publication.get");
+    assert_eq!(query["result"]["kind"], "publication_detail");
+    assert_eq!(query["result"]["summary"]["revision"], 1);
+    assert_eq!(query["result"]["steps"].as_array().map(Vec::len), Some(4));
+    assert_eq!(query["result"]["history"].as_array().map(Vec::len), Some(1));
+    assert_eq!(application.authorizations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        *application.query_families.lock().expect("queries"),
+        vec![QueryFamily::Publication]
     );
 }
 
