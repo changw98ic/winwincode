@@ -5792,10 +5792,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "id",
         "value",
         "label"
       ],
       "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/InteractiveInputChoiceId"
+        },
         "value": {
           "type": "string",
           "minLength": 1,
@@ -5806,7 +5810,8 @@
           "minLength": 1,
           "maxLength": 500
         }
-      }
+      },
+      "description": "Secret-safe interactive option. id is stable presentation identity; value is the server-validated answer token."
     },
     "ChatInputInteractionProjection": {
       "type": "object",

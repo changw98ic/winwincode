@@ -351,8 +351,7 @@ function validateInputValue(
     )
     return null
   }
-  const choices = new Set(input.options.map(option => option.value))
-  if (choices.size !== input.options.length || !choices.has(value.value)) return clientFailure(
+  if (!input.options.some(option => option.value === value.value)) return clientFailure(
     'LOCAL_DECISIONS_INPUT_OPTION_STALE',
     'Choose one current input option.',
   )

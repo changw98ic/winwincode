@@ -3577,8 +3577,8 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                             "header": "Continue",
                             "question": "Continue this turn?",
                             "options": [
-                                {"label": "yes", "description": "Continue the turn."},
-                                {"label": "no", "description": "Stop the turn."}
+                                {"label": "continue", "description": "PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK"},
+                                {"label": "continue", "description": "Continue after revising the plan."}
                             ]
                         }]
                     })
@@ -3632,7 +3632,27 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
         );
         assert_eq!(request.mode, InteractiveInputMode::SingleChoice);
         assert_eq!(request.choices.as_ref().map(Vec::len), Some(2));
+        let choice_json =
+            serde_json::to_value(request.choices.as_ref().expect("interactive input choices"))
+                .expect("serialize interactive input choices");
+        let choice_json = choice_json.as_array().expect("choice array");
+        let first_choice_id = choice_json[0]["id"]
+            .as_str()
+            .expect("first stable choice identity");
+        let second_choice_id = choice_json[1]["id"]
+            .as_str()
+            .expect("second stable choice identity");
+        assert_ne!(first_choice_id, second_choice_id);
+        assert!(first_choice_id.starts_with("ich_"));
+        assert!(second_choice_id.starts_with("ich_"));
+        assert_eq!(choice_json[0]["value"], "continue");
+        assert_eq!(choice_json[1]["value"], "continue");
         assert!(!request.prompt.is_empty());
+        assert!(
+            !serde_json::to_string(&request)
+                .expect("serialize public input request")
+                .contains("PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK")
+        );
 
         let valid_response = input_response(&request);
         let mut foreign = valid_response.clone();
@@ -3828,8 +3848,8 @@ fn real_request_user_input_resumes_after_response_loss_and_rejects_forged_replay
                             "header": "Continue",
                             "question": "Continue this turn?",
                             "options": [
-                                {"label": "yes", "description": "Continue the turn."},
-                                {"label": "no", "description": "Stop the turn."}
+                                {"label": "continue", "description": "PRIVATE_CHOICE_DESCRIPTION_MUST_NOT_LEAK"},
+                                {"label": "continue", "description": "Continue after revising the plan."}
                             ]
                         }]
                     })

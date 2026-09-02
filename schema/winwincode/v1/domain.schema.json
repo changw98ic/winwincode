@@ -50,6 +50,11 @@
       "pattern": "^inp_[0-9A-HJKMNP-TV-Z]{26}$",
       "description": "Identity of one interactive input request."
     },
+    "InteractiveInputChoiceId": {
+      "type": "string",
+      "pattern": "^ich_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Stable identity of one choice within an interactive input request."
+    },
     "PublicationId": {
       "type": "string",
       "pattern": "^pub_[0-9A-HJKMNP-TV-Z]{26}$"

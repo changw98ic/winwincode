@@ -7,7 +7,7 @@
 //! retained. Browser clients read the resulting HTTP projection and use the
 //! matching WebSocket event only as an invalidation signal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use base64::Engine as _;
@@ -31,8 +31,8 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketChatInteractionsInvalidatedEventTypeValue, InputRespondPayload, PageInfo,
 };
 use winwincode_domain::{
-    ApprovalId, ExecutionMessageId, InputRequestId, Instant, OpaqueCursor, ProductSessionId,
-    Revision, SchemaVersion, Sha256Digest,
+    ApprovalId, ExecutionMessageId, InputRequestId, Instant, InteractiveInputMode, OpaqueCursor,
+    ProductSessionId, Revision, SchemaVersion, Sha256Digest,
 };
 use winwincode_execution_port::generated::{
     ApprovalActionCategory, ApprovalRequestMessage, InputRequestMessage,
@@ -185,6 +185,7 @@ impl ChatInteractionProjectionLedger {
         if request.prompt.trim().is_empty() {
             return Err(ChatInteractionProjectionError::InvalidField("prompt"));
         }
+        validate_request_choices(request)?;
         let revision = Revision(self.next_revision()?);
         let projection = ChatInputInteractionProjection {
             allow_empty: request.allow_empty,
@@ -203,6 +204,7 @@ impl ChatInteractionProjectionLedger {
                 .unwrap_or_default()
                 .iter()
                 .map(|choice| ChatInteractionOptionProjection {
+                    id: choice.id.clone(),
                     label: choice.label.clone(),
                     value: choice.value.clone(),
                 })
@@ -652,6 +654,8 @@ impl ChatInteractionProjectionLedger {
                     projection,
                 } => {
                     register_source(&mut source_messages, source_message_id, "input")?;
+                    validate_projection_choices(&projection.mode, &projection.options)
+                        .map_err(|_| ChatInteractionProjectionError::SnapshotConflict)?;
                     if projection.revision.0 <= result.revision
                         || result
                             .inputs
@@ -836,7 +840,88 @@ fn validate_input_payload(
             "sessionIdentity",
         ));
     }
+    match payload.status.as_str() {
+        "provided" => {
+            let value = payload
+                .value
+                .as_ref()
+                .ok_or(ChatInteractionProjectionError::InvalidField("value"))?;
+            if value.mode != projection.mode {
+                return Err(ChatInteractionProjectionError::InvalidField("value.mode"));
+            }
+            match &projection.mode {
+                InteractiveInputMode::Text => {
+                    if !projection.allow_empty && value.value.is_empty() {
+                        return Err(ChatInteractionProjectionError::InvalidField("value.value"));
+                    }
+                }
+                InteractiveInputMode::Confirmation | InteractiveInputMode::SingleChoice => {
+                    if !projection
+                        .options
+                        .iter()
+                        .any(|option| option.value == value.value)
+                    {
+                        return Err(ChatInteractionProjectionError::InvalidField("value.value"));
+                    }
+                }
+            }
+        }
+        "cancelled" if payload.value.is_some() => {
+            return Err(ChatInteractionProjectionError::InvalidField("value"));
+        }
+        _ => {}
+    }
     Ok(())
+}
+
+fn validate_request_choices(
+    request: &InputRequestMessage,
+) -> Result<(), ChatInteractionProjectionError> {
+    let choices = request.choices.as_deref().unwrap_or_default();
+    let projected = choices
+        .iter()
+        .map(|choice| ChatInteractionOptionProjection {
+            id: choice.id.clone(),
+            label: choice.label.clone(),
+            value: choice.value.clone(),
+        })
+        .collect::<Vec<_>>();
+    validate_projection_choices(&request.mode, &projected)
+}
+
+fn validate_projection_choices(
+    mode: &InteractiveInputMode,
+    choices: &[ChatInteractionOptionProjection],
+) -> Result<(), ChatInteractionProjectionError> {
+    if matches!(mode, InteractiveInputMode::Text) && !choices.is_empty()
+        || !matches!(mode, InteractiveInputMode::Text) && choices.is_empty()
+    {
+        return Err(ChatInteractionProjectionError::InvalidField("choices"));
+    }
+    let mut ids = HashSet::with_capacity(choices.len());
+    for choice in choices {
+        if choice.label.trim().is_empty()
+            || choice.value.trim().is_empty()
+            || !canonical_choice_id(&choice.id.0)
+            || !ids.insert(choice.id.clone())
+        {
+            return Err(ChatInteractionProjectionError::InvalidField("choices"));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_choice_id(value: &str) -> bool {
+    value.strip_prefix("ich_").is_some_and(|identifier| {
+        identifier.len() == 26
+            && identifier.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'
+                    )
+            })
+    })
 }
 
 fn validate_binding(

@@ -131,8 +131,8 @@ function choiceInput(overrides = {}) {
     mode: 'single_choice',
     prompt: 'Choose the next planning action',
     options: [
-      { label: 'Plan Delta', value: 'plan_delta' },
-      { label: 'Replan', value: 'replan' },
+      { id: 'ich_00000000000000000000000001', label: 'Plan Delta', value: 'plan_delta' },
+      { id: 'ich_00000000000000000000000002', label: 'Replan', value: 'replan' },
     ],
     ...overrides,
   })
@@ -460,6 +460,25 @@ test('input responses bind the full execution identity and duplicate or expired 
   })
   assert.equal(cancelClient.commands.at(-1).expectedRevision, 5)
   cancelModel.close()
+})
+
+test('choice validation accepts one canonical value shared by distinct stable option identities', async () => {
+  const client = contractFake()
+  client.interactions = [choiceInput({
+    options: [
+      { id: 'ich_00000000000000000000000003', label: 'Continue', value: 'continue' },
+      { id: 'ich_00000000000000000000000004', label: 'Continue', value: 'continue' },
+    ],
+  })]
+  const model = modelFor(client)
+  await model.start()
+  await model.provideInput(choiceInputRequestId, { mode: 'single_choice', value: 'continue' })
+  assert.equal(client.commands.length, 1)
+  assert.deepEqual(client.commands[0].payload.value, {
+    mode: 'single_choice',
+    value: 'continue',
+  })
+  model.close()
 })
 
 test('approval and Attention decisions carry current revisions and deduplicate in-flight clicks', async () => {
@@ -812,6 +831,64 @@ test('read-only Approvals disables decision controls and ignores synthetic actio
   byClass(rootElement, 'wwc-local-approval-approve').dispatch('click')
   byClass(rootElement, 'wwc-local-attention-resolve').dispatch('click')
   assert.deepEqual(calls, [])
+  mounted.close()
+})
+
+test('duplicate choice labels and values render by stable identity and submit the canonical value', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  const duplicateChoices = [
+    { id: 'ich_00000000000000000000000003', label: 'Continue', value: 'continue' },
+    { id: 'ich_00000000000000000000000004', label: 'Continue', value: 'continue' },
+  ]
+  let state = pageState({
+    inputs: [{ projection: choiceInput({ options: duplicateChoices }), expired: false }],
+    approvals: [],
+    attention: [],
+  })
+  let listener = () => {}
+  const model = {
+    get state() { return state },
+    subscribe(next) {
+      listener = next
+      next(state)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async provideInput(id, value) { calls.push({ id, value }) },
+    async cancelInput() {},
+    async decideApproval() {},
+    async resolveAttention() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+
+  let mounted
+  assert.doesNotThrow(() => { mounted = mountLocalDecisionsPage({ root: rootElement, model }) })
+  const before = allByClass(rootElement, 'wwc-local-input-option')
+  assert.equal(before.length, 2)
+  assert.deepEqual(before.map(option => option.textContent), ['Continue', 'Continue'])
+
+  state = pageState({
+    inputs: [{
+      projection: choiceInput({ options: duplicateChoices.map(option => ({ ...option })) }),
+      expired: false,
+    }],
+    approvals: [],
+    attention: [],
+  })
+  listener(state)
+  const after = allByClass(rootElement, 'wwc-local-input-option')
+  assert.equal(after[0], before[0])
+  assert.equal(after[1], before[1])
+  after[1].dispatch('click')
+  assert.deepEqual(calls, [{
+    id: choiceInputRequestId,
+    value: { mode: 'single_choice', value: 'continue' },
+  }])
   mounted.close()
 })
 

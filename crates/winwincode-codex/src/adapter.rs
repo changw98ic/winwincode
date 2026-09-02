@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
@@ -25,15 +25,16 @@ use codex_protocol::approvals::{ApplyPatchApprovalRequestEvent, ExecApprovalRequ
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::{Event as CodexEvent, EventMsg as CodexEventMsg};
 use codex_protocol::request_user_input::{
-    RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputResponse,
+    RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputQuestion,
+    RequestUserInputResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use winwincode_domain::{
     ApprovalId, CodexThreadId, ExecutionEventId, ExecutionMessageId, ExecutionSequence,
-    InputRequestId, Instant, InteractiveInputMode, RequestId, SchemaVersion, SessionIdentity,
-    Sha256Digest, WorkerId, WorkerInstanceId,
+    InputRequestId, Instant, InteractiveInputChoiceId, InteractiveInputMode, RequestId,
+    SchemaVersion, SessionIdentity, Sha256Digest, WorkerId, WorkerInstanceId,
 };
 use winwincode_execution_port::{
     action_enforcement::ActionEnforcementSigningKey,
@@ -1146,6 +1147,7 @@ impl ProductionCodexAdapter {
                 question.id.as_bytes(),
             ],
         );
+        let choices = project_interactive_input_choices(&input_request_id, question)?;
         let request_digest =
             private_payload_digest(b"winwincode.kernel-input-request.v1", request)?;
         let operation = StoredInputOperation {
@@ -1189,15 +1191,6 @@ impl ProductionCodexAdapter {
             return Ok(None);
         }
         let authority = &run.binding.authority;
-        let choices = question.options.as_ref().map(|options| {
-            options
-                .iter()
-                .map(|option| InteractiveInputChoice {
-                    label: option.label.clone(),
-                    value: option.label.clone(),
-                })
-                .collect::<Vec<_>>()
-        });
         let mode = if choices.as_ref().is_some_and(|choices| !choices.is_empty()) {
             InteractiveInputMode::SingleChoice
         } else {
@@ -2601,6 +2594,41 @@ fn canonical_parts_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String
     }
     let hex = format!("{:x}", digest.finalize());
     format!("{prefix}_{}", &hex[..26].to_ascii_uppercase())
+}
+
+fn project_interactive_input_choices(
+    input_request_id: &str,
+    question: &RequestUserInputQuestion,
+) -> Result<Option<Vec<InteractiveInputChoice>>, ProductionCodexError> {
+    let Some(options) = question.options.as_ref() else {
+        return Ok(None);
+    };
+    let mut choice_ids = HashSet::with_capacity(options.len());
+    let mut choices = Vec::with_capacity(options.len());
+    for option in options {
+        let choice_id = canonical_parts_id(
+            "ich",
+            b"winwincode-kernel-input-choice.v1",
+            &[
+                input_request_id.as_bytes(),
+                option.label.as_bytes(),
+                option.description.as_bytes(),
+            ],
+        );
+        if !choice_ids.insert(choice_id.clone()) {
+            // Upstream options have no identity separate from their public
+            // label and description. Exact duplicates cannot be assigned a
+            // stable business identity without using their array position,
+            // so fail before retaining an ambiguous operation.
+            return Err(conflict());
+        }
+        choices.push(InteractiveInputChoice {
+            id: InteractiveInputChoiceId(choice_id),
+            label: option.label.clone(),
+            value: option.label.clone(),
+        });
+    }
+    Ok(Some(choices))
 }
 
 fn private_payload_digest(

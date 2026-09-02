@@ -376,7 +376,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
         HTMLButtonElement
       >({
         parent: choices,
-        key: option => option.value,
+        key: option => option.id,
         create() {
           const choice = element(document, 'button', 'wwc-local-input-option')
           choice.type = 'button'

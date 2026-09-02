@@ -146,7 +146,11 @@ function input(value = 1, sessionId = productSessionId) {
     binding: binding(sessionId),
     mode: 'single_choice',
     prompt: 'Select the target.',
-    options: [{ value: 'candidate', label: 'Candidate workspace' }],
+    options: [{
+      id: `ich_${String(value).padStart(26, '0')}`,
+      value: 'candidate',
+      label: 'Candidate workspace',
+    }],
     allowEmpty: false,
     expiresAt: '2099-08-27T01:10:00.000Z',
   }

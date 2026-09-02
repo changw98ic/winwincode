@@ -528,6 +528,7 @@
       "prompt": "Select the target.",
       "choices": [
         {
+          "id": "ich_00000000000000000000000001",
           "value": "candidate",
           "label": "Candidate workspace"
         }

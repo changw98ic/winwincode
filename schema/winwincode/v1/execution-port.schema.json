@@ -870,6 +870,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "id": {
+          "$ref": "./domain.schema.json#/$defs/InteractiveInputChoiceId"
+        },
         "value": {
           "type": "string",
           "minLength": 1,
@@ -882,9 +885,11 @@
         }
       },
       "required": [
+        "id",
         "value",
         "label"
-      ]
+      ],
+      "description": "One interactive option. id is the stable UI/business identity; value is the canonical answer submitted to the Worker."
     },
     "ApprovalActionCategory": {
       "type": "string",

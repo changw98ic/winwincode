@@ -1980,7 +1980,11 @@
     },
     "ChatInteractionOptionProjection": {
       "additionalProperties": false,
+      "description": "Secret-safe interactive option. id is stable presentation identity; value is the server-validated answer token.",
       "properties": {
+        "id": {
+          "$ref": "#/$defs/InteractiveInputChoiceId"
+        },
         "label": {
           "maxLength": 500,
           "minLength": 1,
@@ -1993,6 +1997,7 @@
         }
       },
       "required": [
+        "id",
         "value",
         "label"
       ],
@@ -12192,7 +12197,11 @@
     },
     "InteractiveInputChoice": {
       "additionalProperties": false,
+      "description": "One interactive option. id is the stable UI/business identity; value is the canonical answer submitted to the Worker.",
       "properties": {
+        "id": {
+          "$ref": "#/$defs/InteractiveInputChoiceId"
+        },
         "label": {
           "maxLength": 500,
           "minLength": 1,
@@ -12205,10 +12214,16 @@
         }
       },
       "required": [
+        "id",
         "value",
         "label"
       ],
       "type": "object"
+    },
+    "InteractiveInputChoiceId": {
+      "description": "Stable identity of one choice within an interactive input request.",
+      "pattern": "^ich_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
     },
     "InteractiveInputMode": {
       "enum": [
@@ -17649,7 +17664,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:8ca389455aff2d4ef29af38ad4856f077874ff29be24b1435b405671051ee8bb",
+  "x-source-digest": "sha256:665f3dce2ef77dd33acc8ceea72034cd4bf9966145bc51dcab33f8cd253fc3c2",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
