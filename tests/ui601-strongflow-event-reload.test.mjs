@@ -245,6 +245,7 @@ function findByClass(node, className) {
 class FakeStrongFlowViewModel {
   constructor(initialState) { this.state = initialState }
 
+  draftScope = '["ui601-test-actor","ui601-test-scope"]'
   listener = null
 
   subscribe(listener) {

@@ -11,7 +11,11 @@ import { mountButton } from './components/button.js'
 import { mountEmptyState } from './components/empty-state.js'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
-import { createEditableDraft, type EditableDraft } from './editable-draft.js'
+import {
+  createEditableDraft,
+  settleDraftSubmission,
+  type EditableDraft,
+} from './editable-draft.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
@@ -367,10 +371,34 @@ export function mountStrongFlowCreatePage(
   }
 }
 
+/**
+ * Complete stable Candidate identity: two Candidates with one Diff digest but
+ * different ref/commit/tree are different review targets, so drafts key on all
+ * four fields instead of the Diff digest alone.
+ */
+function candidateIdentity(projection: StrongFlowProjection | null): string {
+  const candidate = projection?.currentCandidate ?? null
+  if (candidate === null) return ''
+  return [
+    candidate.candidateRef,
+    candidate.candidateCommitId,
+    candidate.candidateTreeId,
+    candidate.diffSha256,
+  ].join(':')
+}
+
+/** ADR-0029 §5: every warning also carries a non-color icon beside its text. */
+function conflictWarningIcon(document: Document, className: string): HTMLElement {
+  const icon = strongFlowElement(document, 'span', className)
+  icon.setAttribute('aria-hidden', 'true')
+  icon.textContent = '!'
+  return icon
+}
+
 /** Mount the advanced StrongFlow workspace against its Control Plane view-model. */
 export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowPage {
   const document = options.root.ownerDocument
-  const pageDraftScope = options.model.draftScope ?? 'mounted-strongflow-scope'
+  const pageDraftScope = options.model.draftScope
   const limits = options.limits ?? DEFAULT_STRONGFLOW_RENDER_LIMITS
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
@@ -424,6 +452,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const changesLabel = document.createElement('label')
   const changes = document.createElement('textarea')
   const reviewConflict = strongFlowElement(document, 'div', 'wwc-strongflow-review-conflict')
+  const reviewConflictIcon = conflictWarningIcon(
+    document,
+    'wwc-strongflow-review-conflict-icon',
+  )
   const reviewConflictText = strongFlowElement(
     document,
     'p',
@@ -516,7 +548,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   keepReviewDraft.textContent = 'Keep my draft'
   useServerReview.type = 'button'
   useServerReview.textContent = 'Use current server review'
-  reviewConflict.append(reviewConflictText, keepReviewDraft, useServerReview)
+  reviewConflict.append(reviewConflictIcon, reviewConflictText, keepReviewDraft, useServerReview)
   approveSolution.type = 'button'
   approveSolution.textContent = 'Approve solution'
   requestChanges.type = 'button'
@@ -646,11 +678,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   interface AttentionActionItem {
     readonly record: DeliveryAttentionProjection
     readonly busy: boolean
-    readonly interactionSettled: boolean
+    readonly interactionFailed: boolean
     readonly interactionCancelled: boolean
     readonly deliveryId: string
     readonly deliveryRevision: number
-    readonly candidateDigest: string
+    readonly candidateIdentity: string
     readonly tasks: readonly DeliveryTaskDetailProjection[]
     readonly nodes: readonly ReviewNode[]
     readonly candidateAvailable: boolean
@@ -725,6 +757,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         'wwc-strongflow-rework',
       ) as HTMLButtonElement
       const conflict = strongFlowElement(document, 'div', 'wwc-strongflow-attention-conflict')
+      const conflictIcon = conflictWarningIcon(
+        document,
+        'wwc-strongflow-attention-conflict-icon',
+      )
       const conflictText = strongFlowElement(
         document,
         'p',
@@ -761,7 +797,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       keepDraft.textContent = 'Keep my draft'
       useServer.type = 'button'
       useServer.textContent = 'Use current server target'
-      conflict.append(conflictText, keepDraft, useServer)
+      conflict.append(conflictIcon, conflictText, keepDraft, useServer)
       const taskOptions = mountKeyedCollection<
         DeliveryTaskDetailProjection,
         string,
@@ -874,11 +910,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         row.draft.edit('nodeId', row.node.value)
         row.draft.edit('instructions', row.instructions.value)
       }
-      if (item.interactionSettled && row.draft.state.submission !== null) {
-        row.draft.finishSubmission(item.interactionCancelled ? 'cancelled' : 'failure')
-      }
       row.draft.synchronize({
-        scope: `${pageDraftScope}:${item.deliveryId}:${item.record.id}:${item.candidateDigest}`,
+        scope: `${pageDraftScope}:${item.deliveryId}:${item.record.id}:${item.candidateIdentity}`,
         revision: item.deliveryRevision,
         values: {
           resolution: '',
@@ -887,9 +920,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
           instructions: '',
         },
       })
+      const attentionSubmission = row.draft.state.submission
+      const attentionOutcome = settleDraftSubmission(attentionSubmission, {
+        busy: item.busy,
+        failed: item.interactionFailed,
+        cancelled: item.interactionCancelled,
+        confirmed: attentionSubmission !== null && item.record.status !== 'open',
+        refuted: attentionSubmission !== null
+          && item.record.status === 'open'
+          && item.deliveryRevision > attentionSubmission.revision,
+      })
+      if (attentionOutcome !== 'in-flight') row.draft.finishSubmission(attentionOutcome)
       row.title.textContent = item.record.title
       group.dataset.attentionItemId = item.record.id
-      const decisionDisabled = item.busy || row.draft.state.revisionConflict
+      const decisionInFlight = row.draft.state.submission !== null
+      const decisionDisabled = item.busy
+        || row.draft.state.revisionConflict
+        || decisionInFlight
       row.resolve.disabled = decisionDisabled
       row.dismiss.disabled = decisionDisabled
       row.rework.disabled = decisionDisabled
@@ -906,10 +953,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       if (row.instructions.value !== draftValues.instructions) {
         row.instructions.value = draftValues.instructions
       }
-      row.resolution.disabled = item.busy
-      row.task.disabled = item.busy
-      row.node.disabled = item.busy
-      row.instructions.disabled = item.busy
+      row.resolution.disabled = item.busy || decisionInFlight
+      row.task.disabled = item.busy || decisionInFlight
+      row.node.disabled = item.busy || decisionInFlight
+      row.instructions.disabled = item.busy || decisionInFlight
       row.conflict.hidden = !row.draft.state.revisionConflict
       row.conflictText.textContent = row.draft.state.revisionConflict
         ? `This Attention draft started at Delivery revision ${String(
@@ -1118,19 +1165,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       reviewDraft.edit('comments', comments.value)
       reviewDraft.edit('requestedChanges', changes.value)
     }
-    if (
-      (interaction.status === 'error' || interaction.status === 'idle')
-      && reviewDraft.state.submission !== null
-    ) {
-      reviewDraft.finishSubmission(
-        interaction.error?.kind === 'cancelled' ? 'cancelled' : 'failure',
-      )
-    }
+    const reviewSubmission = reviewDraft.state.submission
+    const reviewOutcome = settleDraftSubmission(reviewSubmission, {
+      busy,
+      failed: interaction.status === 'error',
+      cancelled: interaction.error?.kind === 'cancelled',
+      confirmed: reviewSubmission !== null && !pendingReview,
+      refuted: reviewSubmission !== null
+        && pendingReview
+        && projection !== null
+        && projection.metadata.revisions.delivery > reviewSubmission.revision,
+    })
+    if (reviewOutcome !== 'in-flight') reviewDraft.finishSubmission(reviewOutcome)
     reviewDraft.synchronize(pendingReview && projection !== null
       ? {
           scope: `${pageDraftScope}:${projection.delivery.deliveryId}:${String(
             review?.attentionItemId ?? '',
-          )}:${projection.currentCandidate?.diffSha256 ?? ''}`,
+          )}:${candidateIdentity(projection)}`,
           revision: projection.metadata.revisions.delivery,
           values: { comments: '', requestedChanges: '' },
         }
@@ -1149,9 +1200,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         )}; the server is now at revision ${String(reviewDraft.state.serverRevision)}.`
       : ''
     solutionActions.hidden = !pendingReview
-    const reviewDisabled = busy || reviewDraft.state.revisionConflict
-    comments.disabled = busy
-    changes.disabled = busy
+    const reviewInFlight = reviewDraft.state.submission !== null
+    const reviewDisabled = busy || reviewDraft.state.revisionConflict || reviewInFlight
+    comments.disabled = busy || reviewInFlight
+    changes.disabled = busy || reviewInFlight
     approveSolution.disabled = reviewDisabled
     requestChanges.disabled = reviewDisabled
     rejectSolution.disabled = reviewDisabled
@@ -1185,11 +1237,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     attentionActionCollection.update(openAttention.items.map(record => ({
       record,
       busy,
-      interactionSettled: interaction.status === 'error' || interaction.status === 'idle',
+      interactionFailed: interaction.status === 'error',
       interactionCancelled: interaction.error?.kind === 'cancelled',
       deliveryId: projection?.delivery.deliveryId ?? '',
       deliveryRevision: projection?.metadata.revisions.delivery ?? 0,
-      candidateDigest: projection?.currentCandidate?.diffSha256 ?? '',
+      candidateIdentity: candidateIdentity(projection),
       tasks: reviewTasks,
       nodes,
       candidateAvailable: projection?.currentCandidate !== null,

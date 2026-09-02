@@ -39,6 +39,39 @@ export interface EditableDraftOptions<Values extends DraftValues> {
   readonly redactFields?: readonly (keyof Values & string)[]
 }
 
+/** Terminal outcome for one submitted draft, as decided by snapshot evidence. */
+export type DraftSubmissionSettlement = 'in-flight' | 'success' | 'failure' | 'cancelled'
+
+export interface DraftSubmissionEvidence {
+  /** A snapshot reload or transport round trip is still in flight. */
+  readonly busy: boolean
+  /** The command transport reported a terminal failure for this submission. */
+  readonly failed: boolean
+  /** The reported failure was a user cancellation. */
+  readonly cancelled: boolean
+  /** The current snapshot proves the submitted change applied. */
+  readonly confirmed: boolean
+  /** The current snapshot proves the submitted change did not apply. */
+  readonly refuted: boolean
+}
+
+/**
+ * One decision seam for every mounted draft: a submission stays in flight
+ * through unrelated reloads and only ends on transport failure or on snapshot
+ * evidence, so pages never duplicate a second business state machine.
+ */
+export function settleDraftSubmission<Values extends DraftValues>(
+  submission: DraftSubmission<Values> | null,
+  evidence: DraftSubmissionEvidence,
+): DraftSubmissionSettlement {
+  if (submission === null) return 'in-flight'
+  if (evidence.failed) return evidence.cancelled ? 'cancelled' : 'failure'
+  if (evidence.busy) return 'in-flight'
+  if (evidence.confirmed) return 'success'
+  if (evidence.refuted) return 'failure'
+  return 'in-flight'
+}
+
 export interface EditableDraft<Values extends DraftValues> {
   readonly state: EditableDraftState<Values>
   synchronize(snapshot: DraftServerSnapshot<Values> | null): void
@@ -140,16 +173,19 @@ export function createEditableDraft<Values extends DraftValues>(
       const nextValues = { ...values } as Record<string, string>
       const nextDirty = new Set(dirtyFields)
       const nextConflicts: DraftFieldConflict[] = []
+      const nextBase = { ...baseValues } as Record<string, string>
       for (const field of Object.keys(snapshot.values) as (keyof Values & string)[]) {
         const draftValue = values[field]
         const currentServerValue = snapshot.values[field] ?? ''
         if (!nextDirty.has(field)) {
           nextValues[field] = currentServerValue
+          nextBase[field] = currentServerValue
           continue
         }
         if (sameValue(draftValue, currentServerValue)) {
           nextDirty.delete(field)
           nextValues[field] = currentServerValue
+          nextBase[field] = currentServerValue
           continue
         }
         const baseValue = baseValues[field]
@@ -171,6 +207,16 @@ export function createEditableDraft<Values extends DraftValues>(
       dirtyFields = nextDirty
       conflicts = Object.freeze(nextConflicts)
       revisionConflict = nextConflicts.length > 0
+      if (nextDirty.size === 0) {
+        // Nothing is being edited against the old revision, so the whole
+        // baseline advances and later edits compare against this snapshot.
+        baseRevision = snapshot.revision
+        baseValues = nextServer
+      } else {
+        // Mixed update: clean fields rebase per field, while dirty fields keep
+        // the revision and values their conflict diagnostics came from.
+        baseValues = copyValues(nextBase as Values)
+      }
     },
     edit(field, value) {
       if (scope === null || submission !== null) return

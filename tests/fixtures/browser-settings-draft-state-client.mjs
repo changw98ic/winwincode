@@ -17,7 +17,7 @@ const reference = {
 
 function state({ revision = 4, provider = 'server-provider-a', model = 'server-model-a',
   concurrency = 2, interaction = { status: 'idle', operation: null, error: null },
-  status = 'ready' } = {}) {
+  status = 'ready', credentials = [reference] } = {}) {
   return {
     status,
     realtime: 'subscribed',
@@ -30,13 +30,14 @@ function state({ revision = 4, provider = 'server-provider-a', model = 'server-m
       },
       workerConcurrencyLimit: concurrency,
     },
-    credentials: [reference],
+    credentials,
     interaction,
     error: null,
   }
 }
 
 class BrowserSettingsModel {
+  draftScope = '["browser-settings-actor","browser-settings-scope"]'
   state = state()
   calls = []
 
@@ -71,7 +72,7 @@ class BrowserSettingsModel {
       model: 'server-model-c',
       concurrency: 4,
       interaction: {
-        status: 'submitting',
+        status: 'waiting',
         operation: 'credential.reference.create',
         error: null,
       },
@@ -109,6 +110,9 @@ globalThis.runSettingsDraftStateScenario = () => {
     cleanConcurrency: document.querySelector('.wwc-settings-concurrency').value,
     dirtyProvider: provider.value,
     focused: document.activeElement === provider,
+    icon: document.querySelector(
+      '.wwc-settings-route-conflict [aria-hidden="true"]',
+    ) !== null,
     message: document.querySelector('.wwc-settings-route-conflict-text').textContent,
     visible: !document.querySelector('.wwc-settings-route-conflict').hidden,
   }
@@ -154,6 +158,7 @@ globalThis.runSettingsDraftStateScenario = () => {
   input('.wwc-settings-create-provider', 'server-provider-c')
   const secret = input('.wwc-settings-create-secret', 'BROWSER_ONLY_SECRET')
   document.querySelector('.wwc-settings-create-form').requestSubmit()
+  const firstCreateCall = model.calls.at(-1)
   model.publish(state({
     revision: 6,
     provider: 'server-provider-c',
@@ -190,16 +195,60 @@ globalThis.runSettingsDraftStateScenario = () => {
       },
     },
   }))
+  const secretAfterCancel = secret.value
+
+  input('.wwc-settings-create-id', 'crd_00000000000000000000000003')
+  input('.wwc-settings-create-name', 'Browser deferred Credential')
+  input('.wwc-settings-create-provider', 'server-provider-c')
+  const deferredSecret = input('.wwc-settings-create-secret', 'DEFERRED_BROWSER_SECRET')
+  document.querySelector('.wwc-settings-create-form').requestSubmit()
+  const deferredCall = model.calls.at(-1)
+  model.publish({
+    status: 'refreshing',
+    realtime: 'reloading',
+    settings: model.state.settings,
+    credentials: [reference],
+    interaction: { status: 'idle', operation: null, error: null },
+    error: null,
+  })
+  const acceptedDuringReload = {
+    createDisabled: document.querySelector('.wwc-settings-create-submit').disabled,
+    secretRetained: deferredSecret.value,
+  }
+  const deferredReference = {
+    ...reference,
+    id: 'crd_00000000000000000000000003',
+    displayName: 'Browser deferred Credential',
+    providerId: 'server-provider-c',
+    revision: 2,
+    updatedAt: '2026-09-02T12:00:02.000Z',
+  }
+  model.publish(state({
+    revision: 6,
+    provider: 'server-provider-c',
+    model: 'server-model-c',
+    concurrency: 4,
+    credentials: [deferredReference, reference],
+  }))
+  const acceptedConfirmed = {
+    createCalls: model.calls.filter(([name]) => name === 'createCredentialReference').length,
+    deferredCall,
+    secretCleared: deferredSecret.value === '',
+    storageClean: JSON.stringify(localStorage).includes('DEFERRED_BROWSER_SECRET') === false
+      && JSON.stringify(sessionStorage).includes('DEFERRED_BROWSER_SECRET') === false,
+  }
   return {
+    acceptedConfirmed,
+    acceptedDuringReload,
     conflict,
     discarded,
     failure,
     secret: {
-      afterCancel: secret.value,
+      afterCancel: secretAfterCancel,
       afterFailure: secretAfterFailure,
       localStorage: JSON.stringify(localStorage),
       sessionStorage: JSON.stringify(sessionStorage),
-      submitted: model.calls.at(-1),
+      submitted: firstCreateCall,
     },
     submitted,
   }

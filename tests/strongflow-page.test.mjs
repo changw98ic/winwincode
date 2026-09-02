@@ -329,6 +329,7 @@ class FakeStrongFlowViewModel {
     this.state = initialState
   }
 
+  draftScope = '["strongflow-page-test-actor","strongflow-page-test-scope"]'
   calls = []
   listener = null
 
@@ -661,6 +662,10 @@ test('StrongFlow review isolates its draft, exposes revision changes, and submit
   assert.equal(comments.value, 'browser review')
   assert.equal(changes.value, 'change one\nchange two')
   assert.equal(conflict.hidden, false)
+  assert.equal(
+    findByClass(conflict, 'wwc-strongflow-review-conflict-icon').getAttribute('aria-hidden'),
+    'true',
+  )
   assert.match(
     findByClass(rootElement, 'wwc-strongflow-review-conflict-text').textContent,
     /revision 4.*revision 5/u,
@@ -748,6 +753,34 @@ test('an accepted StrongFlow review stays in flight across an unrelated event sn
   mounted.close()
 })
 
+test('an accepted Attention decision stays in flight across an unrelated event snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const resolution = findByClass(rootElement, 'wwc-strongflow-attention-actions').children[1].children[0]
+  const resolve = findByClass(rootElement, 'wwc-strongflow-resolve-attention')
+  resolution.value = 'accepted Attention decision'
+  resolution.emit('input')
+  resolve.emit('click')
+  model.publish(state({
+    projection: current,
+    interaction: { status: 'waiting', error: null },
+  }))
+
+  model.publish(state({
+    status: 'refreshing',
+    realtime: 'reloading',
+    projection: current,
+    interaction: { status: 'idle', error: null },
+  }))
+  model.publish(state({ projection: current }))
+
+  assert.equal(resolve.disabled, true)
+  mounted.close()
+})
+
 test('Attention decision drafts keep exact submissions and clear with their entity', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
@@ -763,7 +796,13 @@ test('Attention decision drafts keep exact submissions and clear with their enti
   refreshed.metadata.revisions.delivery = 5
   model.publish(state({ projection: refreshed }))
   assert.equal(resolution.value, 'browser Attention decision')
-  assert.equal(findByClass(rootElement, 'wwc-strongflow-attention-conflict').hidden, false)
+  const attentionConflict = findByClass(rootElement, 'wwc-strongflow-attention-conflict')
+  assert.equal(attentionConflict.hidden, false)
+  assert.equal(
+    findByClass(attentionConflict, 'wwc-strongflow-attention-conflict-icon')
+      .getAttribute('aria-hidden'),
+    'true',
+  )
   assert.equal(findByClass(rootElement, 'wwc-strongflow-resolve-attention').disabled, true)
 
   findByClass(rootElement, 'wwc-strongflow-attention-keep-draft').emit('click')
