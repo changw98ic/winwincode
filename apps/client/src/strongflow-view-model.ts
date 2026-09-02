@@ -1198,11 +1198,14 @@ export function createStrongFlowViewModel(
     }
   }
 
-  function clearForReload(status: StrongFlowViewStatus): void {
+  function beginReload(
+    status: StrongFlowViewStatus,
+    retainProjection = false,
+  ): void {
     publish({
       status,
       realtime: realtime === null ? 'inactive' : 'reloading',
-      projection: null,
+      projection: retainProjection ? currentState.projection : null,
       interaction: frozenInteraction('idle'),
       error: null,
     })
@@ -1260,7 +1263,7 @@ export function createStrongFlowViewModel(
     const ownGeneration = generation
     supersedingGeneration = ownGeneration
     abortRequests()
-    clearForReload('refreshing')
+    beginReload('refreshing', true)
     await completeSnapshot(ownGeneration, 'subscribed', minimum)
   }
 
@@ -1307,7 +1310,7 @@ export function createStrongFlowViewModel(
         const ownGeneration = generation
         supersedingGeneration = ownGeneration
         abortRequests()
-        clearForReload('refreshing')
+        beginReload('refreshing')
         const next = await completeSnapshot(ownGeneration, 'subscribed')
         if (next === null) throw clientFailure(
           'STRONGFLOW_RESET_SUPERSEDED',
@@ -1356,7 +1359,7 @@ export function createStrongFlowViewModel(
     const ownGeneration = generation
     abortRequests()
     closeRealtime()
-    clearForReload('loading')
+    beginReload('loading')
     try {
       const cursor = await completeSnapshot(ownGeneration, 'inactive')
       if (cursor === null || !operationIsCurrent(ownGeneration)) return
@@ -1374,7 +1377,7 @@ export function createStrongFlowViewModel(
     generation += 1
     const ownGeneration = generation
     abortRequests()
-    clearForReload('refreshing')
+    beginReload('refreshing', true)
     try {
       await completeSnapshot(ownGeneration, realtime === null ? 'inactive' : 'subscribed')
     } catch {

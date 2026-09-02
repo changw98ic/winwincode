@@ -908,6 +908,7 @@ test('Delivery events reload one complete pair without publishing a partial revi
   const observed = []
   model.subscribe(state => observed.push(state))
   await model.start()
+  const previousProjection = model.state.projection
   const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
   client.enqueue('runtime.projection.get', response(
@@ -925,11 +926,12 @@ test('Delivery events reload one complete pair without publishing a partial revi
     },
   })
 
-  assert.equal(observed.some(state => (
+  const reloading = observed.find(state => (
     state.status === 'refreshing'
     && state.realtime === 'reloading'
-    && state.projection === null
-  )), true)
+  ))
+  assert.notEqual(reloading, undefined)
+  assert.equal(reloading.projection, previousProjection)
   assert.equal(model.state.projection.metadata.revisions.delivery, 2)
   assert.equal(model.state.projection.currentCandidate.candidateRef, 'refs/winwincode/candidate/2')
   assert.equal(model.state.projection.verdict.candidateRef, 'refs/winwincode/candidate/2')
@@ -1597,6 +1599,8 @@ test('candidate mismatch clears the previous projection and rejects an old Verdi
 
 test('reset, reconnect, authorization, cancellation, and close have explicit empty states', async () => {
   const { client, model } = view()
+  const observed = []
+  model.subscribe(state => observed.push(state))
   await model.start()
   const nextDelivery = delivery(3)
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
@@ -1605,6 +1609,11 @@ test('reset, reconnect, authorization, cancellation, and close have explicit emp
     runtime(nextDelivery),
   ))
   const cursor = await client.subscription.onResetRequired()
+  assert.equal(observed.some(state => (
+    state.status === 'refreshing'
+    && state.realtime === 'reloading'
+    && state.projection === null
+  )), true)
   assert.deepEqual(cursor, nextDelivery.readCursor.eventCursor)
   assert.equal(model.state.projection.metadata.revisions.delivery, 3)
 

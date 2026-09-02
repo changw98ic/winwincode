@@ -17,6 +17,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/chat-control-plane-integration.test.mjs',
   'tests/chat-page.test.mjs',
   'tests/chat-view-model.test.mjs',
+  'tests/client-keyed-collection.test.mjs',
   'tests/client-server-separation.test.mjs',
   'tests/contract-codegen.test.mjs',
   'tests/control-plane-api-coverage.test.mjs',
@@ -52,10 +53,12 @@ const canonicalTestFiles = Object.freeze([
   'tests/strongflow-canonical-api-contract.test.mjs',
   'tests/strongflow-delivery-advance-contract.test.mjs',
   'tests/strongflow-delivery-api.test.mjs',
+  'tests/strongflow-page.test.mjs',
   'tests/strongflow-projection-contract.test.mjs',
   'tests/strongflow-role.test.mjs',
   'tests/strongflow-view-model.test.mjs',
   'tests/strongflow-workflow-integration.test.mjs',
+  'tests/ui601-strongflow-event-reload.test.mjs',
   'tests/workspace-smoke.test.mjs',
 ])
 
