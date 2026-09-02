@@ -752,6 +752,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   ) as HTMLButtonElement
   let closed = false
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
+  if (options.model.state.candidateFiles.selectedPath !== null) {
+    preferences = normalizeStrongFlowLayoutPreferences({
+      ...preferences,
+      artifactsTab: 'candidate',
+    })
+  }
   let navigationDrawerOpen = false
   let contextDrawerOpen = false
   let diagramsNode: HTMLElement | null = null

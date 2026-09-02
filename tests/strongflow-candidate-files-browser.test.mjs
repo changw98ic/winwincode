@@ -85,5 +85,5 @@ test('real Chrome reviews a bounded Candidate tree and drives the linked Diff by
   assert.match(result.binary.hash, /&file=public%2Flogo\.png$/u)
   assert.match(result.binary.status, /Binary file preview is unavailable/u)
   assert.equal(result.calls.some(call => call[0] === 'loadMoreCandidateFiles'), true)
-  assert.equal(result.mainCount, 1)
+  assert.equal(result.mainCount, 0)
 })

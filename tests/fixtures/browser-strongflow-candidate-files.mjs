@@ -216,7 +216,9 @@ globalThis.runCandidateFilesScenario = async () => {
     renamed: document.querySelector('.wwc-candidate-file-renamed').textContent,
     unavailable: document.querySelector('.wwc-candidate-file-preview-unavailable').textContent,
     statusLabels: statusLabels(),
-    selectedPath: document.querySelector('[aria-selected="true"]')?.dataset.path ?? null,
+    selectedPath: document.querySelector(
+      '.wwc-candidate-file-row[aria-selected="true"]',
+    )?.dataset.path ?? null,
     candidateSummaryHasTechnicalIdentity: /sha256:|git-candidate:/u.test(
       document.querySelector('.wwc-candidate-file-summary').textContent,
     ),
@@ -240,7 +242,9 @@ globalThis.runCandidateFilesScenario = async () => {
   await new Promise(resolve => { setTimeout(resolve, 0) })
   const keyboard = {
     target: keyboardTarget,
-    selectedPath: document.querySelector('[aria-selected="true"]')?.dataset.path ?? null,
+    selectedPath: document.querySelector(
+      '.wwc-candidate-file-row[aria-selected="true"]',
+    )?.dataset.path ?? null,
     hash: location.hash,
     diff: document.querySelector('.wwc-candidate-diff-content').textContent,
     activePath: document.activeElement?.dataset.path ?? null,

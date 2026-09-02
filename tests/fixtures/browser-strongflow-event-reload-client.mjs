@@ -96,6 +96,26 @@ function ready(projection = createProjection()) {
     status: 'ready',
     realtime: 'subscribed',
     projection,
+    candidateFiles: {
+      status: 'idle',
+      items: [],
+      hasMore: false,
+      previewLimited: false,
+      selectedPath: null,
+      diff: {
+        status: 'idle',
+        path: null,
+        content: '',
+        loadedBytes: 0,
+        totalBytes: null,
+        hasMore: false,
+        previewLimited: false,
+        fileDiffSha256: null,
+        unavailableReason: null,
+        error: null,
+      },
+      error: null,
+    },
     interaction: { status: 'idle', error: null },
     error: null,
   }
@@ -117,6 +137,10 @@ class BrowserStrongFlowModel {
 
   async start() {}
   async refresh() {}
+  async loadCandidateFiles() {}
+  async loadMoreCandidateFiles() {}
+  async selectCandidateFile() {}
+  async loadMoreCandidateDiff() {}
   async decideSolutionReview() {}
   async approveTaskBreakdown() {}
   async resolveAttention() {}
@@ -145,6 +169,7 @@ globalThis.runStrongFlowEventReloadScenario = () => {
     status: 'refreshing',
     realtime: 'reloading',
     projection: model.state.projection,
+    candidateFiles: model.state.candidateFiles,
     interaction: { status: 'idle', error: null },
     error: null,
   })
@@ -174,7 +199,7 @@ globalThis.runStrongFlowEventReloadScenario = () => {
   return {
     afterEquivalentEvents,
     candidateChange: {
-      candidateRebuilt: candidateAfterChange !== candidateBefore,
+      candidateRetained: candidateAfterChange === candidateBefore,
       diagramsRetained: diagramsAfterCandidate === diagramsBefore,
     },
     duringReload,
