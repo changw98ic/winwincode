@@ -429,7 +429,8 @@ export function mountStrongFlowCreatePage(
       className: 'wwc-strongflow-create-cancel',
       label: 'Cancel pending creation',
       type: 'button',
-      onActivate() { options.model.cancelPending() },
+      disabled: readOnly,
+      onActivate() { if (!readOnly) options.model.cancelPending() },
     })
   }
 

@@ -618,8 +618,22 @@ test('read-only StrongFlow keeps the snapshot visible and blocks review decision
     },
   })
   assert.equal(findByClass(createRoot, 'wwc-strongflow-create-submit').disabled, true)
+  for (const className of [
+    'wwc-strongflow-create-title',
+    'wwc-strongflow-create-goal',
+    'wwc-strongflow-create-baseline',
+    'wwc-strongflow-create-delivery-scope',
+    'wwc-strongflow-create-out-of-scope',
+    'wwc-strongflow-create-constraints',
+    'wwc-strongflow-create-criteria',
+  ]) assert.equal(findByClass(createRoot, className).disabled, true, className)
   findByClass(createRoot, 'wwc-strongflow-create-form').emit('submit', { preventDefault() {} })
   assert.equal(creator.calls.some(([name]) => name === 'create'), false)
+  creator.publish({ status: 'submitting', error: null })
+  const cancel = findByClass(createRoot, 'wwc-strongflow-create-cancel')
+  assert.equal(cancel.disabled, true)
+  cancel.emit('click')
+  assert.equal(creator.calls.some(([name]) => name === 'cancelPending'), false)
   created.close()
 })
 
