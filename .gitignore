@@ -40,3 +40,6 @@ source-repositories/
 /fixture-cert.pem
 /fixture-key.pem
 /openssl.cnf
+
+# Generated local code index
+.codegraph/

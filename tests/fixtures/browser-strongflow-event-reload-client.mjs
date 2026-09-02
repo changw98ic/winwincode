@@ -204,8 +204,12 @@ globalThis.runStrongFlowEventReloadScenario = () => {
   const runtimeChange = {
     candidateRetained: document.querySelector('.wwc-strongflow-view-candidate')
       === candidateAfterChange,
-    diagramsRebuilt: document.querySelector('.wwc-strongflow-diagrams')
-      !== diagramsAfterCandidate,
+    diagramsRetained: document.querySelector('.wwc-strongflow-diagrams')
+      === diagramsAfterCandidate,
+    executionRerendered: document.querySelector('.wwc-strongflow-execution-session')
+      !== executionAfterCandidate,
+    executionSourceRef: document.querySelector('.wwc-strongflow-live-diff')
+      ?.dataset.sourceRef ?? null,
   }
 
   comments.value = 'conflicted review draft'

@@ -2,48 +2,201 @@
 
 import type { StrongFlowProjection } from './strongflow-view-model.js'
 import {
+  mountStrongFlowDiagramGraph,
+} from './strongflow-diagram-graph.js'
+import {
   appendOmittedCount,
   boundedItems,
   strongFlowElement,
   type StrongFlowRenderLimits,
 } from './strongflow-rendering.js'
 
-function renderSolutionDiagram(
-  document: Document,
-  title: string,
-  diagram: NonNullable<StrongFlowProjection['solutionReview']>['architectureDiagram'],
-  limits: StrongFlowRenderLimits,
-): HTMLElement {
-  const section = strongFlowElement(document, 'section', 'wwc-strongflow-diagram')
-  const heading = strongFlowElement(document, 'h4', 'wwc-strongflow-diagram-heading')
-  const nodes = strongFlowElement(document, 'ul', 'wwc-strongflow-diagram-nodes')
-  const edges = strongFlowElement(document, 'ul', 'wwc-strongflow-diagram-edges')
-  const boundedNodes = boundedItems(diagram.nodes, limits.graphNodes)
-  const boundedEdges = boundedItems(diagram.edges, limits.graphEdges)
-  heading.textContent = title
-  nodes.setAttribute('aria-label', `${title} nodes`)
-  edges.setAttribute('aria-label', `${title} connections`)
-  nodes.append(...boundedNodes.items.map(node => {
-    const item = document.createElement('li')
-    const label = document.createElement('strong')
-    const description = document.createElement('p')
-    label.textContent = node.label
-    description.textContent = node.description
-    item.dataset.kind = node.kind
-    item.dataset.unresolved = String(node.unresolved)
-    item.append(label, description)
-    return item
-  }))
-  edges.append(...boundedEdges.items.map(edge => {
-    const item = document.createElement('li')
-    item.textContent = `${edge.from} → ${edge.to}: ${edge.label}`
-    return item
-  }))
-  section.append(heading, nodes)
-  appendOmittedCount(document, section, boundedNodes.omitted, 'diagram nodes')
-  section.append(edges)
-  appendOmittedCount(document, section, boundedEdges.omitted, 'diagram connections')
-  return section
+export interface StrongFlowDiagramsUpdate {
+  readonly projection: StrongFlowProjection | null
+  readonly narrow: boolean
+}
+
+export interface StrongFlowDiagramsView {
+  readonly root: HTMLElement
+  update(input: Readonly<StrongFlowDiagramsUpdate>): void
+  close(): void
+}
+
+export interface StrongFlowDiagramsMountOptions {
+  readonly document: Document
+  readonly limits: StrongFlowRenderLimits
+}
+
+/** Mount the solution graphs and the live execution view as one stable region. */
+export function mountStrongFlowDiagrams(
+  options: StrongFlowDiagramsMountOptions,
+): StrongFlowDiagramsView {
+  const document = options.document
+  const limits = options.limits
+  const root = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams')
+  const solution = strongFlowElement(document, 'section', 'wwc-strongflow-view-solution')
+  const solutionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const solutionState = strongFlowElement(document, 'p', 'wwc-strongflow-solution-state')
+  const solutionEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
+  const architectureGraph = mountStrongFlowDiagramGraph({
+    document,
+    props: emptyGraphProps('pending:architecture'),
+  })
+  const architectureNodesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const architectureEdgesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const processGraph = mountStrongFlowDiagramGraph({
+    document,
+    props: emptyGraphProps('pending:process'),
+  })
+  const processNodesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const processEdgesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const execution = strongFlowElement(document, 'section', 'wwc-strongflow-view-execution')
+  const executionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const executionEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
+  const executionSessions = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-execution-sessions',
+  )
+  const executionOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+
+  let open = true
+  const sessionViews = new Map<string, HTMLElement>()
+
+  solution.dataset.view = 'solution'
+  execution.dataset.view = 'execution'
+  solutionHeading.textContent = 'Solution view'
+  executionHeading.textContent = 'Live execution view'
+  solutionEmpty.textContent = 'No solution review is available yet.'
+  executionEmpty.textContent = 'No live execution sessions are available.'
+  architectureGraph.root.append(architectureNodesOmitted, architectureEdgesOmitted)
+  processGraph.root.append(processNodesOmitted, processEdgesOmitted)
+  solution.append(
+    solutionHeading,
+    solutionState,
+    solutionEmpty,
+    architectureGraph.root,
+    processGraph.root,
+  )
+  execution.append(executionHeading, executionEmpty, executionSessions, executionOmitted)
+  root.append(solution, execution)
+
+  function emptyGraphProps(id: string) {
+    return {
+      id,
+      title: 'Architecture',
+      nodes: [] as readonly [],
+      edges: [] as readonly [],
+      narrow: false,
+    }
+  }
+
+  function renderSolution(projection: StrongFlowProjection, narrow: boolean): void {
+    const review = projection.solutionReview
+    solutionEmpty.hidden = review !== null
+    solutionState.hidden = review === null
+    if (review === null) {
+      architectureGraph.update({ ...emptyGraphProps('pending:architecture'), narrow })
+      processGraph.update({ ...emptyGraphProps('pending:process'), narrow })
+      return
+    }
+    solutionState.dataset.deliveryStatus = projection.delivery.status
+    solutionState.dataset.reviewStatus = review.reviewStatus
+    solutionState.textContent = `Delivery ${projection.delivery.status}`
+      + ` · solution review ${review.reviewStatus}`
+    const architectureNodes = boundedItems(review.architectureDiagram.nodes, limits.graphNodes)
+    const architectureEdges = boundedItems(review.architectureDiagram.edges, limits.graphEdges)
+    architectureGraph.update({
+      id: review.architectureDiagram.id,
+      title: 'Architecture',
+      nodes: architectureNodes.items,
+      edges: architectureEdges.items,
+      narrow,
+    })
+    updateGraphOmitted(architectureNodesOmitted, architectureNodes.omitted, 'diagram nodes')
+    updateGraphOmitted(architectureEdgesOmitted, architectureEdges.omitted, 'diagram connections')
+    const processNodes = boundedItems(review.processDiagram.nodes, limits.graphNodes)
+    const processEdges = boundedItems(review.processDiagram.edges, limits.graphEdges)
+    processGraph.update({
+      id: review.processDiagram.id,
+      title: 'Process',
+      nodes: processNodes.items,
+      edges: processEdges.items,
+      narrow,
+    })
+    updateGraphOmitted(processNodesOmitted, processNodes.omitted, 'diagram nodes')
+    updateGraphOmitted(processEdgesOmitted, processEdges.omitted, 'diagram connections')
+  }
+
+  function updateGraphOmitted(node: HTMLElement, omitted: number, label: string): void {
+    node.hidden = omitted === 0
+    const text = `${String(omitted)} more ${label} not rendered.`
+    if (node.textContent !== text) node.textContent = text
+  }
+
+  function renderExecution(projection: StrongFlowProjection): void {
+    const sessions = boundedItems(projection.runtime.sessions, limits.runtimeSessions)
+    executionEmpty.hidden = sessions.items.length > 0
+    const liveKeys = new Set<string>()
+    for (const session of sessions.items) {
+      const key = `${session.sessionBindingId}:${String(session.attempt)}`
+      liveKeys.add(key)
+      const fingerprint = JSON.stringify(session)
+      const existing = sessionViews.get(key)
+      if (existing !== undefined && existing.dataset.fingerprint === fingerprint) continue
+      const view = renderExecutionSession(document, session, limits)
+      view.dataset.fingerprint = fingerprint
+      if (existing !== undefined) existing.remove()
+      sessionViews.set(key, view)
+      executionSessions.append(view)
+    }
+    for (const [key, view] of sessionViews) {
+      if (liveKeys.has(key)) continue
+      view.remove()
+      sessionViews.delete(key)
+    }
+    updateOmitted(executionOmitted, sessions.omitted, 'runtime sessions')
+  }
+
+  function updateOmitted(node: HTMLElement, count: number, label: string): void {
+    node.hidden = count === 0
+    const text = `${String(count)} more ${label} not rendered.`
+    if (node.textContent !== text) node.textContent = text
+  }
+
+  function update(input: Readonly<StrongFlowDiagramsUpdate>): void {
+    if (!open) throw new Error('StrongFlowDiagrams is closed.')
+    const projection = input.projection
+    if (projection === null) {
+      solutionEmpty.hidden = false
+      solutionState.hidden = true
+      architectureGraph.update({ ...emptyGraphProps('pending:architecture'), narrow: input.narrow })
+      processGraph.update({ ...emptyGraphProps('pending:process'), narrow: input.narrow })
+      executionEmpty.hidden = false
+      for (const view of sessionViews.values()) view.remove()
+      sessionViews.clear()
+      updateOmitted(executionOmitted, 0, 'runtime sessions')
+      return
+    }
+    renderSolution(projection, input.narrow)
+    renderExecution(projection)
+  }
+
+  update({ projection: null, narrow: false })
+
+  return {
+    root,
+    update,
+    close() {
+      if (!open) return
+      open = false
+      architectureGraph.close()
+      processGraph.close()
+      for (const view of sessionViews.values()) view.remove()
+      sessionViews.clear()
+      root.remove()
+    },
+  }
 }
 
 function renderExecutionSession(
@@ -99,55 +252,4 @@ function renderExecutionSession(
     section.append(diff)
   }
   return section
-}
-
-export function renderStrongFlowDiagrams(
-  document: Document,
-  projection: StrongFlowProjection,
-  limits: StrongFlowRenderLimits,
-): HTMLElement {
-  const root = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams')
-  const solution = strongFlowElement(document, 'section', 'wwc-strongflow-view-solution')
-  const solutionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  const execution = strongFlowElement(document, 'section', 'wwc-strongflow-view-execution')
-  const executionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  solution.dataset.view = 'solution'
-  execution.dataset.view = 'execution'
-  solutionHeading.textContent = 'Solution view'
-  executionHeading.textContent = 'Live execution view'
-  solution.append(solutionHeading)
-  if (projection.solutionReview === null) {
-    const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
-    empty.textContent = 'No solution review is available yet.'
-    solution.append(empty)
-  } else {
-    solution.append(
-      renderSolutionDiagram(
-        document,
-        'Architecture',
-        projection.solutionReview.architectureDiagram,
-        limits,
-      ),
-      renderSolutionDiagram(
-        document,
-        'Process',
-        projection.solutionReview.processDiagram,
-        limits,
-      ),
-    )
-  }
-  execution.append(executionHeading)
-  const sessions = boundedItems(projection.runtime.sessions, limits.runtimeSessions)
-  if (sessions.items.length === 0) {
-    const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
-    empty.textContent = 'No live execution sessions are available.'
-    execution.append(empty)
-  } else {
-    execution.append(...sessions.items.map(session => (
-      renderExecutionSession(document, session, limits)
-    )))
-  }
-  appendOmittedCount(document, execution, sessions.omitted, 'runtime sessions')
-  root.append(solution, execution)
-  return root
 }

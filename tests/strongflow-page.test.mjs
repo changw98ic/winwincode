@@ -481,7 +481,7 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   const deliveryList = findByClass(rootElement, 'wwc-strongflow-delivery-list')
   const tasks = findByClass(rootElement, 'wwc-strongflow-task-list')
   const evidence = findByClass(rootElement, 'wwc-strongflow-evidence')
-  const diagramNodes = findAllByClass(rootElement, 'wwc-strongflow-diagram-nodes')
+  const graphs = findAllByClass(rootElement, 'wwc-strongflow-graph')
   const executionSessions = findAllByClass(rootElement, 'wwc-strongflow-execution-session')
   assert.equal(status.getAttribute('role'), 'status')
   assert.equal(status.getAttribute('aria-live'), 'polite')
@@ -492,8 +492,10 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.match(deliveryList.children[0].children[0].href, /^#\/strongflow\?delivery=/u)
   assert.equal(tasks.children.length, 2)
   assert.equal(evidence.children.length, 2)
-  assert.equal(diagramNodes.length, 2)
-  assert.equal(diagramNodes.every(list => list.children.length === 2), true)
+  assert.equal(graphs.length, 2)
+  assert.equal(graphs.every(graph => (
+    findAllByClass(graph, 'wwc-strongflow-graph-node').length === 2
+  )), true)
   assert.equal(executionSessions.length, 2)
   assert.ok(findByClass(rootElement, 'wwc-strongflow-view-solution'))
   assert.ok(findByClass(rootElement, 'wwc-strongflow-view-execution'))
@@ -1137,6 +1139,7 @@ test('StrongFlow page modules call only the view-model and never render raw Diff
   const sources = [
     'strongflow-page.ts',
     'strongflow-diagrams.ts',
+    'strongflow-diagram-graph.ts',
     'strongflow-candidate.ts',
     'strongflow-rendering.ts',
   ].map(path => readFileSync(resolve(root, 'apps/client/src', path), 'utf8')).join('\n')
