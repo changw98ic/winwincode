@@ -27,9 +27,21 @@ assert.equal(
   `StrongFlow page did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const history = await import(`${pathToFileURL(resolve(
+const historySelectionModule = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/strongflow-page-tests/strongflow-history.js',
+  '.cache/strongflow-page-tests/strongflow-history-selection.js',
+)).href}`)
+const historyTreeModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/strongflow-history-tree.js',
+)).href}`)
+const historyNavigationModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/strongflow-history-navigation.js',
+)).href}`)
+const runDetailModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/strongflow-run-detail.js',
 )).href}`)
 const page = await import(`${pathToFileURL(resolve(
   root,
@@ -39,11 +51,11 @@ const page = await import(`${pathToFileURL(resolve(
 const {
   strongFlowHistorySelectionFromHash,
   strongFlowHistoryHashWithSelection,
-  strongFlowHistoryTree,
   strongFlowHistorySelectionForTree,
-  mountStrongFlowHistoryNavigation,
-  mountStrongFlowRunDetail,
-} = history
+} = historySelectionModule
+const { strongFlowHistoryTree } = historyTreeModule
+const { mountStrongFlowHistoryNavigation } = historyNavigationModule
+const { mountStrongFlowRunDetail } = runDetailModule
 const { mountStrongFlowPage } = page
 
 const deliveryId = 'dlv_00000000000000000000000001'
@@ -344,11 +356,20 @@ test('history tree groups StageRuns by Task, keeps Delivery stages, and flags th
   assert.equal(tree.tasks[0].runs[1].producedCurrentCandidate, true)
 })
 
-test('history selection drops stale identities instead of keeping a second state machine', () => {
+test('history selection keeps only canonical Task→StageRun associations and drops stale identities', () => {
   const tree = strongFlowHistoryTree(historyProjection(), limits)
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
       taskId: 'task:1',
+      stageRunId: failedRunId,
+    }),
+    { taskId: 'task:1', stageRunId: failedRunId },
+  )
+  // A crossed task/run deep link cannot expand one Task while reviewing
+  // another Task's run: the StageRun's own deliveryTaskId is the truth.
+  assert.deepEqual(
+    strongFlowHistorySelectionForTree(tree, {
+      taskId: 'task:2',
       stageRunId: failedRunId,
     }),
     { taskId: 'task:1', stageRunId: failedRunId },
@@ -358,7 +379,15 @@ test('history selection drops stale identities instead of keeping a second state
       taskId: 'task:missing',
       stageRunId: failedRunId,
     }),
-    { taskId: null, stageRunId: failedRunId },
+    { taskId: 'task:1', stageRunId: failedRunId },
+  )
+  // A Delivery-level run owns no Task, so a task parameter cannot survive it.
+  assert.deepEqual(
+    strongFlowHistorySelectionForTree(tree, {
+      taskId: 'task:1',
+      stageRunId: planningRunId,
+    }),
+    { taskId: null, stageRunId: planningRunId },
   )
   assert.deepEqual(
     strongFlowHistorySelectionForTree(tree, {
@@ -508,7 +537,6 @@ function mountNavigation(document, overrides = {}) {
     stagesOmitted,
     tasksEmpty,
     stagesEmpty,
-    limits,
     onSelect: selection => { selections.push(selection) },
     ...overrides,
   })
@@ -527,7 +555,7 @@ function mountNavigation(document, overrides = {}) {
 test('task rows expand into clickable historical attempts while the current run stays highlighted', () => {
   const document = new FakeDocument()
   const { view, tasksParent, stagesParent, selections } = mountNavigation(document)
-  view.update(historyProjection())
+  view.update(strongFlowHistoryTree(historyProjection(), limits))
 
   const taskRows = tasksParent.children
   assert.equal(taskRows.length, 2)
@@ -585,7 +613,7 @@ test('task rows expand into clickable historical attempts while the current run 
 test('keyboard roving focus moves through Task toggles and attempts without a mouse', () => {
   const document = new FakeDocument()
   const { view, tasksParent, stagesParent } = mountNavigation(document)
-  view.update(historyProjection())
+  view.update(strongFlowHistoryTree(historyProjection(), limits))
 
   const firstToggle = findByClass(tasksParent.children[0], 'wwc-strongflow-history-toggle')
   const secondToggle = findByClass(tasksParent.children[1], 'wwc-strongflow-history-toggle')
@@ -616,20 +644,138 @@ test('keyboard roving focus moves through Task toggles and attempts without a mo
   view.close()
 })
 
-test('the read-only historical run detail shows exact identity, binding, evidence, candidates and conclusion', () => {
+const historicalRuntimeSnapshot = stageRunId => ({
+  kind: 'runtime_projection',
+  productSessionId: 'psn_00000000000000000000000001',
+  deliveryId,
+  stageRunId,
+  revision: 11,
+  lastProjectionSequence: 27,
+  rebuiltAt: '2026-09-02T08:09:30.000Z',
+  readCursor: {},
+  eventCursor: {},
+  sessions: [{
+    productSessionId: 'psn_00000000000000000000000001',
+    stageRunId,
+    sessionBindingId: 'bind:1',
+    executionJobId: 'job_00000000000000000000000001',
+    workerSessionId: 'wsn_00000000000000000000000001',
+    codexThreadId: 'cdx_00000000000000000000000001',
+    fencingToken: 'fence:1',
+    leaseId: 'lease:1',
+    attempt: 1,
+    deliveryTaskId: 'task:1',
+    asOfSequence: 27,
+    diffSummary: null,
+    plan: null,
+    usage: null,
+    recovery: {
+      failureCount: 0,
+      lastFailureSourceRef: null,
+      latestRecoverySourceRef: null,
+      recoveryCount: 0,
+      state: 'none',
+    },
+    agents: [],
+    agentEdges: [],
+    activities: [{
+      activityType: 'shell_command',
+      callId: 'call:1',
+      command: 'cargo test',
+      outcome: 'succeeded',
+      exitCode: 0,
+      sourceRef: 'artifact:runtime:1',
+      status: 'succeeded',
+    }],
+  }],
+})
+
+const historicalCandidateItem = producerStageRunId => ({
+  availability: 'available',
+  candidate: {
+    candidateRef: 'refs/winwincode/candidate/attempt-1',
+    candidateCommitId: '4444444444444444444444444444444444444444',
+    candidateTreeId: '5555555555555555555555555555555555555555',
+    deliverySpecId: 'spec:1',
+    deliverySpecRevision: 3,
+    diffSha256: `sha256:${'4'.repeat(64)}`,
+    frozenAt: '2026-09-02T08:09:30.000Z',
+    producerSessionBindingId: 'bind:1',
+    producerStageRunId,
+  },
+  firstSeenDeliveryRevision: 6,
+  isCurrentAtReadCursor: false,
+  lastSeenDeliveryRevision: 7,
+  reviewDeliveryRevision: null,
+})
+
+const historicalCandidateReview = identity => ({
+  availability: 'available',
+  candidate: historicalCandidateItem(failedRunId).candidate,
+  currentAuthorization: false,
+  displayOnly: true,
+  evidence: [{
+    id: 'evidence:failed',
+    type: 'command',
+    sourceRef: 'artifact:command:attempt-1',
+    candidateRef: identity.candidateRef,
+    stageRunId: failedRunId,
+    sessionBindingId: 'bind:1',
+    deliverySpecId: 'spec:1',
+    deliverySpecRevision: 3,
+    createdAt: '2026-09-02T08:09:00.000Z',
+  }],
+  firstSeenDeliveryRevision: 6,
+  kind: 'candidate_historical_review',
+  lastSeenDeliveryRevision: 7,
+  readCursor: {},
+  reviewDeliveryRevision: null,
+  verdict: null,
+})
+
+function detailLoaders(records = { runtime: [], candidates: [], review: [] }) {
+  return {
+    loadRuntime: async stageRunId => {
+      records.runtime.push(stageRunId)
+      return historicalRuntimeSnapshot(stageRunId)
+    },
+    loadCandidates: async stageRunId => {
+      records.candidates.push(stageRunId)
+      return stageRunId === failedRunId ? [historicalCandidateItem(stageRunId)] : []
+    },
+    loadCandidateReview: async identity => {
+      records.review.push(identity)
+      return historicalCandidateReview(identity)
+    },
+  }
+}
+
+function nextTick() {
+  return new Promise(resolve => { setImmediate(resolve) })
+}
+
+test('the read-only historical run detail shows exact identity, binding, runtime, evidence, candidates and conclusion', async () => {
   const document = new FakeDocument()
-  const view = mountStrongFlowRunDetail({ document, limits })
+  const records = { runtime: [], candidates: [], review: [] }
+  const view = mountStrongFlowRunDetail({
+    document,
+    limits,
+    loaders: detailLoaders(records),
+  })
   const parent = document.createElement('section')
   parent.append(view.root)
+  const tree = strongFlowHistoryTree(historyProjection(), limits)
 
-  view.update(historyProjection(), { taskId: null, stageRunId: null })
+  view.update({ tree, selection: { taskId: null, stageRunId: null } })
   assert.equal(view.root.hidden, true)
 
-  view.update(historyProjection(), { taskId: 'task:1', stageRunId: currentRunId })
+  view.update({ tree, selection: { taskId: 'task:1', stageRunId: currentRunId } })
   assert.equal(view.root.hidden, true)
 
-  view.update(historyProjection(), { taskId: 'task:1', stageRunId: failedRunId })
+  view.update({ tree, selection: { taskId: 'task:1', stageRunId: failedRunId } })
   assert.equal(view.root.hidden, false)
+  assert.deepEqual(records.runtime, [failedRunId])
+  assert.deepEqual(records.candidates, [failedRunId])
   assert.match(findByClass(view.root, 'wwc-strongflow-history-note').textContent, /read-only/iu)
   const identity = allText(findByClass(view.root, 'wwc-strongflow-history-identity'))
   assert.match(identity, new RegExp(failedRunId, 'u'))
@@ -644,23 +790,58 @@ test('the read-only historical run detail shows exact identity, binding, evidenc
   const evidence = findByClass(view.root, 'wwc-strongflow-history-evidence')
   assert.equal(evidence.children.length, 1)
   assert.match(evidence.children[0].textContent, /evidence:failed/u)
-  const candidates = findByClass(view.root, 'wwc-strongflow-history-candidates')
-  assert.equal(candidates.children.length, 1)
-  assert.match(candidates.children[0].textContent, /refs\/winwincode\/candidate\/attempt-1/u)
-  assert.equal(
-    candidates.children[0].dataset.current,
-    undefined,
-  )
   const conclusion = findByClass(view.root, 'wwc-strongflow-history-conclusion')
   assert.equal(conclusion.dataset.status, 'failed')
   assert.match(allText(conclusion), /failed/u)
   assert.match(allText(conclusion), /2026-09-02T08:10:00\.000Z/u)
 
-  view.update(historyProjection(), { taskId: null, stageRunId: reviewRunId })
+  await nextTick()
+  const runtime = allText(findByClass(view.root, 'wwc-strongflow-history-runtime'))
+  assert.match(runtime, /11/u)
+  assert.match(
+    allText(findByClass(view.root, 'wwc-strongflow-history-runtime-sessions')),
+    /cdx_00000000000000000000000001/u,
+  )
+  const activities = findByClass(view.root, 'wwc-strongflow-history-runtime-activities')
+  assert.equal(activities.children.length, 1)
+  assert.match(activities.children[0].textContent, /cargo test/u)
+
+  const candidates = findByClass(view.root, 'wwc-strongflow-history-candidates')
+  const candidateButton = findByClass(candidates, 'wwc-strongflow-history-candidate')
+  assert.match(candidateButton.textContent, /refs\/winwincode\/candidate\/attempt-1/u)
+  assert.equal(candidates.children[0].dataset.current, undefined)
+  candidateButton.emit('click')
+  await nextTick()
+  assert.deepEqual(records.review, [{
+    candidateRef: 'refs/winwincode/candidate/attempt-1',
+    candidateTreeId: '5555555555555555555555555555555555555555',
+    diffSha256: `sha256:${'4'.repeat(64)}`,
+  }])
+  const review = allText(findByClass(view.root, 'wwc-strongflow-history-review'))
+  assert.match(review, /4444444444444444444444444444444444444444/u)
+  assert.match(review, /r6/u)
+  assert.match(
+    allText(findByClass(view.root, 'wwc-strongflow-history-review-note')),
+    /never authorizes/u,
+  )
+  const reviewEvidence = findByClass(view.root, 'wwc-strongflow-history-review-evidence')
+  assert.equal(reviewEvidence.children.length, 1)
+
+  view.update({ tree, selection: { taskId: null, stageRunId: reviewRunId } })
+  await nextTick()
   assert.equal(view.root.hidden, false)
   assert.match(
     allText(findByClass(view.root, 'wwc-strongflow-history-binding-host')),
     /human|no .*binding/iu,
+  )
+  assert.match(
+    allText(findByClass(view.root, 'wwc-strongflow-history-runtime-host')),
+    /no runtime projection/iu,
+  )
+  assert.equal(
+    records.runtime.includes(reviewRunId),
+    false,
+    'a human run never asks the facade for a runtime projection',
   )
   view.close()
 })
@@ -691,6 +872,18 @@ class FakeStrongFlowViewModel {
   async resolveAttention(input) { this.calls.push(['resolveAttention', input]) }
   async submitVerdict() { this.calls.push(['submitVerdict']) }
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
+  async loadStageRunRuntime(stageRunId) {
+    this.calls.push(['loadStageRunRuntime', stageRunId])
+    return null
+  }
+  async loadStageRunCandidates(stageRunId) {
+    this.calls.push(['loadStageRunCandidates', stageRunId])
+    return []
+  }
+  async loadCandidateHistoricalReview(candidate) {
+    this.calls.push(['loadCandidateHistoricalReview', candidate])
+    return null
+  }
   cancelPending() { this.calls.push(['cancelPending']) }
   reconnect() { this.calls.push(['reconnect']) }
   close() { this.calls.push(['close']) }
@@ -776,6 +969,270 @@ test('the page restores history selection from a deep link and keeps the URL aut
     location.replacements.at(-1),
     initialHash,
     'leaving history clears the presentation parameters',
+  )
+
+  mounted.close()
+})
+
+test('historical attempt review blocks current Delivery mutation controls', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = historyProjection()
+  current.delivery.status = 'ready-to-deliver'
+  const model = new FakeStrongFlowViewModel({
+    status: 'ready',
+    realtime: 'subscribed',
+    projection: current,
+    interaction: { status: 'idle', error: null },
+    error: null,
+  })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    historyLocation: new FakeHistoryLocation(
+      `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
+    ),
+  })
+
+  const advance = findByClass(rootElement, 'wwc-strongflow-advance-delivery')
+  assert.equal(advance.disabled, true)
+  advance.emit('click')
+  assert.equal(model.calls.some(([name]) => name === 'advanceDelivery'), false)
+
+  mounted.close()
+})
+
+test('historical review disables every current Delivery mutation control, double-guards handlers, and restores on return', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = historyProjection()
+  current.delivery.status = 'ready-to-deliver'
+  // Settle the active stage so the verdict control stays mounted like the rest.
+  current.delivery.stages[1].status = 'succeeded'
+  const review = {
+    deliveryId,
+    deliverySpecId: 'spec:1',
+    deliverySpecRevision: 3,
+    planningStageRunId: planningRunId,
+    planningSessionBindingId: 'bind:3',
+    reviewStageRunId: reviewRunId,
+    attentionItemId: 'att_00000000000000000000000001',
+    reviewSetSha256: `sha256:${'1'.repeat(64)}`,
+    reviewStatus: 'pending',
+    decision: null,
+    comments: null,
+    requestedChanges: null,
+    reviewerId: null,
+    reviewedAt: null,
+    solutionId: 'solution:1',
+    summary: 'Review the historic plan.',
+    approach: [],
+    components: [],
+    connections: [],
+    architectureDiagram: {
+      id: 'diagram:architecture',
+      kind: 'system-architecture',
+      title: 'Architecture',
+      nodes: [{
+        id: 'node:1',
+        label: 'Worker',
+        description: '',
+        kind: 'component',
+        trustBoundary: null,
+        unresolved: false,
+      }],
+      edges: [],
+    },
+    processDiagram: { id: 'diagram:process', kind: 'process-flow', title: 'Process', nodes: [], edges: [] },
+    risks: [],
+    unresolvedItems: [],
+    taskProposals: [],
+  }
+  current.delivery.solutionReview = review
+  current.solutionReview = review
+  const attentionRecord = {
+    id: 'att_00000000000000000000000001',
+    deliverySpecId: 'spec:1',
+    stageRunId: failedRunId,
+    type: 'delivery_approval',
+    title: 'Approve delivery',
+    options: [],
+    blocking: true,
+    status: 'open',
+    assignedTo: null,
+    createdAt: '2026-09-02T08:00:00.000Z',
+    resolvedAt: null,
+    resolvedBy: null,
+    resolutionSummary: null,
+  }
+  current.delivery.attention = [attentionRecord]
+  current.attention = [attentionRecord]
+  const model = new FakeStrongFlowViewModel({
+    status: 'ready',
+    realtime: 'subscribed',
+    projection: current,
+    interaction: { status: 'idle', error: null },
+    error: null,
+  })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    historyLocation: new FakeHistoryLocation(
+      `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
+    ),
+  })
+
+  const blocked = [
+    'wwc-strongflow-advance-delivery',
+    'wwc-strongflow-approve-solution',
+    'wwc-strongflow-request-changes',
+    'wwc-strongflow-reject-solution',
+    'wwc-strongflow-submit-verdict',
+    'wwc-strongflow-resolve-attention',
+    'wwc-strongflow-dismiss-attention',
+  ]
+  for (const className of blocked) {
+    assert.equal(
+      findByClass(rootElement, className).disabled,
+      true,
+      `${className} must be disabled while a historical run is open`,
+    )
+  }
+  for (const className of ['wwc-strongflow-approve-solution', 'wwc-strongflow-request-changes', 'wwc-strongflow-reject-solution', 'wwc-strongflow-submit-verdict', 'wwc-strongflow-advance-delivery', 'wwc-strongflow-resolve-attention', 'wwc-strongflow-dismiss-attention']) {
+    findByClass(rootElement, className).emit('click')
+  }
+  const mutationNames = [
+    'decideSolutionReview',
+    'approveTaskBreakdown',
+    'resolveAttention',
+    'submitVerdict',
+    'advanceDelivery',
+  ]
+  assert.equal(
+    model.calls.some(([name]) => mutationNames.includes(name)),
+    false,
+    'no current Delivery command may be issued from historical review',
+  )
+
+  const currentMarker = findByClass(rootElement, 'wwc-strongflow-current-run')
+  currentMarker.emit('click')
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-advance-delivery').disabled,
+    false,
+    'returning to the current run restores mutation controls',
+  )
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-approve-solution').disabled, false)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-resolve-attention').disabled, false)
+  findByClass(rootElement, 'wwc-strongflow-advance-delivery').emit('click')
+  assert.equal(model.calls.some(([name]) => name === 'advanceDelivery'), true)
+
+  mounted.close()
+})
+
+test('equivalent snapshots preserve historical detail DOM identity and focus', async () => {
+  const document = new FakeDocument()
+  const view = mountStrongFlowRunDetail({
+    document,
+    limits,
+    loaders: detailLoaders(),
+  })
+  const parent = document.createElement('section')
+  parent.append(view.root)
+  const selection = { taskId: 'task:1', stageRunId: failedRunId }
+  view.update({ tree: strongFlowHistoryTree(historyProjection(), limits), selection })
+  await nextTick()
+
+  const evidence = findByClass(view.root, 'wwc-strongflow-history-evidence')
+  const identity = findByClass(view.root, 'wwc-strongflow-history-identity')
+  const activities = findByClass(view.root, 'wwc-strongflow-history-runtime-activities')
+  const evidenceBefore = [...evidence.children]
+  const identityBefore = [...identity.children]
+  const activityBefore = [...activities.children]
+  activityBefore[0].focus()
+
+  // A new snapshot object with equivalent content must not rebuild any detail row.
+  view.update({ tree: strongFlowHistoryTree(historyProjection(), limits), selection })
+  assert.deepEqual([...evidence.children], evidenceBefore)
+  assert.deepEqual([...identity.children], identityBefore)
+  assert.deepEqual([...activities.children], activityBefore)
+  assert.equal(document.activeElement, activityBefore[0])
+
+  // Real content changes update the same keyed nodes instead of replacing them.
+  const changed = historyProjection()
+  changed.evidence.push({
+    id: 'evidence:failed:extra',
+    type: 'test',
+    sourceRef: 'artifact:test:attempt-1b',
+    candidateRef: 'refs/winwincode/candidate/attempt-1',
+    stageRunId: failedRunId,
+  })
+  view.update({ tree: strongFlowHistoryTree(changed, limits), selection })
+  assert.equal(evidence.children.length, 2)
+  assert.equal(evidence.children[0], evidenceBefore[0], 'existing rows keep their node identity')
+
+  view.close()
+})
+
+test('timeline ArrowLeft stays inside the timeline instead of collapsing the Task tree', () => {
+  const document = new FakeDocument()
+  const { view, tasksParent, stagesParent } = mountNavigation(document)
+  view.update(strongFlowHistoryTree(historyProjection(), limits))
+  const toggle = findByClass(tasksParent.children[0], 'wwc-strongflow-history-toggle')
+  toggle.emit('click')
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true')
+
+  const timelineButtons = findAllByClass(stagesParent, 'wwc-strongflow-run-button')
+  const taskOwned = timelineButtons.find(button => button.dataset.stageRunId === failedRunId)
+  taskOwned.focus()
+  taskOwned.emit('keydown', { key: 'ArrowLeft', preventDefault() {} })
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true', 'the Task tree stays expanded')
+  assert.equal(document.activeElement, taskOwned, 'focus stays on the timeline row')
+  view.close()
+})
+
+test('a crossed task/run deep link is normalized onto the canonical association and the URL follows', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const initialHash = `#/strongflow?delivery=${deliveryId}&session=psn_2&stageRun=${currentRunId}`
+  const location = new FakeHistoryLocation(
+    `${initialHash}&task=task%3A2&run=${failedRunId}`,
+  )
+  const model = new FakeStrongFlowViewModel({
+    status: 'ready',
+    realtime: 'subscribed',
+    projection: historyProjection(),
+    interaction: { status: 'idle', error: null },
+    error: null,
+  })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: [],
+    limits,
+    historyLocation: location,
+  })
+
+  const taskRows = findByClass(rootElement, 'wwc-strongflow-task-list').children
+  assert.equal(
+    findByClass(taskRows[0], 'wwc-strongflow-history-toggle').getAttribute('aria-expanded'),
+    'true',
+    'the canonical Task of the run expands, not the crossed one',
+  )
+  assert.equal(
+    findByClass(taskRows[1], 'wwc-strongflow-history-toggle').getAttribute('aria-expanded'),
+    'false',
+  )
+  const detail = findByClass(rootElement, 'wwc-strongflow-history')
+  assert.equal(detail.hidden, false)
+  assert.match(allText(detail), new RegExp(failedRunId, 'u'))
+  assert.deepEqual(location.replacements, [
+    `${initialHash}&task=task%3A1&run=${failedRunId}`,
+  ], 'the crossed deep link is rewritten once onto the canonical association')
+  assert.deepEqual(
+    model.calls.filter(([name]) => name === 'loadStageRunRuntime').map(([, id]) => id),
+    [failedRunId],
   )
 
   mounted.close()

@@ -15,13 +15,17 @@ import { mountSplitPane } from './components/split-pane.js'
 import { mountTabs, type TabItem } from './components/tabs.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
+import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
-  mountStrongFlowHistoryNavigation,
-  mountStrongFlowRunDetail,
   strongFlowHistoryHashWithSelection,
   strongFlowHistorySelectionFromHash,
   type StrongFlowHistoryLocation,
-} from './strongflow-history.js'
+} from './strongflow-history-selection.js'
+import {
+  strongFlowHistoryTree,
+  type StrongFlowHistoryTree,
+} from './strongflow-history-tree.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -701,6 +705,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'button',
     'wwc-strongflow-advance-delivery',
   ) as HTMLButtonElement
+  const historyBlockedNote = strongFlowElement(
+    document,
+    'p',
+    'wwc-strongflow-history-blocked',
+  )
   let closed = false
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
   let navigationDrawerOpen = false
@@ -713,8 +722,18 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let candidateFingerprint: string | null = null
   let lastEvidenceKey: string | null = null
   let lastLayoutKey: string | null = null
+  // One shared history tree per snapshot: navigation and the run detail must
+  // never each re-derive their own copy of the same business display state.
+  let historyTree: StrongFlowHistoryTree | null = null
+  let historyTreeSource: StrongFlowProjection | null = null
   let activeDeliveryId: string | null = null
   let solutionDraftKey: string | null = null
+  /**
+   * True while a historical (non-current) StageRun is under review. Every
+   * current-Delivery mutation control must fail closed in that state; the
+   * Server stays the sole mutation authority for the live run.
+   */
+  let historicalReviewOpen = false
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -936,8 +955,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   stagesSection.append(stagesHeading, stages, stagesEmpty, stagesOmitted)
   attentionSection.append(attentionHeading, attention, attentionOmitted)
   details.append(empty, overview)
+  historyBlockedNote.setAttribute('role', 'status')
+  historyBlockedNote.textContent = 'History review is open. Return to the current StageRun to act on this Delivery.'
+  historyBlockedNote.hidden = true
   actions.append(
     actionsHeading,
+    historyBlockedNote,
     solutionActions,
     approveTasks,
     submitVerdict,
@@ -996,7 +1019,19 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     remove(item) { deliveryRows.delete(item) },
   })
 
-  const runDetail = mountStrongFlowRunDetail({ document, limits })
+  const runDetail = mountStrongFlowRunDetail({
+    document,
+    limits,
+    loaders: {
+      loadRuntime: stageRunId => options.model.loadStageRunRuntime(stageRunId),
+      loadCandidates: stageRunId => options.model.loadStageRunCandidates(stageRunId),
+      loadCandidateReview: candidate => options.model.loadCandidateHistoricalReview({
+        candidateRef: candidate.candidateRef,
+        candidateTreeId: candidate.candidateTreeId,
+        diffSha256: candidate.diffSha256,
+      }),
+    },
+  })
   historyHost.append(runDetail.root)
   const historyNavigation = mountStrongFlowHistoryNavigation({
     document,
@@ -1006,7 +1041,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     stagesOmitted,
     tasksEmpty,
     stagesEmpty,
-    limits,
     initialSelection: strongFlowHistorySelectionFromHash(historyLocation?.hash() ?? ''),
     onSelect(selection) {
       if (historyLocation !== null) {
@@ -1125,7 +1159,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         },
       })
       const decide = (decision: 'resolve' | 'dismiss', remediation: boolean) => {
-        if (readOnly) return
+        if (readOnly || historicalReviewOpen) return
         const row = attentionActionRows.get(group)
         if (row === undefined) return
         void options.model.resolveAttention({
@@ -1176,13 +1210,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       row.current = item
       row.title.textContent = item.record.title
       group.dataset.attentionItemId = item.record.id
-      row.resolve.disabled = readOnly || item.busy
-      row.dismiss.disabled = readOnly || item.busy
-      row.rework.disabled = readOnly || item.busy
-      row.resolution.disabled = readOnly || item.busy
-      row.task.disabled = readOnly || item.busy
-      row.node.disabled = readOnly || item.busy
-      row.instructions.disabled = readOnly || item.busy
+      row.resolve.disabled = readOnly || item.busy || historicalReviewOpen
+      row.dismiss.disabled = readOnly || item.busy || historicalReviewOpen
+      row.rework.disabled = readOnly || item.busy || historicalReviewOpen
+      row.resolution.disabled = readOnly || item.busy || historicalReviewOpen
+      row.task.disabled = readOnly || item.busy || historicalReviewOpen
+      row.node.disabled = readOnly || item.busy || historicalReviewOpen
+      row.instructions.disabled = readOnly || item.busy || historicalReviewOpen
       const reworkVisible = item.record.type === 'verification_blocked'
         && item.candidateAvailable
         && item.nodes.length > 0
@@ -1205,7 +1239,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   })
 
   const onApproveSolution = () => {
-    if (readOnly) return
+    if (readOnly || historicalReviewOpen) return
     void options.model.decideSolutionReview({
       action: 'approve',
       comments: comments.value,
@@ -1213,7 +1247,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
   const onRequestChanges = () => {
-    if (readOnly) return
+    if (readOnly || historicalReviewOpen) return
     void options.model.decideSolutionReview({
       action: 'request_changes',
       comments: comments.value,
@@ -1221,16 +1255,22 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
   const onRejectSolution = () => {
-    if (readOnly) return
+    if (readOnly || historicalReviewOpen) return
     void options.model.decideSolutionReview({
       action: 'reject',
       comments: comments.value,
       requestedChanges: [],
     })
   }
-  const onApproveTasks = () => { if (!readOnly) void options.model.approveTaskBreakdown() }
-  const onSubmitVerdict = () => { if (!readOnly) void options.model.submitVerdict() }
-  const onAdvanceDelivery = () => { if (!readOnly) void options.model.advanceDelivery() }
+  const onApproveTasks = () => {
+    if (!readOnly && !historicalReviewOpen) void options.model.approveTaskBreakdown()
+  }
+  const onSubmitVerdict = () => {
+    if (!readOnly && !historicalReviewOpen) void options.model.submitVerdict()
+  }
+  const onAdvanceDelivery = () => {
+    if (!readOnly && !historicalReviewOpen) void options.model.advanceDelivery()
+  }
   const onRetry = () => { void options.model.refresh() }
   const onReconnect = () => { options.model.reconnect() }
   approveSolution.addEventListener('click', onApproveSolution)
@@ -1287,8 +1327,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
         ? 'Loading the exact Delivery snapshot…'
         : 'Select a Delivery to open StrongFlow.'
+      historicalReviewOpen = false
+      historyTree = null
+      historyTreeSource = null
       historyNavigation.update(null)
-      runDetail.update(null, { taskId: null, stageRunId: null })
+      runDetail.update({ tree: null, selection: historyNavigation.selection() })
       attentionCollection.update([])
       updateOmitted(attentionOmitted, 0, 'Attention records')
       if (diagramsNode !== null) diagramsNode.remove()
@@ -1310,8 +1353,15 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     metadata.textContent = `Delivery r${String(
       projection.metadata.revisions.delivery,
     )} · Runtime r${String(projection.metadata.revisions.runtime)} · updated ${projection.metadata.updatedAt}`
-    historyNavigation.update(projection)
-    runDetail.update(projection, historyNavigation.selection())
+    if (projection !== historyTreeSource) {
+      historyTree = strongFlowHistoryTree(projection, limits)
+      historyTreeSource = projection
+    }
+    historyNavigation.update(historyTree)
+    const historySelection = historyNavigation.selection()
+    historicalReviewOpen = historySelection.stageRunId !== null
+      && projection.stage.id !== historySelection.stageRunId
+    runDetail.update({ tree: historyTree, selection: historySelection })
     const boundedAttention = boundedItems(projection.attention, limits.attention)
     attentionCollection.update(boundedAttention.items)
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
@@ -1375,23 +1425,24 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       solutionDraftKey = nextDraftKey
     }
     solutionActions.hidden = !pendingReview
-    comments.disabled = readOnly || busy
-    changes.disabled = readOnly || busy
-    approveSolution.disabled = readOnly || busy
-    requestChanges.disabled = readOnly || busy
-    rejectSolution.disabled = readOnly || busy
+    historyBlockedNote.hidden = !historicalReviewOpen
+    comments.disabled = readOnly || busy || historicalReviewOpen
+    changes.disabled = readOnly || busy || historicalReviewOpen
+    approveSolution.disabled = readOnly || busy || historicalReviewOpen
+    requestChanges.disabled = readOnly || busy || historicalReviewOpen
+    rejectSolution.disabled = readOnly || busy || historicalReviewOpen
     approveTasks.hidden = review?.reviewStatus !== 'approved'
       || (projection?.delivery.tasks.length ?? 0) > 0
-    approveTasks.disabled = readOnly || busy
+    approveTasks.disabled = readOnly || busy || historicalReviewOpen
     const verdictVisible = projection !== null && canSubmitStrongFlowVerdict(projection)
     if (verdictVisible && submitVerdict.parentNode === null) {
       actions.insertBefore(submitVerdict, attentionActions)
     } else if (!verdictVisible) {
       submitVerdict.remove()
     }
-    submitVerdict.disabled = readOnly || busy
+    submitVerdict.disabled = readOnly || busy || historicalReviewOpen
     advanceDelivery.hidden = projection?.delivery.status !== 'ready-to-deliver'
-    advanceDelivery.disabled = readOnly || busy
+    advanceDelivery.disabled = readOnly || busy || historicalReviewOpen
     const nodes: readonly ReviewNode[] = review === null
       ? []
       : boundedItems(

@@ -7,6 +7,8 @@ const failedRunId = 'run_00000000000000000000000001'
 const planningRunId = 'run_00000000000000000000000003'
 const reviewRunId = 'run_00000000000000000000000004'
 const candidateRef = 'refs/winwincode/candidate/browser-history'
+const historicalCandidateRef = 'refs/winwincode/candidate/attempt-1'
+const RUNTIME_EVENT_COUNT = 200
 
 function diagram(kind) {
   return {
@@ -30,7 +32,7 @@ const projection = {
     schemaVersion: 'winwincode/v1',
     deliveryId,
     deliveryRevision: 6,
-    status: 'executing',
+    status: 'ready-to-deliver',
     ownership: {
       organizationId: 'org_00000000000000000000000001',
       workspaceId: 'wsp_00000000000000000000000001',
@@ -41,17 +43,30 @@ const projection = {
       title: 'Real browser history navigation',
       goal: 'Review every historical StageRun attempt in a real browser.',
     },
-    tasks: [{
-      id: 'task:browser',
-      title: 'Verify history navigation',
-      goal: 'Every attempt stays reachable.',
-      status: 'active',
-      owner: null,
-      acceptanceCriterionIds: [],
-      blockedByTaskIds: [],
-      evidenceRefs: [],
-      stageRunIds: [failedRunId, currentRunId],
-    }],
+    tasks: [
+      {
+        id: 'task:browser',
+        title: 'Verify history navigation',
+        goal: 'Every attempt stays reachable.',
+        status: 'active',
+        owner: null,
+        acceptanceCriterionIds: [],
+        blockedByTaskIds: [],
+        evidenceRefs: [],
+        stageRunIds: [failedRunId, currentRunId],
+      },
+      {
+        id: 'task:browser2',
+        title: 'Crossed deep-link guard',
+        goal: 'A crossed task/run link normalizes onto the run association.',
+        status: 'pending',
+        owner: null,
+        acceptanceCriterionIds: [],
+        blockedByTaskIds: [],
+        evidenceRefs: [],
+        stageRunIds: [],
+      },
+    ],
     stages: [
       {
         id: failedRunId,
@@ -150,7 +165,7 @@ const projection = {
         id: 'evidence:failed',
         type: 'command',
         sourceRef: 'artifact:command:attempt-1',
-        candidateRef: 'refs/winwincode/candidate/attempt-1',
+        candidateRef: historicalCandidateRef,
         stageRunId: failedRunId,
         sessionBindingId: 'bind:1',
         deliverySpecId: 'spec:1',
@@ -192,7 +207,7 @@ const projection = {
       id: 'evidence:failed',
       type: 'command',
       sourceRef: 'artifact:command:attempt-1',
-      candidateRef: 'refs/winwincode/candidate/attempt-1',
+      candidateRef: historicalCandidateRef,
       stageRunId: failedRunId,
     },
     {
@@ -221,6 +236,75 @@ const projection = {
   },
 }
 
+const RUNTIME_BINDING_BY_RUN = {
+  [failedRunId]: ['psn_00000000000000000000000001', 'cdx_00000000000000000000000001'],
+  [planningRunId]: ['psn_00000000000000000000000003', 'cdx_00000000000000000000000003'],
+}
+
+function historicalRuntimeSnapshot(stageRunId, binding) {
+  return {
+    kind: 'runtime_projection',
+    productSessionId: binding[0],
+    deliveryId,
+    stageRunId,
+    revision: 7,
+    lastProjectionSequence: 200,
+    rebuiltAt: '2026-09-02T08:09:30.000Z',
+    readCursor: {},
+    eventCursor: {},
+    sessions: [{
+      productSessionId: binding[0],
+      stageRunId,
+      sessionBindingId: 'bind:1',
+      executionJobId: 'job_00000000000000000000000001',
+      workerSessionId: 'wsn_00000000000000000000000001',
+      codexThreadId: binding[1],
+      fencingToken: 'fence:1',
+      leaseId: 'lease:1',
+      attempt: 1,
+      deliveryTaskId: 'task:browser',
+      asOfSequence: 200,
+      diffSummary: null,
+      plan: null,
+      usage: null,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
+      },
+      agents: [],
+      agentEdges: [],
+      activities: Array.from({ length: RUNTIME_EVENT_COUNT }, (_, index) => ({
+        activityType: 'shell_command',
+        callId: `call:${String(index + 1)}`,
+        command: `cargo test --event ${String(index + 1)}`,
+        outcome: 'succeeded',
+        exitCode: 0,
+        sourceRef: `artifact:runtime:${String(index + 1)}`,
+        status: 'succeeded',
+      })),
+    }],
+  }
+}
+
+const historicalCandidateSummary = {
+  candidateCommitId: '4444444444444444444444444444444444444444',
+  candidateRef: historicalCandidateRef,
+  candidateTreeId: '5555555555555555555555555555555555555555',
+  deliverySpecId: 'spec:1',
+  deliverySpecRevision: 2,
+  diffSha256: `sha256:${'4'.repeat(64)}`,
+  frozenAt: '2026-09-02T08:09:30.000Z',
+  producerSessionBindingId: 'bind:1',
+  producerStageRunId: failedRunId,
+}
+
+function settled() {
+  return new Promise(resolve => { requestAnimationFrame(() => { resolve() }) })
+}
+
 class BrowserStrongFlowModel {
   state = {
     status: 'ready',
@@ -230,19 +314,65 @@ class BrowserStrongFlowModel {
     error: null,
   }
 
+  calls = []
+
   subscribe(listener) {
     this.listener = listener
     listener(this.state)
     return () => { this.listener = null }
   }
 
-  async start() {}
-  async refresh() {}
-  async decideSolutionReview() {}
-  async approveTaskBreakdown() {}
-  async resolveAttention() {}
-  async submitVerdict() {}
-  async advanceDelivery() {}
+  async start() { this.calls.push(['start']) }
+  async refresh() { this.calls.push(['refresh']) }
+  async decideSolutionReview() { this.calls.push(['decideSolutionReview']) }
+  async approveTaskBreakdown() { this.calls.push(['approveTaskBreakdown']) }
+  async resolveAttention() { this.calls.push(['resolveAttention']) }
+  async submitVerdict() { this.calls.push(['submitVerdict']) }
+  async advanceDelivery() { this.calls.push(['advanceDelivery']) }
+  async loadStageRunRuntime(stageRunId) {
+    this.calls.push(['loadStageRunRuntime', stageRunId])
+    const binding = RUNTIME_BINDING_BY_RUN[stageRunId]
+    return binding === undefined ? null : historicalRuntimeSnapshot(stageRunId, binding)
+  }
+  async loadStageRunCandidates(stageRunId) {
+    this.calls.push(['loadStageRunCandidates', stageRunId])
+    return stageRunId === failedRunId
+      ? [{
+        availability: 'available',
+        candidate: historicalCandidateSummary,
+        firstSeenDeliveryRevision: 5,
+        isCurrentAtReadCursor: false,
+        lastSeenDeliveryRevision: 6,
+        reviewDeliveryRevision: null,
+      }]
+      : []
+  }
+  async loadCandidateHistoricalReview(candidate) {
+    this.calls.push(['loadCandidateHistoricalReview', candidate.candidateRef])
+    return {
+      availability: 'available',
+      candidate: historicalCandidateSummary,
+      currentAuthorization: false,
+      displayOnly: true,
+      evidence: [{
+        id: 'evidence:failed',
+        type: 'command',
+        sourceRef: 'artifact:command:attempt-1',
+        candidateRef: candidate.candidateRef,
+        stageRunId: failedRunId,
+        sessionBindingId: 'bind:1',
+        deliverySpecId: 'spec:1',
+        deliverySpecRevision: 2,
+        createdAt: '2026-09-02T08:09:00.000Z',
+      }],
+      firstSeenDeliveryRevision: 5,
+      kind: 'candidate_historical_review',
+      lastSeenDeliveryRevision: 6,
+      readCursor: {},
+      reviewDeliveryRevision: null,
+      verdict: null,
+    }
+  }
   cancelPending() {}
   reconnect() {}
   close() {}
@@ -255,7 +385,8 @@ class BrowserStrongFlowModel {
 
 const model = new BrowserStrongFlowModel()
 const baseHash = `#/strongflow?delivery=${deliveryId}&session=psn_00000000000000000000000002&stageRun=${currentRunId}`
-history.replaceState(null, '', `/${baseHash}&task=task%3Abrowser&run=${failedRunId}`)
+// A deliberately crossed deep link: task:browser2 does not own the failed run.
+history.replaceState(null, '', `/${baseHash}&task=task%3Abrowser2&run=${failedRunId}`)
 const mounted = mountStrongFlowPage({
   root,
   model,
@@ -264,7 +395,7 @@ const mounted = mountStrongFlowPage({
     deliveryId,
     title: 'Real browser history navigation',
     revision: 6,
-    status: 'executing',
+    status: 'ready-to-deliver',
   }],
 })
 
@@ -288,6 +419,18 @@ function historySnapshot() {
 
 globalThis.historyDeepLinkSnapshot = () => historySnapshot()
 
+globalThis.historyMutationGate = () => {
+  const advance = document.querySelector('.wwc-strongflow-advance-delivery')
+  advance?.click()
+  const note = document.querySelector('.wwc-strongflow-history-blocked')
+  return {
+    advanceDisabled: advance?.disabled ?? null,
+    noteVisible: note !== null && !note.hidden,
+    advanceCalls: model.calls
+      .filter(([name]) => name === 'advanceDelivery').length,
+  }
+}
+
 globalThis.historySelectTimelineRun = () => {
   document.querySelector(
     `.wwc-strongflow-run-button[data-stage-run-id="${planningRunId}"]`,
@@ -305,6 +448,69 @@ globalThis.historySelectHumanReviewRun = () => {
 globalThis.historyReturnToCurrent = () => {
   document.querySelector('.wwc-strongflow-current-run')?.click()
   return historySnapshot()
+}
+
+globalThis.historyRuntimeProbe = async () => {
+  await settled()
+  const sessions = document.querySelector('.wwc-strongflow-history-runtime-sessions')
+  const activities = document.querySelector('.wwc-strongflow-history-runtime-activities')
+  return {
+    runtimeText: (document.querySelector('.wwc-strongflow-history-runtime')?.innerText ?? '')
+      .replace(/\s+/gu, ' ').trim(),
+    sessionText: (sessions?.children[0]?.innerText ?? '').replace(/\s+/gu, ' ').trim(),
+    sessionCount: sessions?.children.length ?? 0,
+    activityCount: activities?.children.length ?? 0,
+    activityText: (activities?.children[0]?.innerText ?? '').replace(/\s+/gu, ' ').trim(),
+    omittedText: (sessions?.querySelector('.wwc-strongflow-omitted')?.innerText ?? '')
+      .replace(/\s+/gu, ' ').trim(),
+  }
+}
+
+globalThis.historyOpenCandidate = async () => {
+  document.querySelector('.wwc-strongflow-history-candidate')?.click()
+  await settled()
+  const review = document.querySelector('.wwc-strongflow-history-review')
+  return {
+    reviewText: (review?.innerText ?? '').replace(/\s+/gu, ' ').trim(),
+    noteText: (document.querySelector('.wwc-strongflow-history-review-note')?.innerText ?? '')
+      .replace(/\s+/gu, ' ').trim(),
+    expanded: document.querySelector('.wwc-strongflow-history-candidate')
+      ?.getAttribute('aria-expanded') ?? null,
+  }
+}
+
+globalThis.historyIdentityProbe = () => {
+  const detail = detailElement()
+  const candidate = document.querySelector('.wwc-strongflow-history-candidate')
+  candidate?.focus()
+  globalThis.__historyIdentity = {
+    detail,
+    evidenceFirst: document.querySelector('.wwc-strongflow-history-evidence li'),
+    activityFirst: document.querySelector('.wwc-strongflow-history-runtime-activities li'),
+    focus: document.activeElement,
+    scrollTop: detail?.scrollTop ?? 0,
+  }
+  return { focusedClass: document.activeElement?.className ?? null }
+}
+
+globalThis.historyEquivalentRepublish = () => {
+  const before = globalThis.__historyIdentity
+  const detail = detailElement()
+  if (detail !== null && detail.scrollHeight > detail.clientHeight) {
+    detail.scrollTop = 24
+    before.scrollTop = detail.scrollTop
+  }
+  // A fresh, content-equal projection object: equivalent snapshot by value.
+  model.publish({ ...model.state, projection: structuredClone(projection) })
+  const after = globalThis.__historyIdentity
+  return {
+    sameDetail: detailElement() === after.detail,
+    sameEvidence: document.querySelector('.wwc-strongflow-history-evidence li') === after.evidenceFirst,
+    sameActivity: document.querySelector('.wwc-strongflow-history-runtime-activities li') === after.activityFirst,
+    focusPreserved: document.activeElement === after.focus,
+    scrollPreserved: (detailElement()?.scrollTop ?? 0) === after.scrollTop,
+    activityCount: document.querySelector('.wwc-strongflow-history-runtime-activities')?.children.length ?? 0,
+  }
 }
 
 globalThis.historyKeyboardFlow = () => {
@@ -336,7 +542,21 @@ globalThis.historyKeyboardFlow = () => {
   return { before, afterExpand, afterDown }
 }
 
-globalThis.historyRefreshRestore = () => {
-  // A full reload keeps the URL as the single source of selection truth.
-  return { hash: location.hash }
+globalThis.historyTimelineArrowLeft = () => {
+  const toggle = document.querySelector('.wwc-strongflow-history-toggle')
+  const timelineButton = document.querySelector(
+    `.wwc-strongflow-stage-list .wwc-strongflow-run-button[data-stage-run-id="${failedRunId}"]`,
+  )
+  timelineButton?.focus()
+  timelineButton?.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'ArrowLeft',
+    bubbles: true,
+    cancelable: true,
+  }))
+  return {
+    expanded: toggle?.getAttribute('aria-expanded') ?? null,
+    focusRun: document.activeElement?.dataset?.stageRunId ?? null,
+  }
 }
+
+globalThis.historyRestoreAfterReload = () => historySnapshot()

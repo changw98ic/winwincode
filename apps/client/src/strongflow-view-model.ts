@@ -8,6 +8,10 @@ import {
 import type {
   Actor,
   AttentionItemId,
+  CandidateHistoricalReviewGetResultResponse,
+  CandidateHistoricalReviewProjection,
+  CandidateHistoryItemProjection,
+  CandidateHistoryListResultResponse,
   CommandAcceptedResponse,
   CommandCompletedResponse,
   ControlPlaneWebSocketEventFrame,
@@ -27,6 +31,7 @@ import type {
   DeliveryTaskId,
   EventReadCursor,
   ProductSessionId,
+
   QueryResultResponse,
   RepositoryScope,
   RequestId,
@@ -48,6 +53,7 @@ const SNAPSHOT_CONSISTENCY_RETRY_DELAY_MILLIS = 50
 const MAX_TRUSTED_FACTS_COMMAND_RETRIES = 400
 const TRUSTED_FACTS_COMMAND_RETRY_DEADLINE_MILLIS = 20_000
 const TRUSTED_FACTS_COMMAND_RETRY_DELAY_MILLIS = 50
+const HISTORICAL_CANDIDATE_PAGE_LIMIT = 50
 
 export type StrongFlowViewStatus =
   | 'idle'
@@ -153,6 +159,13 @@ export interface StrongFlowAttentionDecisionInput {
   readonly remediation: StrongFlowAttentionRemediationInput | null
 }
 
+/** Exact server identity of one historical Candidate opened for read-only review. */
+export interface StrongFlowHistoricalCandidateIdentity {
+  readonly candidateRef: string
+  readonly candidateTreeId: string
+  readonly diffSha256: string
+}
+
 export interface StrongFlowViewModel {
   readonly state: StrongFlowViewModelState
   subscribe(listener: StrongFlowViewModelListener): () => void
@@ -163,6 +176,20 @@ export interface StrongFlowViewModel {
   resolveAttention(input: StrongFlowAttentionDecisionInput): Promise<void>
   submitVerdict(): Promise<void>
   advanceDelivery(): Promise<void>
+  /**
+   * Read the exact RuntimeProjection of one historical StageRun at the current
+   * snapshot's read cursor. Human review runs have no runtime binding and
+   * resolve to null instead of a projection.
+   */
+  loadStageRunRuntime(stageRunId: StageRunId): Promise<RuntimeProjectionSnapshot | null>
+  /** Read the exact Candidates a historical StageRun produced, from candidate.list. */
+  loadStageRunCandidates(
+    stageRunId: StageRunId,
+  ): Promise<readonly CandidateHistoryItemProjection[]>
+  /** Open one exact historical Candidate review (candidate.review.get), display-only. */
+  loadCandidateHistoricalReview(
+    candidate: StrongFlowHistoricalCandidateIdentity,
+  ): Promise<CandidateHistoricalReviewProjection | null>
   cancelPending(): void
   reconnect(): void
   close(): void
@@ -186,6 +213,8 @@ interface StrongFlowSnapshotMinimum {
 interface StrongFlowQueryResponses {
   readonly [QueryName.DeliveryGet]: DeliveryGetResultResponse
   readonly [QueryName.RuntimeProjectionGet]: RuntimeProjectionGetResultResponse
+  readonly [QueryName.CandidateList]: CandidateHistoryListResultResponse
+  readonly [QueryName.CandidateReviewGet]: CandidateHistoricalReviewGetResultResponse
 }
 
 interface StrongFlowCommandResponses {
@@ -1601,6 +1630,133 @@ export function createStrongFlowViewModel(
     }))
   }
 
+  /** Guard shared by the read-only historical review queries. */
+  function requireOpenViewModel(): void {
+    if (closed) throw clientFailure(
+      'STRONGFLOW_VIEW_MODEL_CLOSED',
+      'The StrongFlow view-model is closed.',
+    )
+  }
+
+  function historicalStage(
+    requestedStageRunId: StageRunId,
+  ): StrongFlowProjection['delivery']['stages'][number] | undefined {
+    const projection = currentState.projection
+    if (projection === null) return undefined
+    return projection.delivery.stages.find(stage => stage.id === requestedStageRunId)
+  }
+
+  async function loadStageRunRuntime(
+    requestedStageRunId: StageRunId,
+  ): Promise<RuntimeProjectionSnapshot | null> {
+    requireOpenViewModel()
+    const projection = currentState.projection
+    if (projection === null) return null
+    const stage = historicalStage(requestedStageRunId)
+    if (stage === undefined || stage.actorType !== 'codex' || stage.sessionBinding === null) {
+      return null
+    }
+    const binding = Object.freeze({
+      productSessionId: stage.sessionBinding.productSessionId,
+      stageRunId: stage.id,
+    })
+    const active = controller()
+    try {
+      const response = expectResponse(await options.client.query({
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.RuntimeProjectionGet,
+        parameters: {
+          kind: 'delivery-stage',
+          productSessionId: binding.productSessionId,
+          deliveryId: options.deliveryId,
+          stageRunId: binding.stageRunId,
+          atCursor: projection.delivery.readCursor,
+        },
+        page: requestPage(),
+      }, { signal: active.signal }), QueryName.RuntimeProjectionGet)
+      assertRuntime(response.result, projection.delivery.readCursor, options, binding)
+      return response.result
+    } finally {
+      releaseController(active)
+    }
+  }
+
+  async function loadStageRunCandidates(
+    requestedStageRunId: StageRunId,
+  ): Promise<readonly CandidateHistoryItemProjection[]> {
+    requireOpenViewModel()
+    const projection = currentState.projection
+    if (projection === null) return []
+    const active = controller()
+    try {
+      const response = expectResponse(await options.client.query({
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.CandidateList,
+        parameters: {
+          deliveryId: options.deliveryId,
+          atCursor: projection.delivery.readCursor,
+          readPageLimit: HISTORICAL_CANDIDATE_PAGE_LIMIT,
+        },
+        page: { cursor: null, limit: HISTORICAL_CANDIDATE_PAGE_LIMIT },
+      }, { signal: active.signal }), QueryName.CandidateList)
+      const result = response.result
+      if (
+        result.kind !== 'candidate_history_page'
+        || !sameReadCursor(result.readCursor, projection.delivery.readCursor)
+      ) throw clientFailure(
+        'STRONGFLOW_CANDIDATE_HISTORY_MISMATCH',
+        'The Candidate history does not match the current Delivery read cursor.',
+      )
+      return result.items.filter(
+        item => item.candidate.producerStageRunId === requestedStageRunId,
+      )
+    } finally {
+      releaseController(active)
+    }
+  }
+
+  async function loadCandidateHistoricalReview(
+    candidate: StrongFlowHistoricalCandidateIdentity,
+  ): Promise<CandidateHistoricalReviewProjection | null> {
+    requireOpenViewModel()
+    const projection = currentState.projection
+    if (projection === null) return null
+    const active = controller()
+    try {
+      const response = expectResponse(await options.client.query({
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.CandidateReviewGet,
+        parameters: {
+          deliveryId: options.deliveryId,
+          atCursor: projection.delivery.readCursor,
+          candidateRef: candidate.candidateRef,
+          candidateTreeId: candidate.candidateTreeId,
+          diffSha256: candidate.diffSha256,
+          readPageLimit: HISTORICAL_CANDIDATE_PAGE_LIMIT,
+        },
+        page: requestPage(),
+      }, { signal: active.signal }), QueryName.CandidateReviewGet)
+      const result = response.result
+      if (
+        result.kind !== 'candidate_historical_review'
+        || result.candidate.candidateRef !== candidate.candidateRef
+        || result.candidate.candidateTreeId !== candidate.candidateTreeId
+        || result.candidate.diffSha256 !== candidate.diffSha256
+        || result.displayOnly !== true
+        || result.currentAuthorization !== false
+      ) throw clientFailure(
+        'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+        'The Control Plane returned another historical Candidate review.',
+      )
+      return result
+    } finally {
+      releaseController(active)
+    }
+  }
+
   return {
     get state() {
       return currentState
@@ -1630,6 +1786,15 @@ export function createStrongFlowViewModel(
     },
     async advanceDelivery() {
       await advanceDelivery()
+    },
+    async loadStageRunRuntime(stageRunId) {
+      return loadStageRunRuntime(stageRunId)
+    },
+    async loadStageRunCandidates(stageRunId) {
+      return loadStageRunCandidates(stageRunId)
+    },
+    async loadCandidateHistoricalReview(candidate) {
+      return loadCandidateHistoricalReview(candidate)
     },
     cancelPending() {
       if (closed) return
