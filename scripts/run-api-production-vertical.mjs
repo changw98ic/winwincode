@@ -49,7 +49,7 @@ const SCHEMA_VERSION = 'winwincode/v1'
 const DEFAULT_TIMEOUT_MILLIS = 240_000
 const POLL_INTERVAL_MILLIS = 50
 const SERVER_GRACEFUL_STOP_TIMEOUT_MILLIS = 30_000
-const MAX_DELIVERY_TRANSITIONS = 64
+export const DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY = 64
 const HELPER_RELEASE_MANIFEST_NAME = 'winwincode-kernel-helper.release.json'
 const HELPER_RELEASE_BINARY_NAME = 'winwincode-kernel-helper'
 const HELPER_RELEASE_BINARY_MODE = 0o755
@@ -1406,25 +1406,40 @@ function transientDeliveryErrorSummary(errors) {
   return [...counts.values()]
 }
 
-async function driveDelivery(client, timeoutMillis, modelRoute = configuredModelRoute()) {
-  const observations = []
+export function appendDeliveryTransition(trace, observation) {
+  const previous = trace.observations.at(-1)
+  if (previous?.revision === observation.revision && previous?.status === observation.status) {
+    return false
+  }
+  if (trace.observations.length === DELIVERY_TRANSITION_DIAGNOSTIC_CAPACITY) {
+    trace.observations.shift()
+  }
+  trace.observations.push(observation)
+  trace.totalTransitionCount += 1
+  return true
+}
+
+export async function driveDelivery(
+  client,
+  timeoutMillis,
+  modelRoute = configuredModelRoute(),
+  now = Date.now,
+) {
+  const transitionTrace = { observations: [], totalTransitionCount: 0 }
   const actions = []
   const transientErrors = []
-  const deadline = Date.now() + timeoutMillis
+  const deadline = now() + timeoutMillis
   let detail = null
   let terminalCommand = null
   for (;;) {
     detail = (await client.query('delivery.get', { deliveryId: IDS.delivery })).result
     const observation = { revision: detail.deliveryRevision, status: detail.status }
-    const previous = observations.at(-1)
-    if (previous?.revision !== observation.revision || previous?.status !== observation.status) {
-      assert.ok(observations.length < MAX_DELIVERY_TRANSITIONS, 'StrongFlow transition trace is bounded')
-      observations.push(observation)
-    }
+    appendDeliveryTransition(transitionTrace, observation)
     if (detail.status === 'delivered') break
-    if (Date.now() >= deadline) {
+    if (now() >= deadline) {
       fail(`StrongFlow did not reach delivered: ${JSON.stringify({
-        observations,
+        observations: transitionTrace.observations,
+        totalTransitionCount: transitionTrace.totalTransitionCount,
         failure: deliveryFailureSummary(detail, modelRoute),
         transientErrors: transientDeliveryErrorSummary(transientErrors),
       })}`)
@@ -1548,7 +1563,13 @@ async function driveDelivery(client, timeoutMillis, modelRoute = configuredModel
   assert.ok(terminal.tasks.length > 0, 'Delivered projection must contain promoted tasks')
   assert.equal(terminal.tasks.every(task => task.status === 'completed'), true)
   assert.equal(terminal.verdict.criteria.every(criterion => criterion.verdict === 'pass'), true)
-  return { actions, detail: terminal, observations, terminalCommand }
+  return {
+    actions,
+    detail: terminal,
+    observations: transitionTrace.observations,
+    terminalCommand,
+    totalTransitionCount: transitionTrace.totalTransitionCount,
+  }
 }
 
 async function commandEventually(client, command, expectedRevision, payload, timeoutMillis) {
@@ -1853,6 +1874,7 @@ export async function runApiProductionVertical({
         providerRoute: modelRoute,
         candidateArtifact: candidateArtifactSummary(delivery.detail.currentCandidate),
         observations: delivery.observations,
+        totalTransitionCount: delivery.totalTransitionCount,
         stageRuns: delivery.detail.stages.map(stage => stageRunSummary(stage, modelRoute)),
         stageRoles: delivery.detail.stages.map(stage => stage.role.toLowerCase()).toSorted(),
         stageRuntime: stageRuntime.map(item => ({
