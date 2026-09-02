@@ -62,6 +62,26 @@ test('editable draft merges clean fields and reports conflicting dirty fields', 
   assert.deepEqual(draft.state.dirtyFields, [])
 })
 
+test('a clean server refresh becomes the baseline for edits started afterwards', () => {
+  const fieldSensitive = createEditableDraft()
+  fieldSensitive.synchronize(snapshot(1, { provider: 'server-a', model: 'model-a' }))
+  fieldSensitive.synchronize(snapshot(2, { provider: 'server-a', model: 'model-b' }))
+  fieldSensitive.edit('model', 'browser-model')
+  fieldSensitive.synchronize(snapshot(2, { provider: 'server-a', model: 'model-b' }))
+
+  assert.equal(fieldSensitive.state.baseRevision, 2)
+  assert.deepEqual(fieldSensitive.state.conflicts, [])
+
+  const revisionSensitive = createEditableDraft({ revisionSensitive: true })
+  revisionSensitive.synchronize(snapshot(1, { comments: '' }))
+  revisionSensitive.synchronize(snapshot(2, { comments: '' }))
+  revisionSensitive.edit('comments', 'browser review')
+  revisionSensitive.synchronize(snapshot(2, { comments: '' }))
+
+  assert.equal(revisionSensitive.state.baseRevision, 2)
+  assert.deepEqual(revisionSensitive.state.conflicts, [])
+})
+
 test('editable draft captures one immutable submission and retains it on failure', () => {
   const draft = createEditableDraft()
   draft.synchronize(snapshot(4, { comments: '', changes: '' }))

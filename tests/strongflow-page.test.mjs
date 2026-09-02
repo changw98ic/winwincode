@@ -699,6 +699,55 @@ test('StrongFlow review isolates its draft, exposes revision changes, and submit
   mounted.close()
 })
 
+test('StrongFlow review draft is isolated by Candidate identity, not only its Diff digest', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.solutionReview.reviewStatus = 'pending'
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const comments = findByClass(rootElement, 'wwc-strongflow-solution-actions').children[0].children[0]
+  comments.value = 'draft for candidate one'
+  comments.emit('input')
+
+  const nextCandidate = structuredClone(current)
+  nextCandidate.currentCandidate.candidateRef = 'refs/winwincode/candidate/2'
+  nextCandidate.currentCandidate.candidateCommitId = '9999999999999999999999999999999999999999'
+  model.publish(state({ projection: nextCandidate }))
+
+  assert.equal(comments.value, '')
+  mounted.close()
+})
+
+test('an accepted StrongFlow review stays in flight across an unrelated event snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.solutionReview.reviewStatus = 'pending'
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const comments = findByClass(rootElement, 'wwc-strongflow-solution-actions').children[0].children[0]
+  const approve = findByClass(rootElement, 'wwc-strongflow-approve-solution')
+  comments.value = 'one accepted review'
+  comments.emit('input')
+  approve.emit('click')
+  model.publish(state({
+    projection: current,
+    interaction: { status: 'waiting', error: null },
+  }))
+
+  model.publish(state({
+    status: 'refreshing',
+    realtime: 'reloading',
+    projection: current,
+    interaction: { status: 'idle', error: null },
+  }))
+  model.publish(state({ projection: current }))
+
+  assert.equal(approve.disabled, true)
+  mounted.close()
+})
+
 test('Attention decision drafts keep exact submissions and clear with their entity', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')

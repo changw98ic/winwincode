@@ -672,6 +672,58 @@ test('settings keeps write-only inputs only in mounted controls until success or
   mounted.close()
 })
 
+test('an accepted Credential create keeps its submission until the refreshed snapshot confirms success', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings() {},
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const createSecret = byClass(rootElement, 'wwc-settings-create-secret')
+  byClass(rootElement, 'wwc-settings-create-id').value = externalCredentialId
+  byClass(rootElement, 'wwc-settings-create-name').value = 'Async Credential'
+  byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
+  createSecret.value = 'ASYNC_CREATE_SECRET'
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+
+  current = pageState({
+    interaction: {
+      status: 'waiting',
+      operation: 'credential.reference.create',
+      error: null,
+    },
+  })
+  listener(current)
+  current = pageState({ status: 'refreshing', realtime: 'reloading' })
+  listener(current)
+  current = pageState({
+    credentials: [credential(), credential({
+      id: externalCredentialId,
+      displayName: 'Async Credential',
+    })],
+  })
+  listener(current)
+
+  assert.equal(createSecret.value, '')
+  mounted.close()
+})
+
 test('settings keyed updates preserve route drafts, Credential row identity, focus, and scroll', () => {
   const document = new FakeDocument()
   document.activeElement = null
@@ -813,6 +865,10 @@ test('settings merges clean fields, exposes revision conflicts, and submits one 
   assert.equal(concurrency.value, '3')
   assert.equal(conflict.hidden, false)
   assert.match(visibleText(conflict), /Provider ID.*server-provider-b.*browser-provider/u)
+  assert.equal(
+    descendants(conflict).some(node => node.getAttribute('aria-hidden') === 'true'),
+    true,
+  )
   assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
 
   byClass(rootElement, 'wwc-settings-route-keep-draft').dispatch('click')
@@ -900,6 +956,10 @@ test('invalid settings scope fails before transport and produces a clear page pr
 
 test('settings page keeps its network boundary in the view-model and renders only safe errors', () => {
   const pageSource = readFileSync(resolve(root, 'apps/client/src/settings-page.ts'), 'utf8')
+  const strongFlowPageSource = readFileSync(
+    resolve(root, 'apps/client/src/strongflow-page.ts'),
+    'utf8',
+  )
   const draftSource = readFileSync(resolve(root, 'apps/client/src/editable-draft.ts'), 'utf8')
   const viewModelSource = readFileSync(
     resolve(root, 'apps/client/src/settings-view-model.ts'),
@@ -909,6 +969,7 @@ test('settings page keeps its network boundary in the view-model and renders onl
   assert.doesNotMatch(pageSource, /new\s+WebSocket/u)
   assert.doesNotMatch(pageSource, /innerHTML/u)
   assert.doesNotMatch(pageSource, /console\./u)
+  assert.doesNotMatch(`${pageSource}\n${strongFlowPageSource}`, /draftScope\s*\?\?/u)
   assert.doesNotMatch(`${pageSource}\n${draftSource}`, /localStorage|sessionStorage/u)
   assert.doesNotMatch(viewModelSource, /\bfetch\s*\(/u)
   assert.doesNotMatch(viewModelSource, /new\s+WebSocket/u)
