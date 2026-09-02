@@ -106,16 +106,6 @@ run('corepack', [
   '--outdir=dist/public/assets',
   '--banner:js=// SPDX-License-Identifier: Apache-2.0',
 ], packageRoot)
-run('corepack', [
-  'pnpm',
-  'exec',
-  'esbuild',
-  'src/styles/client.css',
-  '--bundle',
-  '--minify',
-  '--outfile=dist/public/assets/client.css',
-  '--banner:css=/* SPDX-License-Identifier: Apache-2.0 */',
-], packageRoot)
 cpSync(join(packageRoot, 'public'), publicOutputRoot, { recursive: true, force: true })
 
 const version = Object.freeze({
