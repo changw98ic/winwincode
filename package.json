@@ -32,10 +32,12 @@
     "test:ts": "pnpm build:ts && node scripts/run-ts-tests.mjs",
     "test:rust": "cargo build -p winwincode-kernel-helper --bin winwincode-kernel-helper --locked && cargo test --workspace --all-features --locked",
     "test": "pnpm test:ts && pnpm test:rust",
+    "test:rust:built": "cargo test --workspace --all-features --locked",
     "verify:products": "node scripts/verify-products.mjs",
-    "verify:phase-6.6": "node scripts/phase-6-6-negative-gate.mjs",
-    "verify:source": "node scripts/lint-workspace.mjs",
-    "verify": "pnpm format:check && pnpm lint && pnpm verify:phase-6.6 && pnpm test && pnpm build && pnpm verify:products && pnpm verify:api-production-vertical"
+    "verify:source": "pnpm format:check && pnpm lint:source",
+    "verify:typescript": "pnpm test:ts && node scripts/verify-products.mjs --scope typescript",
+    "verify:rust": "pnpm build:rust && pnpm lint:rust && pnpm test:rust:built && node scripts/verify-products.mjs --scope rust && pnpm verify:api-production-vertical",
+    "verify": "pnpm verify:source && pnpm verify:typescript && pnpm verify:rust"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

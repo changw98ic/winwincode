@@ -61,7 +61,7 @@ corepack pnpm build
 corepack pnpm verify
 ```
 
-`corepack pnpm verify` 会在当前 checkout 中各执行一次格式、类型、Rust Clippy、负向门、全 workspace 测试、构建、产品边界和生产纵向。普通 CI 由 `actions/checkout` 提供真实的干净 commit，并在 frozen install 后调用这一个入口。平台发布证据另按[发布流程](docs/releasing.md)生成。
+`corepack pnpm verify` 会依次执行源码格式与边界、TypeScript 构建与测试，以及 Rust 构建、Clippy、全 workspace 测试、产品检查和生产纵向。TypeScript 构建同时完成严格类型检查；Rust 产品先构建一次，后续测试和生产纵向复用同一目录。普通 CI 对同一提交并行执行这三组检查，最后汇总成一个 `Canonical workspace verification` 结果。feature 分支只通过 pull request 触发，默认分支只通过 push 触发，避免同一提交重复跑两遍。平台发布证据另按[发布流程](docs/releasing.md)生成。
 
 ## 修改 Delivery 数据结构
 

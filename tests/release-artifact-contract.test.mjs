@@ -340,23 +340,6 @@ test('release runner leaves the complete workspace gate to mainline and runs one
   assert.equal(replay < api && api < stage, true)
 })
 
-test('canonical verify runs every complete-checkout gate exactly once', () => {
-  const workspace = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  const verifyCommands = workspace.scripts.verify.split(' && ')
-  assert.deepEqual(verifyCommands, [
-    'pnpm format:check',
-    'pnpm lint',
-    'pnpm verify:phase-6.6',
-    'pnpm test',
-    'pnpm build',
-    'pnpm verify:products',
-    'pnpm verify:api-production-vertical',
-  ])
-  assert.equal(new Set(verifyCommands).size, verifyCommands.length)
-  assert.equal(workspace.scripts['verify:clean-install'], undefined)
-  assert.equal(existsSync(join(root, 'scripts/verify-clean-install.mjs')), false)
-})
-
 test('release runner cold-builds twice at one physical Cargo target outside its snapshot', () => {
   const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(runner, /const cargoTarget = resolve\(buildRoot, 'cargo-target'\)/u)

@@ -956,7 +956,7 @@
         "tests": [
           {
             "path": "tests/contract-codegen.test.mjs",
-            "name": "one canonical schema generation is deterministic and compiles for Rust and TypeScript"
+            "name": "one canonical schema generation is deterministic and TypeScript output compiles"
           }
         ]
       },

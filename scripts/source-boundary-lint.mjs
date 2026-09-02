@@ -300,45 +300,36 @@ function canonicalFacadeFindings() {
     .map(path => Object.freeze({ marker: 'missing-canonical-client-facade', path }))
 }
 
-const source = sourceFiles()
-const manifests = explicitManifestPaths()
-const artifacts = artifactFindings()
-const distLegacy = distLegacyFindings()
-const provider = providerNetworkFindings()
-const report = Object.freeze({
-  schemaVersion: 1,
-  gate: 'winwincode-9c4.16.6.6.6',
-  generatedAt: new Date().toISOString(),
-  sourceFiles: source.length,
-  manifestFiles: manifests.length,
-  gates: Object.freeze([
-    gate('legacy-directories', forbiddenDirectoryFindings()),
-    gate('source-legacy-identifiers', markerFindings(source, forbiddenMarkers)),
-    gate('manifest-lock-dependencies', markerFindings(manifests, forbiddenMarkers)),
-    gate('package-artifacts', artifacts),
-    gate('dist-artifact-content', distLegacy),
-    gate('canonical-client-facade', canonicalFacadeFindings()),
-    gate('client-network-authority', clientNetworkFindings()),
-    gate('provider-network-authority', provider.findings, { providerFiles: provider.files }),
-    gate('execution-boundary-network-authority', executionNetworkFindings()),
-  ]),
-})
-const red = report.gates.filter(entry => entry.status === 'red')
-
-if (process.argv.includes('--json')) {
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
-} else {
-  process.stdout.write(`phase-6.6.6 negative gate ${red.length === 0 ? 'GREEN' : 'RED'}\n`)
-  for (const entry of report.gates) {
-    process.stdout.write(`${entry.status === 'green' ? 'GREEN' : 'RED'} ${entry.id}`
-      + ` findings=${String(entry.findingCount)}\n`)
-    for (const value of entry.findings.slice(0, 12)) {
-      process.stdout.write(`  ${value.marker} ${value.path}${value.line === undefined ? '' : `:${String(value.line)}`}\n`)
-    }
-    if (entry.findingCount > entry.findings.length) {
-      process.stdout.write(`  ... ${String(entry.findingCount - entry.findings.length)} more\n`)
-    }
-  }
+export function sourceBoundaryReport() {
+  const source = sourceFiles()
+  const manifests = explicitManifestPaths()
+  const artifacts = artifactFindings()
+  const distLegacy = distLegacyFindings()
+  const provider = providerNetworkFindings()
+  return Object.freeze({
+    sourceFiles: source.length,
+    manifestFiles: manifests.length,
+    gates: Object.freeze([
+      gate('legacy-directories', forbiddenDirectoryFindings()),
+      gate('source-legacy-identifiers', markerFindings(source, forbiddenMarkers)),
+      gate('manifest-lock-dependencies', markerFindings(manifests, forbiddenMarkers)),
+      gate('package-artifacts', artifacts),
+      gate('dist-artifact-content', distLegacy),
+      gate('canonical-client-facade', canonicalFacadeFindings()),
+      gate('client-network-authority', clientNetworkFindings()),
+      gate('provider-network-authority', provider.findings, { providerFiles: provider.files }),
+      gate('execution-boundary-network-authority', executionNetworkFindings()),
+    ]),
+  })
 }
 
-if (red.length > 0) process.exitCode = 1
+export function sourceBoundaryErrors() {
+  const errors = []
+  for (const entry of sourceBoundaryReport().gates) {
+    for (const value of entry.findings) {
+      const location = value.line === undefined ? value.path : `${value.path}:${String(value.line)}`
+      errors.push(`${entry.id}: ${value.marker} ${location}`)
+    }
+  }
+  return errors
+}

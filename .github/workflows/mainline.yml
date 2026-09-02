@@ -2,18 +2,78 @@ name: Mainline verification
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: mainline-verification-${{ github.workflow }}-${{ github.ref }}
+  group: mainline-verification-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Canonical workspace verification
+  source:
+    name: Source format and boundaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CI: "1"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install pinned Rust formatter
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup override set 1.95.0
+
+      - name: Verify source once
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm verify:source
+
+  typescript:
+    name: TypeScript build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: "1"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install JavaScript dependencies
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+
+      - name: Verify TypeScript once
+        shell: bash
+        run: corepack pnpm verify:typescript
+
+  rust:
+    name: Rust build, tests, and product runtime
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -45,17 +105,35 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: |
-          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt,rust-src
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rust-src
           rustup override set 1.95.0
           rustc -Vv
           cargo -V
 
-      - name: Install JavaScript dependencies
+      - name: Verify Rust and the production runtime once
         shell: bash
         run: |
           corepack enable
-          corepack pnpm install --frozen-lockfile
+          corepack pnpm verify:rust
 
-      - name: Verify the exact commit once
+  verify:
+    name: Canonical workspace verification
+    if: ${{ always() }}
+    needs:
+      - source
+      - typescript
+      - rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every independent lane to pass
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          SOURCE_RESULT: ${{ needs.source.result }}
+          TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
         shell: bash
-        run: corepack pnpm verify
+        run: |
+          set -euo pipefail
+          test "${SOURCE_RESULT}" = "success"
+          test "${TYPESCRIPT_RESULT}" = "success"
+          test "${RUST_RESULT}" = "success"
