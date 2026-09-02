@@ -841,6 +841,32 @@ async function waitFor(predicate, label, timeoutMillis) {
   }
 }
 
+async function waitForRemoteWorker(
+  client,
+  started,
+  timeoutMillis,
+  previousHeartbeatAt = null,
+) {
+  return waitFor(async () => {
+    if (started.child.exitCode !== null || started.child.signalCode !== null) {
+      const diagnostic = started.errors.join('').trim().slice(-8_000)
+      fail(`remote Worker exited before becoming ready${
+        diagnostic.length === 0 ? '' : `:\n${diagnostic}`
+      }`)
+    }
+    const response = await client.query('worker.list', { states: [] })
+    const worker = response.result?.items?.find(item => item.id === IDS.remoteWorker)
+    if (
+      worker?.state !== 'enabled'
+      || typeof worker.lastHeartbeatAt !== 'string'
+      || worker.lastHeartbeatAt === previousHeartbeatAt
+    ) {
+      return false
+    }
+    return worker
+  }, `remote Worker ${IDS.remoteWorker} ready heartbeat`, timeoutMillis)
+}
+
 async function freePort() {
   const server = createNetServer()
   await new Promise((resolvePromise, reject) => {
@@ -1728,6 +1754,7 @@ export async function runApiProductionVertical({
   let api = null
   let serverOutput = ''
   let workerOutput = ''
+  let remoteWorkerHeartbeatAt = null
   let failure = null
   const report = {
     schemaVersion: 'winwincode.api-production-vertical.v1',
@@ -1790,6 +1817,8 @@ export async function runApiProductionVertical({
         terminalAfterWorkerRestart: false,
         terminalAfterServerRestart: false,
       }
+      const readyWorker = await waitForRemoteWorker(api, workerStarted, timeoutMillis)
+      remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
     }
 
     const chat = await runChat(api, timeoutMillis, { modelRoute })
@@ -1825,6 +1854,13 @@ export async function runApiProductionVertical({
           sourceRoot: controlledRepository.sourceRoot,
           workerBinary: remoteWorkerBinary,
         })
+        const readyWorker = await waitForRemoteWorker(
+          api,
+          workerStarted,
+          timeoutMillis,
+          remoteWorkerHeartbeatAt,
+        )
+        remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
         report.remoteWorker.restartedPid = workerStarted.child.pid
       }
       const repeated = await runChat(api, timeoutMillis, {
@@ -1921,6 +1957,13 @@ export async function runApiProductionVertical({
       await restartedApi.bootstrap(restartProof)
       if (workerStarted !== null) {
         report.remoteWorker.survivedServerRestartPid = workerStarted.child.pid
+        const readyWorker = await waitForRemoteWorker(
+          restartedApi,
+          workerStarted,
+          timeoutMillis,
+          remoteWorkerHeartbeatAt,
+        )
+        remoteWorkerHeartbeatAt = readyWorker.lastHeartbeatAt
         const reconnected = await runChat(restartedApi, timeoutMillis, {
           modelRoute,
           productSessionId: IDS.reconnectSession,

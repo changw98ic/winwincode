@@ -378,6 +378,10 @@ try {
     force: true,
   })
   const primaryRustSnapshot = snapshotRustBuild(primary.rust, rustSnapshot)
+  assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256)
+  runReleaseApiVertical(buildRoot, primaryRustSnapshot)
+  assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256)
+
   resetCargoTarget(cargoTarget)
   const replay = isolatedReleaseBuild({
     label: 'replay',
@@ -389,8 +393,6 @@ try {
     buildPaths,
   })
 
-  assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256)
-  runReleaseApiVertical(buildRoot, primaryRustSnapshot)
   assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256)
   stageArtifacts(artifactRoot, primaryRustSnapshot, clientSnapshot)
   const manifest = createReleaseArtifactManifest({

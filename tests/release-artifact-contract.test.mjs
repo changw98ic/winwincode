@@ -334,10 +334,11 @@ test('release runner leaves the complete workspace gate to mainline and runs one
   assert.match(runner, /report\.flow\?\.strongflow\?\.verdictStatus !== 'pass'/u)
   assert.match(runner, /report\.remoteWorker\?\.terminalAfterWorkerRestart !== true/u)
   assert.match(runner, /report\.remoteWorker\?\.terminalAfterServerRestart !== true/u)
+  const coldReplay = runner.lastIndexOf('resetCargoTarget(cargoTarget)')
   const replay = runner.indexOf("label: 'replay'")
   const api = runner.indexOf('  runReleaseApiVertical(buildRoot, primaryRustSnapshot)')
   const stage = runner.indexOf('  stageArtifacts(artifactRoot, primaryRustSnapshot, clientSnapshot)')
-  assert.equal(replay < api && api < stage, true)
+  assert.equal(api < coldReplay && coldReplay < replay && replay < stage, true)
 })
 
 test('release runner cold-builds twice at one physical Cargo target outside its snapshot', () => {
