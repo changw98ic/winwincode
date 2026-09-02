@@ -61,12 +61,17 @@ test('real browser routes mount Settings, Approvals, and Local Operations withou
   await devtools.send('Runtime.enable', {}, sessionId)
   await devtools.send('Page.enable', {}, sessionId)
 
-  async function open(path) {
+  async function open(path, featureRoute) {
     await devtools.send('Page.navigate', { url: `${clientOrigin}/${path}` }, sessionId)
     await waitForGlobal(devtools, sessionId, 'inspectFeatureRoute')
+    await evaluate(
+      devtools,
+      sessionId,
+      `globalThis.inspectFeatureRoute(${JSON.stringify(featureRoute)})`,
+    )
   }
 
-  await open('#/settings')
+  await open('#/settings', 'settings')
   const navigation = await evaluate(
     devtools,
     sessionId,
@@ -85,7 +90,7 @@ test('real browser routes mount Settings, Approvals, and Local Operations withou
   assert.deepEqual(navigation.calls.abortedQueries, ['settings.get'])
   assert.match(navigation.afterCancellation.status, /^Ready/iu)
 
-  await open('#/settings')
+  await open('#/settings', 'settings')
   const desktopSettings = await evaluate(
     devtools,
     sessionId,
@@ -122,7 +127,7 @@ test('real browser routes mount Settings, Approvals, and Local Operations withou
   assert.equal(compactSettings.noHorizontalOverflow, true)
   assert.equal(compactSettings.panelWithinPage, true)
 
-  await open(`#/approvals?session=${productSessionId}`)
+  await open(`#/approvals?session=${productSessionId}`, 'approvals')
   const approvals = await evaluate(
     devtools,
     sessionId,
@@ -139,7 +144,7 @@ test('real browser routes mount Settings, Approvals, and Local Operations withou
   assert.equal(compactApprovals.emptyCount, 3)
   assert.equal(compactApprovals.noHorizontalOverflow, true)
 
-  await open('#/settings/runtime')
+  await open('#/settings/runtime', 'operations')
   const directOperations = await evaluate(
     devtools,
     sessionId,
