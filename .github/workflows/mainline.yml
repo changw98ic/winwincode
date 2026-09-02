@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mainline-verification-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
+  group: mainline-verification-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
