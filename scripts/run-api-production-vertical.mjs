@@ -895,6 +895,7 @@ subjectAltName = @names
 [names]
 DNS.1 = control.localhost
 DNS.2 = api.localhost
+IP.1 = 127.0.0.1
 `)
   const result = spawnSync('openssl', [
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1',
@@ -1089,7 +1090,6 @@ function spawnStandaloneWorker({
   workerBinary,
 }) {
   const errors = []
-  const publicControlUrl = controlUrl.replace('127.0.0.1', 'control.localhost')
   const child = spawn(workerBinary, ['--remote'], {
     cwd: root,
     detached: process.platform !== 'win32',
@@ -1100,7 +1100,7 @@ function spawnStandaloneWorker({
       WWC_WORKER_STARTED_AT: fixture.startedAt,
       WWC_WORKER_DATA_DIRECTORY: resolve(directory, 'worker-data'),
       WWC_WORKER_SOURCE_ROOT: sourceRoot,
-      WWC_WORKER_SERVER_ORIGIN: publicControlUrl,
+      WWC_WORKER_SERVER_ORIGIN: controlUrl,
       WWC_WORKER_TLS_ROOT_DER_FILE: fixture.tlsRootDerFile,
       WWC_WORKER_CREDENTIAL_FILE: fixture.credentialFile,
       WWC_WORKER_HELPER_RELEASE_MANIFEST: helperReleaseManifest,
@@ -1109,6 +1109,7 @@ function spawnStandaloneWorker({
       WWC_WORKER_MODEL_ID: modelRoute.modelId,
       WWC_WORKER_ACTION_SIGNING_KEY_HEX: '1f'.repeat(32),
       WWC_WORKER_EXECUTION_ENVELOPE_DIGEST: `sha256:${'a'.repeat(64)}`,
+      WWC_DEBUG_REMOTE_WORKER: '1',
       GIT_CONFIG_NOSYSTEM: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
