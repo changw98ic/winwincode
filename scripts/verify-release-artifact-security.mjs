@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { scanCredentialLeakBytes } from './credential-leak-gate.mjs'
 import {
@@ -308,12 +308,16 @@ export function inspectExecutable(bytes, target) {
   return target.os === 'macos' ? inspectMachO64(bytes) : inspectElf64(bytes)
 }
 
-export function dynamicLibraryAllowed(target, library) {
+export function dynamicLibraryAllowed(target, library, interpreter = null) {
   if (target.os === 'macos') {
     return library.startsWith('/usr/lib/')
       || library.startsWith('/System/Library/Frameworks/')
   }
-  return linuxDynamicLibraryAllowlist.has(library)
+  const approvedInterpreters = linuxInterpreterAllowlist[target.arch]
+  const approvedRuntimeLoader = typeof interpreter === 'string'
+    && approvedInterpreters?.has(interpreter) === true
+    && basename(interpreter) === library
+  return linuxDynamicLibraryAllowlist.has(library) || approvedRuntimeLoader
 }
 
 function printableAsciiSegments(bytes) {
@@ -535,7 +539,7 @@ export function createReleaseArtifactSecurityReport({
         findings.push({ target: target.target, path: descriptor.path, rule: 'binary.arch-mismatch' })
       }
       for (const library of identity.dynamicLibraries) {
-        if (!dynamicLibraryAllowed(target, library)) {
+        if (!dynamicLibraryAllowed(target, library, identity.interpreter)) {
           findings.push({ target: target.target, path: descriptor.path, rule: 'binary.dynamic-library' })
         }
       }

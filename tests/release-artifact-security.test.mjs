@@ -112,6 +112,26 @@ test('dynamic library policy accepts system libraries and rejects bundled runtim
   assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libcrypto.so'), false)
   assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libssl.so.1.1'), false)
   assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libnode.so.120'), false)
+  assert.equal(dynamicLibraryAllowed(
+    { os: 'linux', arch: 'arm64' },
+    'ld-linux-aarch64.so.1',
+    '/lib/ld-linux-aarch64.so.1',
+  ), true)
+  assert.equal(dynamicLibraryAllowed(
+    { os: 'linux', arch: 'x64' },
+    'ld-linux-x86-64.so.2',
+    '/lib64/ld-linux-x86-64.so.2',
+  ), true)
+  assert.equal(dynamicLibraryAllowed(
+    { os: 'linux', arch: 'x64' },
+    'ld-linux-aarch64.so.1',
+    '/lib64/ld-linux-x86-64.so.2',
+  ), false)
+  assert.equal(dynamicLibraryAllowed(
+    { os: 'linux', arch: 'arm64' },
+    'ld-linux-aarch64.so.1',
+    '/tmp/ld-linux-aarch64.so.1',
+  ), false)
 })
 
 test('artifact content scan rejects legacy surfaces, host paths, credentials, and private inputs', () => {
