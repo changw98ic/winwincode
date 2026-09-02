@@ -1,0 +1,128 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-settings {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wwc-settings-heading,
+.wwc-settings-local-operations-link,
+.wwc-settings-status,
+.wwc-settings-error,
+.wwc-settings-credentials {
+  grid-column: 1 / -1;
+}
+
+.wwc-settings-local-operations-link {
+  width: fit-content;
+  color: var(--wwc-color-action-strong);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-settings-route-form,
+.wwc-settings-create-form,
+.wwc-settings-rotate-form {
+  display: grid;
+  gap: var(--wwc-space-3);
+  min-width: 0;
+}
+
+.wwc-settings input,
+.wwc-settings select {
+  width: 100%;
+  max-width: 100%;
+}
+
+.wwc-settings-route-controls,
+.wwc-settings-credential-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-settings-credential-list {
+  display: grid;
+  gap: var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-settings-credential-item {
+  align-items: start;
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-settings-credential-title,
+.wwc-settings-secret-help,
+.wwc-settings-credential-help {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-settings-credential-title {
+  flex: 1 1 100%;
+}
+
+.wwc-settings-credential-help,
+.wwc-settings-secret-help {
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-settings-credential-metadata {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--wwc-space-1) var(--wwc-space-3);
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: var(--wwc-space-0);
+  overflow-wrap: anywhere;
+}
+
+.wwc-settings-credential-metadata dt {
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-settings-credential-metadata dd {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-settings [data-state='empty'],
+.wwc-settings-credential-empty {
+  max-width: var(--wwc-readable-max);
+}
+
+.wwc-settings [data-variant='destructive'] {
+  justify-self: start;
+}
+
+@media (max-width: 64rem) {
+  .wwc-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wwc-settings-heading,
+  .wwc-settings-local-operations-link,
+  .wwc-settings-status,
+  .wwc-settings-error,
+  .wwc-settings-credentials {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 48rem) {
+  .wwc-settings-route-controls > * {
+    flex: 1 1 100%;
+  }
+
+  .wwc-settings-credential-metadata {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wwc-settings-credential-item > [data-wwc-component='button'],
+  .wwc-settings-rotate-form [data-wwc-component='button'] {
+    width: 100%;
+  }
+}

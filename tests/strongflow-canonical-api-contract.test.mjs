@@ -627,6 +627,187 @@ test('runtime.projection.get returns bounded typed sessions and only a live Diff
   for (const field of forbidden) assert.equal(publicFields.has(field), false, field)
 })
 
+test('Candidate history and review queries are exact, bounded, and display-only', () => {
+  const http = json('control-plane-http.schema.json')
+  const history = http.$defs.CandidateHistoryListParameters
+  const review = http.$defs.CandidateHistoricalReviewGetParameters
+  const historical = http.$defs.CandidateHistoricalReviewProjection
+  const files = http.$defs.CandidateFilesListParameters
+  const diff = http.$defs.CandidateDiffGetParameters
+  const file = http.$defs.CandidateFileProjection
+  const chunk = http.$defs.CandidateDiffChunkProjection
+
+  assert.deepEqual(history.required, ['deliveryId', 'atCursor', 'readPageLimit'])
+  assert.equal(history.additionalProperties, false)
+  assert.equal(history.properties.readPageLimit.maximum, 200)
+  assert.equal(http.$defs.CandidateHistoryPage.properties.items.maxItems, 200)
+  assert.deepEqual(http.$defs.CandidateAvailability.enum, ['available', 'released'])
+
+  assert.deepEqual(review.required, [
+    'deliveryId',
+    'atCursor',
+    'readPageLimit',
+    'candidateRef',
+    'candidateTreeId',
+    'diffSha256',
+  ])
+  assert.equal(review.additionalProperties, false)
+  assert.equal(historical.additionalProperties, false)
+  assert.equal(historical.properties.displayOnly.const, true)
+  assert.equal(historical.properties.currentAuthorization.const, false)
+  assert.equal(historical.properties.evidence.maxItems, 1_000)
+  assert.deepEqual(historical.properties.verdict.oneOf, [
+    { $ref: '#/$defs/DeliveryVerdictProjection' },
+    { type: 'null' },
+  ])
+
+  assert.deepEqual(files.required, [
+    'deliveryId',
+    'atCursor',
+    'readPageLimit',
+    'candidateRef',
+    'candidateTreeId',
+    'diffSha256',
+    'statuses',
+    'pathPrefix',
+  ])
+  assert.equal(files.additionalProperties, false)
+  assert.equal(files.properties.readPageLimit.maximum, 200)
+  assert.equal(files.properties.statuses.uniqueItems, true)
+  assert.equal(files.properties.statuses.maxItems, 6)
+  assert.equal(files.properties.pathPrefix.oneOf[0].maxLength, 4_096)
+
+  assert.deepEqual(diff.required, [
+    'deliveryId',
+    'atCursor',
+    'readPageLimit',
+    'candidateRef',
+    'candidateTreeId',
+    'diffSha256',
+    'path',
+    'offset',
+    'length',
+  ])
+  assert.equal(diff.additionalProperties, false)
+  assert.equal(diff.properties.path.maxLength, 4_096)
+  assert.equal(diff.properties.offset.maximum, 268_435_456)
+  assert.equal(diff.properties.length.maximum, 262_144)
+
+  assert.equal(file.additionalProperties, false)
+  assert.deepEqual(file.required, [
+    'path',
+    'oldPath',
+    'status',
+    'additions',
+    'deletions',
+    'binary',
+    'encoding',
+  ])
+  assert.equal(http.$defs.CandidateFilePage.properties.items.maxItems, 200)
+  assert.deepEqual(http.$defs.CandidateFileEncoding.enum, [
+    'utf-8',
+    'binary',
+    'unknown-8bit',
+  ])
+
+  assert.equal(chunk.additionalProperties, false)
+  assert.equal(
+    chunk.properties.contentEncoding.$ref,
+    '#/$defs/CandidateFileEncoding',
+  )
+  assert.equal(chunk.properties.encoding.const, 'base64')
+  assert.equal(
+    chunk.properties.mediaType.const,
+    'application/vnd.winwincode.git-diff',
+  )
+  assert.equal(chunk.properties.dataBase64.maxLength, 349_528)
+  assert.equal(chunk.properties.returnedBytes.maximum, 262_144)
+  assert.equal(chunk.properties.totalBytes.maximum, 268_435_456)
+
+  const publicFields = propertyNames({ history, review, historical, files, diff, file, chunk })
+  for (const forbidden of [
+    'repositoryLocator',
+    'baseRevision',
+    'candidateCommitIdInput',
+    'artifactStoreKey',
+    'artifactBody',
+    'leaseId',
+    'fencingToken',
+    'credential',
+    'authorization',
+  ]) assert.equal(publicFields.has(forbidden), false, forbidden)
+})
+
+test('Evidence detail and Artifact content contracts are exact, bounded, and secret-safe', () => {
+  const http = json('control-plane-http.schema.json')
+  const evidence = http.$defs.EvidenceReadBinding
+  const detail = http.$defs.EvidenceDetailProjection
+  const access = http.$defs.EvidenceArtifactAccessProjection
+  const content = http.$defs.EvidenceArtifactContentGetParameters
+  const chunk = http.$defs.EvidenceArtifactContentChunkProjection
+  const unavailable = http.$defs.EvidenceArtifactContentUnavailableProjection
+
+  assert.equal(evidence.additionalProperties, false)
+  assert.equal(
+    http.$defs.EvidenceGetQuery.allOf[1].properties.parameters.$ref,
+    '#/$defs/EvidenceReadBinding',
+  )
+  assert.deepEqual(evidence.required, [
+    'deliveryId',
+    'atCursor',
+    'readPageLimit',
+    'evidenceId',
+    'candidateRef',
+    'stageRunId',
+    'sessionBindingId',
+    'type',
+    'sourceRef',
+  ])
+  assert.equal(detail.additionalProperties, false)
+  assert.equal(detail.properties.outcome.$ref, '#/$defs/EvidenceOutcome')
+  assert.equal(detail.properties.artifactAccess.$ref, '#/$defs/EvidenceArtifactAccessProjection')
+  assert.deepEqual(access.oneOf, [
+    { $ref: '#/$defs/EvidenceArtifactAvailableProjection' },
+    { $ref: '#/$defs/EvidenceArtifactUnavailableProjection' },
+  ])
+  assert.deepEqual(
+    http.$defs.EvidenceArtifactUnavailableProjection.properties.reason.enum,
+    ['no_authoritative_link'],
+  )
+
+  assert.equal(content.additionalProperties, false)
+  assert.equal(content.properties.evidence.$ref, '#/$defs/EvidenceReadBinding')
+  assert.equal(content.properties.length.maximum, 262_144)
+  assert.equal(content.properties.offset.minimum, 0)
+  assert.equal(chunk.properties.encoding.const, 'base64')
+  assert.equal(chunk.properties.returnedBytes.maximum, 262_144)
+  assert.deepEqual(chunk.properties.previewMode, {
+    $ref: '#/$defs/EvidenceArtifactPreviewMode',
+  })
+  assert.equal(unavailable.additionalProperties, false)
+  assert.deepEqual(unavailable.properties.reason.enum, ['no_authoritative_link'])
+
+  const fields = propertyNames({
+    EvidenceDetailProjection: detail,
+    EvidenceArtifactDescriptorProjection: http.$defs.EvidenceArtifactDescriptorProjection,
+    EvidenceArtifactProvenanceProjection: http.$defs.EvidenceArtifactProvenanceProjection,
+    EvidenceArtifactContentChunkProjection: chunk,
+    EvidenceArtifactContentUnavailableProjection: unavailable,
+  })
+  for (const forbidden of [
+    'leaseId',
+    'fencingToken',
+    'workerId',
+    'workerInstanceId',
+    'storeKey',
+    'objectKey',
+    'path',
+    'locator',
+    'token',
+    'credential',
+  ]) assert.equal(fields.has(forbidden), false, forbidden)
+})
+
 test('WebSocket uses invalidation and reset names both canonical reload queries', () => {
   const events = json('control-plane-events.schema.json')
   const eventTypes = branchConstants(events, 'ControlPlaneWebSocketEventPayload', 'type')

@@ -16,9 +16,9 @@ use winwincode_delivery::{
     },
     projection::{DeliveryProjection, ProjectionInput, project_delivery_detail},
     store::{
-        AtomicPublication, DeliveryJournalPort, DeliveryQuery, DeliveryQueryPort, DeliveryStore,
-        JournalBackendError, JournalBackendErrorCode, JournalEntryState, JournalRecordBytes,
-        LoadedDeliveryJournal,
+        AtomicPublication, DeliveryJournalCodec, DeliveryJournalPort, DeliveryQuery,
+        DeliveryQueryPort, DeliveryStore, JournalBackendError, JournalBackendErrorCode,
+        JournalEntryState, JournalRecordBytes, LoadedDeliveryJournal,
     },
 };
 use winwincode_domain::{DeliveryId, EventReadPosition, OpaqueCursor, Revision, Sha256Digest};
@@ -631,7 +631,83 @@ pub(crate) fn load_current(
         })
 }
 
-fn load_revision(
+/// Verifies the complete append-only journal and returns every authoritative
+/// Delivery snapshot through one already-issued read revision.
+///
+/// Historical Candidate reads use the journal records rather than accepting
+/// a caller-supplied Candidate descriptor. Verifying the complete retained
+/// chain also makes a later gap or changed record fail the older read closed.
+pub(crate) fn load_history_through(
+    control_plane: &ControlPlane,
+    delivery_id: &DeliveryId,
+    revision: u64,
+) -> Result<Vec<Delivery>, StrongFlowProjectionError> {
+    const MAX_HISTORY_RECORDS: usize = 10_000;
+
+    if revision == 0 {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "Candidate history revision is invalid".to_owned(),
+        ));
+    }
+    let key = AggregateJournalKey::new("delivery", &delivery_id.0).map_err(|_| {
+        StrongFlowProjectionError::InvalidRequest("aggregate identity is invalid".to_owned())
+    })?;
+    let journal = control_plane
+        .storage_ref()
+        .map_err(current_event_storage_error)?
+        .load_journal(&key)
+        .map_err(current_event_storage_error)?
+        .ok_or_else(|| {
+            StrongFlowProjectionError::ResourceNotFound(
+                "the requested aggregate was not found".to_owned(),
+            )
+        })?;
+    if journal.records.len() > MAX_HISTORY_RECORDS {
+        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "Candidate history exceeds the retained read bound".to_owned(),
+        ));
+    }
+    let verified = DeliveryJournalCodec::verify(
+        delivery_id,
+        LoadedDeliveryJournal {
+            manifest: journal.manifest,
+            records: journal
+                .records
+                .into_iter()
+                .map(|record| JournalRecordBytes {
+                    sequence: record.sequence,
+                    state: JournalEntryState::Published,
+                    digest: record.digest,
+                    bytes: record.payload,
+                })
+                .collect(),
+        },
+    )
+    .map_err(|_| {
+        StrongFlowProjectionError::TrustedFactsUnavailable(
+            "canonical Delivery history verification failed".to_owned(),
+        )
+    })?;
+    if revision > verified.snapshot.revision() {
+        return Err(StrongFlowProjectionError::InvalidRequest(
+            "Candidate history revision has never been issued".to_owned(),
+        ));
+    }
+    let snapshots = verified
+        .records
+        .into_iter()
+        .take_while(|record| record.snapshot.revision() <= revision)
+        .map(|record| record.snapshot)
+        .collect::<Vec<_>>();
+    if snapshots.last().map(Delivery::revision) != Some(revision) {
+        return Err(StrongFlowProjectionError::ReadCursorExpired(
+            "Candidate history revision is outside the retained read window".to_owned(),
+        ));
+    }
+    Ok(snapshots)
+}
+
+pub(super) fn load_revision(
     control_plane: &ControlPlane,
     delivery_id: &DeliveryId,
     revision: u64,

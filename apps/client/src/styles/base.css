@@ -1,0 +1,58 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+:root {
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-canvas);
+  font-family: var(--wwc-font-family);
+  font-size: var(--wwc-font-size-md);
+  line-height: var(--wwc-line-height-default);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 20rem;
+  margin: var(--wwc-space-0);
+}
+
+button,
+input,
+select,
+textarea {
+  min-width: 0;
+  font: inherit;
+}
+
+button,
+[href],
+input,
+select,
+textarea,
+[tabindex]:not([tabindex='-1']) {
+  scroll-margin: var(--wwc-space-4);
+}
+
+button:focus-visible,
+[href]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: var(--wwc-focus-width) solid var(--wwc-color-focus);
+  outline-offset: var(--wwc-focus-offset);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

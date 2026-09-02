@@ -954,15 +954,22 @@ fn complete_across_client_restart(
             true,
         ))
         .expect("resume and complete S3 multipart upload");
+    let access = ArtifactAccess::new(
+        scope.clone(),
+        artifact_id.clone(),
+        digest.clone(),
+        provenance(),
+    );
     let object = restarted
-        .read_exact(&ArtifactAccess::new(
-            scope.clone(),
-            artifact_id.clone(),
-            digest.clone(),
-            provenance(),
-        ))
+        .read_exact(&access)
         .expect("read complete S3 Artifact");
     assert_eq!(object.bytes(), bytes);
+    let range = restarted
+        .read_exact_range(&access, 3, 8)
+        .expect("read authorized S3 Artifact range");
+    assert_eq!(range.bytes(), &bytes[3..11]);
+    assert_eq!(range.range().total_size(), bytes.len() as u64);
+    assert_eq!(range.range().digest(), &digest);
     restarted.close().expect("close restarted S3 client");
     (artifact_id, scope, digest)
 }

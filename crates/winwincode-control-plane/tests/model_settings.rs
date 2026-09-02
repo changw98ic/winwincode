@@ -203,6 +203,7 @@ fn register_provider(
                 expected_catalog_version: 0,
             },
             &descriptor(provider_id, model_id, credential_seed),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider fixture");
 }
@@ -245,7 +246,10 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
         7,
     );
     let updated = ModelSettingsService::new(&mut storage)
-        .update_generated(&update)
+        .update_generated(
+            &update,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("atomically update both canonical settings fields");
     assert_eq!(updated.previous_revision, Revision(0));
     assert_eq!(updated.current_revision, Revision(1));
@@ -277,12 +281,18 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
     assert_eq!(inherited.result.worker_concurrency_limit, 1);
     let project_update = update_command(104, project_api_scope.clone(), 0, Some(route.clone()), 9);
     let project_updated = ModelSettingsService::new(&mut storage)
-        .update_generated(&project_update)
+        .update_generated(
+            &project_update,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("Project owns its concurrency and model override atomically");
     assert_eq!(project_updated.result.worker_concurrency_limit, 9);
     assert_eq!(project_updated.result.revision, Revision(1));
     let project_cleared = ModelSettingsService::new(&mut storage)
-        .update_generated(&update_command(120, project_api_scope.clone(), 1, None, 10))
+        .update_generated(
+            &update_command(120, project_api_scope.clone(), 1, None, 10),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("null route and new concurrency replace the complete Project value");
     assert_eq!(
         project_cleared.result.default_model_route,
@@ -300,38 +310,47 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
     assert_eq!(cleared_projection.worker_concurrency_limit, 10);
 
     let stale = ModelSettingsService::new(&mut storage)
-        .update_generated(&update_command(
-            105,
-            organization_api_scope.clone(),
-            0,
-            Some(route.clone()),
-            8,
-        ))
+        .update_generated(
+            &update_command(
+                105,
+                organization_api_scope.clone(),
+                0,
+                Some(route.clone()),
+                8,
+            ),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("stale revision rejects both replacement fields");
     assert_eq!(stale.kind(), ModelSettingsErrorKind::RevisionConflict);
     for invalid_limit in [0, 10_001] {
         let error = ModelSettingsService::new(&mut storage)
-            .update_generated(&update_command(
-                106 + u64::try_from(invalid_limit).expect("limit"),
-                organization_api_scope.clone(),
-                1,
-                Some(route.clone()),
-                invalid_limit,
-            ))
+            .update_generated(
+                &update_command(
+                    106 + u64::try_from(invalid_limit).expect("limit"),
+                    organization_api_scope.clone(),
+                    1,
+                    Some(route.clone()),
+                    invalid_limit,
+                ),
+                winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+            )
             .expect_err("concurrency stays inside canonical bounds");
         assert_eq!(error.kind(), ModelSettingsErrorKind::InvalidRequest);
     }
     let stale_reference = ModelSettingsService::new(&mut storage)
-        .update_generated(&update_command(
-            20_108,
-            organization_api_scope.clone(),
-            1,
-            Some(ModelRoute {
-                credential_reference_id: CredentialReferenceId(id("crd", 99)),
-                ..route.clone()
-            }),
-            8,
-        ))
+        .update_generated(
+            &update_command(
+                20_108,
+                organization_api_scope.clone(),
+                1,
+                Some(ModelRoute {
+                    credential_reference_id: CredentialReferenceId(id("crd", 99)),
+                    ..route.clone()
+                }),
+                8,
+            ),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("route reference must match the current catalog");
     assert_eq!(
         stale_reference.kind(),
@@ -345,19 +364,25 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
         .expect("durable settings survive restart");
     assert_eq!(restarted.result, updated.result);
     let exact_replay = ModelSettingsService::new(&mut storage)
-        .update_generated(&update)
+        .update_generated(
+            &update,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("exact generated update replay returns original projection");
     assert_eq!(exact_replay, updated);
     let changed_body = ModelSettingsService::new(&mut storage)
-        .update_generated(&SettingsUpdateCommand {
-            payload: SettingsUpdatePayload {
-                patch: SettingsPatch {
-                    default_model_route: Some(route.clone()),
-                    worker_concurrency_limit: 8,
+        .update_generated(
+            &SettingsUpdateCommand {
+                payload: SettingsUpdatePayload {
+                    patch: SettingsPatch {
+                        default_model_route: Some(route.clone()),
+                        worker_concurrency_limit: 8,
+                    },
                 },
+                ..update.clone()
             },
-            ..update.clone()
-        })
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("same requestId with changed concurrency conflicts");
     assert_eq!(changed_body.kind(), ModelSettingsErrorKind::RequestConflict);
 
@@ -370,6 +395,7 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
                 expected_catalog_version: 1,
             },
             "provider-settings",
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("disable configured Provider");
     let disabled = ModelSettingsService::new(&mut storage)
@@ -377,7 +403,10 @@ fn generated_update_and_get_atomically_project_route_concurrency_revision_and_de
         .expect_err("current projection fails closed for disabled Provider");
     assert_eq!(disabled.kind(), ModelSettingsErrorKind::ProviderDisabled);
     let replay_after_disable = ModelSettingsService::new(&mut storage)
-        .update_generated(&update)
+        .update_generated(
+            &update,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("replay returns original response before current catalog lookup");
     assert_eq!(replay_after_disable, updated);
 
@@ -437,7 +466,10 @@ fn assert_concurrent_exact_full_replacement(round: u64) {
             thread::spawn(move || {
                 barrier.wait();
                 let response = ModelSettingsService::new(&mut storage)
-                    .update_generated(&command)
+                    .update_generated(
+                        &command,
+                        winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+                    )
                     .expect("concurrent exact settings update");
                 Box::new(storage)
                     .close()
@@ -459,7 +491,10 @@ fn assert_concurrent_exact_full_replacement(round: u64) {
     changed.payload.patch.worker_concurrency_limit = 13;
     assert_eq!(
         ModelSettingsService::new(&mut storage)
-            .update_generated(&changed)
+            .update_generated(
+                &changed,
+                winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+            )
             .expect_err("changed concurrent replacement conflicts")
             .kind(),
         ModelSettingsErrorKind::RequestConflict
@@ -468,7 +503,7 @@ fn assert_concurrent_exact_full_replacement(round: u64) {
         .get(&get_query(20_300 + round, organization_api_scope))
         .expect("read one concurrent durable result");
     assert_eq!(recovered.result, responses[0].result);
-    assert_eq!(storage.pending_events().expect("pending events").len(), 2);
+    assert_eq!(storage.pending_events().expect("pending events").len(), 4);
     Box::new(storage).close().expect("close storage");
     let event_count: i64 = Connection::open(root.join("control-plane.sqlite3"))
         .expect("open concurrent settings event database")
@@ -522,6 +557,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &organization_request,
             settings_values("provider-org", "model-org", 1, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("set Organization route");
     let inherited_organization = ModelSettingsService::new(&mut storage)
@@ -538,6 +574,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &project_request,
             settings_values("provider-project", "model-project", 2, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("set Project route");
     let inherited_project = ModelSettingsService::new(&mut storage)
@@ -554,6 +591,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &repository_request,
             settings_values("provider-org", "model-org", 1, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("set Repository route");
     let inherited_repository = ModelSettingsService::new(&mut storage)
@@ -566,6 +604,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &session_request,
             settings_values("provider-project", "model-project", 2, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("set ProductSession route");
     let direct_session = ModelSettingsService::new(&mut storage)
@@ -577,6 +616,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &settings_request(14, product_session.clone(), 1),
             cleared_settings(1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("clear ProductSession override");
     assert_eq!(
@@ -590,6 +630,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &settings_request(15, repository.clone(), 1),
             cleared_settings(1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("clear Repository override");
     assert_eq!(
@@ -603,6 +644,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &settings_request(16, project.clone(), 1),
             cleared_settings(1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("clear Project override");
     assert_eq!(
@@ -617,6 +659,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &settings_request(17, organization.clone(), 1),
             cleared_settings(1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("clear Organization override");
     let cleared = ModelSettingsService::new(&mut storage)
@@ -628,6 +671,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &settings_request(18, organization.clone(), 2),
             settings_values("missing-provider", "missing-model", 1, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect_err("unknown Provider setting is rejected before commit");
     assert_eq!(invalid.kind(), ModelSettingsErrorKind::ProviderNotFound);
@@ -637,6 +681,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &active_project_request,
             settings_values("provider-project", "model-project", 2, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("restore Project override");
     assert_eq!(active.revision, 3);
@@ -649,6 +694,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
                 expected_catalog_version: 1,
             },
             "provider-project",
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("disable effective Provider");
     let disabled = ModelSettingsService::new(&mut storage)
@@ -660,6 +706,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &active_project_request,
             settings_values("provider-project", "model-project", 2, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("exact request replays before consulting changed catalog");
     assert!(replay.idempotent_replay);
@@ -668,6 +715,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &active_project_request,
             settings_values("provider-project", "another-model", 2, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect_err("changed requestId body conflicts before route lookup");
     assert_eq!(
@@ -679,6 +727,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &settings_request(21, project.clone(), 3),
             cleared_settings(1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("clear disabled Project override");
     let active_organization_request = settings_request(22, organization.clone(), 2);
@@ -686,12 +735,14 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &active_organization_request,
             settings_values("provider-org", "model-org", 1, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("restore Organization override");
     let missing_model = ModelSettingsService::new(&mut storage)
         .update(
             &settings_request(23, organization.clone(), 3),
             settings_values("provider-org", "missing-model", 1, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect_err("known Provider with unknown model is explicit");
     assert_eq!(missing_model.kind(), ModelSettingsErrorKind::ModelNotFound);
@@ -704,6 +755,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
                 expected_catalog_version: 1,
             },
             &descriptor("provider-org", "replacement-model", 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("remove the selected model from current discovery");
     let disabled_model = ModelSettingsService::new(&mut storage)
@@ -714,6 +766,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
         .update(
             &active_organization_request,
             settings_values("provider-org", "model-org", 1, 1),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("settings replay ignores later model removal");
     assert!(organization_replay.idempotent_replay);
@@ -734,6 +787,7 @@ fn priority_clear_and_catalog_rejection_rules_are_stable() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn legacy_route_migrates_once_discards_old_reference_and_survives_restart() {
     const SECRET: &[u8] = b"model-settings-secret-fixture-88217";
     let root = temporary_directory("legacy");
@@ -755,7 +809,11 @@ fn legacy_route_migrates_once_discards_old_reference_and_survives_restart() {
         model_id: "legacy-model".to_owned(),
     };
     let migrated = ModelSettingsService::new(&mut storage)
-        .migrate_legacy_once(&migration_request, Some(&legacy))
+        .migrate_legacy_once(
+            &migration_request,
+            Some(&legacy),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("migrate old ModelRoute once");
     assert_eq!(migrated.change, ModelSettingsChange::LegacyMigrated);
     assert_eq!(migrated.revision, 1);
@@ -777,7 +835,11 @@ fn legacy_route_migrates_once_discards_old_reference_and_survives_restart() {
         ..legacy.clone()
     };
     let replay = ModelSettingsService::new(&mut storage)
-        .migrate_legacy_once(&migration_request, Some(&semantically_same_legacy))
+        .migrate_legacy_once(
+            &migration_request,
+            Some(&semantically_same_legacy),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("discarded legacy reference does not change migration identity");
     assert!(replay.idempotent_replay);
     assert_eq!(replay.revision, 1);
@@ -785,13 +847,18 @@ fn legacy_route_migrates_once_discards_old_reference_and_survives_restart() {
     let mut changed_legacy = legacy.clone();
     changed_legacy.model_id = "another-model".to_owned();
     let conflict = ModelSettingsService::new(&mut storage)
-        .migrate_legacy_once(&migration_request, Some(&changed_legacy))
+        .migrate_legacy_once(
+            &migration_request,
+            Some(&changed_legacy),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("changed legacy model conflicts on the same requestId");
     assert_eq!(conflict.kind(), ModelSettingsErrorKind::RequestConflict);
     let repeated = ModelSettingsService::new(&mut storage)
         .migrate_legacy_once(
             &settings_request(32, organization.clone(), 1),
             Some(&legacy),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect_err("a second migration command is rejected");
     assert_eq!(repeated.kind(), ModelSettingsErrorKind::AlreadyMigrated);
@@ -824,7 +891,11 @@ fn legacy_route_migrates_once_discards_old_reference_and_survives_restart() {
         .expect("resolve migrated route after restart");
     assert_eq!(recovered, route);
     let still_migrated = ModelSettingsService::new(&mut reopened)
-        .migrate_legacy_once(&settings_request(33, organization, 1), Some(&legacy))
+        .migrate_legacy_once(
+            &settings_request(33, organization, 1),
+            Some(&legacy),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("migration marker survives restart");
     assert_eq!(
         still_migrated.kind(),

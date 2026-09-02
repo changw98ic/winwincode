@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  mountButton,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+  type StatusTone,
+} from './components/index.js'
 import type {
   CommandRequest,
   CredentialReferenceId,
@@ -204,6 +212,21 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
+function enterprisePanel(
+  document: Document,
+  id: string,
+  title: string,
+  description: string,
+  className: string,
+) {
+  const panel = mountPanel({
+    document,
+    props: { id, title, description, className },
+  })
+  panel.title.className = 'wwc-enterprise-section-heading'
+  return panel
+}
+
 function labelledInput(
   document: Document,
   id: string,
@@ -308,6 +331,7 @@ function integrationCommand(
 
 interface OperationsSection<T> {
   readonly section: HTMLElement
+  close(): void
   render(
     items: readonly T[],
     state: EnterpriseManagementViewModelState,
@@ -321,12 +345,59 @@ export function mountEnterpriseOperationsPage(
 ): EnterpriseOperationsPage {
   const document = options.root.ownerDocument
   const layout = element(document, 'main', 'wwc-enterprise-operations')
-  const heading = element(document, 'h1', 'wwc-enterprise-operations-heading')
-  const status = element(document, 'p', 'wwc-enterprise-operations-status')
-  const error = element(document, 'div', 'wwc-enterprise-operations-error')
-  const errorText = element(document, 'span', 'wwc-enterprise-operations-error-text')
-  const retry = element(document, 'button', 'wwc-enterprise-operations-retry')
-  const reconnect = element(document, 'button', 'wwc-enterprise-operations-reconnect')
+  layout.dataset.wwcPage = 'management'
+  const pageHeader = mountPageHeader({
+    document,
+    props: {
+      title: 'Enterprise governance and operations',
+      eyebrow: 'Enterprise administration',
+      description: 'Review Policy, remote Worker fleets, usage, audit evidence, and Integrations.',
+      headingLevel: 1,
+      className: 'wwc-enterprise-operations-heading',
+    },
+  })
+  const heading = pageHeader.root
+  const statusBadge = mountStatusBadge({
+    document,
+    props: {
+      label: 'Loading enterprise operations…',
+      tone: 'info',
+      live: 'polite',
+      className: 'wwc-enterprise-operations-status',
+    },
+  })
+  const status = statusBadge.root
+  const retryButton = mountButton({
+    document,
+    props: {
+      label: 'Retry snapshot',
+      className: 'wwc-enterprise-operations-retry',
+      onActivate: () => { void options.model.refresh() },
+    },
+  })
+  const retry = retryButton.root
+  const reconnectButton = mountButton({
+    document,
+    props: {
+      label: 'Reconnect events',
+      className: 'wwc-enterprise-operations-reconnect',
+      onActivate: () => { options.model.reconnect() },
+    },
+  })
+  const reconnect = reconnectButton.root
+  const errorState = mountErrorState({
+    document,
+    props: {
+      title: 'Enterprise operations unavailable',
+      message: '',
+      actions: [retry, reconnect],
+      visible: false,
+      className: 'wwc-enterprise-operations-error',
+    },
+  })
+  const error = errorState.root
+  const errorText = errorState.message
+  errorText.className = 'wwc-enterprise-operations-error-text'
   const policy = createPolicySection(
     document,
     options.model,
@@ -339,16 +410,6 @@ export function mountEnterpriseOperationsPage(
   let latestAudit: readonly EnterpriseAuditProjection[] = Object.freeze([])
   let closed = false
 
-  heading.textContent = 'Enterprise governance and operations'
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  error.setAttribute('role', 'alert')
-  error.setAttribute('aria-live', 'assertive')
-  retry.type = 'button'
-  retry.textContent = 'Retry snapshot'
-  reconnect.type = 'button'
-  reconnect.textContent = 'Reconnect events'
-  error.append(errorText, retry, reconnect)
   layout.append(
     heading,
     status,
@@ -366,10 +427,29 @@ export function mountEnterpriseOperationsPage(
     const presentation = enterpriseOperationsPagePresentation(state)
     const snapshot = enterpriseOperationsSnapshot(state)
     latestAudit = snapshot.audit
-    status.textContent = presentation.statusText
+    const tone: StatusTone = presentation.errorText !== null
+      ? 'danger'
+      : state.realtime === 'reconnecting'
+        ? 'warning'
+        : presentation.busy
+          ? 'info'
+          : state.status === 'ready' || state.status === 'partial'
+            ? 'success'
+            : 'neutral'
+    statusBadge.update({
+      label: presentation.statusText,
+      tone,
+      live: 'polite',
+      className: 'wwc-enterprise-operations-status',
+    })
     layout.setAttribute('aria-busy', String(presentation.busy))
-    error.hidden = presentation.errorText === null
-    errorText.textContent = presentation.errorText ?? ''
+    errorState.update({
+      title: 'Enterprise operations unavailable',
+      message: presentation.errorText ?? '',
+      actions: [retry, reconnect],
+      visible: presentation.errorText !== null,
+      className: 'wwc-enterprise-operations-error',
+    })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
     policy.render(snapshot.policies, state, presentation.mutationsDisabled.policy)
@@ -383,8 +463,6 @@ export function mountEnterpriseOperationsPage(
     )
   }
 
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  reconnect.addEventListener('click', () => { options.model.reconnect() })
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -394,6 +472,16 @@ export function mountEnterpriseOperationsPage(
       closed = true
       unsubscribe()
       options.model.close()
+      integration.close()
+      audit.close()
+      usage.close()
+      fleet.close()
+      policy.close()
+      reconnectButton.close()
+      retryButton.close()
+      errorState.close()
+      statusBadge.close()
+      pageHeader.close()
       options.root.replaceChildren()
     },
   }
@@ -404,8 +492,15 @@ function createPolicySection(
   model: EnterpriseManagementViewModel,
   now: () => Instant,
 ): OperationsSection<EnterprisePolicyProjection> {
-  const section = element(document, 'section', 'wwc-enterprise-policies')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-policies',
+    'Policy and dry-run',
+    'Review effective Policy evidence and prepare a closed, versioned definition.',
+    'wwc-enterprise-policies',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-policy-status')
   const list = element(document, 'ul', 'wwc-enterprise-policy-list')
   const fieldset = element(document, 'fieldset', 'wwc-enterprise-policy-fields')
@@ -458,6 +553,8 @@ function createPolicySection(
   definitionDigest.input.pattern = 'sha256:[0-9a-f]{64}'
   save.type = 'submit'
   save.textContent = 'Save Policy'
+  save.dataset.wwcComponent = 'button'
+  save.dataset.variant = 'primary'
   form.addEventListener('submit', event => {
     event.preventDefault()
     const policyKind = kind.select.value as EnterprisePolicyProjection['policyKind']
@@ -501,9 +598,10 @@ function createPolicySection(
     save,
   )
   fieldset.append(legend, form)
-  section.append(heading, areaStatus, list, fieldset)
+  panel.content.append(areaStatus, list, fieldset)
   return {
     section,
+    close() { panel.close() },
     render(items, viewState, disabled) {
       areaStatus.textContent = areaLabel(viewState, 'policy')
       fieldset.disabled = disabled
@@ -516,6 +614,8 @@ function createPolicySection(
         summary.textContent = `${item.state} · ${item.mode === 'audit' ? 'audit dry-run' : 'enforced'} · version ${String(item.version)} · definition ${shortValue(item.definitionSha256)}`
         audit.type = 'button'
         audit.textContent = 'Prepare audit dry-run'
+        audit.dataset.wwcComponent = 'button'
+        audit.dataset.variant = 'default'
         audit.disabled = disabled
         audit.addEventListener('click', () => {
           id.input.value = item.id
@@ -543,8 +643,15 @@ function createFleetSection(
   document: Document,
   model: EnterpriseManagementViewModel,
 ): OperationsSection<EnterpriseFleetProjection> {
-  const section = element(document, 'section', 'wwc-enterprise-fleets')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-fleets',
+    'Remote Worker fleets',
+    'Reported capacity and bounded Worker-pool operations.',
+    'wwc-enterprise-fleets',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-fleet-status')
   const list = element(document, 'ul', 'wwc-enterprise-fleet-list')
   heading.id = 'wwc-enterprise-fleets-heading'
@@ -552,9 +659,10 @@ function createFleetSection(
   section.setAttribute('aria-labelledby', heading.id)
   areaStatus.setAttribute('aria-live', 'polite')
   list.setAttribute('aria-live', 'polite')
-  section.append(heading, areaStatus, list)
+  panel.content.append(areaStatus, list)
   return {
     section,
+    close() { panel.close() },
     render(items, viewState, disabled) {
       areaStatus.textContent = areaLabel(viewState, 'fleet')
       list.replaceChildren(...items.map(item => {
@@ -567,9 +675,13 @@ function createFleetSection(
         summary.textContent = `${item.state} · ${String(item.registeredWorkers)} Workers · ${String(item.activeLeases)} active leases · ${String(item.availableCapacity)} available`
         drain.type = 'button'
         drain.textContent = 'Drain remote Worker pool'
+        drain.dataset.wwcComponent = 'button'
+        drain.dataset.variant = 'destructive'
         drain.disabled = disabled || item.state === 'draining' || item.state === 'offline'
         enable.type = 'button'
         enable.textContent = 'Enable remote Worker pool'
+        enable.dataset.wwcComponent = 'button'
+        enable.dataset.variant = 'default'
         enable.disabled = disabled || item.state === 'healthy'
         drain.addEventListener('click', () => {
           void model.execute('fleet', context => fleetCommand(context, {
@@ -603,8 +715,15 @@ function createUsageSection(
   document: Document,
   model: EnterpriseManagementViewModel,
 ): OperationsSection<EnterpriseUsageProjection> {
-  const section = element(document, 'section', 'wwc-enterprise-usage')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-usage',
+    'Usage and quota evidence',
+    'Bounded operation, token, runtime, storage, and cost summaries.',
+    'wwc-enterprise-usage',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-usage-status')
   const summary = element(document, 'p', 'wwc-enterprise-usage-summary')
   const refresh = element(document, 'button', 'wwc-enterprise-usage-refresh')
@@ -615,11 +734,14 @@ function createUsageSection(
   areaStatus.setAttribute('aria-live', 'polite')
   refresh.type = 'button'
   refresh.textContent = 'Refresh usage and quota evidence'
+  refresh.dataset.wwcComponent = 'button'
+  refresh.dataset.variant = 'default'
   refresh.addEventListener('click', () => { void model.refresh('usage') })
   list.setAttribute('aria-live', 'polite')
-  section.append(heading, areaStatus, summary, refresh, list)
+  panel.content.append(areaStatus, summary, refresh, list)
   return {
     section,
+    close() { panel.close() },
     render(items, viewState) {
       areaStatus.textContent = areaLabel(viewState, 'usage')
       refresh.disabled = viewState.areas.usage.permission !== 'allowed'
@@ -652,8 +774,15 @@ function createAuditSection(
   document: Document,
   onExport: EnterpriseOperationsPageOptions['onAuditExport'],
 ): OperationsSection<EnterpriseAuditProjection> {
-  const section = element(document, 'section', 'wwc-enterprise-audit')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-audit',
+    'Audit trail',
+    'Public bounded audit records with a secret-free CSV export.',
+    'wwc-enterprise-audit',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-audit-status')
   const exportStatus = element(document, 'p', 'wwc-enterprise-audit-export-status')
   const exportButton = element(document, 'button', 'wwc-enterprise-audit-export')
@@ -667,15 +796,18 @@ function createAuditSection(
   exportStatus.setAttribute('aria-live', 'polite')
   exportButton.type = 'button'
   exportButton.textContent = 'Export bounded audit CSV'
+  exportButton.dataset.wwcComponent = 'button'
+  exportButton.dataset.variant = 'default'
   exportButton.addEventListener('click', () => {
     const content = enterpriseAuditCsv(currentItems)
     onExport?.('winwincode-enterprise-audit.csv', content)
     exportStatus.textContent = `Audit export ready · ${String(currentItems.length)} records`
   })
   list.setAttribute('aria-live', 'polite')
-  section.append(heading, areaStatus, exportButton, exportStatus, list)
+  panel.content.append(areaStatus, exportButton, exportStatus, list)
   return {
     section,
+    close() { panel.close() },
     render(items, viewState) {
       currentItems = items
       areaStatus.textContent = areaLabel(viewState, 'audit')
@@ -700,8 +832,15 @@ function createIntegrationSection(
   document: Document,
   model: EnterpriseManagementViewModel,
 ): OperationsSection<EnterpriseIntegrationProjection> {
-  const section = element(document, 'section', 'wwc-enterprise-integrations')
-  const heading = element(document, 'h2', 'wwc-enterprise-section-heading')
+  const panel = enterprisePanel(
+    document,
+    'wwc-enterprise-integrations',
+    'Integrations',
+    'Secret-free Integration state and configuration digests.',
+    'wwc-enterprise-integrations',
+  )
+  const section = panel.root
+  const heading = panel.title
   const areaStatus = element(document, 'p', 'wwc-enterprise-integration-status')
   const list = element(document, 'ul', 'wwc-enterprise-integration-list')
   const fieldset = element(document, 'fieldset', 'wwc-enterprise-integration-fields')
@@ -736,6 +875,8 @@ function createIntegrationSection(
   credentialReference.input.pattern = 'crd_[0-9A-HJKMNP-TV-Z]{26}'
   save.type = 'submit'
   save.textContent = 'Save Integration status'
+  save.dataset.wwcComponent = 'button'
+  save.dataset.variant = 'primary'
   form.addEventListener('submit', event => {
     event.preventDefault()
     const payload: EnterpriseIntegrationUpdatePayload = {
@@ -772,9 +913,10 @@ function createIntegrationSection(
     save,
   )
   fieldset.append(legend, form)
-  section.append(heading, areaStatus, list, fieldset)
+  panel.content.append(areaStatus, list, fieldset)
   return {
     section,
+    close() { panel.close() },
     render(items, viewState, disabled) {
       areaStatus.textContent = areaLabel(viewState, 'integration')
       fieldset.disabled = disabled
@@ -800,6 +942,7 @@ function createIntegrationSection(
 
 function emptyRow(document: Document, label: string, className: string): HTMLLIElement {
   const row = element(document, 'li', className)
+  row.dataset.state = 'empty'
   row.textContent = label
   return row
 }

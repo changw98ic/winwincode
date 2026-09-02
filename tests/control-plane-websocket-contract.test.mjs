@@ -49,6 +49,7 @@ const eventTypes = Object.freeze([
   'enterprise-policy.invalidated.v1',
   'enterprise-project.invalidated.v1',
   'enterprise-usage.invalidated.v1',
+  'model-route-availability.invalidated.v1',
   'presence.changed.v1',
   'product-session.message.appended.v1',
   'product-session.changed.v1',
@@ -620,6 +621,33 @@ test('enterprise invalidations bind each area to its one generated reload query'
 
   const crossed = structuredClone(organization)
   crossed.event.reloadQueries = ['enterprise.membership.list']
+  assert.notDeepEqual(validateSchemaNode(crossed, schema), [])
+})
+
+test('ModelRoute invalidation exposes only a closed source and the one reload query', () => {
+  const transcript = validFixture.transcripts.find(item => (
+    item.name === 'enterprise-management-scope-invalidations'
+  ))
+  const invalidation = transcript.frames.find(frame => (
+    frame.type === 'event.v1'
+    && frame.event.type === 'model-route-availability.invalidated.v1'
+  ))
+  assert.ok(invalidation)
+  assert.deepEqual(validateSchemaNode(invalidation, schema), [])
+  assert.deepEqual(
+    schema.$defs.ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource.enum,
+    ['settings', 'provider_catalog', 'credential_reference', 'request_pool'],
+  )
+  assert.deepEqual(invalidation.event.reloadQueries, ['model.route.availability.list'])
+  assert.deepEqual(Object.keys(invalidation.event).sort(), [
+    'reloadQueries',
+    'source',
+    'sourceRevision',
+    'type',
+  ])
+
+  const crossed = structuredClone(invalidation)
+  crossed.event.reloadQueries = ['settings.get']
   assert.notDeepEqual(validateSchemaNode(crossed, schema), [])
 })
 

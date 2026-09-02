@@ -13,10 +13,14 @@ import type {
   ControlPlaneWebSocketEventFrame,
   ControlPlaneWebSocketSubscriptionId,
   DeliveryAdvanceCompletedResponse,
+  DeliveryAdvanceCommand,
   DeliveryApproveTaskBreakdownCompletedResponse,
+  DeliveryCreateCommand,
+  DeliveryCreateCompletedResponse,
   DeliveryDetailProjection,
   DeliveryGetResultResponse,
   DeliveryId,
+  DeliveryProjection,
   DeliveryResolveAttentionCompletedResponse,
   DeliveryStageProjection,
   DeliverySubmitVerdictCompletedResponse,
@@ -185,10 +189,50 @@ interface StrongFlowQueryResponses {
 }
 
 interface StrongFlowCommandResponses {
+  readonly [CommandName.DeliveryCreate]: DeliveryCreateCompletedResponse
   readonly [CommandName.DeliveryApproveTaskBreakdown]: DeliveryApproveTaskBreakdownCompletedResponse
   readonly [CommandName.DeliveryAdvance]: DeliveryAdvanceCompletedResponse
   readonly [CommandName.DeliveryResolveAttention]: DeliveryResolveAttentionCompletedResponse
   readonly [CommandName.DeliverySubmitVerdict]: DeliverySubmitVerdictCompletedResponse
+}
+
+export type StrongFlowCreateStatus =
+  | 'idle'
+  | 'submitting'
+  | 'waiting'
+  | 'created'
+  | 'error'
+  | 'closed'
+
+export interface StrongFlowCreateState {
+  readonly status: StrongFlowCreateStatus
+  readonly error: ControlPlaneClientError | null
+}
+
+export interface StrongFlowCreateInput {
+  readonly title: string
+  readonly goal: string
+  readonly baseRevision: string
+  readonly acceptanceCriteria: readonly string[]
+}
+
+export interface StrongFlowCreateViewModelOptions {
+  readonly client: ControlPlaneClient
+  readonly actor: Actor
+  readonly scope: RepositoryScope
+  readonly nextDeliveryId: () => DeliveryId
+  readonly nextRequestId: () => RequestId
+  readonly onCreated: (deliveryId: DeliveryId) => void
+}
+
+export type StrongFlowCreateListener = (state: StrongFlowCreateState) => void
+
+export interface StrongFlowCreateViewModel {
+  readonly state: StrongFlowCreateState
+  subscribe(listener: StrongFlowCreateListener): () => void
+  create(input: StrongFlowCreateInput): Promise<void>
+  cancelPending(): void
+  close(): void
 }
 
 function initialState(): StrongFlowViewModelState {
@@ -652,6 +696,244 @@ function projectionFromSnapshot(snapshot: StrongFlowSnapshot): StrongFlowProject
       readCursor: delivery.readCursor,
     }),
   })
+}
+
+function createdDeliveryMatchesScope(
+  delivery: DeliveryProjection,
+  deliveryId: DeliveryId,
+  scope: RepositoryScope,
+): boolean {
+  return delivery.deliveryId === deliveryId
+    && delivery.ownership.organizationId === scope.organizationId
+    && delivery.ownership.workspaceId === scope.workspaceId
+    && delivery.ownership.projectId === scope.projectId
+    && delivery.ownership.repositoryId === scope.repositoryId
+}
+
+/** Create the first Delivery through canonical commands before the read-model workbench mounts. */
+export function createStrongFlowCreateViewModel(
+  options: StrongFlowCreateViewModelOptions,
+): StrongFlowCreateViewModel {
+  const listeners = new Set<StrongFlowCreateListener>()
+  let currentState: StrongFlowCreateState = Object.freeze({ status: 'idle', error: null })
+  let active: AbortController | null = null
+  let closed = false
+  let attempt: {
+    readonly inputKey: string
+    readonly createRequest: DeliveryCreateCommand
+    created: DeliveryProjection | null
+    advanceRequest: DeliveryAdvanceCommand | null
+  } | null = null
+
+  function publish(status: StrongFlowCreateStatus, error: ControlPlaneClientError | null): void {
+    currentState = Object.freeze({ status, error })
+    for (const listener of listeners) listener(currentState)
+  }
+
+  function invalid(code: string, message: string): void {
+    publish('error', clientFailure(code, message))
+  }
+
+  function completedDelivery(
+    response: CommandAcceptedResponse | CommandCompletedResponse,
+    command: CommandName.DeliveryCreate | CommandName.DeliveryAdvance,
+    requestId: RequestId,
+    deliveryId: DeliveryId,
+  ): DeliveryProjection | null {
+    const completed = expectCompletedCommand(response, command, requestId)
+    if (completed === null) return null
+    if (
+      !createdDeliveryMatchesScope(completed.result, deliveryId, options.scope)
+      || completed.result.revision !== completed.currentRevision
+    ) throw clientFailure(
+      'STRONGFLOW_CREATE_RESPONSE_MISMATCH',
+      'The Delivery command returned another repository revision.',
+    )
+    return completed.result
+  }
+
+  async function create(input: StrongFlowCreateInput): Promise<void> {
+    if (closed) throw clientFailure(
+      'STRONGFLOW_CREATE_VIEW_MODEL_CLOSED',
+      'The StrongFlow creation view-model is closed.',
+    )
+    if (currentState.status === 'submitting' || currentState.status === 'waiting') {
+      return
+    }
+    const title = input.title.trim()
+    const goal = input.goal.trim()
+    const baseRevision = input.baseRevision.trim()
+    const acceptanceCriteria = input.acceptanceCriteria
+      .map(value => value.trim())
+      .filter(value => value.length > 0)
+    if (title.length === 0) {
+      invalid('STRONGFLOW_CREATE_TITLE_REQUIRED', 'Enter a title for the new Delivery.')
+      return
+    }
+    if (goal.length === 0) {
+      invalid('STRONGFLOW_CREATE_GOAL_REQUIRED', 'Enter the Delivery goal.')
+      return
+    }
+    if (baseRevision.length === 0) {
+      invalid('STRONGFLOW_CREATE_BASE_REVISION_REQUIRED', 'Enter the repository baseline revision.')
+      return
+    }
+    if (acceptanceCriteria.length === 0) {
+      invalid(
+        'STRONGFLOW_CREATE_ACCEPTANCE_REQUIRED',
+        'Enter at least one initial acceptance criterion.',
+      )
+      return
+    }
+    const inputKey = JSON.stringify({ title, goal, baseRevision, acceptanceCriteria })
+    if (attempt !== null && attempt.inputKey !== inputKey) {
+      invalid(
+        'STRONGFLOW_CREATE_DRAFT_CHANGED_AFTER_SUBMIT',
+        'Retry the submitted Delivery draft before starting another conversion.',
+      )
+      return
+    }
+    if (currentState.status === 'created') return
+    if (attempt === null) {
+      const deliveryId = options.nextDeliveryId()
+      attempt = {
+        inputKey,
+        createRequest: {
+          schemaVersion: SCHEMA_VERSION,
+          requestId: options.nextRequestId(),
+          actor: options.actor,
+          scope: options.scope,
+          command: CommandName.DeliveryCreate,
+          expectedRevision: 0,
+          payload: {
+            deliveryId,
+            spec: {
+              acceptanceCriteria: acceptanceCriteria.map((criterion, index) => ({
+                id: `criterion:${String(index + 1)}`,
+                required: true,
+                title: criterion,
+              })),
+              baseRevision,
+              goal,
+              publicationTarget: null,
+              repositoryId: options.scope.repositoryId,
+              title,
+            },
+            tasks: [],
+          },
+        },
+        created: null,
+        advanceRequest: null,
+      }
+    }
+    const currentAttempt = attempt
+    const deliveryId = currentAttempt.createRequest.payload.deliveryId
+    active?.abort()
+    const controller = new AbortController()
+    active = controller
+    publish('submitting', null)
+    try {
+      if (currentAttempt.created === null) {
+        const createResponse = await options.client.command(
+          currentAttempt.createRequest,
+          { signal: controller.signal },
+        )
+        if (closed || active !== controller) return
+        const created = completedDelivery(
+          createResponse,
+          CommandName.DeliveryCreate,
+          currentAttempt.createRequest.requestId,
+          deliveryId,
+        )
+        if (created === null) {
+          publish('waiting', null)
+          return
+        }
+        currentAttempt.created = created
+      }
+      currentAttempt.advanceRequest ??= {
+        schemaVersion: SCHEMA_VERSION,
+        requestId: options.nextRequestId(),
+        actor: options.actor,
+        scope: options.scope,
+        command: CommandName.DeliveryAdvance,
+        expectedRevision: currentAttempt.created.revision,
+        payload: { deliveryId },
+      }
+      const advanceRequest = currentAttempt.advanceRequest
+      const advanceResponse = await options.client.command(
+        advanceRequest,
+        { signal: controller.signal },
+      )
+      if (closed || active !== controller) return
+      const advanced = completedDelivery(
+        advanceResponse,
+        CommandName.DeliveryAdvance,
+        advanceRequest.requestId,
+        deliveryId,
+      )
+      if (advanced === null) {
+        publish('waiting', null)
+        return
+      }
+      if (advanced.activeStageRunId === null) throw clientFailure(
+        'STRONGFLOW_CREATE_STAGE_REQUIRED',
+        'The new Delivery did not expose its executable StrongFlow stage.',
+      )
+      publish('created', null)
+      options.onCreated(deliveryId)
+    } catch (error) {
+      if (closed || active !== controller) return
+      publish('error', normalizedError(error, controller.signal))
+    } finally {
+      if (active === controller) active = null
+    }
+  }
+
+  return {
+    get state() {
+      return currentState
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      listener(currentState)
+      return () => { listeners.delete(listener) }
+    },
+    async create(input) {
+      await create(input)
+    },
+    cancelPending() {
+      if (closed) return
+      if (active === null) {
+        if (currentState.status === 'waiting') publish('error', new ControlPlaneClientError({
+          kind: 'cancelled',
+          code: 'REQUEST_CANCELLED',
+          message: 'Delivery creation was cancelled locally.',
+          requestId: null,
+          retryable: false,
+        }))
+        return
+      }
+      const controller = active
+      active = null
+      controller.abort()
+      publish('error', new ControlPlaneClientError({
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'Delivery creation was cancelled locally.',
+        requestId: null,
+        retryable: false,
+      }))
+    },
+    close() {
+      if (closed) return
+      closed = true
+      active?.abort()
+      active = null
+      publish('closed', null)
+      listeners.clear()
+    },
+  }
 }
 
 /** Build the exact StrongFlow read model from one bounded HTTP pair and one event stream. */

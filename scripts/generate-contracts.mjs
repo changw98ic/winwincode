@@ -1351,6 +1351,7 @@ function eventMatchesStream(frame: ControlPlaneWebSocketEventFrame): boolean {
     case 'enterprise-usage.invalidated.v1':
     case 'enterprise-audit.invalidated.v1':
     case 'enterprise-integration.invalidated.v1':
+    case 'model-route-availability.invalidated.v1':
       return stream.kind === 'scope'
     case 'activity.recorded.v1':
       if (stream.kind === 'scope') {

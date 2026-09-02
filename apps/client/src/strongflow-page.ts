@@ -1,16 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DeliveryProjection } from './generated/contracts.js'
+import type {
+  DeliveryAttentionProjection,
+  DeliveryProjection,
+  DeliveryStageProjection,
+  DeliveryTaskDetailProjection,
+  RepositoryScope,
+} from './generated/contracts.js'
+import { mountButton } from './components/button.js'
+import { mountEmptyState } from './components/empty-state.js'
+import { mountFormField } from './components/form-field.js'
+import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
-  appendOmittedCount,
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
   strongFlowElement,
   type StrongFlowRenderLimits,
 } from './strongflow-rendering.js'
 import type {
+  StrongFlowCreateState,
+  StrongFlowCreateViewModel,
+  StrongFlowProjection,
   StrongFlowViewModel,
   StrongFlowViewModelState,
 } from './strongflow-view-model.js'
@@ -24,6 +36,16 @@ export interface StrongFlowPageOptions {
 }
 
 export interface StrongFlowPage {
+  close(): void
+}
+
+export interface StrongFlowCreatePageOptions {
+  readonly root: HTMLElement
+  readonly model: StrongFlowCreateViewModel
+  readonly scope: RepositoryScope
+}
+
+export interface StrongFlowCreatePage {
   close(): void
 }
 
@@ -101,329 +123,247 @@ export function strongFlowPagePresentation(
   })
 }
 
-function actionButton(
-  document: Document,
-  label: string,
-  className: string,
-  busy: boolean,
-  action: () => void,
-): HTMLButtonElement {
-  const button = strongFlowElement(document, 'button', className) as HTMLButtonElement
-  button.type = 'button'
-  button.textContent = label
-  button.disabled = busy
-  button.addEventListener('click', action)
-  return button
+function strongFlowCreateError(state: StrongFlowCreateState): string | null {
+  const error = state.error
+  if (error === null) return null
+  if (error.code.startsWith('STRONGFLOW_CREATE_')) return error.message
+  if (error.kind === 'authentication') return 'Sign in again before creating this Delivery.'
+  if (error.kind === 'authorization') {
+    return 'You do not have permission to create a Delivery in this repository.'
+  }
+  if (error.kind === 'network') {
+    return 'The StrongFlow server could not be reached. Your draft is still here; retry when connected.'
+  }
+  if (error.kind === 'cancelled') return 'Delivery creation was cancelled. Your draft is still here.'
+  return 'The Delivery could not be created. Your draft is still here; review it and retry.'
 }
 
-function reviewActions(
-  document: Document,
-  state: StrongFlowViewModelState,
-  model: StrongFlowViewModel,
-  limits: StrongFlowRenderLimits,
-): HTMLElement {
-  const section = strongFlowElement(document, 'section', 'wwc-strongflow-actions')
-  const heading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  const projection = state.projection
-  const interaction = state.interaction ?? { status: 'idle', error: null }
-  const busy = interaction.status === 'submitting' || interaction.status === 'waiting'
-  heading.textContent = 'Review actions'
-  section.setAttribute('aria-busy', String(busy))
-  section.append(heading)
-  if (projection === null) return section
+/** Mount the complete first-Delivery form without introducing browser-owned Delivery state. */
+export function mountStrongFlowCreatePage(
+  options: StrongFlowCreatePageOptions,
+): StrongFlowCreatePage {
+  const document = options.root.ownerDocument
+  const layout = strongFlowElement(document, 'div', 'wwc-strongflow wwc-strongflow-create')
+  const status = strongFlowElement(document, 'p', 'wwc-strongflow-create-status')
+  const content = strongFlowElement(document, 'main', 'wwc-strongflow-create-content')
+  const form = strongFlowElement(document, 'form', 'wwc-strongflow-create-form') as HTMLFormElement
+  const error = strongFlowElement(document, 'p', 'wwc-strongflow-create-error')
+  const title = strongFlowElement(
+    document,
+    'input',
+    'wwc-strongflow-create-title',
+  ) as HTMLInputElement
+  const goal = strongFlowElement(
+    document,
+    'textarea',
+    'wwc-strongflow-create-goal',
+  ) as HTMLTextAreaElement
+  const repository = strongFlowElement(
+    document,
+    'input',
+    'wwc-strongflow-create-repository',
+  ) as HTMLInputElement
+  const baseline = strongFlowElement(
+    document,
+    'input',
+    'wwc-strongflow-create-baseline',
+  ) as HTMLInputElement
+  const scope = strongFlowElement(
+    document,
+    'input',
+    'wwc-strongflow-create-scope',
+  ) as HTMLInputElement
+  const criteria = strongFlowElement(
+    document,
+    'textarea',
+    'wwc-strongflow-create-criteria',
+  ) as HTMLTextAreaElement
+  let closed = false
 
-  const review = projection.solutionReview
-  if (review?.reviewStatus === 'pending') {
-    const reviewGroup = strongFlowElement(document, 'div', 'wwc-strongflow-solution-actions')
-    const commentsLabel = document.createElement('label')
-    const comments = document.createElement('textarea')
-    const changesLabel = document.createElement('label')
-    const changes = document.createElement('textarea')
-    commentsLabel.textContent = 'Review comments'
-    commentsLabel.append(comments)
-    changesLabel.textContent = 'Requested changes, one per line'
-    changesLabel.append(changes)
-    reviewGroup.append(
-      commentsLabel,
-      changesLabel,
-      actionButton(document, 'Approve solution', 'wwc-strongflow-approve-solution', busy, () => {
-        void model.decideSolutionReview({
-          action: 'approve',
-          comments: comments.value,
-          requestedChanges: [],
-        })
-      }),
-      actionButton(document, 'Request changes', 'wwc-strongflow-request-changes', busy, () => {
-        void model.decideSolutionReview({
-          action: 'request_changes',
-          comments: comments.value,
-          requestedChanges: changes.value.split(/\r?\n/u),
-        })
-      }),
-      actionButton(document, 'Reject solution', 'wwc-strongflow-reject-solution', busy, () => {
-        void model.decideSolutionReview({
-          action: 'reject',
-          comments: comments.value,
-          requestedChanges: [],
-        })
-      }),
-    )
-    section.append(reviewGroup)
-  } else if (review?.reviewStatus === 'approved' && projection.delivery.tasks.length === 0) {
-    section.append(actionButton(
-      document,
-      'Approve task breakdown',
-      'wwc-strongflow-approve-tasks',
-      busy,
-      () => { void model.approveTaskBreakdown() },
-    ))
-  }
+  status.setAttribute('role', 'status')
+  status.setAttribute('aria-live', 'polite')
+  error.setAttribute('role', 'alert')
+  error.setAttribute('aria-live', 'assertive')
+  title.type = 'text'
+  title.required = true
+  goal.required = true
+  repository.type = 'text'
+  repository.readOnly = true
+  repository.value = options.scope.repositoryId
+  baseline.type = 'text'
+  baseline.required = true
+  scope.type = 'text'
+  scope.readOnly = true
+  scope.value = [
+    options.scope.organizationId,
+    options.scope.workspaceId,
+    options.scope.projectId,
+    options.scope.repositoryId,
+  ].join(' / ')
+  criteria.required = true
 
-  if (canSubmitStrongFlowVerdict(projection)) {
-    section.append(actionButton(
-      document,
-      'Compute current verdict',
-      'wwc-strongflow-submit-verdict',
-      busy,
-      () => { void model.submitVerdict() },
-    ))
-  }
-
-  const nodes = review === null
-    ? []
-    : [...review.architectureDiagram.nodes, ...review.processDiagram.nodes]
-  const openAttention = boundedItems(
-    projection.attention.filter(item => item.status === 'open'),
-    limits.attention,
+  const titleField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-title',
+      label: 'Delivery title',
+      control: title,
+      required: true,
+    },
+  })
+  const goalField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-goal',
+      label: 'Goal',
+      help: 'Describe the concrete result this Delivery must reach.',
+      control: goal,
+      required: true,
+    },
+  })
+  const repositoryField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-repository',
+      label: 'Repository',
+      help: 'This value comes from your exact authorized Repository Scope.',
+      control: repository,
+    },
+  })
+  const baselineField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-baseline',
+      label: 'Baseline revision',
+      help: 'Enter the commit or repository revision StrongFlow should start from.',
+      control: baseline,
+      required: true,
+    },
+  })
+  const scopeField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-scope',
+      label: 'Repository Scope',
+      help: 'Organization / workspace / project / repository',
+      control: scope,
+    },
+  })
+  const criteriaField = mountFormField({
+    document,
+    props: {
+      id: 'strongflow-create-criteria',
+      label: 'Initial acceptance criteria',
+      help: 'Enter one required result per line.',
+      control: criteria,
+      required: true,
+    },
+  })
+  const submit = mountButton({
+    document,
+    props: {
+      className: 'wwc-strongflow-create-submit',
+      label: 'Create Delivery and open StrongFlow',
+      type: 'submit',
+      variant: 'primary',
+    },
+  })
+  const cancel = mountButton({
+    document,
+    props: {
+      className: 'wwc-strongflow-create-cancel',
+      label: 'Cancel pending creation',
+      type: 'button',
+      onActivate() { options.model.cancelPending() },
+    },
+  })
+  cancel.root.hidden = true
+  const empty = mountEmptyState({
+    document,
+    props: {
+      className: 'wwc-strongflow-create-empty',
+      title: 'Create the first Delivery',
+      detail: 'Define the goal, repository baseline, exact Scope, and initial acceptance criteria.',
+    },
+  })
+  form.append(
+    titleField.root,
+    goalField.root,
+    repositoryField.root,
+    baselineField.root,
+    scopeField.root,
+    criteriaField.root,
+    error,
+    submit.root,
+    cancel.root,
   )
-  for (const record of openAttention.items) {
-    const group = strongFlowElement(document, 'div', 'wwc-strongflow-attention-actions')
-    const title = document.createElement('strong')
-    const resolutionLabel = document.createElement('label')
-    const resolution = document.createElement('textarea')
-    title.textContent = record.title
-    resolutionLabel.textContent = 'Decision note'
-    resolutionLabel.append(resolution)
-    group.dataset.attentionItemId = record.id
-    group.append(
-      title,
-      resolutionLabel,
-      actionButton(document, 'Resolve', 'wwc-strongflow-resolve-attention', busy, () => {
-        void model.resolveAttention({
-          attentionItemId: record.id,
-          decision: 'resolve',
-          resolution: resolution.value,
-          remediation: null,
-        })
-      }),
-      actionButton(document, 'Dismiss', 'wwc-strongflow-dismiss-attention', busy, () => {
-        void model.resolveAttention({
-          attentionItemId: record.id,
-          decision: 'dismiss',
-          resolution: resolution.value,
-          remediation: null,
-        })
-      }),
-    )
-    if (
-      record.type === 'verification_blocked'
-      && projection.currentCandidate !== null
-      && nodes.length > 0
-    ) {
-      const taskLabel = document.createElement('label')
-      const task = document.createElement('select')
-      const nodeLabel = document.createElement('label')
-      const node = document.createElement('select')
-      const instructionsLabel = document.createElement('label')
-      const instructions = document.createElement('textarea')
-      taskLabel.textContent = 'Current task'
-      task.append(...projection.delivery.tasks.map(item => {
-        const option = document.createElement('option')
-        option.value = item.id
-        option.textContent = item.title
-        return option
-      }))
-      taskLabel.append(task)
-      nodeLabel.textContent = 'Current solution node'
-      node.append(...nodes.map(item => {
-        const option = document.createElement('option')
-        option.value = item.id
-        option.textContent = item.label
-        return option
-      }))
-      nodeLabel.append(node)
-      instructionsLabel.textContent = 'Bounded rework instructions'
-      instructionsLabel.append(instructions)
-      group.append(
-        taskLabel,
-        nodeLabel,
-        instructionsLabel,
-        actionButton(document, 'Approve bounded rework', 'wwc-strongflow-rework', busy, () => {
-          void model.resolveAttention({
-            attentionItemId: record.id,
-            decision: 'resolve',
-            resolution: resolution.value,
-            remediation: {
-              deliveryTaskId: task.value.length === 0
-                ? null
-                : task.value as typeof projection.delivery.tasks[number]['id'],
-              nodeId: node.value,
-              instructions: instructions.value,
-            },
-          })
-        }),
-      )
-    }
-    section.append(group)
-  }
-  appendOmittedCount(document, section, openAttention.omitted, 'Attention actions')
+  content.append(empty.root, form)
+  layout.append(status, content)
+  options.root.replaceChildren(layout)
 
-  if (projection.delivery.status === 'ready-to-deliver') {
-    section.append(actionButton(
-      document,
-      'Approve final Delivery',
-      'wwc-strongflow-advance-delivery',
-      busy,
-      () => { void model.advanceDelivery() },
-    ))
-  }
-  return section
-}
-
-function deliveryList(
-  document: Document,
-  state: StrongFlowViewModelState,
-  deliveries: readonly DeliveryProjection[],
-  limits: StrongFlowRenderLimits,
-): HTMLElement {
-  const root = strongFlowElement(document, 'aside', 'wwc-strongflow-deliveries')
-  const heading = strongFlowElement(document, 'h2', 'wwc-strongflow-deliveries-heading')
-  const list = strongFlowElement(document, 'ul', 'wwc-strongflow-delivery-list')
-  const active = state.projection?.delivery ?? null
-  const byId = new Map(deliveries.map(delivery => [delivery.deliveryId, delivery]))
-  if (active !== null && !byId.has(active.deliveryId)) {
-    byId.set(active.deliveryId, {
-      schemaVersion: active.schemaVersion,
-      deliveryId: active.deliveryId,
-      revision: active.deliveryRevision,
-      status: active.status,
-      title: active.requirements.title,
-      updatedAt: state.projection?.metadata.updatedAt ?? '',
-      ownership: active.ownership,
-      activeStageRunId: state.projection?.stage.id ?? null,
-      openAttentionCount: active.attention.filter(item => item.status === 'open').length,
-      taskCounts: {
-        total: active.tasks.length,
-        pending: active.tasks.filter(item => item.status === 'pending').length,
-        active: active.tasks.filter(item => item.status === 'active').length,
-        blocked: active.tasks.filter(item => item.status === 'blocked').length,
-        verifying: active.tasks.filter(item => item.status === 'verifying').length,
-        completed: active.tasks.filter(item => item.status === 'completed').length,
-        failed: active.tasks.filter(item => item.status === 'failed').length,
-      },
+  const onSubmit = (event: SubmitEvent) => {
+    event.preventDefault()
+    void options.model.create({
+      title: title.value,
+      goal: goal.value,
+      baseRevision: baseline.value,
+      acceptanceCriteria: criteria.value.split(/\r?\n/u),
     })
   }
-  const boundedDeliveries = boundedItems([...byId.values()], limits.deliveries)
-  heading.textContent = 'Deliveries'
-  list.append(...boundedDeliveries.items.map(delivery => {
-    const item = document.createElement('li')
-    const link = document.createElement('a')
-    const status = document.createElement('span')
-    link.href = `#/strongflow?delivery=${encodeURIComponent(delivery.deliveryId)}`
-    link.textContent = delivery.title
-    link.dataset.deliveryId = delivery.deliveryId
-    status.textContent = `${delivery.status} · r${String(delivery.revision)}`
-    if (delivery.deliveryId === active?.deliveryId) link.setAttribute('aria-current', 'page')
-    item.append(link, status)
-    return item
-  }))
-  root.append(heading, list)
-  appendOmittedCount(document, root, boundedDeliveries.omitted, 'Deliveries')
-  return root
-}
+  form.addEventListener('submit', onSubmit)
 
-function deliveryDetails(
-  document: Document,
-  state: StrongFlowViewModelState,
-  limits: StrongFlowRenderLimits,
-): HTMLElement {
-  const root = strongFlowElement(document, 'div', 'wwc-strongflow-details')
-  const projection = state.projection
-  if (projection === null) {
-    const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
-    empty.textContent = state.status === 'loading' || state.status === 'refreshing'
-      ? 'Loading the exact Delivery snapshot…'
-      : 'Select a Delivery to open StrongFlow.'
-    root.append(empty)
-    return root
+  function render(state: StrongFlowCreateState): void {
+    if (closed) return
+    const busy = state.status === 'submitting' || state.status === 'waiting'
+    status.textContent = state.status === 'submitting'
+      ? 'Creating Delivery…'
+      : state.status === 'waiting'
+        ? 'Delivery accepted · waiting for its executable stage…'
+        : state.status === 'created'
+          ? 'Delivery created · opening StrongFlow…'
+          : 'No Delivery exists in this repository yet'
+    form.setAttribute('aria-busy', String(busy))
+    const visibleError = strongFlowCreateError(state)
+    error.hidden = visibleError === null
+    error.textContent = visibleError ?? ''
+    submit.update({
+      className: 'wwc-strongflow-create-submit',
+      label: 'Create Delivery and open StrongFlow',
+      busy,
+      busyLabel: state.status === 'waiting' ? 'Waiting for Delivery…' : 'Creating Delivery…',
+      disabled: state.status === 'created' || state.status === 'closed',
+      type: 'submit',
+      variant: 'primary',
+    })
+    cancel.root.hidden = !busy
+    cancel.update({
+      className: 'wwc-strongflow-create-cancel',
+      label: 'Cancel pending creation',
+      type: 'button',
+      onActivate() { options.model.cancelPending() },
+    })
   }
 
-  const overview = strongFlowElement(document, 'section', 'wwc-strongflow-overview')
-  const heading = strongFlowElement(document, 'h2', 'wwc-strongflow-heading')
-  const goal = strongFlowElement(document, 'p', 'wwc-strongflow-goal')
-  const metadata = strongFlowElement(document, 'p', 'wwc-strongflow-metadata')
-  heading.textContent = projection.delivery.requirements.title
-  goal.textContent = projection.delivery.requirements.goal
-  metadata.textContent = `Delivery r${String(projection.metadata.revisions.delivery)} · Runtime r${String(
-    projection.metadata.revisions.runtime,
-  )} · updated ${projection.metadata.updatedAt}`
-  overview.append(heading, goal, metadata)
-
-  const tasksSection = strongFlowElement(document, 'section', 'wwc-strongflow-tasks')
-  const tasksHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  const tasks = strongFlowElement(document, 'ul', 'wwc-strongflow-task-list')
-  const boundedTasks = boundedItems(projection.delivery.tasks, limits.tasks)
-  tasksHeading.textContent = 'Tasks'
-  tasks.append(...boundedTasks.items.map(task => {
-    const item = document.createElement('li')
-    const title = document.createElement('strong')
-    const status = document.createElement('span')
-    title.textContent = task.title
-    status.textContent = task.status
-    item.dataset.status = task.status
-    item.append(title, status)
-    return item
-  }))
-  tasksSection.append(tasksHeading, tasks)
-  appendOmittedCount(document, tasksSection, boundedTasks.omitted, 'tasks')
-
-  const stagesSection = strongFlowElement(document, 'section', 'wwc-strongflow-stages')
-  const stagesHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  const stages = strongFlowElement(document, 'ol', 'wwc-strongflow-stage-list')
-  const boundedStages = boundedItems(projection.delivery.stages, limits.stages)
-  stagesHeading.textContent = 'Stages'
-  stages.append(...boundedStages.items.map(stage => {
-    const item = document.createElement('li')
-    item.dataset.status = stage.status
-    item.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
-    return item
-  }))
-  stagesSection.append(stagesHeading, stages)
-  appendOmittedCount(document, stagesSection, boundedStages.omitted, 'stages')
-
-  const attentionSection = strongFlowElement(document, 'section', 'wwc-strongflow-attention')
-  const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
-  const boundedAttention = boundedItems(projection.attention, limits.attention)
-  attentionHeading.textContent = 'Attention'
-  attention.append(...boundedAttention.items.map(record => {
-    const item = document.createElement('li')
-    item.dataset.status = record.status
-    item.textContent = `${record.title} · ${record.status}`
-    return item
-  }))
-  attentionSection.append(attentionHeading, attention)
-  appendOmittedCount(document, attentionSection, boundedAttention.omitted, 'Attention records')
-
-  root.append(
-    overview,
-    tasksSection,
-    stagesSection,
-    attentionSection,
-    renderStrongFlowDiagrams(document, projection, limits),
-    renderStrongFlowCandidate(document, projection, limits),
-  )
-  return root
+  const unsubscribe = options.model.subscribe(render)
+  return {
+    close() {
+      if (closed) return
+      closed = true
+      unsubscribe()
+      form.removeEventListener?.('submit', onSubmit)
+      titleField.close()
+      goalField.close()
+      repositoryField.close()
+      baselineField.close()
+      scopeField.close()
+      criteriaField.close()
+      submit.close()
+      cancel.close()
+      empty.close()
+      options.model.close()
+      options.root.replaceChildren()
+    },
+  }
 }
 
 /** Mount the advanced StrongFlow workspace against its Control Plane view-model. */
@@ -434,10 +374,106 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
   const error = strongFlowElement(document, 'div', 'wwc-strongflow-error')
   const errorText = strongFlowElement(document, 'span', 'wwc-strongflow-error-text')
-  const retry = strongFlowElement(document, 'button', 'wwc-strongflow-retry')
-  const reconnect = strongFlowElement(document, 'button', 'wwc-strongflow-reconnect')
+  const retry = strongFlowElement(document, 'button', 'wwc-strongflow-retry') as HTMLButtonElement
+  const reconnect = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-reconnect',
+  ) as HTMLButtonElement
   const content = strongFlowElement(document, 'div', 'wwc-strongflow-content')
+  const deliveriesRoot = strongFlowElement(document, 'aside', 'wwc-strongflow-deliveries')
+  const deliveriesHeading = strongFlowElement(
+    document,
+    'h2',
+    'wwc-strongflow-deliveries-heading',
+  )
+  const deliveries = strongFlowElement(document, 'ul', 'wwc-strongflow-delivery-list')
+  const deliveriesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const workspace = strongFlowElement(document, 'main', 'wwc-strongflow-workspace')
+  const details = strongFlowElement(document, 'div', 'wwc-strongflow-details')
+  const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
+  const overview = strongFlowElement(document, 'section', 'wwc-strongflow-overview')
+  const heading = strongFlowElement(document, 'h2', 'wwc-strongflow-heading')
+  const goal = strongFlowElement(document, 'p', 'wwc-strongflow-goal')
+  const metadata = strongFlowElement(document, 'p', 'wwc-strongflow-metadata')
+  const tasksSection = strongFlowElement(document, 'section', 'wwc-strongflow-tasks')
+  const tasksHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const tasks = strongFlowElement(document, 'ul', 'wwc-strongflow-task-list')
+  const tasksOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const stagesSection = strongFlowElement(document, 'section', 'wwc-strongflow-stages')
+  const stagesHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const stages = strongFlowElement(document, 'ol', 'wwc-strongflow-stage-list')
+  const stagesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const attentionSection = strongFlowElement(document, 'section', 'wwc-strongflow-attention')
+  const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
+  const attentionOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const diagramsHost = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams-host')
+  const candidateHost = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-host')
+  const actions = strongFlowElement(document, 'section', 'wwc-strongflow-actions')
+  const actionsHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const solutionActions = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-solution-actions',
+  )
+  const commentsLabel = document.createElement('label')
+  const comments = document.createElement('textarea')
+  const changesLabel = document.createElement('label')
+  const changes = document.createElement('textarea')
+  const approveSolution = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-approve-solution',
+  ) as HTMLButtonElement
+  const requestChanges = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-request-changes',
+  ) as HTMLButtonElement
+  const rejectSolution = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-reject-solution',
+  ) as HTMLButtonElement
+  const approveTasks = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-approve-tasks',
+  ) as HTMLButtonElement
+  const submitVerdict = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-submit-verdict',
+  ) as HTMLButtonElement
+  const attentionActions = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-attention-actions-list',
+  )
+  const actionsOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const advanceDelivery = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-advance-delivery',
+  ) as HTMLButtonElement
   let closed = false
+  let diagramsNode: HTMLElement | null = null
+  let candidateNode: HTMLElement | null = null
+  let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
+  let lastRuntime: StrongFlowProjection['runtime'] | null = null
+  let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
+  let lastEvidence: StrongFlowProjection['evidence'] | null = null
+  let lastVerdict: StrongFlowProjection['verdict'] | null = null
+  let lastPublication: StrongFlowProjection['publication'] | null = null
+  let solutionDraftKey: string | null = null
+
+  function updateOmitted(node: HTMLElement, count: number, label: string): void {
+    node.hidden = count === 0
+    const text = `${String(count)} more ${label} not shown.`
+    if (node.textContent !== text) node.textContent = text
+  }
+
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   error.setAttribute('role', 'alert')
@@ -446,9 +482,504 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   retry.textContent = 'Retry snapshot'
   reconnect.type = 'button'
   reconnect.textContent = 'Reconnect events'
+  deliveriesHeading.textContent = 'Deliveries'
+  tasksHeading.textContent = 'Tasks'
+  stagesHeading.textContent = 'Stages'
+  attentionHeading.textContent = 'Attention'
+  actionsHeading.textContent = 'Review actions'
+  commentsLabel.textContent = 'Review comments'
+  commentsLabel.append(comments)
+  changesLabel.textContent = 'Requested changes, one per line'
+  changesLabel.append(changes)
+  approveSolution.type = 'button'
+  approveSolution.textContent = 'Approve solution'
+  requestChanges.type = 'button'
+  requestChanges.textContent = 'Request changes'
+  rejectSolution.type = 'button'
+  rejectSolution.textContent = 'Reject solution'
+  approveTasks.type = 'button'
+  approveTasks.textContent = 'Approve task breakdown'
+  submitVerdict.type = 'button'
+  submitVerdict.textContent = 'Compute current verdict'
+  advanceDelivery.type = 'button'
+  advanceDelivery.textContent = 'Approve final Delivery'
+  solutionActions.append(
+    commentsLabel,
+    changesLabel,
+    approveSolution,
+    requestChanges,
+    rejectSolution,
+  )
   error.append(errorText, retry, reconnect)
+  deliveriesRoot.append(deliveriesHeading, deliveries, deliveriesOmitted)
+  overview.append(heading, goal, metadata)
+  tasksSection.append(tasksHeading, tasks, tasksOmitted)
+  stagesSection.append(stagesHeading, stages, stagesOmitted)
+  attentionSection.append(attentionHeading, attention, attentionOmitted)
+  details.append(
+    empty,
+    overview,
+    tasksSection,
+    stagesSection,
+    attentionSection,
+    diagramsHost,
+    candidateHost,
+  )
+  actions.append(
+    actionsHeading,
+    solutionActions,
+    approveTasks,
+    submitVerdict,
+    attentionActions,
+    actionsOmitted,
+    advanceDelivery,
+  )
+  workspace.append(details, actions)
+  content.append(deliveriesRoot, workspace)
   layout.append(status, error, content)
   options.root.replaceChildren(layout)
+
+  const deliveryRows = new WeakMap<HTMLLIElement, {
+    readonly link: HTMLAnchorElement
+    readonly status: HTMLElement
+  }>()
+  const deliveryCollection = mountKeyedCollection({
+    parent: deliveries,
+    key: (delivery: DeliveryProjection) => delivery.deliveryId,
+    create() {
+      const item = document.createElement('li')
+      const link = document.createElement('a')
+      const deliveryStatus = document.createElement('span')
+      item.append(link, deliveryStatus)
+      deliveryRows.set(item, { link, status: deliveryStatus })
+      return item
+    },
+    update(item, delivery: DeliveryProjection) {
+      const row = deliveryRows.get(item)
+      if (row === undefined) return
+      row.link.href = `#/strongflow?delivery=${encodeURIComponent(delivery.deliveryId)}`
+      row.link.textContent = delivery.title
+      row.link.dataset.deliveryId = delivery.deliveryId
+      row.status.textContent = `${delivery.status} · r${String(delivery.revision)}`
+      if (delivery.deliveryId === options.model.state.projection?.delivery.deliveryId) {
+        row.link.setAttribute('aria-current', 'page')
+      } else {
+        row.link.removeAttribute('aria-current')
+      }
+    },
+    remove(item) { deliveryRows.delete(item) },
+  })
+
+  const taskRows = new WeakMap<HTMLLIElement, {
+    readonly title: HTMLElement
+    readonly status: HTMLElement
+  }>()
+  const taskCollection = mountKeyedCollection({
+    parent: tasks,
+    key: (task: DeliveryTaskDetailProjection) => task.id,
+    create() {
+      const item = document.createElement('li')
+      const title = document.createElement('strong')
+      const taskStatus = document.createElement('span')
+      item.append(title, taskStatus)
+      taskRows.set(item, { title, status: taskStatus })
+      return item
+    },
+    update(item, task: DeliveryTaskDetailProjection) {
+      const row = taskRows.get(item)
+      if (row === undefined) return
+      item.dataset.status = task.status
+      row.title.textContent = task.title
+      row.status.textContent = task.status
+    },
+    remove(item) { taskRows.delete(item) },
+  })
+
+  const stageCollection = mountKeyedCollection({
+    parent: stages,
+    key: (stage: DeliveryStageProjection) => stage.id,
+    create: () => document.createElement('li'),
+    update(item, stage: DeliveryStageProjection) {
+      item.dataset.status = stage.status
+      item.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
+    },
+  })
+
+  const attentionCollection = mountKeyedCollection({
+    parent: attention,
+    key: (record: DeliveryAttentionProjection) => record.id,
+    create: () => document.createElement('li'),
+    update(item, record: DeliveryAttentionProjection) {
+      item.dataset.status = record.status
+      item.textContent = `${record.title} · ${record.status}`
+    },
+  })
+
+  type ReviewNode = { readonly id: string; readonly label: string }
+  interface AttentionActionItem {
+    readonly record: DeliveryAttentionProjection
+    readonly busy: boolean
+    readonly tasks: readonly DeliveryTaskDetailProjection[]
+    readonly nodes: readonly ReviewNode[]
+    readonly candidateAvailable: boolean
+  }
+  interface AttentionActionRow {
+    current: AttentionActionItem
+    readonly title: HTMLElement
+    readonly resolution: HTMLTextAreaElement
+    readonly task: HTMLSelectElement
+    readonly node: HTMLSelectElement
+    readonly instructions: HTMLTextAreaElement
+    readonly reworkFields: HTMLElement
+    readonly resolve: HTMLButtonElement
+    readonly dismiss: HTMLButtonElement
+    readonly rework: HTMLButtonElement
+    readonly taskOptions: KeyedCollectionView<
+      DeliveryTaskDetailProjection,
+      string,
+      HTMLOptionElement
+    >
+    readonly nodeOptions: KeyedCollectionView<ReviewNode, string, HTMLOptionElement>
+    readonly onResolve: () => void
+    readonly onDismiss: () => void
+    readonly onRework: () => void
+  }
+  const attentionActionRows = new WeakMap<HTMLElement, AttentionActionRow>()
+  const attentionActionCollection = mountKeyedCollection({
+    parent: attentionActions,
+    key: (item: AttentionActionItem) => item.record.id,
+    create(item: AttentionActionItem) {
+      const group = strongFlowElement(document, 'div', 'wwc-strongflow-attention-actions')
+      const title = document.createElement('strong')
+      const resolutionLabel = document.createElement('label')
+      const resolution = document.createElement('textarea')
+      const resolve = strongFlowElement(
+        document,
+        'button',
+        'wwc-strongflow-resolve-attention',
+      ) as HTMLButtonElement
+      const dismiss = strongFlowElement(
+        document,
+        'button',
+        'wwc-strongflow-dismiss-attention',
+      ) as HTMLButtonElement
+      const reworkFields = strongFlowElement(document, 'div', 'wwc-strongflow-rework-fields')
+      const taskLabel = document.createElement('label')
+      const task = document.createElement('select')
+      const nodeLabel = document.createElement('label')
+      const node = document.createElement('select')
+      const instructionsLabel = document.createElement('label')
+      const instructions = document.createElement('textarea')
+      const rework = strongFlowElement(
+        document,
+        'button',
+        'wwc-strongflow-rework',
+      ) as HTMLButtonElement
+      resolutionLabel.textContent = 'Decision note'
+      resolutionLabel.append(resolution)
+      resolve.type = 'button'
+      resolve.textContent = 'Resolve'
+      dismiss.type = 'button'
+      dismiss.textContent = 'Dismiss'
+      taskLabel.textContent = 'Current task'
+      taskLabel.append(task)
+      nodeLabel.textContent = 'Current solution node'
+      nodeLabel.append(node)
+      instructionsLabel.textContent = 'Bounded rework instructions'
+      instructionsLabel.append(instructions)
+      rework.type = 'button'
+      rework.textContent = 'Approve bounded rework'
+      const taskOptions = mountKeyedCollection<
+        DeliveryTaskDetailProjection,
+        string,
+        HTMLOptionElement
+      >({
+        parent: task,
+        key: option => option.id,
+        create: () => document.createElement('option'),
+        update(option, currentTask) {
+          option.value = currentTask.id
+          option.textContent = currentTask.title
+        },
+      })
+      const nodeOptions = mountKeyedCollection<ReviewNode, string, HTMLOptionElement>({
+        parent: node,
+        key: option => option.id,
+        create: () => document.createElement('option'),
+        update(option, currentNode) {
+          option.value = currentNode.id
+          option.textContent = currentNode.label
+        },
+      })
+      const decide = (decision: 'resolve' | 'dismiss', remediation: boolean) => {
+        const row = attentionActionRows.get(group)
+        if (row === undefined) return
+        void options.model.resolveAttention({
+          attentionItemId: row.current.record.id,
+          decision,
+          resolution: row.resolution.value,
+          remediation: remediation
+            ? {
+                deliveryTaskId: row.task.value.length === 0
+                  ? null
+                  : row.task.value as DeliveryTaskDetailProjection['id'],
+                nodeId: row.node.value,
+                instructions: row.instructions.value,
+              }
+            : null,
+        })
+      }
+      const onResolve = () => { decide('resolve', false) }
+      const onDismiss = () => { decide('dismiss', false) }
+      const onRework = () => { decide('resolve', true) }
+      resolve.addEventListener('click', onResolve)
+      dismiss.addEventListener('click', onDismiss)
+      rework.addEventListener('click', onRework)
+      reworkFields.append(taskLabel, nodeLabel, instructionsLabel, rework)
+      group.append(title, resolutionLabel, resolve, dismiss, reworkFields)
+      attentionActionRows.set(group, {
+        current: item,
+        title,
+        resolution,
+        task,
+        node,
+        instructions,
+        reworkFields,
+        resolve,
+        dismiss,
+        rework,
+        taskOptions,
+        nodeOptions,
+        onResolve,
+        onDismiss,
+        onRework,
+      })
+      return group
+    },
+    update(group, item: AttentionActionItem) {
+      const row = attentionActionRows.get(group)
+      if (row === undefined) return
+      row.current = item
+      row.title.textContent = item.record.title
+      group.dataset.attentionItemId = item.record.id
+      row.resolve.disabled = item.busy
+      row.dismiss.disabled = item.busy
+      row.rework.disabled = item.busy
+      const reworkVisible = item.record.type === 'verification_blocked'
+        && item.candidateAvailable
+        && item.nodes.length > 0
+      row.reworkFields.hidden = !reworkVisible
+      row.taskOptions.update(reworkVisible ? item.tasks : [])
+      row.nodeOptions.update(reworkVisible ? item.nodes : [])
+    },
+    remove(group) {
+      const row = attentionActionRows.get(group)
+      if (row === undefined) return
+      row.resolution.value = ''
+      row.instructions.value = ''
+      row.resolve.removeEventListener('click', row.onResolve)
+      row.dismiss.removeEventListener('click', row.onDismiss)
+      row.rework.removeEventListener('click', row.onRework)
+      row.taskOptions.close()
+      row.nodeOptions.close()
+      attentionActionRows.delete(group)
+    },
+  })
+
+  const onApproveSolution = () => {
+    void options.model.decideSolutionReview({
+      action: 'approve',
+      comments: comments.value,
+      requestedChanges: [],
+    })
+  }
+  const onRequestChanges = () => {
+    void options.model.decideSolutionReview({
+      action: 'request_changes',
+      comments: comments.value,
+      requestedChanges: changes.value.split(/\r?\n/u),
+    })
+  }
+  const onRejectSolution = () => {
+    void options.model.decideSolutionReview({
+      action: 'reject',
+      comments: comments.value,
+      requestedChanges: [],
+    })
+  }
+  const onApproveTasks = () => { void options.model.approveTaskBreakdown() }
+  const onSubmitVerdict = () => { void options.model.submitVerdict() }
+  const onAdvanceDelivery = () => { void options.model.advanceDelivery() }
+  const onRetry = () => { void options.model.refresh() }
+  const onReconnect = () => { options.model.reconnect() }
+  approveSolution.addEventListener('click', onApproveSolution)
+  requestChanges.addEventListener('click', onRequestChanges)
+  rejectSolution.addEventListener('click', onRejectSolution)
+  approveTasks.addEventListener('click', onApproveTasks)
+  submitVerdict.addEventListener('click', onSubmitVerdict)
+  advanceDelivery.addEventListener('click', onAdvanceDelivery)
+  retry.addEventListener('click', onRetry)
+  reconnect.addEventListener('click', onReconnect)
+
+  function renderDeliveries(state: StrongFlowViewModelState): void {
+    const active = state.projection?.delivery ?? null
+    const byId = new Map(
+      (options.deliveries ?? []).map(delivery => [delivery.deliveryId, delivery]),
+    )
+    if (active !== null && !byId.has(active.deliveryId)) {
+      byId.set(active.deliveryId, {
+        schemaVersion: active.schemaVersion,
+        deliveryId: active.deliveryId,
+        revision: active.deliveryRevision,
+        status: active.status,
+        title: active.requirements.title,
+        updatedAt: state.projection?.metadata.updatedAt ?? '',
+        ownership: active.ownership,
+        activeStageRunId: state.projection?.stage.id ?? null,
+        openAttentionCount: active.attention.filter(item => item.status === 'open').length,
+        taskCounts: {
+          total: active.tasks.length,
+          pending: active.tasks.filter(item => item.status === 'pending').length,
+          active: active.tasks.filter(item => item.status === 'active').length,
+          blocked: active.tasks.filter(item => item.status === 'blocked').length,
+          verifying: active.tasks.filter(item => item.status === 'verifying').length,
+          completed: active.tasks.filter(item => item.status === 'completed').length,
+          failed: active.tasks.filter(item => item.status === 'failed').length,
+        },
+      })
+    }
+    const bounded = boundedItems([...byId.values()], limits.deliveries)
+    deliveryCollection.update(bounded.items)
+    updateOmitted(deliveriesOmitted, bounded.omitted, 'Deliveries')
+  }
+
+  function renderProjection(projection: StrongFlowProjection | null, stateStatus: string): void {
+    empty.hidden = projection !== null
+    overview.hidden = projection === null
+    tasksSection.hidden = projection === null
+    stagesSection.hidden = projection === null
+    attentionSection.hidden = projection === null
+    diagramsHost.hidden = projection === null
+    candidateHost.hidden = projection === null
+    if (projection === null) {
+      empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
+        ? 'Loading the exact Delivery snapshot…'
+        : 'Select a Delivery to open StrongFlow.'
+      taskCollection.update([])
+      stageCollection.update([])
+      attentionCollection.update([])
+      updateOmitted(tasksOmitted, 0, 'tasks')
+      updateOmitted(stagesOmitted, 0, 'stages')
+      updateOmitted(attentionOmitted, 0, 'Attention records')
+      if (diagramsNode !== null) diagramsNode.remove()
+      if (candidateNode !== null) candidateNode.remove()
+      diagramsNode = null
+      candidateNode = null
+      lastSolutionReview = null
+      lastRuntime = null
+      lastCandidate = null
+      lastEvidence = null
+      lastVerdict = null
+      lastPublication = null
+      return
+    }
+
+    heading.textContent = projection.delivery.requirements.title
+    goal.textContent = projection.delivery.requirements.goal
+    metadata.textContent = `Delivery r${String(
+      projection.metadata.revisions.delivery,
+    )} · Runtime r${String(projection.metadata.revisions.runtime)} · updated ${projection.metadata.updatedAt}`
+    const boundedTasks = boundedItems(projection.delivery.tasks, limits.tasks)
+    const boundedStages = boundedItems(projection.delivery.stages, limits.stages)
+    const boundedAttention = boundedItems(projection.attention, limits.attention)
+    taskCollection.update(boundedTasks.items)
+    stageCollection.update(boundedStages.items)
+    attentionCollection.update(boundedAttention.items)
+    updateOmitted(tasksOmitted, boundedTasks.omitted, 'tasks')
+    updateOmitted(stagesOmitted, boundedStages.omitted, 'stages')
+    updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
+
+    if (
+      diagramsNode === null
+      || lastSolutionReview !== projection.solutionReview
+      || lastRuntime !== projection.runtime
+    ) {
+      diagramsNode?.remove()
+      diagramsNode = renderStrongFlowDiagrams(document, projection, limits)
+      diagramsHost.append(diagramsNode)
+      lastSolutionReview = projection.solutionReview
+      lastRuntime = projection.runtime
+    }
+    if (
+      candidateNode === null
+      || lastCandidate !== projection.currentCandidate
+      || lastEvidence !== projection.evidence
+      || lastVerdict !== projection.verdict
+      || lastPublication !== projection.publication
+    ) {
+      candidateNode?.remove()
+      candidateNode = renderStrongFlowCandidate(document, projection, limits)
+      candidateHost.append(candidateNode)
+      lastCandidate = projection.currentCandidate
+      lastEvidence = projection.evidence
+      lastVerdict = projection.verdict
+      lastPublication = projection.publication
+    }
+  }
+
+  function renderActions(state: StrongFlowViewModelState): void {
+    const projection = state.projection
+    const interaction = state.interaction ?? { status: 'idle', error: null }
+    const busy = interaction.status === 'submitting' || interaction.status === 'waiting'
+    actions.setAttribute('aria-busy', String(busy))
+    const review = projection?.solutionReview ?? null
+    const pendingReview = review?.reviewStatus === 'pending'
+    const nextDraftKey = pendingReview
+      ? projection?.currentCandidate?.diffSha256 ?? projection?.delivery.deliveryId ?? null
+      : null
+    if (solutionDraftKey !== nextDraftKey) {
+      comments.value = ''
+      changes.value = ''
+      solutionDraftKey = nextDraftKey
+    }
+    solutionActions.hidden = !pendingReview
+    approveSolution.disabled = busy
+    requestChanges.disabled = busy
+    rejectSolution.disabled = busy
+    approveTasks.hidden = review?.reviewStatus !== 'approved'
+      || (projection?.delivery.tasks.length ?? 0) > 0
+    approveTasks.disabled = busy
+    const verdictVisible = projection !== null && canSubmitStrongFlowVerdict(projection)
+    if (verdictVisible && submitVerdict.parentNode === null) {
+      actions.insertBefore(submitVerdict, attentionActions)
+    } else if (!verdictVisible) {
+      submitVerdict.remove()
+    }
+    submitVerdict.disabled = busy
+    advanceDelivery.hidden = projection?.delivery.status !== 'ready-to-deliver'
+    advanceDelivery.disabled = busy
+    const nodes: readonly ReviewNode[] = review === null
+      ? []
+      : boundedItems(
+          [...review.architectureDiagram.nodes, ...review.processDiagram.nodes],
+          limits.graphNodes,
+        ).items
+    const reviewTasks = projection === null
+      ? []
+      : boundedItems(projection.delivery.tasks, limits.tasks).items
+    const openAttention = boundedItems(
+      projection?.attention.filter(item => item.status === 'open') ?? [],
+      limits.attention,
+    )
+    attentionActionCollection.update(openAttention.items.map(record => ({
+      record,
+      busy,
+      tasks: reviewTasks,
+      nodes,
+      candidateAvailable: projection?.currentCandidate !== null,
+    })))
+    updateOmitted(actionsOmitted, openAttention.omitted, 'Attention actions')
+  }
 
   function render(state: StrongFlowViewModelState): void {
     if (closed) return
@@ -459,19 +990,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     errorText.textContent = presentation.errorText ?? ''
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    const workspace = strongFlowElement(document, 'main', 'wwc-strongflow-workspace')
-    workspace.append(
-      deliveryDetails(document, state, limits),
-      reviewActions(document, state, options.model, limits),
-    )
-    content.replaceChildren(
-      deliveryList(document, state, options.deliveries ?? [], limits),
-      workspace,
-    )
+    renderDeliveries(state)
+    renderProjection(state.projection, state.status)
+    renderActions(state)
   }
 
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  reconnect.addEventListener('click', () => { options.model.reconnect() })
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -479,6 +1002,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       if (closed) return
       closed = true
       unsubscribe()
+      retry.removeEventListener('click', onRetry)
+      reconnect.removeEventListener('click', onReconnect)
+      approveSolution.removeEventListener('click', onApproveSolution)
+      requestChanges.removeEventListener('click', onRequestChanges)
+      rejectSolution.removeEventListener('click', onRejectSolution)
+      approveTasks.removeEventListener('click', onApproveTasks)
+      submitVerdict.removeEventListener('click', onSubmitVerdict)
+      advanceDelivery.removeEventListener('click', onAdvanceDelivery)
+      comments.value = ''
+      changes.value = ''
+      attentionActionCollection.close()
+      attentionCollection.close()
+      stageCollection.close()
+      taskCollection.close()
+      deliveryCollection.close()
+      diagramsNode?.remove()
+      candidateNode?.remove()
       options.model.close()
       options.root.replaceChildren()
     },

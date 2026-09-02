@@ -338,6 +338,55 @@
       "stalePresence": "derived_offline_at_trusted_query_time",
       "websocket": "existing_authorized_durable_subscription_and_resume",
       "duplicateAndOutOfOrder": "same_source_receipt_replays_without_duplicate_activity_or_notification"
+    },
+    "candidateReviewRead": {
+      "authority": "exact Delivery cursor plus verified append-only Delivery journal, candidate Artifact, controlled Git source, and durable candidate retention receipt",
+      "queries": [
+        "candidate.list",
+        "candidate.review.get",
+        "candidate.files.list",
+        "candidate.diff.get"
+      ],
+      "binding": [
+        "repository scope",
+        "deliveryId",
+        "deliveryRevision",
+        "readPageLimit",
+        "candidateRef",
+        "candidateTreeId",
+        "diffSha256"
+      ],
+      "filePageLimit": 200,
+      "diffChunkMaxBytes": 262144,
+      "readCursorReplay": "readPageLimit must equal the page.limit used to issue atCursor",
+      "rawRepositoryLocatorAllowed": false,
+      "callerGitRevisionAllowed": false,
+      "pathTraversalAllowed": false,
+      "baseProjectionIncludesContent": false,
+      "historyAvailability": "available only for an exact pinned retention; released is display-only and never authorizes Git content reads",
+      "historicalReviewAuthorization": "historical Verdict and Evidence are display-only and never become current Delivery authorization"
+    },
+    "modelRouteAvailability": {
+      "query": "model.route.availability.list",
+      "scopeAuthority": "exact repository query scope; inherited settings and catalog scopes are joined only by the server",
+      "sources": [
+        "effective model settings selection",
+        "effective Provider/model catalog",
+        "Credential reference lifecycle",
+        "configured durable model request pool"
+      ],
+      "reasons": [
+        "ready",
+        "no_provider",
+        "credential_missing_or_revoked",
+        "default_route_invalid",
+        "provider_or_model_disabled",
+        "request_pool_unavailable"
+      ],
+      "clientInferenceAllowed": false,
+      "secretFieldsAllowed": false,
+      "poolInternalFieldsAllowed": false,
+      "invalidationEvent": "model-route-availability.invalidated.v1"
     }
   },
   "$defs": {
@@ -509,7 +558,28 @@
           "$ref": "#/$defs/DeliveryGetQuery"
         },
         {
+          "$ref": "#/$defs/CandidateHistoryListQuery"
+        },
+        {
+          "$ref": "#/$defs/CandidateHistoricalReviewGetQuery"
+        },
+        {
+          "$ref": "#/$defs/CandidateFilesListQuery"
+        },
+        {
+          "$ref": "#/$defs/CandidateDiffGetQuery"
+        },
+        {
+          "$ref": "#/$defs/EvidenceGetQuery"
+        },
+        {
+          "$ref": "#/$defs/EvidenceArtifactContentGetQuery"
+        },
+        {
           "$ref": "#/$defs/SettingsGetQuery"
+        },
+        {
+          "$ref": "#/$defs/ModelRouteAvailabilityListQuery"
         },
         {
           "$ref": "#/$defs/CredentialReferenceListQuery"
@@ -589,7 +659,14 @@
         "runtime.projection.get",
         "delivery.list",
         "delivery.get",
+        "candidate.list",
+        "candidate.review.get",
+        "candidate.files.list",
+        "candidate.diff.get",
+        "evidence.get",
+        "evidence.artifact.content.get",
         "settings.get",
+        "model.route.availability.list",
         "credential.reference.list",
         "credential.reference.get",
         "approval.list",
@@ -864,7 +941,28 @@
           "$ref": "#/$defs/DeliveryGetResultResponse"
         },
         {
+          "$ref": "#/$defs/CandidateHistoryListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CandidateHistoricalReviewGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CandidateFilesListResultResponse"
+        },
+        {
+          "$ref": "#/$defs/CandidateDiffGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/EvidenceGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/EvidenceArtifactContentGetResultResponse"
+        },
+        {
           "$ref": "#/$defs/SettingsGetResultResponse"
+        },
+        {
+          "$ref": "#/$defs/ModelRouteAvailabilityListResultResponse"
         },
         {
           "$ref": "#/$defs/CredentialReferenceListResultResponse"
@@ -9593,6 +9691,1486 @@
               "$ref": "#/$defs/CollaborationPresencePage"
             }
           }
+        }
+      ]
+    },
+    "CandidateFileStatus": {
+      "type": "string",
+      "enum": [
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "type_changed"
+      ]
+    },
+    "CandidateFileEncoding": {
+      "type": "string",
+      "enum": [
+        "utf-8",
+        "binary",
+        "unknown-8bit"
+      ]
+    },
+    "CandidateFileProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "oldPath",
+        "status",
+        "additions",
+        "deletions",
+        "binary",
+        "encoding"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Normalized repository-relative path selected from the trusted Candidate diff."
+        },
+        "oldPath": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CandidateFileStatus"
+        },
+        "additions": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Count"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deletions": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Count"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "encoding": {
+          "$ref": "#/$defs/CandidateFileEncoding"
+        }
+      },
+      "description": "Bounded secret-free file metadata rebuilt from the exact retained Candidate Git range."
+    },
+    "CandidateFilePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "candidate",
+        "readCursor",
+        "items"
+      ],
+      "properties": {
+        "kind": {
+          "const": "candidate_file_page"
+        },
+        "candidate": {
+          "$ref": "#/$defs/FrozenCandidateSummaryProjection"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateFileProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "CandidateAvailability": {
+      "type": "string",
+      "enum": [
+        "available",
+        "released"
+      ],
+      "description": "Authoritative candidate Git retention state. Released candidates retain display facts only."
+    },
+    "CandidateHistoryListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "atCursor",
+        "readPageLimit"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "readPageLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "The delivery.get page.limit sealed into atCursor; independent from this Candidate-history page size."
+        }
+      },
+      "description": "Exact append-only Candidate history cut for one Delivery."
+    },
+    "CandidateHistoryListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CandidateHistoryListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateHistoryItemProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate",
+        "availability",
+        "firstSeenDeliveryRevision",
+        "lastSeenDeliveryRevision",
+        "reviewDeliveryRevision",
+        "isCurrentAtReadCursor"
+      ],
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/FrozenCandidateSummaryProjection"
+        },
+        "availability": {
+          "$ref": "#/$defs/CandidateAvailability"
+        },
+        "firstSeenDeliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "lastSeenDeliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reviewDeliveryRevision": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isCurrentAtReadCursor": {
+          "type": "boolean"
+        }
+      },
+      "description": "One exact Candidate observed in the verified Delivery journal. Availability comes only from its durable retention receipt."
+    },
+    "CandidateHistoryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "readCursor",
+        "items"
+      ],
+      "properties": {
+        "kind": {
+          "const": "candidate_history_page"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateHistoryItemProjection"
+          },
+          "maxItems": 200
+        }
+      }
+    },
+    "CandidateHistoryListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.list"
+            },
+            "result": {
+              "$ref": "#/$defs/CandidateHistoryPage"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateHistoricalReviewGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "atCursor",
+        "readPageLimit",
+        "candidateRef",
+        "candidateTreeId",
+        "diffSha256"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "readPageLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "The delivery.get page.limit sealed into atCursor."
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "description": "Exact historical Candidate identity selected from candidate.list. Repository locator and Git revision remain server-owned."
+    },
+    "CandidateHistoricalReviewGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.review.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CandidateHistoricalReviewGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateHistoricalReviewProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "candidate",
+        "availability",
+        "firstSeenDeliveryRevision",
+        "lastSeenDeliveryRevision",
+        "reviewDeliveryRevision",
+        "evidence",
+        "verdict",
+        "displayOnly",
+        "currentAuthorization",
+        "readCursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "candidate_historical_review"
+        },
+        "candidate": {
+          "$ref": "#/$defs/FrozenCandidateSummaryProjection"
+        },
+        "availability": {
+          "$ref": "#/$defs/CandidateAvailability"
+        },
+        "firstSeenDeliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "lastSeenDeliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "reviewDeliveryRevision": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryEvidenceProjection"
+          },
+          "maxItems": 1000
+        },
+        "verdict": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeliveryVerdictProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "displayOnly": {
+          "const": true
+        },
+        "currentAuthorization": {
+          "const": false
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        }
+      },
+      "description": "Original Candidate-bound review facts from the verified append-only journal. These facts are historical display data and never authorize the current Delivery."
+    },
+    "CandidateHistoricalReviewGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.review.get"
+            },
+            "result": {
+              "$ref": "#/$defs/CandidateHistoricalReviewProjection"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateFilesListParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "atCursor",
+        "readPageLimit",
+        "candidateRef",
+        "candidateTreeId",
+        "diffSha256",
+        "statuses",
+        "pathPrefix"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "readPageLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "The delivery.get page.limit sealed into atCursor; independent from this file-page size."
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateFileStatus"
+          },
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "pathPrefix": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Exact current-Candidate file filters. Empty statuses means every status."
+    },
+    "CandidateFilesListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.files.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CandidateFilesListParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateFilesListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.files.list"
+            },
+            "result": {
+              "$ref": "#/$defs/CandidateFilePage"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateDiffGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "atCursor",
+        "readPageLimit",
+        "candidateRef",
+        "candidateTreeId",
+        "diffSha256",
+        "path",
+        "offset",
+        "length"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "readPageLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "The delivery.get page.limit sealed into atCursor."
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "candidateTreeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "diffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      }
+    },
+    "CandidateDiffChunkProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "candidate",
+        "readCursor",
+        "path",
+        "oldPath",
+        "status",
+        "binary",
+        "contentEncoding",
+        "encoding",
+        "mediaType",
+        "fileDiffSha256",
+        "offset",
+        "returnedBytes",
+        "totalBytes",
+        "dataBase64",
+        "nextOffset"
+      ],
+      "properties": {
+        "kind": {
+          "const": "candidate_diff_chunk"
+        },
+        "candidate": {
+          "$ref": "#/$defs/FrozenCandidateSummaryProjection"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "oldPath": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CandidateFileStatus"
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "contentEncoding": {
+          "$ref": "#/$defs/CandidateFileEncoding"
+        },
+        "encoding": {
+          "const": "base64"
+        },
+        "mediaType": {
+          "const": "application/vnd.winwincode.git-diff"
+        },
+        "fileDiffSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "returnedBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        },
+        "dataBase64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 349528,
+          "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+        },
+        "nextOffset": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 268435456
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "One bounded base64 byte range from the exact per-file unified Git diff. The normalized path must select the trusted inventory; repository locators, caller Git selectors, and request bodies are excluded."
+    },
+    "CandidateDiffGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.diff.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/CandidateDiffGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "CandidateDiffGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "candidate.diff.get"
+            },
+            "result": {
+              "$ref": "#/$defs/CandidateDiffChunkProjection"
+            }
+          }
+        }
+      ]
+    },
+    "EvidenceReadBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "atCursor",
+        "readPageLimit",
+        "evidenceId",
+        "candidateRef",
+        "stageRunId",
+        "sessionBindingId",
+        "type",
+        "sourceRef"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "atCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "readPageLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "description": "The delivery.get page.limit sealed into atCursor."
+        },
+        "evidenceId": {
+          "$ref": "./domain.schema.json#/$defs/EvidenceId"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "sessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "test",
+            "command",
+            "diff",
+            "file",
+            "commit",
+            "pull_request",
+            "runtime_event",
+            "review_finding"
+          ]
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "description": "A stale-check selector for one Evidence already returned at the exact Delivery read cursor. No field is bearer authorization."
+    },
+    "EvidenceOutcome": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "succeeded",
+        "failed",
+        "timed_out",
+        "policy_denied",
+        "infrastructure_failed",
+        "cancelled"
+      ]
+    },
+    "EvidenceArtifactProvenanceProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "deliveryRevision",
+        "stageRunId",
+        "sessionBindingId",
+        "candidateRef",
+        "evidenceId"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliveryRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "sessionBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "evidenceId": {
+          "$ref": "./domain.schema.json#/$defs/EvidenceId"
+        }
+      },
+      "description": "Public provenance only. Worker, lease, fence, object key, path, and credential facts stay server-owned."
+    },
+    "EvidenceArtifactDescriptorProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "kind",
+        "mediaType",
+        "digest",
+        "sizeBytes",
+        "fileName",
+        "previewMode",
+        "provenance"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "Artifact identity used only as a stale selector under exact Evidence authority."
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceArtifactKind"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200,
+          "pattern": "^[^\\s/]+/[^\\s]+$"
+        },
+        "digest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "fileName": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]{0,254}$",
+              "not": {
+                "enum": [
+                  ".",
+                  ".."
+                ]
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previewMode": {
+          "$ref": "#/$defs/EvidenceArtifactPreviewMode"
+        },
+        "provenance": {
+          "$ref": "#/$defs/EvidenceArtifactProvenanceProjection"
+        }
+      },
+      "description": "Secret-safe immutable descriptor revalidated from the exact Evidence authority. Its id and digest are stale selectors, never bearer authorization."
+    },
+    "EvidenceArtifactUnavailableProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "state": {
+          "const": "unavailable"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "no_authoritative_link"
+          ]
+        }
+      },
+      "description": "The current producer retained no exact Evidence-to-Artifact authority, so no Artifact selector or storage detail is exposed."
+    },
+    "EvidenceArtifactAvailableProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "items"
+      ],
+      "properties": {
+        "state": {
+          "const": "available"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/EvidenceArtifactDescriptorProjection"
+          }
+        }
+      }
+    },
+    "EvidenceDetailProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "readCursor",
+        "evidence",
+        "outcome",
+        "artifactAccess"
+      ],
+      "properties": {
+        "kind": {
+          "const": "evidence_detail"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "evidence": {
+          "$ref": "#/$defs/DeliveryEvidenceProjection"
+        },
+        "outcome": {
+          "$ref": "#/$defs/EvidenceOutcome"
+        },
+        "artifactAccess": {
+          "$ref": "#/$defs/EvidenceArtifactAccessProjection"
+        }
+      },
+      "description": "Exact current Evidence details reconstructed from the accepted Delivery, terminal, and runtime authorities. Free-form logs are never treated as outcome or access authority."
+    },
+    "EvidenceGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "evidence.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/EvidenceReadBinding"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "EvidenceGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "evidence.get"
+            },
+            "result": {
+              "$ref": "#/$defs/EvidenceDetailProjection"
+            }
+          }
+        }
+      ]
+    },
+    "EvidenceArtifactContentGetParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "artifactId",
+        "artifactKind",
+        "artifactDigest",
+        "artifactMediaType",
+        "artifactSizeBytes",
+        "offset",
+        "length"
+      ],
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/EvidenceReadBinding"
+        },
+        "artifactId": {
+          "type": "string",
+          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "Artifact identity used only as a stale selector under exact Evidence authority."
+        },
+        "artifactKind": {
+          "$ref": "#/$defs/EvidenceArtifactKind"
+        },
+        "artifactDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "artifactMediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200,
+          "pattern": "^[^\\s/]+/[^\\s]+$"
+        },
+        "artifactSizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627775
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      },
+      "description": "A bounded range request that repeats the exact Evidence and descriptor stale-checks. Artifact id and digest alone grant no access."
+    },
+    "EvidenceArtifactContentGetQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "evidence.artifact.content.get"
+            },
+            "parameters": {
+              "$ref": "#/$defs/EvidenceArtifactContentGetParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "EvidenceArtifactContentUnavailableProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "readCursor",
+        "evidenceId",
+        "artifactId",
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "kind": {
+          "const": "evidence_artifact_content_unavailable"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "evidenceId": {
+          "$ref": "./domain.schema.json#/$defs/EvidenceId"
+        },
+        "artifactId": {
+          "type": "string",
+          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "Artifact identity used only as a stale selector under exact Evidence authority."
+        },
+        "state": {
+          "const": "unavailable"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "no_authoritative_link"
+          ]
+        }
+      },
+      "description": "Closed response used when the producer did not persist an exact Evidence-to-Artifact link. It does not confirm whether the caller-supplied Artifact id exists."
+    },
+    "EvidenceArtifactContentChunkProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "readCursor",
+        "evidence",
+        "artifact",
+        "state",
+        "encoding",
+        "contentEncoding",
+        "previewMode",
+        "offset",
+        "returnedBytes",
+        "totalBytes",
+        "dataBase64",
+        "nextOffset",
+        "truncated"
+      ],
+      "properties": {
+        "kind": {
+          "const": "evidence_artifact_content_chunk"
+        },
+        "readCursor": {
+          "$ref": "./domain.schema.json#/$defs/StrongFlowReadCursor"
+        },
+        "evidence": {
+          "$ref": "#/$defs/DeliveryEvidenceProjection"
+        },
+        "artifact": {
+          "$ref": "#/$defs/EvidenceArtifactDescriptorProjection"
+        },
+        "state": {
+          "const": "available"
+        },
+        "encoding": {
+          "const": "base64"
+        },
+        "contentEncoding": {
+          "$ref": "#/$defs/EvidenceArtifactContentEncoding"
+        },
+        "previewMode": {
+          "$ref": "#/$defs/EvidenceArtifactPreviewMode"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627775
+        },
+        "returnedBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "dataBase64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 349528,
+          "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+        },
+        "nextOffset": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627775
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "description": "One integrity-checked bounded byte range. Large logs require continuation; binary and unknown text are download-only base64."
+    },
+    "EvidenceArtifactContentResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvidenceArtifactContentChunkProjection"
+        },
+        {
+          "$ref": "#/$defs/EvidenceArtifactContentUnavailableProjection"
+        }
+      ]
+    },
+    "EvidenceArtifactContentGetResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "evidence.artifact.content.get"
+            },
+            "result": {
+              "$ref": "#/$defs/EvidenceArtifactContentResult"
+            }
+          }
+        }
+      ]
+    },
+    "ModelRouteAvailabilityStatus": {
+      "type": "string",
+      "enum": [
+        "enabled",
+        "disabled"
+      ],
+      "description": "Closed readiness status derived only by the server."
+    },
+    "ModelRouteAvailabilityReason": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "no_provider",
+        "credential_missing_or_revoked",
+        "default_route_invalid",
+        "provider_or_model_disabled",
+        "request_pool_unavailable"
+      ],
+      "description": "Closed, secret-safe reason for the route or page readiness result."
+    },
+    "ModelRouteToolSupport": {
+      "type": "string",
+      "enum": [
+        "unsupported",
+        "serial",
+        "parallel"
+      ]
+    },
+    "ModelRouteAvailabilityProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route",
+        "providerDisplayName",
+        "modelDisplayName",
+        "catalogSource",
+        "catalogVersion",
+        "providerVersion",
+        "modelVersion",
+        "contextWindowTokens",
+        "maxOutputTokens",
+        "toolSupport",
+        "reasoningEfforts",
+        "credentialRotationVersion",
+        "isDefault",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "route": {
+          "$ref": "#/$defs/ModelRoute"
+        },
+        "providerDisplayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "modelDisplayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "catalogSource": {
+          "$ref": "./domain.schema.json#/$defs/Scope"
+        },
+        "catalogVersion": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "providerVersion": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "modelVersion": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "contextWindowTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "toolSupport": {
+          "$ref": "#/$defs/ModelRouteToolSupport"
+        },
+        "reasoningEfforts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "credentialRotationVersion": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ModelRouteAvailabilityStatus"
+        },
+        "reason": {
+          "$ref": "#/$defs/ModelRouteAvailabilityReason"
+        }
+      },
+      "description": "One server-joined ModelRoute. It contains identities and display metadata only; Credential locators, secrets, and pool internals are excluded."
+    },
+    "ModelRouteAvailabilityPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "scope",
+        "settingsSource",
+        "settingsRevision",
+        "requestPoolSource",
+        "requestPoolRevision",
+        "defaultProviderId",
+        "defaultModelId",
+        "status",
+        "reason",
+        "items"
+      ],
+      "properties": {
+        "kind": {
+          "const": "model_route_availability_page"
+        },
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+        },
+        "settingsSource": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Scope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settingsRevision": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestPoolSource": {
+          "$ref": "./domain.schema.json#/$defs/ProjectScope"
+        },
+        "requestPoolRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "defaultProviderId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "defaultModelId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ModelRouteAvailabilityStatus"
+        },
+        "reason": {
+          "$ref": "#/$defs/ModelRouteAvailabilityReason"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelRouteAvailabilityProjection"
+          },
+          "maxItems": 200
+        }
+      },
+      "description": "Bounded exact-Repository ModelRoute availability. Parent settings/catalog sources and the Project-scoped request-pool invalidation authority are joined by the server and identified explicitly; the client never derives a cross-Scope subscription."
+    },
+    "ModelRouteAvailabilityListQuery": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "model.route.availability.list"
+            },
+            "parameters": {
+              "$ref": "#/$defs/EmptyParameters"
+            },
+            "scope": {
+              "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+            }
+          }
+        }
+      ]
+    },
+    "ModelRouteAvailabilityListResultResponse": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/QueryResultEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "const": "model.route.availability.list"
+            },
+            "result": {
+              "$ref": "#/$defs/ModelRouteAvailabilityPage"
+            }
+          }
+        }
+      ]
+    },
+    "EvidenceArtifactKind": {
+      "type": "string",
+      "enum": [
+        "command_output",
+        "diff",
+        "log",
+        "report",
+        "test_output"
+      ]
+    },
+    "EvidenceArtifactPreviewMode": {
+      "type": "string",
+      "enum": [
+        "inline_text",
+        "download_only"
+      ]
+    },
+    "EvidenceArtifactContentEncoding": {
+      "type": "string",
+      "enum": [
+        "utf-8",
+        "binary",
+        "unknown-8bit"
+      ]
+    },
+    "EvidenceArtifactAccessProjection": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvidenceArtifactAvailableProjection"
+        },
+        {
+          "$ref": "#/$defs/EvidenceArtifactUnavailableProjection"
         }
       ]
     }

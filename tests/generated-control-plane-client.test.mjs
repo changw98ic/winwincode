@@ -18,6 +18,12 @@ const scope = {
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
 }
+const projectScope = {
+  kind: 'project',
+  organizationId: scope.organizationId,
+  workspaceId: scope.workspaceId,
+  projectId: scope.projectId,
+}
 const deliveryId = 'dlv_00000000000000000000000001'
 const otherDeliveryId = 'dlv_00000000000000000000000002'
 const productSessionId = 'psn_00000000000000000000000001'
@@ -154,6 +160,20 @@ function deliveryRuntimeProjection(cursor) {
     eventCursor: cursor.eventCursor,
     rebuiltAt: '2026-08-25T00:00:00.000Z',
     sessions: [],
+  }
+}
+
+function candidateProjection() {
+  return {
+    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    producerStageRunId: stageRunId,
+    producerSessionBindingId: 'binding:executor',
+    candidateCommitId: 'b'.repeat(40),
+    candidateTreeId: 'c'.repeat(40),
+    diffSha256: `sha256:${'d'.repeat(64)}`,
+    frozenAt: '2026-08-25T00:00:00.000Z',
   }
 }
 
@@ -461,6 +481,471 @@ test('HTTP queries preserve opaque cursors and malformed errors stay bounded', a
       return true
     },
   )
+})
+
+test('generated HTTP client validates bounded Candidate file and diff reads', async () => {
+  let fetchCalls = 0
+  const cursor = readCursor('1')
+  const candidate = candidateProjection()
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      fetchCalls += 1
+      const request = JSON.parse(init.body)
+      if (request.query === 'candidate.list') {
+        return response(200, queryResponse(request, {
+          kind: 'candidate_history_page',
+          readCursor: cursor,
+          items: [{
+            candidate,
+            availability: 'available',
+            firstSeenDeliveryRevision: 1,
+            lastSeenDeliveryRevision: 2,
+            reviewDeliveryRevision: 2,
+            isCurrentAtReadCursor: true,
+          }],
+        }))
+      }
+      if (request.query === 'candidate.review.get') {
+        return response(200, queryResponse(request, {
+          kind: 'candidate_historical_review',
+          candidate,
+          availability: 'available',
+          firstSeenDeliveryRevision: 1,
+          lastSeenDeliveryRevision: 2,
+          reviewDeliveryRevision: 2,
+          evidence: [],
+          verdict: null,
+          displayOnly: true,
+          currentAuthorization: false,
+          readCursor: cursor,
+        }))
+      }
+      if (request.query === 'candidate.files.list') {
+        return response(200, queryResponse(request, {
+          kind: 'candidate_file_page',
+          candidate,
+          readCursor: cursor,
+          items: [{
+            path: 'src/index.ts',
+            oldPath: null,
+            status: 'modified',
+            additions: 2,
+            deletions: 1,
+            binary: false,
+            encoding: 'utf-8',
+          }],
+        }))
+      }
+      return response(200, queryResponse(request, {
+        kind: 'candidate_diff_chunk',
+        candidate,
+        readCursor: cursor,
+        path: 'src/index.ts',
+        oldPath: null,
+        status: 'modified',
+        binary: false,
+        contentEncoding: 'utf-8',
+        encoding: 'base64',
+        mediaType: 'application/vnd.winwincode.git-diff',
+        fileDiffSha256: `sha256:${'e'.repeat(64)}`,
+        offset: 0,
+        returnedBytes: 4,
+        totalBytes: 4,
+        dataBase64: 'ZGlmZg==',
+        nextOffset: null,
+      }))
+    },
+  })
+  const binding = {
+    deliveryId,
+    atCursor: cursor,
+    readPageLimit: 1,
+    candidateRef: candidate.candidateRef,
+    candidateTreeId: candidate.candidateTreeId,
+    diffSha256: candidate.diffSha256,
+  }
+  const history = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(29),
+    actor,
+    scope,
+    query: 'candidate.list',
+    parameters: { deliveryId, atCursor: cursor, readPageLimit: 1 },
+    page: { cursor: null, limit: 20 },
+  })
+  assert.equal(history.result.items[0].availability, 'available')
+
+  const review = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(30),
+    actor,
+    scope,
+    query: 'candidate.review.get',
+    parameters: binding,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(review.result.displayOnly, true)
+  assert.equal(review.result.currentAuthorization, false)
+
+  const files = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(31),
+    actor,
+    scope,
+    query: 'candidate.files.list',
+    parameters: { ...binding, statuses: [], pathPrefix: 'src/' },
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(files.result.items[0].path, 'src/index.ts')
+
+  const diff = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(32),
+    actor,
+    scope,
+    query: 'candidate.diff.get',
+    parameters: { ...binding, path: 'src/index.ts', offset: 0, length: 4 },
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(diff.result.dataBase64, 'ZGlmZg==')
+
+  await assert.rejects(
+    client.submitQuery({
+      schemaVersion,
+      requestId: requestId(33),
+      actor,
+      scope,
+      query: 'candidate.diff.get',
+      parameters: {
+        ...binding,
+        path: '../secret',
+        offset: 0,
+        length: 262_145,
+      },
+      page: { cursor: null, limit: 1 },
+    }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'INVALID_CLIENT_REQUEST',
+  )
+  assert.equal(fetchCalls, 4)
+})
+
+test('generated HTTP client validates exact Evidence and closed Artifact reads', async () => {
+  let fetchCalls = 0
+  const cursor = readCursor('2')
+  const evidence = {
+    id: canonicalId('evd', 2),
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    stageRunId,
+    sessionBindingId: 'binding:reviewer',
+    candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+    type: 'runtime_event',
+    sourceRef: canonicalId('exe', 2),
+    createdAt: '2026-08-25T00:00:00.000Z',
+  }
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      fetchCalls += 1
+      const request = JSON.parse(init.body)
+      if (request.query === 'evidence.get') {
+        return response(200, queryResponse(request, {
+          kind: 'evidence_detail',
+          readCursor: cursor,
+          evidence,
+          outcome: 'succeeded',
+          artifactAccess: {
+            state: 'unavailable',
+            reason: 'no_authoritative_link',
+          },
+        }))
+      }
+      return response(200, queryResponse(request, {
+        kind: 'evidence_artifact_content_unavailable',
+        readCursor: cursor,
+        evidenceId: evidence.id,
+        artifactId: canonicalId('art', 2),
+        state: 'unavailable',
+        reason: 'no_authoritative_link',
+      }))
+    },
+  })
+  const binding = {
+    deliveryId,
+    atCursor: cursor,
+    readPageLimit: 20,
+    evidenceId: evidence.id,
+    candidateRef: evidence.candidateRef,
+    stageRunId: evidence.stageRunId,
+    sessionBindingId: evidence.sessionBindingId,
+    type: evidence.type,
+    sourceRef: evidence.sourceRef,
+  }
+  const detail = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(34),
+    actor,
+    scope,
+    query: 'evidence.get',
+    parameters: binding,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(detail.result.outcome, 'succeeded')
+  assert.equal(detail.result.artifactAccess.reason, 'no_authoritative_link')
+
+  const contentParameters = {
+    evidence: binding,
+    artifactId: canonicalId('art', 2),
+    artifactKind: 'log',
+    artifactDigest: `sha256:${'f'.repeat(64)}`,
+    artifactMediaType: 'text/plain',
+    artifactSizeBytes: 1_000_000,
+    offset: 0,
+    length: 262_144,
+  }
+  const content = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(35),
+    actor,
+    scope,
+    query: 'evidence.artifact.content.get',
+    parameters: contentParameters,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(content.result.state, 'unavailable')
+  assert.equal(content.result.reason, 'no_authoritative_link')
+
+  await assert.rejects(
+    client.submitQuery({
+      schemaVersion,
+      requestId: requestId(36),
+      actor,
+      scope,
+      query: 'evidence.artifact.content.get',
+      parameters: { ...contentParameters, length: 262_145, path: '../secret' },
+      page: { cursor: null, limit: 1 },
+    }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'INVALID_CLIENT_REQUEST',
+  )
+  assert.equal(fetchCalls, 2)
+
+  const leaky = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, {
+        kind: 'evidence_artifact_content_unavailable',
+        readCursor: cursor,
+        evidenceId: evidence.id,
+        artifactId: canonicalId('art', 2),
+        state: 'unavailable',
+        reason: 'no_authoritative_link',
+        storeKey: '/private/artifacts/object',
+      }))
+    },
+  })
+  await assert.rejects(
+    leaky.submitQuery({
+      schemaVersion,
+      requestId: requestId(37),
+      actor,
+      scope,
+      query: 'evidence.artifact.content.get',
+      parameters: contentParameters,
+      page: { cursor: null, limit: 1 },
+    }),
+    error => error instanceof ControlPlaneClientError
+      && error.code === 'INVALID_RESPONSE',
+  )
+
+  const boundedBinary = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, {
+        kind: 'evidence_artifact_content_chunk',
+        readCursor: cursor,
+        evidence,
+        artifact: {
+          artifactId: canonicalId('art', 2),
+          kind: 'log',
+          mediaType: 'application/octet-stream',
+          digest: `sha256:${'f'.repeat(64)}`,
+          sizeBytes: 1_000_000,
+          fileName: 'review-output.bin',
+          previewMode: 'download_only',
+          provenance: {
+            deliveryId,
+            deliveryRevision: cursor.deliveryRevision,
+            stageRunId,
+            sessionBindingId: evidence.sessionBindingId,
+            candidateRef: evidence.candidateRef,
+            evidenceId: evidence.id,
+          },
+        },
+        state: 'available',
+        encoding: 'base64',
+        contentEncoding: 'binary',
+        previewMode: 'download_only',
+        offset: 0,
+        returnedBytes: 4,
+        totalBytes: 1_000_000,
+        dataBase64: 'AAECAw==',
+        nextOffset: 4,
+        truncated: true,
+      }))
+    },
+  })
+  const binary = await boundedBinary.submitQuery({
+    schemaVersion,
+    requestId: requestId(38),
+    actor,
+    scope,
+    query: 'evidence.artifact.content.get',
+    parameters: contentParameters,
+    page: { cursor: null, limit: 1 },
+  })
+  assert.equal(binary.result.contentEncoding, 'binary')
+  assert.equal(binary.result.previewMode, 'download_only')
+  assert.equal(binary.result.truncated, true)
+  assert.equal(binary.result.nextOffset, 4)
+})
+
+test('generated HTTP client reads only the server-joined secret-safe ModelRoute projection', async () => {
+  const captured = []
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      captured.push(request)
+      return response(200, queryResponse(request, {
+        kind: 'model_route_availability_page',
+        scope,
+        settingsSource: {
+          kind: 'organization',
+          organizationId: scope.organizationId,
+        },
+        settingsRevision: 4,
+        requestPoolSource: projectScope,
+        requestPoolRevision: 6,
+        defaultProviderId: 'provider-main',
+        defaultModelId: 'model-main',
+        status: 'enabled',
+        reason: 'ready',
+        items: [{
+          route: {
+            providerId: 'provider-main',
+            modelId: 'model-main',
+            credentialReferenceId: canonicalId('crd', 1),
+          },
+          providerDisplayName: 'Provider Main',
+          modelDisplayName: 'Model Main',
+          catalogSource: {
+            kind: 'organization',
+            organizationId: scope.organizationId,
+          },
+          catalogVersion: 7,
+          providerVersion: 3,
+          modelVersion: 2,
+          contextWindowTokens: 128_000,
+          maxOutputTokens: 16_000,
+          toolSupport: 'parallel',
+          reasoningEfforts: ['high', 'medium'],
+          credentialRotationVersion: 2,
+          isDefault: true,
+          status: 'enabled',
+          reason: 'ready',
+        }],
+      }))
+    },
+  })
+
+  const result = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(34),
+    actor,
+    scope,
+    query: 'model.route.availability.list',
+    parameters: {},
+    page: { cursor: null, limit: 20 },
+  })
+
+  assert.equal(captured.length, 1)
+  assert.deepEqual(captured[0].scope, scope)
+  assert.deepEqual(captured[0].parameters, {})
+  assert.equal(result.result.items.length, 1)
+  assert.equal(result.result.items[0].status, 'enabled')
+  assert.equal(result.result.items[0].reason, 'ready')
+  assert.deepEqual(result.result.requestPoolSource, projectScope)
+  assert.equal(result.result.requestPoolRevision, 6)
+  assert.doesNotMatch(JSON.stringify(result), /vault|locator|secret|poolSize|queueDepth/iu)
+})
+
+test('generated HTTP client rejects ModelRoute responses that add credential material', async () => {
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, {
+        kind: 'model_route_availability_page',
+        scope,
+        settingsSource: null,
+        settingsRevision: null,
+        requestPoolSource: projectScope,
+        requestPoolRevision: 0,
+        defaultProviderId: null,
+        defaultModelId: null,
+        status: 'disabled',
+        reason: 'no_provider',
+        items: [],
+        vaultLocator: 'local-fixture://must-not-cross-http',
+      }))
+    },
+  })
+
+  await assert.rejects(
+    client.submitQuery({
+      schemaVersion,
+      requestId: requestId(35),
+      actor,
+      scope,
+      query: 'model.route.availability.list',
+      parameters: {},
+      page: { cursor: null, limit: 20 },
+    }),
+    error => error instanceof ControlPlaneClientError && error.code === 'INVALID_RESPONSE',
+  )
+})
+
+test('generated WebSocket client applies a scope-bound ModelRoute invalidation', async () => {
+  const factory = fakeWebSocketFactory()
+  const applied = []
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    async onEvent(frame) {
+      applied.push(frame.event)
+    },
+  })
+  const modelRouteSubscription = {
+    scope,
+    stream: { kind: 'scope' },
+    eventTypes: ['model-route-availability.invalidated.v1'],
+  }
+  client.subscribe(subscriptionId, modelRouteSubscription)
+  factory.sockets[0].open()
+  factory.sockets[0].receive(acceptedFrame(scope, modelRouteSubscription.stream))
+  factory.sockets[0].receive(runtimeEvent(1, {
+    type: 'model-route-availability.invalidated.v1',
+    source: 'credential_reference',
+    sourceRevision: 3,
+    reloadQueries: ['model.route.availability.list'],
+  }, modelRouteSubscription.stream))
+  await flush()
+
+  assert.deepEqual(applied, [{
+    type: 'model-route-availability.invalidated.v1',
+    source: 'credential_reference',
+    sourceRevision: 3,
+    reloadQueries: ['model.route.availability.list'],
+  }])
+  assert.equal(factory.sockets[0].sent.at(-1).type, 'transport.ack.v1')
 })
 
 test('canonical HTTP errors expose only the five public safe fields', async () => {

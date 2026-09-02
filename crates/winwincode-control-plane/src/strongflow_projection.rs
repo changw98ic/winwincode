@@ -7,6 +7,9 @@
 //! Plane.
 
 mod application;
+mod candidate_history;
+mod candidate_review;
+mod evidence_detail;
 mod mapping;
 mod production_sources;
 mod sources;
@@ -14,7 +17,9 @@ mod sources;
 use std::fmt;
 
 use winwincode_api::generated::{
-    DeliveryGetQuery, DeliveryGetResultResponse, DeliveryGetResultResponseQuery, ErrorCode,
+    CandidateDiffGetQuery, CandidateFilesListQuery, CandidateHistoricalReviewGetQuery,
+    CandidateHistoryListQuery, DeliveryGetQuery, DeliveryGetResultResponse,
+    DeliveryGetResultResponseQuery, ErrorCode, EvidenceArtifactContentGetQuery, EvidenceGetQuery,
     PageInfo, QueryResultResponse, RuntimeProjectionGetParameters, RuntimeProjectionGetQuery,
     RuntimeProjectionGetResultResponse, RuntimeProjectionGetResultResponseQuery,
 };
@@ -45,6 +50,7 @@ pub enum StrongFlowProjectionError {
     InvalidRequest(String),
     PermissionDenied(String),
     ResourceNotFound(String),
+    CandidateStale(String),
     RevisionConflict(String),
     ReadCursorExpired(String),
     TrustedFactsUnavailable(String),
@@ -64,6 +70,7 @@ impl StrongFlowProjectionError {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::PermissionDenied(_) => ErrorCode::PermissionDenied,
             Self::ResourceNotFound(_) => ErrorCode::ResourceNotFound,
+            Self::CandidateStale(_) => ErrorCode::CandidateStale,
             Self::RevisionConflict(_) => ErrorCode::RevisionConflict,
             Self::ReadCursorExpired(_) => ErrorCode::ReadCursorExpired,
             Self::TrustedFactsUnavailable(_) => ErrorCode::TrustedFactsUnavailable,
@@ -79,6 +86,7 @@ impl StrongFlowProjectionError {
             Self::InvalidRequest(message)
             | Self::PermissionDenied(message)
             | Self::ResourceNotFound(message)
+            | Self::CandidateStale(message)
             | Self::RevisionConflict(message)
             | Self::ReadCursorExpired(message)
             | Self::TrustedFactsUnavailable(message)
@@ -124,6 +132,74 @@ pub trait StrongFlowProjectionQueryPort {
     fn runtime_projection_get(
         &self,
         query: &RuntimeProjectionGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns one stable page of exact current-Candidate changed files.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on foreign scope/cursor/Candidate bindings or unavailable
+    /// trusted Git facts.
+    fn candidate_files_list(
+        &self,
+        query: &CandidateFilesListQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns one bounded byte range from one trusted current-Candidate file
+    /// diff.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on path traversal, over-limit ranges, foreign bindings, or
+    /// unavailable trusted Git facts.
+    fn candidate_diff_get(
+        &self,
+        query: &CandidateDiffGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns a stable page of Candidates observed through one exact Delivery
+    /// journal cut, with availability derived from durable Git retention.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on a foreign cursor, a broken journal, or moved/tampered
+    /// retention authority.
+    fn candidate_history_list(
+        &self,
+        query: &CandidateHistoryListQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns original Candidate-bound Verdict/Evidence facts for display.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on a foreign/stale Candidate identity or unavailable
+    /// append-only history and retention facts.
+    fn candidate_historical_review_get(
+        &self,
+        query: &CandidateHistoricalReviewGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns one exact Evidence detail rebuilt from its accepted source.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on foreign or stale Delivery, Candidate, `StageRun`,
+    /// `SessionBinding`, Evidence, or source facts.
+    fn evidence_get(
+        &self,
+        query: &EvidenceGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
+
+    /// Returns one bounded Evidence Artifact range, when an exact producer link exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on unsupported ranges and foreign, stale, or tampered
+    /// Evidence/Artifact authority.
+    fn evidence_artifact_content_get(
+        &self,
+        query: &EvidenceArtifactContentGetQuery,
     ) -> Result<QueryResultResponse, StrongFlowProjectionError>;
 }
 
@@ -236,6 +312,48 @@ impl StrongFlowProjectionQueryPort for ControlPlane {
                 page: page(),
             },
         ))
+    }
+
+    fn candidate_files_list(
+        &self,
+        query: &CandidateFilesListQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        candidate_review::files_list(self, query)
+    }
+
+    fn candidate_diff_get(
+        &self,
+        query: &CandidateDiffGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        candidate_review::diff_get(self, query)
+    }
+
+    fn candidate_history_list(
+        &self,
+        query: &CandidateHistoryListQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        candidate_history::list(self, query)
+    }
+
+    fn candidate_historical_review_get(
+        &self,
+        query: &CandidateHistoricalReviewGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        candidate_history::review_get(self, query)
+    }
+
+    fn evidence_get(
+        &self,
+        query: &EvidenceGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        evidence_detail::get(self, query)
+    }
+
+    fn evidence_artifact_content_get(
+        &self,
+        query: &EvidenceArtifactContentGetQuery,
+    ) -> Result<QueryResultResponse, StrongFlowProjectionError> {
+        evidence_detail::artifact_content_get(self, query)
     }
 }
 

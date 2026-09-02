@@ -49,6 +49,7 @@ mod model_request_pool;
 mod model_retry_planner;
 mod model_retry_settlement;
 mod model_retry_usage;
+mod model_route_availability;
 pub mod model_settings;
 mod model_stream_flow_control;
 mod observer_decision_service;
@@ -303,6 +304,9 @@ pub use model_retry_usage::{
     ModelRetryUsageRequest, ModelRetryUsageService, ModelUsageAttribution, ModelUsageFilter,
     ModelUsageReconciliation, ModelUsageSettlementReceipt, ModelUsageSourceCursor,
     ModelUsageSourceEntry, ModelUsageSourcePage, ModelUsageTotals, SettledModelUsage,
+};
+pub use model_route_availability::{
+    ModelRouteAvailabilityError, ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService,
 };
 pub use model_settings::{
     DEFAULT_WORKER_CONCURRENCY_LIMIT, ModelSelection, ModelSettingsChange, ModelSettingsError,

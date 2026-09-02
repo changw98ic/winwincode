@@ -54,7 +54,14 @@
       "runtime.projection.get",
       "delivery.list",
       "delivery.get",
+      "candidate.list",
+      "candidate.review.get",
+      "candidate.files.list",
+      "candidate.diff.get",
+      "evidence.get",
+      "evidence.artifact.content.get",
       "settings.get",
+      "model.route.availability.list",
       "credential.reference.list",
       "credential.reference.get",
       "approval.list",
@@ -99,7 +106,8 @@
       "enterprise-fleet.invalidated.v1",
       "enterprise-usage.invalidated.v1",
       "enterprise-audit.invalidated.v1",
-      "enterprise-integration.invalidated.v1"
+      "enterprise-integration.invalidated.v1",
+      "model-route-availability.invalidated.v1"
     ],
     "executionPortMessages": [
       "worker.register",
@@ -782,7 +790,8 @@
       "currentObservableOperations": [
         "configure a Provider-neutral model route using a credential reference",
         "resolve the long-lived credential only inside the Control Plane",
-        "stream encoded model data and stable redacted failures without sending a secret to Worker"
+        "stream encoded model data and stable redacted failures without sending a secret to Worker",
+        "list exact-repository secret-safe ModelRoute candidates with closed readiness reasons and reload them after source invalidation"
       ],
       "httpCommands": [
         "settings.update",
@@ -793,11 +802,13 @@
       ],
       "httpQueries": [
         "settings.get",
+        "model.route.availability.list",
         "credential.reference.list",
         "credential.reference.get"
       ],
       "websocketEvents": [
-        "activity.recorded.v1"
+        "activity.recorded.v1",
+        "model-route-availability.invalidated.v1"
       ],
       "executionPortMessages": [
         "model.open",
@@ -810,11 +821,18 @@
       "id": "candidate-artifacts",
       "currentObservableOperations": [
         "open and stream immutable candidate, diff, report, and evidence artifacts",
-        "acknowledge only contiguous artifact chunks under the current Lease"
+        "acknowledge only contiguous artifact chunks under the current Lease",
+        "read bounded current and retained Candidate identities, files, diffs, display-only review facts, exact Evidence outcomes, and closed Evidence Artifact availability"
       ],
       "httpCommands": [],
       "httpQueries": [
         "delivery.get",
+        "candidate.list",
+        "candidate.review.get",
+        "candidate.files.list",
+        "candidate.diff.get",
+        "evidence.get",
+        "evidence.artifact.content.get",
         "runtime.projection.get"
       ],
       "websocketEvents": [

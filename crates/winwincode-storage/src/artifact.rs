@@ -35,6 +35,8 @@ const MAX_UNFINISHED_ARTIFACTS_PER_JOB: usize = 4_096;
 const CATALOG_STARTUP_LOCK_FILE_NAME: &str = "artifact-catalog.startup.lock";
 const CATALOG_SCHEMA_VERSION: i64 = 2;
 const MAX_ARTIFACT_BYTES: u64 = 1_099_511_627_776;
+/// Largest Artifact byte range returned by one storage read.
+pub const MAX_ARTIFACT_RANGE_BYTES: u64 = 256 * 1024;
 const MAX_TEXT_BYTES: usize = 4_096;
 static NEXT_TEMPORARY_OBJECT_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -591,6 +593,98 @@ pub struct ArtifactObject {
     bytes: Vec<u8>,
 }
 
+/// One verified, bounded slice of a complete content-addressed object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactObjectRange {
+    bytes: Vec<u8>,
+    offset: u64,
+    total_size: u64,
+    digest: Sha256Digest,
+}
+
+impl ArtifactObjectRange {
+    /// Builds one adapter result after the adapter has verified the complete
+    /// object's immutable size and digest authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed digests, empty or oversized slices, arithmetic
+    /// overflow, and slices outside the declared complete object.
+    pub fn verified(
+        bytes: Vec<u8>,
+        offset: u64,
+        total_size: u64,
+        digest: Sha256Digest,
+    ) -> Result<Self, ArtifactError> {
+        sha256_hex(&digest)?;
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| ArtifactError::invalid("Artifact object range length is invalid"))?;
+        if length == 0 || length > MAX_ARTIFACT_RANGE_BYTES {
+            return Err(ArtifactError::invalid(
+                "Artifact object range length is invalid",
+            ));
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| ArtifactError::invalid("Artifact object range overflows"))?;
+        if total_size > MAX_ARTIFACT_BYTES || offset >= total_size || end > total_size {
+            return Err(ArtifactError::invalid(
+                "Artifact object range is outside the complete object",
+            ));
+        }
+        Ok(Self {
+            bytes,
+            offset,
+            total_size,
+            digest,
+        })
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[must_use]
+    pub const fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> &Sha256Digest {
+        &self.digest
+    }
+}
+
+/// Authorized Artifact catalog metadata plus one verified bounded byte range.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactRangeObject {
+    metadata: ArtifactRecord,
+    range: ArtifactObjectRange,
+}
+
+impl ArtifactRangeObject {
+    #[must_use]
+    pub const fn metadata(&self) -> &ArtifactRecord {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub const fn range(&self) -> &ArtifactObjectRange {
+        &self.range
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.range.bytes()
+    }
+}
+
 impl ArtifactObject {
     #[must_use]
     pub const fn metadata(&self) -> &ArtifactRecord {
@@ -639,6 +733,22 @@ pub trait ArtifactObjectStore: Send {
     ///
     /// Rejects malformed content addresses or an adapter read failure.
     fn read(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, ArtifactError>;
+
+    /// Reads one bounded range while verifying the complete object's declared
+    /// size and content address. Implementations must not buffer the complete
+    /// object merely to return a small range.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero, oversized, overflowing, or out-of-object ranges and any
+    /// object size/hash corruption or adapter read failure.
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError>;
 
     /// Deletes one unreferenced content object. Missing objects are idempotent.
     ///
@@ -1024,21 +1134,7 @@ impl ArtifactStore {
     /// Rejects foreign scope or provenance, a changed digest, incomplete or
     /// deleted metadata, missing bytes, and any object size/hash corruption.
     pub fn read_exact(&self, access: &ArtifactAccess) -> Result<ArtifactObject, ArtifactError> {
-        canonical_id(&access.artifact_id.0, "art_", "artifactId")?;
-        sha256_hex(&access.digest)?;
-        let record = self.load_authorized(&access.scope_key, &access.artifact_id)?;
-        if record.open.digest != access.digest || record.open.provenance != access.provenance {
-            return Err(ArtifactError::new(
-                ArtifactErrorKind::PermissionDenied,
-                "Artifact access does not match its immutable digest and provenance",
-            ));
-        }
-        if !record.complete {
-            return Err(ArtifactError::new(
-                ArtifactErrorKind::Incomplete,
-                "Artifact upload is not complete",
-            ));
-        }
+        let record = self.load_exact_complete(access)?;
         let bytes = self
             .objects_ref()?
             .read(&record.open.digest)?
@@ -1047,6 +1143,57 @@ impl ArtifactStore {
         Ok(ArtifactObject {
             metadata: record,
             bytes,
+        })
+    }
+
+    /// Returns catalog metadata for one exact complete Artifact authority
+    /// without reading its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign scope or provenance, a changed digest, incomplete or
+    /// deleted metadata, and a closed or corrupt catalog.
+    pub fn describe_exact(&self, access: &ArtifactAccess) -> Result<ArtifactRecord, ArtifactError> {
+        self.load_exact_complete(access)
+    }
+
+    /// Reads one authorized bounded range and verifies the adapter result
+    /// against the immutable catalog size, digest, offset, and exact length.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign scope or provenance, changed digest, incomplete or
+    /// deleted metadata, zero/oversized/overflowing/out-of-object ranges,
+    /// missing bytes, and any adapter result that disagrees with the catalog.
+    pub fn read_exact_range(
+        &self,
+        access: &ArtifactAccess,
+        offset: u64,
+        length: u64,
+    ) -> Result<ArtifactRangeObject, ArtifactError> {
+        let record = self.load_exact_complete(access)?;
+        let expected_length = validate_range_request(record.open.size_bytes, offset, length)?;
+        let range = self
+            .objects_ref()?
+            .read_range(
+                &record.open.digest,
+                record.open.size_bytes,
+                offset,
+                expected_length,
+            )?
+            .ok_or_else(|| ArtifactError::corrupt("Artifact content object is missing"))?;
+        if range.offset != offset
+            || range.total_size != record.open.size_bytes
+            || range.digest != record.open.digest
+            || u64::try_from(range.bytes.len()).ok() != Some(expected_length)
+        {
+            return Err(ArtifactError::corrupt(
+                "Artifact object range does not match immutable metadata",
+            ));
+        }
+        Ok(ArtifactRangeObject {
+            metadata: record,
+            range,
         })
     }
 
@@ -1290,6 +1437,28 @@ impl ArtifactStore {
             return Err(ArtifactError::new(
                 ArtifactErrorKind::PermissionDenied,
                 "Artifact belongs to another repository scope",
+            ));
+        }
+        Ok(record)
+    }
+
+    fn load_exact_complete(
+        &self,
+        access: &ArtifactAccess,
+    ) -> Result<ArtifactRecord, ArtifactError> {
+        canonical_id(&access.artifact_id.0, "art_", "artifactId")?;
+        sha256_hex(&access.digest)?;
+        let record = self.load_authorized(&access.scope_key, &access.artifact_id)?;
+        if record.open.digest != access.digest || record.open.provenance != access.provenance {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::PermissionDenied,
+                "Artifact access does not match its immutable digest and provenance",
+            ));
+        }
+        if !record.complete {
+            return Err(ArtifactError::new(
+                ArtifactErrorKind::Incomplete,
+                "Artifact upload is not complete",
             ));
         }
         Ok(record)
@@ -1613,6 +1782,64 @@ impl ArtifactObjectStore for LocalArtifactObjectStore {
         }
     }
 
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError> {
+        sha256_hex(digest)?;
+        let expected_length = validate_range_request(size_bytes, offset, length)?;
+        let requested_end = offset
+            .checked_add(expected_length)
+            .ok_or_else(|| ArtifactError::invalid("Artifact range overflows"))?;
+        let path = self.object_path(digest)?;
+        let mut input = match File::open(path) {
+            Ok(input) => input,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(error)),
+        };
+        let capacity = usize::try_from(expected_length)
+            .map_err(|_| ArtifactError::invalid("Artifact range length is invalid"))?;
+        let mut range_bytes = Vec::with_capacity(capacity);
+        let mut hasher = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = input.read(&mut buffer).map_err(io_error)?;
+            if read == 0 {
+                break;
+            }
+            let chunk_start = total;
+            total = total
+                .checked_add(read as u64)
+                .ok_or_else(|| ArtifactError::corrupt("Artifact object size overflows"))?;
+            let copy_start = offset.max(chunk_start);
+            let copy_end = requested_end.min(total);
+            if copy_start < copy_end {
+                let source_start = usize::try_from(copy_start - chunk_start)
+                    .map_err(|_| ArtifactError::corrupt("Artifact object range is invalid"))?;
+                let source_end = usize::try_from(copy_end - chunk_start)
+                    .map_err(|_| ArtifactError::corrupt("Artifact object range is invalid"))?;
+                range_bytes.extend_from_slice(&buffer[source_start..source_end]);
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let expected_digest = sha256_hex(digest)?;
+        if total != size_bytes || format!("{:x}", hasher.finalize()) != expected_digest {
+            return Err(ArtifactError::corrupt(
+                "Artifact object bytes do not match immutable metadata",
+            ));
+        }
+        if range_bytes.len() != capacity {
+            return Err(ArtifactError::corrupt(
+                "Artifact object range does not match immutable metadata",
+            ));
+        }
+        ArtifactObjectRange::verified(range_bytes, offset, total, digest.clone()).map(Some)
+    }
+
     fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError> {
         let path = self.object_path(digest)?;
         let parent = path.parent().ok_or_else(|| {
@@ -1763,6 +1990,40 @@ impl ArtifactObjectStore for FakeArtifactObjectStore {
             .objects
             .get(&key)
             .cloned())
+    }
+
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError> {
+        let key = sha256_hex(digest)?.to_owned();
+        let expected_length = validate_range_request(size_bytes, offset, length)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ArtifactError::adapter("fake object store lock is poisoned"))?;
+        let Some(bytes) = state.objects.get(&key) else {
+            return Ok(None);
+        };
+        validate_complete_bytes(digest, size_bytes, bytes)?;
+        let start = usize::try_from(offset)
+            .map_err(|_| ArtifactError::corrupt("Artifact object range is invalid"))?;
+        let end = usize::try_from(
+            offset
+                .checked_add(expected_length)
+                .ok_or_else(|| ArtifactError::invalid("Artifact range overflows"))?,
+        )
+        .map_err(|_| ArtifactError::corrupt("Artifact object range is invalid"))?;
+        let range_bytes = bytes
+            .get(start..end)
+            .ok_or_else(|| {
+                ArtifactError::corrupt("Artifact object range does not match immutable metadata")
+            })?
+            .to_vec();
+        ArtifactObjectRange::verified(range_bytes, offset, size_bytes, digest.clone()).map(Some)
     }
 
     fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError> {
@@ -2223,6 +2484,23 @@ fn validate_complete_bytes(
         ));
     }
     Ok(())
+}
+
+fn validate_range_request(size_bytes: u64, offset: u64, length: u64) -> Result<u64, ArtifactError> {
+    if length == 0 || length > MAX_ARTIFACT_RANGE_BYTES {
+        return Err(ArtifactError::invalid(
+            "Artifact range length is outside the supported bound",
+        ));
+    }
+    let requested_end = offset
+        .checked_add(length)
+        .ok_or_else(|| ArtifactError::invalid("Artifact range overflows"))?;
+    if size_bytes > MAX_ARTIFACT_BYTES || offset >= size_bytes {
+        return Err(ArtifactError::invalid(
+            "Artifact range starts outside the complete object",
+        ));
+    }
+    Ok(requested_end.min(size_bytes) - offset)
 }
 
 fn validate_incoming_complete_bytes(

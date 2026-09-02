@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientError } from './control-plane-client.js'
+import {
+  mountButton,
+  mountEmptyState,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+  type StatusTone,
+} from './components/index.js'
+import { mountKeyedCollection } from './components/keyed-collection.js'
 import type {
   CredentialReferenceId,
   CredentialReferenceProjection,
@@ -13,6 +23,7 @@ import type {
 export interface SettingsPageOptions {
   readonly root: HTMLElement
   readonly model: SettingsViewModel
+  readonly localOperationsHref?: string
 }
 
 export interface SettingsPage {
@@ -148,15 +159,73 @@ function lifecycleLabel(reference: CredentialReferenceProjection): string {
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
   const layout = element(document, 'main', 'wwc-settings')
-  const heading = element(document, 'h1', 'wwc-settings-heading')
-  const status = element(document, 'p', 'wwc-settings-status')
-  const error = element(document, 'div', 'wwc-settings-error')
-  const errorText = element(document, 'span', 'wwc-settings-error-text')
-  const retry = element(document, 'button', 'wwc-settings-retry')
-  const reconnect = element(document, 'button', 'wwc-settings-reconnect')
+  layout.dataset.wwcPage = 'management'
+  const pageHeader = mountPageHeader({
+    document,
+    props: {
+      title: 'Local Provider settings',
+      eyebrow: 'Local control plane',
+      description: 'Choose the default model route and manage write-only Credential references.',
+      headingLevel: 1,
+      className: 'wwc-settings-heading',
+    },
+  })
+  const heading = pageHeader.root
+  const localOperationsLink = element(document, 'a', 'wwc-settings-local-operations-link')
+  const statusBadge = mountStatusBadge({
+    document,
+    props: {
+      label: 'Loading Provider settings…',
+      tone: 'info',
+      live: 'polite',
+      className: 'wwc-settings-status',
+    },
+  })
+  const status = statusBadge.root
+  const retryButton = mountButton({
+    document,
+    props: {
+      label: 'Retry snapshot',
+      className: 'wwc-settings-retry',
+      onActivate: () => { void options.model.refresh() },
+    },
+  })
+  const retry = retryButton.root
+  const reconnectButton = mountButton({
+    document,
+    props: {
+      label: 'Reconnect events',
+      className: 'wwc-settings-reconnect',
+      onActivate: () => { options.model.reconnect() },
+    },
+  })
+  const reconnect = reconnectButton.root
+  const errorState = mountErrorState({
+    document,
+    props: {
+      title: 'Provider settings unavailable',
+      message: '',
+      actions: [retry, reconnect],
+      visible: false,
+      className: 'wwc-settings-error',
+    },
+  })
+  const error = errorState.root
+  const errorText = errorState.message
+  errorText.className = 'wwc-settings-error-text'
 
-  const routeSection = element(document, 'section', 'wwc-settings-route')
-  const routeHeading = element(document, 'h2', 'wwc-settings-section-heading')
+  const routePanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-settings-route',
+      title: 'Default model route',
+      description: 'Select the Provider, model, Credential reference, and local Worker limit.',
+      className: 'wwc-settings-route',
+    },
+  })
+  const routeSection = routePanel.root
+  const routeHeading = routePanel.title
+  routeHeading.className = 'wwc-settings-section-heading'
   const routeForm = element(document, 'form', 'wwc-settings-route-form')
   const provider = labelledInput(document, 'wwc-settings-provider', 'Provider ID', 'wwc-settings-provider')
   const model = labelledInput(document, 'wwc-settings-model', 'Model ID', 'wwc-settings-model')
@@ -173,8 +242,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const saveRoute = element(document, 'button', 'wwc-settings-save-route')
   const clearRoute = element(document, 'button', 'wwc-settings-clear-route')
 
-  const createSection = element(document, 'section', 'wwc-settings-create-credential')
-  const createHeading = element(document, 'h2', 'wwc-settings-section-heading')
+  const createPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-settings-create-credential',
+      title: 'Add Credential reference',
+      description: 'The local secret-store locator is submitted once and is not shown again.',
+      className: 'wwc-settings-create-credential',
+    },
+  })
+  const createSection = createPanel.root
+  const createHeading = createPanel.title
+  createHeading.className = 'wwc-settings-section-heading'
   const createHelp = element(document, 'p', 'wwc-settings-secret-help')
   const createForm = element(document, 'form', 'wwc-settings-create-form')
   const createId = labelledInput(document, 'wwc-settings-create-id', 'Reference ID', 'wwc-settings-create-id')
@@ -194,24 +273,33 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   )
   const createButton = element(document, 'button', 'wwc-settings-create-submit')
 
-  const referencesSection = element(document, 'section', 'wwc-settings-credentials')
-  const referencesHeading = element(document, 'h2', 'wwc-settings-section-heading')
+  const referencesPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-settings-credentials',
+      title: 'Credential references',
+      description: 'Only secret-safe lifecycle metadata is displayed.',
+      className: 'wwc-settings-credentials',
+    },
+  })
+  const referencesSection = referencesPanel.root
+  const referencesHeading = referencesPanel.title
+  referencesHeading.className = 'wwc-settings-section-heading'
   const referencesHelp = element(document, 'p', 'wwc-settings-credential-help')
   const references = element(document, 'ul', 'wwc-settings-credential-list')
+  const referencesEmpty = mountEmptyState({
+    document,
+    props: {
+      title: 'No Credential references',
+      detail: 'Add a write-only Credential reference before choosing a default model route.',
+      className: 'wwc-settings-credential-empty',
+    },
+  })
   let closed = false
 
-  heading.textContent = 'Local Provider settings'
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  error.setAttribute('role', 'alert')
-  error.setAttribute('aria-live', 'assertive')
-  retry.type = 'button'
-  retry.textContent = 'Retry snapshot'
-  reconnect.type = 'button'
-  reconnect.textContent = 'Reconnect events'
-  error.append(errorText, retry, reconnect)
+  localOperationsLink.href = options.localOperationsHref ?? '#/settings/runtime'
+  localOperationsLink.textContent = 'Open repository and local Worker operations'
 
-  routeHeading.textContent = 'Default model route'
   credentialLabel.htmlFor = 'wwc-settings-credential'
   credentialLabel.textContent = 'Credential reference'
   credential.id = 'wwc-settings-credential'
@@ -221,8 +309,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   concurrency.input.step = '1'
   saveRoute.type = 'submit'
   saveRoute.textContent = 'Save model route'
+  saveRoute.dataset.wwcComponent = 'button'
+  saveRoute.dataset.variant = 'primary'
   clearRoute.type = 'button'
   clearRoute.textContent = 'Clear default route'
+  clearRoute.dataset.wwcComponent = 'button'
+  clearRoute.dataset.variant = 'destructive'
   routeControls.append(saveRoute, clearRoute)
   routeForm.append(
     provider.label,
@@ -231,14 +323,16 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     concurrency.label,
     routeControls,
   )
-  routeSection.append(routeHeading, routeForm)
+  routePanel.content.append(routeForm)
 
-  createHeading.textContent = 'Add Credential reference'
   createHelp.textContent = 'The local secret-store locator is submitted once and is not shown again.'
+  createHelp.hidden = true
   createSecret.input.autocomplete = 'new-password'
   createSecret.input.spellcheck = false
   createButton.type = 'submit'
   createButton.textContent = 'Add reference'
+  createButton.dataset.wwcComponent = 'button'
+  createButton.dataset.variant = 'primary'
   createForm.append(
     createId.label,
     createName.label,
@@ -246,100 +340,210 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     createSecret.label,
     createButton,
   )
-  createSection.append(createHeading, createHelp, createForm)
+  createPanel.content.append(createHelp, createForm)
 
-  referencesHeading.textContent = 'Credential references'
   referencesHelp.textContent = 'Only secret-safe lifecycle metadata is displayed.'
+  referencesHelp.hidden = true
   references.setAttribute('aria-live', 'polite')
-  referencesSection.append(referencesHeading, referencesHelp, references)
-  layout.append(heading, status, error, routeSection, createSection, referencesSection)
+  referencesPanel.content.append(referencesHelp, references, referencesEmpty.root)
+  layout.append(
+    heading,
+    localOperationsLink,
+    status,
+    error,
+    routeSection,
+    createSection,
+    referencesSection,
+  )
   options.root.replaceChildren(layout)
 
-  function renderReference(
-    reference: CredentialReferenceProjection,
-    disabled: boolean,
-  ): HTMLLIElement {
-    const item = element(document, 'li', 'wwc-settings-credential-item')
-    const title = element(document, 'h3', 'wwc-settings-credential-title')
-    const metadata = element(document, 'dl', 'wwc-settings-credential-metadata')
-    const rotateForm = element(document, 'form', 'wwc-settings-rotate-form')
-    const rotateSecret = labelledInput(
-      document,
-      `wwc-settings-rotate-${reference.id}`,
-      `New local secret for ${reference.displayName}`,
-      'wwc-settings-rotate-secret',
-      'password',
-    )
-    const rotate = element(document, 'button', 'wwc-settings-rotate')
-    const revoke = element(document, 'button', 'wwc-settings-revoke')
-    const entries: readonly [string, string][] = Object.freeze([
-      ['Reference ID', reference.id],
-      ['Provider ID', reference.providerId],
-      ['Secret state', lifecycleLabel(reference)],
-      ['Rotation version', String(reference.rotationVersion)],
-      ['Updated', reference.updatedAt],
-      ['Last rotated', reference.lastRotatedAt ?? 'Never'],
-      ['Revoked', reference.revokedAt ?? 'No'],
-    ])
-    title.textContent = reference.displayName
-    for (const [term, description] of entries) {
-      const dt = document.createElement('dt')
-      const dd = document.createElement('dd')
-      dt.textContent = term
-      dd.textContent = description
-      metadata.append(dt, dd)
-    }
-    rotateSecret.input.autocomplete = 'new-password'
-    rotateSecret.input.spellcheck = false
-    rotate.type = 'submit'
-    rotate.textContent = 'Rotate secret'
-    revoke.type = 'button'
-    revoke.textContent = 'Revoke reference'
-    rotate.disabled = disabled || reference.secretState === 'revoked'
-    rotateSecret.input.disabled = rotate.disabled
-    revoke.disabled = disabled || reference.secretState === 'revoked'
-    rotateForm.addEventListener('submit', event => {
-      event.preventDefault()
-      const secret = rotateSecret.input.value
-      rotateSecret.input.value = ''
-      void options.model.rotateCredentialReference({
-        credentialReferenceId: reference.id,
-        vaultLocator: secret,
-      })
-    })
-    revoke.addEventListener('click', () => {
-      void options.model.revokeCredentialReference(reference.id)
-    })
-    rotateForm.append(rotateSecret.label, rotate)
-    item.append(title, metadata, rotateForm, revoke)
-    return item
+  interface CredentialChoice {
+    readonly key: string
+    readonly reference: CredentialReferenceProjection | null
   }
+  interface CredentialRow {
+    current: CredentialReferenceProjection
+    readonly title: HTMLElement
+    readonly descriptions: readonly HTMLElement[]
+    readonly rotateForm: HTMLFormElement
+    readonly rotateSecret: HTMLInputElement
+    readonly rotate: HTMLButtonElement
+    readonly revoke: HTMLButtonElement
+    readonly onRotate: (event: SubmitEvent) => void
+    readonly onRevoke: () => void
+  }
+  let routeDirty = false
+  const markRouteDirty = () => { routeDirty = true }
+  const credentialOptions = mountKeyedCollection<CredentialChoice, string, HTMLOptionElement>({
+    parent: credential,
+    key: choice => choice.key,
+    create: () => document.createElement('option'),
+    update(choice, item) {
+      choice.value = item.key
+      choice.textContent = item.reference === null
+        ? 'Choose an available reference'
+        : `${item.reference.displayName} · ${item.reference.providerId}`
+    },
+  })
+  const credentialRows = new WeakMap<HTMLLIElement, CredentialRow>()
+  const credentialReferences = mountKeyedCollection({
+    parent: references,
+    key: (reference: CredentialReferenceProjection) => reference.id,
+    create(reference: CredentialReferenceProjection) {
+      const item = element(document, 'li', 'wwc-settings-credential-item')
+      const title = element(document, 'h3', 'wwc-settings-credential-title')
+      const metadata = element(document, 'dl', 'wwc-settings-credential-metadata')
+      const rotateForm = element(document, 'form', 'wwc-settings-rotate-form')
+      const rotateSecret = labelledInput(
+        document,
+        `wwc-settings-rotate-${reference.id}`,
+        `New local secret for ${reference.displayName}`,
+        'wwc-settings-rotate-secret',
+        'password',
+      )
+      const rotate = element(document, 'button', 'wwc-settings-rotate')
+      const revoke = element(document, 'button', 'wwc-settings-revoke')
+      const terms = [
+        'Reference ID',
+        'Provider ID',
+        'Secret state',
+        'Rotation version',
+        'Updated',
+        'Last rotated',
+        'Revoked',
+      ] as const
+      const descriptions = terms.map(term => {
+        const dt = document.createElement('dt')
+        const dd = document.createElement('dd')
+        dt.textContent = term
+        metadata.append(dt, dd)
+        return dd
+      })
+      rotateSecret.input.autocomplete = 'new-password'
+      rotateSecret.input.spellcheck = false
+      rotate.type = 'submit'
+      rotate.textContent = 'Rotate secret'
+      rotate.dataset.wwcComponent = 'button'
+      rotate.dataset.variant = 'default'
+      revoke.type = 'button'
+      revoke.textContent = 'Revoke reference'
+      revoke.dataset.wwcComponent = 'button'
+      revoke.dataset.variant = 'destructive'
+      const onRotate = (event: SubmitEvent) => {
+        event.preventDefault()
+        const row = credentialRows.get(item)
+        if (row === undefined) return
+        const secret = row.rotateSecret.value
+        row.rotateSecret.value = ''
+        void options.model.rotateCredentialReference({
+          credentialReferenceId: row.current.id,
+          vaultLocator: secret,
+        })
+      }
+      const onRevoke = () => {
+        const row = credentialRows.get(item)
+        if (row !== undefined) void options.model.revokeCredentialReference(row.current.id)
+      }
+      rotateForm.addEventListener('submit', onRotate)
+      revoke.addEventListener('click', onRevoke)
+      rotateForm.append(rotateSecret.label, rotate)
+      item.append(title, metadata, rotateForm, revoke)
+      credentialRows.set(item, {
+        current: reference,
+        title,
+        descriptions,
+        rotateForm,
+        rotateSecret: rotateSecret.input,
+        rotate,
+        revoke,
+        onRotate,
+        onRevoke,
+      })
+      return item
+    },
+    update(item, reference: CredentialReferenceProjection) {
+      const row = credentialRows.get(item)
+      if (row === undefined) return
+      row.current = reference
+      row.title.textContent = reference.displayName
+      const values = [
+        reference.id,
+        reference.providerId,
+        lifecycleLabel(reference),
+        String(reference.rotationVersion),
+        reference.updatedAt,
+        reference.lastRotatedAt ?? 'Never',
+        reference.revokedAt ?? 'No',
+      ] as const
+      values.forEach((value, index) => {
+        const description = row.descriptions[index]
+        if (description !== undefined && description.textContent !== value) {
+          description.textContent = value
+        }
+      })
+      const disabled = settingsPagePresentation(options.model.state).mutationsDisabled
+        || reference.secretState === 'revoked'
+      row.rotate.disabled = disabled
+      row.rotateSecret.disabled = disabled
+      row.revoke.disabled = disabled
+    },
+    remove(item) {
+      const row = credentialRows.get(item)
+      if (row === undefined) return
+      row.rotateSecret.value = ''
+      row.rotateForm.removeEventListener('submit', row.onRotate)
+      row.revoke.removeEventListener('click', row.onRevoke)
+      credentialRows.delete(item)
+    },
+  })
 
   function render(state: SettingsViewModelState): void {
     if (closed) return
     const presentation = settingsPagePresentation(state)
     const route = state.settings?.defaultModelRoute ?? null
-    status.textContent = presentation.statusText
+    const tone: StatusTone = presentation.errorText !== null
+      ? 'danger'
+      : state.realtime === 'reconnecting'
+        ? 'warning'
+        : presentation.busy
+          ? 'info'
+          : state.status === 'ready'
+            ? 'success'
+            : 'neutral'
+    statusBadge.update({
+      label: presentation.statusText,
+      tone,
+      live: 'polite',
+      className: 'wwc-settings-status',
+    })
     layout.setAttribute('aria-busy', String(presentation.busy))
-    error.hidden = presentation.errorText === null
-    errorText.textContent = presentation.errorText ?? ''
+    errorState.update({
+      title: 'Provider settings unavailable',
+      message: presentation.errorText ?? '',
+      actions: [retry, reconnect],
+      visible: presentation.errorText !== null,
+      className: 'wwc-settings-error',
+    })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    provider.input.value = route?.providerId ?? ''
-    model.input.value = route?.modelId ?? ''
-    concurrency.input.value = String(state.settings?.workerConcurrencyLimit ?? 1)
-    credential.replaceChildren()
-    const noCredential = document.createElement('option')
-    noCredential.value = ''
-    noCredential.textContent = 'Choose an available reference'
-    credential.append(noCredential)
-    for (const reference of state.credentials) {
-      if (reference.secretState !== 'available') continue
-      const choice = document.createElement('option')
-      choice.value = reference.id
-      choice.textContent = `${reference.displayName} · ${reference.providerId}`
-      choice.selected = reference.id === route?.credentialReferenceId
-      credential.append(choice)
+    if (!routeDirty) {
+      const providerValue = route?.providerId ?? ''
+      const modelValue = route?.modelId ?? ''
+      const concurrencyValue = String(state.settings?.workerConcurrencyLimit ?? 1)
+      const credentialValue = route?.credentialReferenceId ?? ''
+      if (provider.input.value !== providerValue) provider.input.value = providerValue
+      if (model.input.value !== modelValue) model.input.value = modelValue
+      if (concurrency.input.value !== concurrencyValue) concurrency.input.value = concurrencyValue
+    }
+    credentialOptions.update([
+      { key: '', reference: null },
+      ...state.credentials
+        .filter(reference => reference.secretState === 'available')
+        .map(reference => ({ key: reference.id, reference })),
+    ])
+    if (!routeDirty) {
+      const credentialValue = route?.credentialReferenceId ?? ''
+      if (credential.value !== credentialValue) credential.value = credentialValue
     }
     provider.input.disabled = presentation.mutationsDisabled
     model.input.disabled = presentation.mutationsDisabled
@@ -352,12 +556,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     createProvider.input.disabled = presentation.mutationsDisabled
     createSecret.input.disabled = presentation.mutationsDisabled
     createButton.disabled = presentation.mutationsDisabled
-    references.replaceChildren(...state.credentials.map(reference => (
-      renderReference(reference, presentation.mutationsDisabled)
-    )))
+    credentialReferences.update(state.credentials)
+    references.hidden = state.credentials.length === 0
+    referencesEmpty.root.hidden = state.credentials.length !== 0
   }
 
-  routeForm.addEventListener('submit', event => {
+  const onRouteSubmit = (event: SubmitEvent) => {
     event.preventDefault()
     void options.model.updateSettings({
       defaultModelRoute: {
@@ -366,15 +570,19 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         credentialReferenceId: credential.value as CredentialReferenceId,
       },
       workerConcurrencyLimit: Number(concurrency.input.value),
+    }).then(() => {
+      if (options.model.state.interaction.status !== 'error') routeDirty = false
     })
-  })
-  clearRoute.addEventListener('click', () => {
+  }
+  const onClearRoute = () => {
     void options.model.updateSettings({
       defaultModelRoute: null,
       workerConcurrencyLimit: Number(concurrency.input.value),
+    }).then(() => {
+      if (options.model.state.interaction.status !== 'error') routeDirty = false
     })
-  })
-  createForm.addEventListener('submit', event => {
+  }
+  const onCreateCredential = (event: SubmitEvent) => {
     event.preventDefault()
     const secret = createSecret.input.value
     createSecret.input.value = ''
@@ -390,9 +598,14 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         createProvider.input.value = ''
       }
     })
-  })
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  reconnect.addEventListener('click', () => { options.model.reconnect() })
+  }
+  provider.input.addEventListener('input', markRouteDirty)
+  model.input.addEventListener('input', markRouteDirty)
+  credential.addEventListener('change', markRouteDirty)
+  concurrency.input.addEventListener('input', markRouteDirty)
+  routeForm.addEventListener('submit', onRouteSubmit)
+  clearRoute.addEventListener('click', onClearRoute)
+  createForm.addEventListener('submit', onCreateCredential)
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -400,7 +613,25 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       if (closed) return
       closed = true
       unsubscribe()
+      provider.input.removeEventListener('input', markRouteDirty)
+      model.input.removeEventListener('input', markRouteDirty)
+      credential.removeEventListener('change', markRouteDirty)
+      concurrency.input.removeEventListener('input', markRouteDirty)
+      routeForm.removeEventListener('submit', onRouteSubmit)
+      clearRoute.removeEventListener('click', onClearRoute)
+      createForm.removeEventListener('submit', onCreateCredential)
+      credentialReferences.close()
+      credentialOptions.close()
       options.model.close()
+      retryButton.close()
+      reconnectButton.close()
+      errorState.close()
+      referencesEmpty.close()
+      referencesPanel.close()
+      createPanel.close()
+      routePanel.close()
+      statusBadge.close()
+      pageHeader.close()
       options.root.replaceChildren()
     },
   }

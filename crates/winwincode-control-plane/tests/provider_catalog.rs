@@ -135,7 +135,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
 
     let create_request = request(1, catalog_scope.clone(), 0);
     let created = ProviderCatalogService::new(&mut storage)
-        .upsert(&create_request, &initial_descriptor())
+        .upsert(
+            &create_request,
+            &initial_descriptor(),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("register Provider descriptor");
     assert_eq!(created.change, ProviderCatalogChange::Upserted);
     assert_eq!(created.previous_catalog_version, 0);
@@ -169,7 +173,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
     equivalent_replay.models.reverse();
     equivalent_replay.models[0].reasoning_efforts.reverse();
     let replay = ProviderCatalogService::new(&mut storage)
-        .upsert(&create_request, &equivalent_replay)
+        .upsert(
+            &create_request,
+            &equivalent_replay,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("replay exact registration");
     assert_eq!(replay.catalog_version, 1);
     assert_eq!(replay.provider_version, 1);
@@ -178,7 +186,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
     let mut changed_replay = initial_descriptor();
     changed_replay.display_name = "Changed body".to_owned();
     let replay_error = ProviderCatalogService::new(&mut storage)
-        .upsert(&create_request, &changed_replay)
+        .upsert(
+            &create_request,
+            &changed_replay,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("changed requestId input must conflict");
     assert_eq!(
         replay_error.kind(),
@@ -188,7 +200,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
 
     let update_request = request(2, catalog_scope.clone(), 1);
     let updated = ProviderCatalogService::new(&mut storage)
-        .upsert(&update_request, &updated_descriptor())
+        .upsert(
+            &update_request,
+            &updated_descriptor(),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("hot-update Provider descriptor");
     assert_eq!(updated.previous_catalog_version, 1);
     assert_eq!(updated.catalog_version, 2);
@@ -243,7 +259,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
 
     let disable_request = request(3, catalog_scope.clone(), 2);
     let disabled = ProviderCatalogService::new(&mut storage)
-        .disable(&disable_request, "fixture-provider")
+        .disable(
+            &disable_request,
+            "fixture-provider",
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("disable Provider");
     assert_eq!(disabled.change, ProviderCatalogChange::Disabled);
     assert_eq!(disabled.catalog_version, 3);
@@ -258,7 +278,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
 
     let repeat_disable = request(4, catalog_scope.clone(), 3);
     let repeat_error = ProviderCatalogService::new(&mut storage)
-        .disable(&repeat_disable, "fixture-provider")
+        .disable(
+            &repeat_disable,
+            "fixture-provider",
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("a new disable command cannot create a fake version");
     assert_eq!(
         repeat_error.kind(),
@@ -267,7 +291,11 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
 
     let stale = request(5, catalog_scope.clone(), 1);
     let stale_error = ProviderCatalogService::new(&mut storage)
-        .upsert(&stale, &initial_descriptor())
+        .upsert(
+            &stale,
+            &initial_descriptor(),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("stale hot update must fail");
     assert_eq!(
         stale_error.kind(),
@@ -290,12 +318,14 @@ fn hot_update_disable_scope_query_and_replay_are_deterministic() {
 
     let events = storage
         .pending_events()
-        .expect("load catalog version events");
+        .expect("load catalog version events")
+        .into_iter()
+        .filter(|event| event.topic == PROVIDER_CATALOG_VERSION_EVENT_TOPIC)
+        .collect::<Vec<_>>();
     assert_eq!(events.len(), 3);
     let decoded = events
         .iter()
         .map(|event| {
-            assert_eq!(event.topic, PROVIDER_CATALOG_VERSION_EVENT_TOPIC);
             serde_json::from_slice::<ProviderCatalogVersionEvent>(&event.payload)
                 .expect("decode catalog version event")
         })
@@ -326,10 +356,15 @@ fn catalog_state_and_versions_survive_restart() {
         .upsert(
             &request(10, catalog_scope.clone(), 0),
             &initial_descriptor(),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider before restart");
     ProviderCatalogService::new(&mut storage)
-        .disable(&request(11, catalog_scope.clone(), 1), "fixture-provider")
+        .disable(
+            &request(11, catalog_scope.clone(), 1),
+            "fixture-provider",
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect("disable Provider before restart");
     Box::new(storage).close().expect("close before restart");
 
@@ -348,6 +383,7 @@ fn catalog_state_and_versions_survive_restart() {
         .upsert(
             &request(12, catalog_scope.clone(), 2),
             &initial_descriptor(),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("hot update from recovered version");
     assert_eq!(reenabled.catalog_version, 3);
@@ -359,7 +395,10 @@ fn catalog_state_and_versions_survive_restart() {
 
     let events = reopened
         .pending_events()
-        .expect("recover all version events after restart");
+        .expect("recover all version events after restart")
+        .into_iter()
+        .filter(|event| event.topic == PROVIDER_CATALOG_VERSION_EVENT_TOPIC)
+        .collect::<Vec<_>>();
     assert_eq!(events.len(), 3);
     Box::new(reopened).close().expect("close reopened storage");
     fs::remove_dir_all(root).expect("remove restart fixture");
@@ -375,6 +414,7 @@ fn catalog_boundaries_hold_references_but_no_secret_material() {
         .upsert(
             &request(20, catalog_scope.clone(), 0),
             &initial_descriptor(),
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register secret-free descriptor");
     let projection = ProviderCatalogService::new(&mut storage)
@@ -422,7 +462,11 @@ fn catalog_boundaries_hold_references_but_no_secret_material() {
     let mut credential_shaped = initial_descriptor();
     credential_shaped.display_name = "sk-1234567890abcdef1234567890".to_owned();
     let rejected = ProviderCatalogService::new(&mut storage)
-        .upsert(&request(21, catalog_scope, 1), &credential_shaped)
+        .upsert(
+            &request(21, catalog_scope, 1),
+            &credential_shaped,
+            winwincode_domain::Instant("2026-09-02T00:00:00.000Z".to_owned()),
+        )
         .expect_err("credential-shaped description must fail closed");
     assert_eq!(rejected.kind(), ProviderCatalogErrorKind::CredentialLeak);
     assert!(!rejected.to_string().contains("sk-"));

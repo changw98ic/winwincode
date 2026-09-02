@@ -12,7 +12,8 @@ use winwincode_domain::{
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactErrorKind, ArtifactMeteringAttribution, ArtifactOpen,
     ArtifactProvenance, ArtifactRetention, ArtifactStore, CandidateSourceManifest,
-    FakeArtifactObjectStore, GitSourcePathState, LocalGitSourceResolver, ReceiptScopeKey,
+    FakeArtifactObjectStore, GitCandidateReviewFileEncoding, GitCandidateReviewFileStatus,
+    GitSourcePathState, GitSourceResolver, LocalGitSourceResolver, ReceiptScopeKey,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -92,7 +93,16 @@ fn repository_fixture(root: &Path) -> (String, String) {
     let base = text(git(root, &["rev-parse", "HEAD"]));
 
     fs::write(root.join("src/app.txt"), b"base\ncandidate\n").expect("candidate source");
-    git(root, &["add", "--", "src/app.txt"]);
+    fs::write(root.join("src/blob.bin"), [0_u8, 1, 2, 0, 255]).expect("candidate binary");
+    fs::write(
+        root.join("src/legacy.txt"),
+        [b'l', b'a', b't', b'i', b'n', b'-', 0xff, b'\n'],
+    )
+    .expect("candidate unknown 8-bit text");
+    git(
+        root,
+        &["add", "--", "src/app.txt", "src/blob.bin", "src/legacy.txt"],
+    );
     commit(root, "candidate", "2026-08-25T00:01:00Z");
     let candidate = text(git(root, &["rev-parse", "HEAD"]));
     (base, candidate)
@@ -252,7 +262,7 @@ fn local_git_resolver_rebuilds_identity_from_exact_candidate_artifact() {
         source.diff_sha256(),
         format!("{:x}", Sha256::digest(expected_diff))
     );
-    assert_eq!(source.changed_paths().len(), 1);
+    assert_eq!(source.changed_paths().len(), 3);
     assert_eq!(source.changed_paths()[0].path(), "src/app.txt");
     assert_eq!(
         source.changed_paths()[0].state(),
@@ -270,8 +280,78 @@ fn local_git_resolver_rebuilds_identity_from_exact_candidate_artifact() {
         )))
         .as_deref()
     );
-    assert_eq!(source.changed_hunks().len(), 1);
+    assert_eq!(source.changed_hunks().len(), 3);
     assert_eq!(source.changed_hunks()[0].file_path(), "src/app.txt");
+    let review = resolver
+        .candidate_review(&source)
+        .expect("Candidate changed-file review");
+    assert_eq!(review.candidate_commit_id(), candidate_commit);
+    assert_eq!(review.candidate_tree_id(), source.candidate_tree_id());
+    assert_eq!(review.diff_sha256(), source.diff_sha256());
+    assert_eq!(review.files().len(), 3);
+    assert_eq!(review.files()[0].path(), "src/app.txt");
+    assert_eq!(review.files()[0].old_path(), None);
+    assert_eq!(
+        review.files()[0].status(),
+        GitCandidateReviewFileStatus::Modified
+    );
+    assert_eq!(review.files()[0].additions(), Some(1));
+    assert_eq!(review.files()[0].deletions(), Some(0));
+    assert!(!review.files()[0].is_binary());
+    assert_eq!(
+        review.files()[0].encoding(),
+        GitCandidateReviewFileEncoding::Utf8
+    );
+    assert_eq!(review.files()[1].path(), "src/blob.bin");
+    assert_eq!(
+        review.files()[1].status(),
+        GitCandidateReviewFileStatus::Added
+    );
+    assert_eq!(review.files()[1].additions(), None);
+    assert_eq!(review.files()[1].deletions(), None);
+    assert!(review.files()[1].is_binary());
+    assert_eq!(
+        review.files()[1].encoding(),
+        GitCandidateReviewFileEncoding::Binary
+    );
+    assert_eq!(review.files()[2].path(), "src/legacy.txt");
+    assert!(!review.files()[2].is_binary());
+    assert_eq!(
+        review.files()[2].encoding(),
+        GitCandidateReviewFileEncoding::Unknown8Bit
+    );
+    let path_diff = resolver
+        .candidate_diff(&source, "src/app.txt")
+        .expect("Candidate path diff");
+    assert_eq!(path_diff.path(), "src/app.txt");
+    assert!(!path_diff.is_binary());
+    assert_eq!(
+        path_diff.file_diff_sha256(),
+        format!("{:x}", Sha256::digest(path_diff.bytes()))
+    );
+    assert!(String::from_utf8_lossy(path_diff.bytes()).contains("+candidate"));
+    let binary_diff = resolver
+        .candidate_diff(&source, "src/blob.bin")
+        .expect("Candidate binary diff");
+    assert!(binary_diff.is_binary());
+    assert_eq!(binary_diff.status(), GitCandidateReviewFileStatus::Added);
+    assert_eq!(
+        binary_diff.encoding(),
+        GitCandidateReviewFileEncoding::Binary
+    );
+    assert!(binary_diff.bytes().starts_with(b"diff --git "));
+    let unknown_text_diff = resolver
+        .candidate_diff(&source, "src/legacy.txt")
+        .expect("Candidate unknown 8-bit diff");
+    assert!(!unknown_text_diff.is_binary());
+    assert_eq!(
+        unknown_text_diff.encoding(),
+        GitCandidateReviewFileEncoding::Unknown8Bit
+    );
+    let traversal = resolver
+        .candidate_diff(&source, "../secret")
+        .expect_err("path traversal must not select Candidate data");
+    assert_eq!(traversal.kind(), ArtifactErrorKind::InvalidInput);
     assert_eq!(
         source.artifact().artifact_id().0,
         "art_0000000000000000000000000C"

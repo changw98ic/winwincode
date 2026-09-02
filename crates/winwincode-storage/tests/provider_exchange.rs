@@ -6,11 +6,16 @@ use std::{
 
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
-use winwincode_domain::{ExecutionMessageId, Instant, ModelExchangeId, RequestId, Sha256Digest};
+use winwincode_domain::{
+    ControlPlaneEventId, ExecutionMessageId, Instant, ModelExchangeId, OrganizationId, ProjectId,
+    RequestId, Sha256Digest, SystemActorId, WorkspaceId,
+};
 use winwincode_storage::{
-    ProviderExchangeBegin, ProviderExchangeFailure, ProviderExchangeOpened, ProviderExchangeState,
+    NewOutboxEvent, ProductStateStorage, ProjectionEventStream, ProviderExchangeBegin,
+    ProviderExchangeFailure, ProviderExchangeOpened, ProviderExchangeState,
     ProviderExchangeStoreErrorCode, ProviderExchangeTerminal, ProviderExchangeTerminalStage,
-    SqliteStorage,
+    PublicEventActor, PublicEventScope, PublicEventSource, SqliteStorage, StateCommit,
+    public_receipt_identity,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -33,6 +38,43 @@ fn at(second: u64) -> Instant {
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn readiness_commit(seed: u64, marker: &str, authority: &[u8]) -> StateCommit {
+    let actor = PublicEventActor::System {
+        id: SystemActorId(id("sys", 1)),
+    };
+    let scope = PublicEventScope::Project {
+        organization_id: OrganizationId(id("org", 1)),
+        workspace_id: WorkspaceId(id("wsp", 1)),
+        project_id: ProjectId(id("prj", 1)),
+    };
+    let request_id = RequestId(id("req", 10_000 + seed));
+    let identity =
+        public_receipt_identity(&actor, &scope, request_id).expect("canonical readiness receipt");
+    let event = NewOutboxEvent::public_projection(
+        ControlPlaneEventId(format!("evt_pool_readiness_{marker}")),
+        "model-route-availability.invalidated.v1",
+        format!(r#"{{"marker":"{marker}"}}"#).into_bytes(),
+        ProjectionEventStream::Scope,
+        scope,
+        at(4),
+        PublicEventSource::ControlPlane {
+            actor,
+            component: "model-route-availability".to_owned(),
+        },
+    )
+    .expect("canonical readiness event");
+    let mut command = Vec::from(marker.as_bytes());
+    command.extend_from_slice(authority);
+    StateCommit::new(
+        identity,
+        digest(&command),
+        format!("model-request-pool-readiness:{marker}"),
+        0,
+        br#"{"schema":"pool-readiness-v1"}"#.to_vec(),
+        vec![event],
+    )
 }
 
 fn begin(seed: u64, body: &[u8]) -> ProviderExchangeBegin {
@@ -258,6 +300,7 @@ fn noncanonical_digest_and_partial_state_are_rejected() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
     let root = temporary_directory("single-pool-authority");
     let active = begin(6, b"active-request");
@@ -267,11 +310,15 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
     let terminal_authority = br#"{"generation":3,"state":"terminal"}"#;
     let forgotten_authority = br#"{"generation":4,"state":"forgotten"}"#;
     let final_ack_receipt = br#"{"acknowledgedSequence":4,"schema":"final-ack-v1"}"#;
+    let active_readiness = readiness_commit(1, "active", active_authority);
+    let failed_readiness = readiness_commit(2, "failed", failed_authority);
+    let terminal_readiness = readiness_commit(3, "terminal", terminal_authority);
+    let forgotten_readiness = readiness_commit(4, "forgotten", forgotten_authority);
     {
         let mut storage = SqliteStorage::open(&root).expect("open storage");
         let mut exchanges = storage.provider_exchange_store().expect("exchange store");
         exchanges
-            .begin_open_with_pool_authority(&active, active_authority)
+            .begin_open_with_pool_authority(&active, active_authority, &active_readiness)
             .expect("atomic active authority and opening tombstone");
         assert_eq!(
             exchanges
@@ -298,6 +345,7 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
                     failed_at: at(3),
                 },
                 failed_authority,
+                &failed_readiness,
             )
             .expect("atomic failed state and authority");
         exchanges
@@ -305,6 +353,7 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
                 &active.model_exchange_id,
                 &terminal("atomic"),
                 terminal_authority,
+                &terminal_readiness,
             )
             .expect("atomic terminal state and authority");
         let final_ack_digest = digest(b"exact-final-ack-envelope");
@@ -316,6 +365,7 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
                 final_ack_receipt,
                 forgotten_authority,
                 &at(4),
+                &forgotten_readiness,
             )
             .expect("atomic final ack tombstone and forgotten pool authority");
         assert!(!acknowledgement.idempotent_replay);
@@ -327,6 +377,7 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
                 final_ack_receipt,
                 forgotten_authority,
                 &at(4),
+                &forgotten_readiness,
             )
             .expect("exact final ack replay");
         assert!(replay.idempotent_replay);
@@ -339,6 +390,7 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
                     final_ack_receipt,
                     forgotten_authority,
                     &at(4),
+                    &forgotten_readiness,
                 )
                 .expect_err("changed final ack conflicts")
                 .code(),
@@ -352,10 +404,22 @@ fn one_pool_authority_commits_with_open_failure_and_terminal_transitions() {
         forgotten_authority,
         final_ack_receipt,
     );
+    let storage = SqliteStorage::open(&root).expect("reopen public outbox");
+    assert_eq!(
+        storage
+            .pending_events()
+            .expect("pending readiness events")
+            .into_iter()
+            .filter(|event| event.topic == "model-route-availability.invalidated.v1")
+            .count(),
+        4
+    );
+    drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn final_ack_write_failure_keeps_terminal_pool_authority_for_exact_retry() {
     let root = temporary_directory("final-ack-rollback");
     let request = begin(8, b"final-ack-rollback");
@@ -364,11 +428,14 @@ fn final_ack_write_failure_keeps_terminal_pool_authority_for_exact_retry() {
     let forgotten_authority = br#"{"generation":3,"state":"forgotten"}"#;
     let receipt = br#"{"acknowledgedSequence":1,"schema":"final-ack-v1"}"#;
     let ack_digest = digest(b"final-ack-rollback-envelope");
+    let active_readiness = readiness_commit(5, "rollback-active", active_authority);
+    let terminal_readiness = readiness_commit(6, "rollback-terminal", terminal_authority);
+    let forgotten_readiness = readiness_commit(7, "rollback-forgotten", forgotten_authority);
     let mut storage = SqliteStorage::open(&root).expect("open storage");
     {
         let mut exchanges = storage.provider_exchange_store().expect("exchange store");
         exchanges
-            .begin_open_with_pool_authority(&request, active_authority)
+            .begin_open_with_pool_authority(&request, active_authority, &active_readiness)
             .expect("begin active");
         exchanges
             .commit_opened(
@@ -382,6 +449,7 @@ fn final_ack_write_failure_keeps_terminal_pool_authority_for_exact_retry() {
                 &request.model_exchange_id,
                 &terminal("rollback"),
                 terminal_authority,
+                &terminal_readiness,
             )
             .expect("commit terminal");
     }
@@ -404,10 +472,20 @@ fn final_ack_write_failure_keeps_terminal_pool_authority_for_exact_retry() {
                 receipt,
                 forgotten_authority,
                 &at(4),
+                &forgotten_readiness,
             )
             .expect_err("injected final ack failure")
             .code(),
         ProviderExchangeStoreErrorCode::Storage
+    );
+    assert_eq!(
+        storage
+            .pending_events()
+            .expect("rolled-back readiness outbox")
+            .into_iter()
+            .filter(|event| event.topic == "model-route-availability.invalidated.v1")
+            .count(),
+        2
     );
     connection
         .execute_batch("DROP TRIGGER fail_final_ack;")
@@ -436,9 +514,19 @@ fn final_ack_write_failure_keeps_terminal_pool_authority_for_exact_retry() {
                 receipt,
                 forgotten_authority,
                 &at(4),
+                &forgotten_readiness,
             )
             .expect("exact retry commits once");
     }
+    assert_eq!(
+        storage
+            .pending_events()
+            .expect("retried readiness outbox")
+            .into_iter()
+            .filter(|event| event.topic == "model-route-availability.invalidated.v1")
+            .count(),
+        3
+    );
     drop(connection);
     drop(storage);
     fs::remove_dir_all(root).expect("remove fixture");

@@ -49,7 +49,14 @@ const QUERIES = Object.freeze([
   'runtime.projection.get',
   'delivery.list',
   'delivery.get',
+  'candidate.list',
+  'candidate.review.get',
+  'candidate.files.list',
+  'candidate.diff.get',
+  'evidence.get',
+  'evidence.artifact.content.get',
   'settings.get',
+  'model.route.availability.list',
   'credential.reference.list',
   'credential.reference.get',
   'approval.list',
@@ -209,7 +216,14 @@ test('HTTP query contract covers every current read surface with an opaque stabl
     'runtime.projection.get': './domain.schema.json#/$defs/RuntimeProjectionSnapshot',
     'delivery.list': '#/$defs/DeliveryPage',
     'delivery.get': '#/$defs/DeliveryDetailProjection',
+    'candidate.list': '#/$defs/CandidateHistoryPage',
+    'candidate.review.get': '#/$defs/CandidateHistoricalReviewProjection',
+    'candidate.files.list': '#/$defs/CandidateFilePage',
+    'candidate.diff.get': '#/$defs/CandidateDiffChunkProjection',
+    'evidence.get': '#/$defs/EvidenceDetailProjection',
+    'evidence.artifact.content.get': '#/$defs/EvidenceArtifactContentResult',
     'settings.get': '#/$defs/SettingsProjection',
+    'model.route.availability.list': '#/$defs/ModelRouteAvailabilityPage',
     'credential.reference.list': '#/$defs/CredentialReferencePage',
     'credential.reference.get': '#/$defs/CredentialReferenceProjection',
     'approval.list': '#/$defs/ApprovalPage',
@@ -238,6 +252,9 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'ProductSessionPage',
       'ChatInteractionPage',
       'DeliveryPage',
+      'CandidateHistoryPage',
+      'CandidateFilePage',
+      'ModelRouteAvailabilityPage',
       'CredentialReferencePage',
       'ApprovalPage',
       'WorkerPage',
@@ -259,6 +276,9 @@ test('HTTP query contract covers every current read surface with an opaque stabl
       'product_session_page',
       'chat_interaction_page',
       'delivery_page',
+      'candidate_history_page',
+      'candidate_file_page',
+      'model_route_availability_page',
       'credential_reference_page',
       'approval_page',
       'worker_page',
@@ -282,6 +302,55 @@ test('HTTP query contract covers every current read surface with an opaque stabl
   assert.equal(pagination.order, 'snapshot_then_updated_at_then_id')
   assert.equal(pagination.cursor, 'opaque_scope_query_filter_bound')
   assert.equal(pagination.invalidCursorError, 'INVALID_REQUEST')
+
+  const candidateRead = schema['x-winwincode-semantics'].candidateReviewRead
+  assert.deepEqual(candidateRead.queries, [
+    'candidate.list',
+    'candidate.review.get',
+    'candidate.files.list',
+    'candidate.diff.get',
+  ])
+  assert.equal(candidateRead.diffChunkMaxBytes, 262_144)
+  assert.deepEqual(candidateRead.binding, [
+    'repository scope',
+    'deliveryId',
+    'deliveryRevision',
+    'readPageLimit',
+    'candidateRef',
+    'candidateTreeId',
+    'diffSha256',
+  ])
+  assert.equal(candidateRead.pathTraversalAllowed, false)
+  assert.equal(candidateRead.rawRepositoryLocatorAllowed, false)
+  assert.equal(candidateRead.callerGitRevisionAllowed, false)
+  assert.equal(candidateRead.baseProjectionIncludesContent, false)
+  assert.match(candidateRead.historyAvailability, /display-only/u)
+  assert.match(candidateRead.historicalReviewAuthorization, /never become current/u)
+
+  const modelRouteAvailability = schema['x-winwincode-semantics'].modelRouteAvailability
+  assert.equal(modelRouteAvailability.query, 'model.route.availability.list')
+  assert.match(modelRouteAvailability.scopeAuthority, /exact repository/u)
+  assert.deepEqual(modelRouteAvailability.sources, [
+    'effective model settings selection',
+    'effective Provider/model catalog',
+    'Credential reference lifecycle',
+    'configured durable model request pool',
+  ])
+  assert.deepEqual(schema.$defs.ModelRouteAvailabilityReason.enum, [
+    'ready',
+    'no_provider',
+    'credential_missing_or_revoked',
+    'default_route_invalid',
+    'provider_or_model_disabled',
+    'request_pool_unavailable',
+  ])
+  assert.equal(modelRouteAvailability.clientInferenceAllowed, false)
+  assert.equal(modelRouteAvailability.secretFieldsAllowed, false)
+  assert.equal(modelRouteAvailability.poolInternalFieldsAllowed, false)
+  assert.equal(
+    modelRouteAvailability.invalidationEvent,
+    'model-route-availability.invalidated.v1',
+  )
 })
 
 test('HTTP input responses are bound and cannot inject an ExecutionPort message', async () => {

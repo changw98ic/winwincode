@@ -171,6 +171,7 @@ fn seed_provider_and_credential(storage: &mut SqliteStorage) -> Result<(), Box<d
                 reasoning_efforts: vec!["high".into(), "medium".into()],
             }],
         },
+        Instant("2026-09-02T00:00:00.000Z".to_owned()),
     )?;
     CredentialReferenceService::new(storage).create(
         &CredentialReferenceCreateCommand {

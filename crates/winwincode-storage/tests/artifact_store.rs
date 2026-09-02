@@ -13,9 +13,9 @@ use winwincode_domain::{
 };
 use winwincode_storage::{
     ArtifactAccess, ArtifactChunk, ArtifactError, ArtifactErrorKind, ArtifactMeteringAttribution,
-    ArtifactObjectStore, ArtifactOpen, ArtifactProvenance, ArtifactRetention,
+    ArtifactObjectRange, ArtifactObjectStore, ArtifactOpen, ArtifactProvenance, ArtifactRetention,
     ArtifactStorageOperationKind, ArtifactStore, FakeArtifactObjectStore, LocalArtifactObjectStore,
-    ReceiptScopeKey,
+    MAX_ARTIFACT_RANGE_BYTES, ReceiptScopeKey,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -231,6 +231,16 @@ impl ArtifactObjectStore for BlockingDeleteObjectStore {
         self.inner.read(digest)
     }
 
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError> {
+        self.inner.read_range(digest, size_bytes, offset, length)
+    }
+
     fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError> {
         self.delete_entered.wait();
         self.delete_release.wait();
@@ -263,6 +273,16 @@ impl ArtifactObjectStore for BarrierObjectStore {
 
     fn read(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, ArtifactError> {
         self.inner.read(digest)
+    }
+
+    fn read_range(
+        &self,
+        digest: &Sha256Digest,
+        size_bytes: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<ArtifactObjectRange>, ArtifactError> {
+        self.inner.read_range(digest, size_bytes, offset, length)
     }
 
     fn delete(&mut self, digest: &Sha256Digest) -> Result<(), ArtifactError> {
@@ -412,17 +432,46 @@ fn exercise_completed_artifact(name: &str, objects: Box<dyn ArtifactObjectStore>
         .expect_err("both adapters must reject a changed repeat");
     assert_eq!(changed.kind(), ArtifactErrorKind::Conflict);
 
+    let access = ArtifactAccess::new(artifact_scope, artifact_id, digest, artifact_provenance);
     let loaded = store
-        .read_exact(&ArtifactAccess::new(
-            artifact_scope,
-            artifact_id,
-            digest,
-            artifact_provenance,
-        ))
+        .read_exact(&access)
         .expect("content-addressed artifact read");
     assert_eq!(loaded.bytes(), bytes);
     assert_eq!(loaded.metadata().size_bytes(), bytes.len() as u64);
     assert_eq!(loaded.metadata().kind(), "report");
+    assert_eq!(
+        store
+            .describe_exact(&access)
+            .expect("authorized Artifact descriptor"),
+        *loaded.metadata()
+    );
+
+    for (offset, length, expected) in [
+        (0, 4, &bytes[..4]),
+        (7, 8, &bytes[7..15]),
+        (21, 256, &bytes[21..]),
+    ] {
+        let ranged = store
+            .read_exact_range(&access, offset, length)
+            .expect("bounded Artifact range");
+        assert_eq!(ranged.bytes(), expected);
+        assert_eq!(ranged.range().offset(), offset);
+        assert_eq!(ranged.range().total_size(), bytes.len() as u64);
+        assert_eq!(ranged.range().digest(), loaded.metadata().digest());
+        assert_eq!(ranged.metadata(), loaded.metadata());
+    }
+
+    for (offset, length) in [
+        (0, 0),
+        (0, MAX_ARTIFACT_RANGE_BYTES + 1),
+        (bytes.len() as u64, 1),
+        (u64::MAX, 2),
+    ] {
+        let error = store
+            .read_exact_range(&access, offset, length)
+            .expect_err("invalid Artifact range must fail closed");
+        assert_eq!(error.kind(), ArtifactErrorKind::InvalidInput);
+    }
 
     store.close().expect("artifact store close");
     let restarted = ArtifactStore::open(&root, Box::new(FakeArtifactObjectStore::new()))
@@ -655,6 +704,10 @@ fn retention_and_shared_content_prevent_early_or_cross_artifact_deletion() {
         .read_exact(&first_access)
         .expect_err("deleted Artifact identity stays tombstoned");
     assert_eq!(deleted.kind(), ArtifactErrorKind::NotFound);
+    let deleted_range = store
+        .read_exact_range(&first_access, 0, 4)
+        .expect_err("deleted Artifact range stays tombstoned");
+    assert_eq!(deleted_range.kind(), ArtifactErrorKind::NotFound);
 
     let rebound = store
         .open_artifact(ArtifactOpen::new(
@@ -705,16 +758,18 @@ fn retention_and_shared_content_prevent_early_or_cross_artifact_deletion() {
             1_000,
         ))
         .expect("incomplete Artifact open");
+    let incomplete_access = ArtifactAccess::new(
+        artifact_scope.clone(),
+        incomplete,
+        empty_digest,
+        artifact_provenance.clone(),
+    );
+    let incomplete_range = store
+        .read_exact_range(&incomplete_access, 0, 1)
+        .expect_err("incomplete Artifact cannot return a range");
+    assert_eq!(incomplete_range.kind(), ArtifactErrorKind::Incomplete);
     let incomplete_delete = store
-        .delete(
-            &ArtifactAccess::new(
-                artifact_scope.clone(),
-                incomplete,
-                empty_digest,
-                artifact_provenance.clone(),
-            ),
-            1_000,
-        )
+        .delete(&incomplete_access, 1_000)
         .expect_err("incomplete Artifact cannot enter retention deletion");
     assert_eq!(incomplete_delete.kind(), ArtifactErrorKind::Incomplete);
 
@@ -1035,26 +1090,51 @@ fn artifact_reads_require_exact_scope_digest_and_execution_provenance() {
         ))
         .expect_err("foreign scope cannot read Artifact bytes");
     assert_eq!(foreign_scope.kind(), ArtifactErrorKind::PermissionDenied);
+    let foreign_scope_range = store
+        .read_exact_range(
+            &ArtifactAccess::new(
+                scope("repository:two"),
+                artifact_id.clone(),
+                digest.clone(),
+                artifact_provenance.clone(),
+            ),
+            0,
+            4,
+        )
+        .expect_err("foreign scope cannot read an Artifact range");
+    assert_eq!(
+        foreign_scope_range.kind(),
+        ArtifactErrorKind::PermissionDenied
+    );
 
-    let old_job = ArtifactProvenance::execution_job(
-        ExecutionJobId("job_00000000000000000000000006".into()),
-        1,
-        LeaseId("lse_00000000000000000000000004".into()),
-        FencingToken("42".into()),
-        WorkerId("wrk_00000000000000000000000001".into()),
-        WorkerInstanceId("wki_00000000000000000000000002".into()),
-        WorkerSessionId("wsn_00000000000000000000000005".into()),
-    )
-    .expect("foreign provenance");
+    let changed_digest = Sha256Digest(format!("sha256:{:064x}", 0));
+    let stale_digest_range = store
+        .read_exact_range(
+            &ArtifactAccess::new(
+                artifact_scope.clone(),
+                artifact_id.clone(),
+                changed_digest,
+                artifact_provenance.clone(),
+            ),
+            0,
+            4,
+        )
+        .expect_err("changed digest cannot authorize an Artifact range");
+    assert_eq!(
+        stale_digest_range.kind(),
+        ArtifactErrorKind::PermissionDenied
+    );
+
+    let old_job = provenance_for_job(ExecutionJobId("job_00000000000000000000000006".into()));
+    let rebound_access = ArtifactAccess::new(artifact_scope, artifact_id, digest, old_job);
     let rebound = store
-        .read_exact(&ArtifactAccess::new(
-            artifact_scope,
-            artifact_id,
-            digest,
-            old_job,
-        ))
+        .read_exact(&rebound_access)
         .expect_err("an old candidate Artifact cannot be rebound to another Job");
     assert_eq!(rebound.kind(), ArtifactErrorKind::PermissionDenied);
+    let rebound_range = store
+        .read_exact_range(&rebound_access, 0, 4)
+        .expect_err("an old Job cannot authorize an Artifact range");
+    assert_eq!(rebound_range.kind(), ArtifactErrorKind::PermissionDenied);
 
     store.close().expect("artifact store close");
     fs::remove_dir_all(root).expect("artifact fixture release");
@@ -1067,6 +1147,7 @@ fn object_corruption_is_detected_before_bytes_are_returned() {
     let corruption_probe = objects.clone();
     let mut store = ArtifactStore::open(&root, Box::new(objects)).expect("artifact store");
     let artifact_id = ArtifactId("art_0000000000000000000000000C".into());
+    let bytes = b"canonical artifact bytes";
     let digest = Sha256Digest(
         "sha256:6b0a4af70a524f7303cb8a26242e0a8719c4747370cb51e8d1168179f272c5bc".into(),
     );
@@ -1081,7 +1162,7 @@ fn object_corruption_is_detected_before_bytes_are_returned() {
             "test_output",
             "text/plain",
             digest.clone(),
-            24,
+            bytes.len() as u64,
             Some("tests.txt".into()),
             artifact_provenance.clone(),
             metering_attribution(),
@@ -1096,22 +1177,89 @@ fn object_corruption_is_detected_before_bytes_are_returned() {
             artifact_id.clone(),
             1,
             digest.clone(),
-            b"canonical artifact bytes".to_vec(),
+            bytes.to_vec(),
             true,
         ))
         .expect("artifact complete");
+    let mut tampered = bytes.to_vec();
+    *tampered.last_mut().expect("non-empty Artifact") ^= 0xff;
     corruption_probe
-        .corrupt_object(&digest, b"changed after acceptance".to_vec())
+        .corrupt_object(&digest, tampered)
         .expect("corrupt fake object");
 
+    let access = ArtifactAccess::new(artifact_scope, artifact_id, digest, artifact_provenance);
+    let range_error = store
+        .read_exact_range(&access, 0, 4)
+        .expect_err("corruption outside the requested range must fail closed");
+    assert_eq!(range_error.kind(), ArtifactErrorKind::Corrupt);
     let error = store
-        .read_exact(&ArtifactAccess::new(
-            artifact_scope,
-            artifact_id,
-            digest,
-            artifact_provenance,
-        ))
+        .read_exact(&access)
         .expect_err("corrupt bytes must fail closed");
+    assert_eq!(error.kind(), ArtifactErrorKind::Corrupt);
+
+    store.close().expect("artifact store close");
+    fs::remove_dir_all(root).expect("artifact fixture release");
+}
+
+#[test]
+fn local_range_stream_hash_detects_corruption_outside_the_requested_bytes() {
+    let root = temporary_directory("local-range-corruption");
+    let object_root = root.join("objects");
+    let local = LocalArtifactObjectStore::open(&object_root).expect("local object adapter");
+    let mut store = ArtifactStore::open(&root, Box::new(local)).expect("artifact store");
+    let artifact_id = ArtifactId("art_0000000000000000000000000H".into());
+    let bytes = b"first bytes stay valid; last byte changes";
+    let digest = Sha256Digest(format!("sha256:{:x}", Sha256::digest(bytes)));
+    let artifact_scope = scope("repository:one");
+    let artifact_provenance = provenance();
+    store
+        .open_artifact(ArtifactOpen::new(
+            artifact_scope.clone(),
+            message(52),
+            request(52),
+            artifact_id.clone(),
+            "log",
+            "text/plain",
+            digest.clone(),
+            bytes.len() as u64,
+            Some("stage.log".into()),
+            artifact_provenance.clone(),
+            metering_attribution(),
+            ArtifactRetention::Indefinite,
+            1_000,
+        ))
+        .expect("artifact open");
+    store
+        .append_chunk(&artifact_chunk(
+            artifact_scope.clone(),
+            message(53),
+            artifact_id.clone(),
+            1,
+            digest.clone(),
+            bytes.to_vec(),
+            true,
+        ))
+        .expect("artifact complete");
+
+    let digest_hex = digest
+        .0
+        .strip_prefix("sha256:")
+        .expect("fixture digest prefix");
+    let object_path = object_root
+        .join("objects/sha256")
+        .join(&digest_hex[..2])
+        .join(&digest_hex[2..]);
+    let mut tampered = fs::read(&object_path).expect("completed local object");
+    *tampered.last_mut().expect("non-empty local object") ^= 0xff;
+    fs::write(&object_path, tampered).expect("tamper outside requested range");
+
+    let error = store
+        .read_exact_range(
+            &ArtifactAccess::new(artifact_scope, artifact_id, digest, artifact_provenance),
+            0,
+            5,
+        )
+        .expect_err("local range read must hash bytes outside the requested slice");
     assert_eq!(error.kind(), ArtifactErrorKind::Corrupt);
 
     store.close().expect("artifact store close");
@@ -1193,6 +1341,13 @@ fn local_metadata_and_content_survive_restart_without_exposing_object_paths() {
             .expect("restart exact read")
             .bytes(),
         b"canonical artifact bytes"
+    );
+    assert_eq!(
+        restarted
+            .read_exact_range(&access, 10, 8)
+            .expect("restart exact range read")
+            .bytes(),
+        b"artifact"
     );
     restarted.close().expect("restart close");
     fs::remove_dir_all(root).expect("artifact fixture release");

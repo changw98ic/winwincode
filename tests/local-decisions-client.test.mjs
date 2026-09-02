@@ -540,6 +540,7 @@ class FakeElement {
 
   attributes = new Map()
   children = []
+  parentNode = null
   listeners = new Map()
   dataset = {}
   className = ''
@@ -558,15 +559,33 @@ class FakeElement {
 
   set textContent(value) {
     this.#textContent = String(value)
-    this.children = []
+    this.replaceChildren()
   }
 
+  get childNodes() { return this.children }
+
   append(...children) {
-    this.children.push(...children)
+    for (const child of children) this.insertBefore(child, null)
   }
 
   replaceChildren(...children) {
-    this.children = [...children]
+    for (const child of [...this.children]) child.remove()
+    for (const child of children) this.insertBefore(child, null)
+  }
+
+  insertBefore(child, reference) {
+    child.remove?.()
+    const index = reference === null ? this.children.length : this.children.indexOf(reference)
+    this.children.splice(index < 0 ? this.children.length : index, 0, child)
+    child.parentNode = this
+    return child
+  }
+
+  remove() {
+    if (this.parentNode === null) return
+    const index = this.parentNode.children.indexOf(this)
+    if (index >= 0) this.parentNode.children.splice(index, 1)
+    this.parentNode = null
   }
 
   setAttribute(name, value) {
@@ -577,6 +596,11 @@ class FakeElement {
     const current = this.listeners.get(name) ?? []
     current.push(listener)
     this.listeners.set(name, current)
+  }
+
+  removeEventListener(name, listener) {
+    const current = this.listeners.get(name) ?? []
+    this.listeners.set(name, current.filter(candidate => candidate !== listener))
   }
 
   dispatch(name) {
@@ -679,6 +703,13 @@ test('local decisions page exposes safe labels, clears responses synchronously, 
     close() {},
   }
   const mounted = mountLocalDecisionsPage({ root: rootElement, model })
+  assert.equal(byClass(rootElement, 'wwc-local-decisions').dataset.wwcPage, 'management')
+  assert.equal(byClass(rootElement, 'wwc-local-decisions-heading').dataset.wwcComponent, 'page-header')
+  assert.equal(byClass(rootElement, 'wwc-local-decisions-status').dataset.wwcComponent, 'status-badge')
+  assert.equal(byClass(rootElement, 'wwc-local-decisions-retry').dataset.wwcComponent, 'button')
+  assert.equal(byClass(rootElement, 'wwc-local-inputs').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-local-approvals').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-local-attention').dataset.wwcComponent, 'panel')
   const text = visibleText(rootElement)
   assert.equal(text.includes('Plan Delta'), true)
   assert.equal(text.includes('Replan'), true)
@@ -739,7 +770,102 @@ test('local decisions page exposes safe labels, clears responses synchronously, 
   state = pageState({ realtime: 'reconnecting' })
   listener(state)
   assert.equal(byClass(rootElement, 'wwc-local-decisions-reconnect').hidden, false)
+
+  state = pageState({ inputs: [], approvals: [], attention: [] })
+  listener(state)
+  assert.equal(byClass(rootElement, 'wwc-local-input-empty').dataset.wwcComponent, 'empty-state')
+  assert.equal(byClass(rootElement, 'wwc-local-approval-empty').dataset.wwcComponent, 'empty-state')
+  assert.equal(byClass(rootElement, 'wwc-local-attention-empty').dataset.wwcComponent, 'empty-state')
   mounted.close()
+})
+
+test('local decision keyed updates preserve row drafts, focus, scroll, and bounded DOM', () => {
+  const document = new FakeDocument()
+  document.activeElement = null
+  const rootElement = new FakeElement(document, 'div')
+  let state = pageState()
+  let listener = () => {}
+  const model = {
+    get state() { return state },
+    subscribe(next) {
+      listener = next
+      next(state)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async provideInput() {},
+    async cancelInput() {},
+    async decideApproval() {},
+    async resolveAttention() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountLocalDecisionsPage({ root: rootElement, model })
+  const inputList = byClass(rootElement, 'wwc-local-input-list')
+  const approvalList = byClass(rootElement, 'wwc-local-approval-list')
+  const attentionList = byClass(rootElement, 'wwc-local-attention-list')
+  const inputRow = inputList.children[0]
+  const approvalRow = approvalList.children[0]
+  const attentionRow = attentionList.children[0]
+  const response = byClass(inputRow, 'wwc-local-input-response')
+  const inputForm = byClass(inputRow, 'wwc-local-input-form')
+  const reason = byClass(approvalRow, 'wwc-local-approval-reason')
+  const resolution = byClass(attentionRow, 'wwc-local-attention-resolution')
+  const attentionOption = byClass(attentionRow, 'wwc-local-attention-option-label').parentNode
+
+  response.value = 'draft input'
+  reason.value = 'draft approval'
+  resolution.value = 'draft Attention'
+  response.selectionStart = 4
+  document.activeElement = response
+  inputList.scrollTop = 45
+  approvalList.scrollTop = 46
+  attentionList.scrollTop = 47
+
+  for (let index = 0; index < 200; index += 1) {
+    state = pageState({
+      realtime: index % 2 === 0 ? 'reloading' : 'subscribed',
+      inputs: [
+        { projection: input({ prompt: index === 199 ? 'Updated prompt' : 'Describe the exact local change' }), expired: false },
+        { projection: choiceInput(), expired: false },
+      ],
+      approvals: [{ projection: approval({ subject: index === 199 ? 'Updated approval' : 'Allow the projected repository action' }), expired: false }],
+      attention: [{
+        projection: attention({ title: index === 199 ? 'Updated Attention' : 'Review the proposed delivery scope' }),
+        deliveryId,
+        deliveryRevision: 12 + index,
+        candidateDigest: hiddenCandidateDigest,
+      }],
+    })
+    listener(state)
+  }
+
+  assert.equal(inputList.children[0], inputRow)
+  assert.equal(approvalList.children[0], approvalRow)
+  assert.equal(attentionList.children[0], attentionRow)
+  assert.equal(byClass(attentionRow, 'wwc-local-attention-option-label').parentNode, attentionOption)
+  assert.equal(byClass(inputRow, 'wwc-local-input-prompt').textContent, 'Updated prompt')
+  assert.equal(byClass(approvalRow, 'wwc-local-approval-subject').textContent, 'Updated approval')
+  assert.equal(byClass(attentionRow, 'wwc-local-attention-title').textContent, 'Updated Attention')
+  assert.equal(response.value, 'draft input')
+  assert.equal(reason.value, 'draft approval')
+  assert.equal(resolution.value, 'draft Attention')
+  assert.equal(response.selectionStart, 4)
+  assert.equal(document.activeElement, response)
+  assert.equal(inputList.scrollTop, 45)
+  assert.equal(approvalList.scrollTop, 46)
+  assert.equal(attentionList.scrollTop, 47)
+  assert.equal(inputList.children.length, 2)
+  assert.equal(approvalList.children.length, 1)
+  assert.equal(attentionList.children.length, 1)
+
+  mounted.close()
+  assert.equal((inputForm.listeners.get('submit') ?? []).length, 0)
+  assert.equal(response.value, '')
+  assert.equal(reason.value, '')
+  assert.equal(resolution.value, '')
 })
 
 test('local decisions presentation never exposes raw server messages and source uses one facade path', () => {

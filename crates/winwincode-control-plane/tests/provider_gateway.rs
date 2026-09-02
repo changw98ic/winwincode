@@ -14,7 +14,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
+    Actor, ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent,
+    ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource,
+    CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
     RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
 };
@@ -136,6 +138,7 @@ fn register_provider(
                 credential_reference_id: CredentialReferenceId(id("crd", credential_seed)),
                 models: vec![model_capability(model_id)],
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("register Provider fixture");
 }
@@ -194,6 +197,7 @@ fn configure_session(
                 }),
                 worker_concurrency_limit: 1,
             },
+            Instant("2026-09-02T00:00:00.000Z".to_owned()),
         )
         .expect("configure model session fixture");
 }
@@ -1012,8 +1016,51 @@ impl RuntimeFixture {
                 .as_slice(),
             [ProviderStreamControlAction::Release]
         );
+        self.assert_request_pool_invalidations();
         drop(self.storage);
         fs::remove_dir_all(self.root).expect("remove terminal fixture");
+    }
+
+    fn assert_request_pool_invalidations(&self) {
+        let pool_invalidations = self
+            .storage
+            .pending_events()
+            .expect("load request-pool invalidations")
+            .into_iter()
+            .filter(|event| event.topic == "model-route-availability.invalidated.v1")
+            .filter_map(|event| {
+                let decoded: ControlPlaneWebSocketModelRouteAvailabilityInvalidatedEvent =
+                    serde_json::from_slice(&event.payload).expect("decode ModelRoute invalidation");
+                (decoded.source
+                    == ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::RequestPool)
+                    .then_some((decoded, event.public_context.expect("public pool context")))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pool_invalidations.len(), 3);
+        assert_eq!(
+            pool_invalidations
+                .iter()
+                .map(|(event, _)| event.source_revision.0)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        for (event, context) in pool_invalidations {
+            assert!(matches!(
+                context.scope(),
+                winwincode_storage::PublicEventScope::Project {
+                    organization_id,
+                    workspace_id,
+                    project_id,
+                } if organization_id == &self.identity.repository_scope.organization_id
+                    && workspace_id == &self.identity.repository_scope.workspace_id
+                    && project_id == &self.identity.repository_scope.project_id
+            ));
+            let payload = serde_json::to_string(&event).expect("encode pool invalidation");
+            assert!(!payload.contains("provider-a-secret-fixture"));
+            assert!(!payload.contains("credentialReferenceId"));
+            assert!(!payload.contains("capacity"));
+            assert!(!payload.contains("queue"));
+        }
     }
 
     fn ack_after_final_ack_write_failure(

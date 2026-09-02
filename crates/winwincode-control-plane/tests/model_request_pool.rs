@@ -16,16 +16,44 @@ fn id(prefix: &str, value: u64) -> String {
 }
 
 fn identity(organization: u64, project: u64) -> ProviderGatewayIdentity {
+    identity_with_repository(organization, project, 1)
+}
+
+fn identity_with_repository(
+    organization: u64,
+    project: u64,
+    repository: u64,
+) -> ProviderGatewayIdentity {
     ProviderGatewayIdentity::product_session(
         RepositoryScope {
             kind: RepositoryScopeKind::Repository,
             organization_id: OrganizationId(id("org", organization)),
             workspace_id: WorkspaceId(id("wsp", 1)),
             project_id: ProjectId(id("prj", project)),
-            repository_id: RepositoryId(id("rep", 1)),
+            repository_id: RepositoryId(id("rep", repository)),
         },
         ProductSessionId(id("psn", project)),
     )
+}
+
+fn admission_for_identity(
+    identity: &ProviderGatewayIdentity,
+    provider: &str,
+    model: &str,
+    credential: u64,
+    exchange: u64,
+) -> ModelRequestAdmission {
+    ModelRequestAdmission::from_gateway_route(
+        identity,
+        &ModelRoute {
+            credential_reference_id: CredentialReferenceId(id("crd", credential)),
+            model_id: model.into(),
+            provider_id: provider.into(),
+        },
+        ModelExchangeId(id("mdl", exchange)),
+        RequestId(id("req", exchange)),
+    )
+    .expect("Gateway pool admission")
 }
 
 fn admission(
@@ -37,17 +65,46 @@ fn admission(
     exchange: u64,
 ) -> ModelRequestAdmission {
     let identity = identity(organization, project);
-    ModelRequestAdmission::from_gateway_route(
-        &identity,
-        &ModelRoute {
-            credential_reference_id: CredentialReferenceId(id("crd", credential)),
-            model_id: model.into(),
-            provider_id: provider.into(),
-        },
-        ModelExchangeId(id("mdl", exchange)),
-        RequestId(id("req", exchange)),
-    )
-    .expect("Gateway pool admission")
+    admission_for_identity(&identity, provider, model, credential, exchange)
+}
+
+#[test]
+fn route_limit_is_project_scoped_and_same_project_repositories_share_the_limit() {
+    let mut bounded = config();
+    bounded.max_routes = 1;
+    let mut pool = ModelRequestPool::new(bounded).expect("project-bounded pool");
+    let project_a_repository_one = admission_for_identity(
+        &identity_with_repository(1, 1, 1),
+        "provider-a",
+        "model-a",
+        1,
+        90,
+    );
+    let project_a_repository_two = admission_for_identity(
+        &identity_with_repository(1, 1, 2),
+        "provider-b",
+        "model-b",
+        2,
+        91,
+    );
+    let project_b = admission_for_identity(
+        &identity_with_repository(1, 2, 1),
+        "provider-c",
+        "model-c",
+        3,
+        92,
+    );
+
+    pool.submit(&project_a_repository_one)
+        .expect("first Project A route");
+    assert_eq!(
+        pool.submit(&project_a_repository_two)
+            .expect_err("second Project A route exceeds the shared limit")
+            .code(),
+        ModelRequestPoolErrorCode::RouteLimit
+    );
+    pool.submit(&project_b)
+        .expect("Project B owns an independent route limit");
 }
 
 fn config() -> ModelRequestPoolConfig {

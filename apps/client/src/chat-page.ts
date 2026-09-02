@@ -5,16 +5,47 @@ import type {
   ChatViewModelState,
 } from './chat-view-model.js'
 import type { ControlPlaneClientError } from './control-plane-client.js'
+import { mountButton } from './components/button.js'
+import { mountFormField } from './components/form-field.js'
+import { mountKeyedCollection } from './components/keyed-collection.js'
 import type {
-  ModelRoute,
+  ModelRouteAvailabilityProjection,
   ProductSessionId,
+  RepositoryScope,
+  Scope,
 } from './generated/contracts.js'
+import {
+  ModelRouteAvailabilityReason,
+  ModelRouteAvailabilityStatus,
+} from './generated/contracts.js'
+
+export interface ChatDeliveryCreateInput {
+  readonly title: string
+  readonly goal: string
+  readonly baseRevision: string
+  readonly acceptanceCriteria: readonly string[]
+}
+
+export interface ChatDeliveryCreatorState {
+  readonly status: 'idle' | 'submitting' | 'waiting' | 'created' | 'error' | 'closed'
+  readonly error: ControlPlaneClientError | null
+}
+
+/** Structural composition seam; Chat does not import the StrongFlow feature model. */
+export interface ChatDeliveryCreator {
+  readonly state: ChatDeliveryCreatorState
+  subscribe(listener: (state: ChatDeliveryCreatorState) => void): () => void
+  create(input: ChatDeliveryCreateInput): Promise<void>
+  cancelPending(): void
+  close(): void
+}
 
 export interface ChatPageOptions {
   readonly root: HTMLElement
   readonly model: ChatViewModel
-  readonly modelRoutes?: readonly ModelRoute[]
   readonly nextProductSessionId?: () => ProductSessionId
+  readonly deliveryCreator?: ChatDeliveryCreator
+  readonly scope?: RepositoryScope
 }
 
 export interface ChatPage {
@@ -58,6 +89,15 @@ function stateLabel(state: ChatViewModelState): string {
   if (state.interaction.status === 'submitting') return 'Sending message…'
   if (state.interaction.status === 'cancelling') return 'Stopping run…'
   if (state.interaction.status === 'waiting') return 'Waiting for the server…'
+  if (
+    state.session === null
+    && !readyModelRoutes(state).length
+  ) return state.modelRouteAvailability?.reason === ModelRouteAvailabilityReason.NoProvider
+    ? 'Model setup required'
+    : 'Model route unavailable'
+  if (state.session === null) return state.selectedModelRoute === null
+    ? 'Choose a model route'
+    : 'Ready for a new Chat'
   const sessionState = state.session?.state
   if (sessionState === 'running') return 'Running'
   if (sessionState === 'waiting_for_input') return 'Waiting for input'
@@ -69,8 +109,60 @@ function stateLabel(state: ChatViewModelState): string {
   return 'Select a session'
 }
 
+function modelRouteReady(candidate: ModelRouteAvailabilityProjection): boolean {
+  return candidate.status === ModelRouteAvailabilityStatus.Enabled
+    && candidate.reason === ModelRouteAvailabilityReason.Ready
+}
+
+function readyModelRoutes(
+  state: ChatViewModelState,
+): readonly ModelRouteAvailabilityProjection[] {
+  return state.modelRouteAvailability?.items.filter(modelRouteReady) ?? []
+}
+
+function modelRouteReasonLabel(reason: ModelRouteAvailabilityReason): string {
+  if (reason === ModelRouteAvailabilityReason.Ready) return 'Ready'
+  if (reason === ModelRouteAvailabilityReason.NoProvider) return 'No Provider'
+  if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
+    return 'Credential missing or revoked'
+  }
+  if (reason === ModelRouteAvailabilityReason.DefaultRouteInvalid) {
+    return 'Default route invalid'
+  }
+  if (reason === ModelRouteAvailabilityReason.ProviderOrModelDisabled) {
+    return 'Provider or model disabled'
+  }
+  return 'Request pool unavailable'
+}
+
+function modelRouteSourceLabel(scope: Scope): string {
+  if (scope.kind === 'organization') return 'Organization scope'
+  if (scope.kind === 'workspace') return 'Workspace scope'
+  if (scope.kind === 'project') return 'Project scope'
+  return 'Repository scope'
+}
+
+function modelRouteIdentity(route: ModelRouteAvailabilityProjection['route']): string {
+  return `${route.providerId}\u0000${route.modelId}\u0000${route.credentialReferenceId}`
+}
+
 function errorLabel(error: ControlPlaneClientError | null): string | null {
   if (error === null) return null
+  if (error.code === 'IDEMPOTENCY_CONFLICT') {
+    return 'This New Chat request conflicts with an earlier request. Start a fresh New Chat.'
+  }
+  if (error.code === 'INVALID_REQUEST') {
+    return 'The selected model is not available for this repository. Choose another model and retry.'
+  }
+  if (error.code === 'WRONG_STATE') {
+    return 'This Chat identity is already in use. Start a fresh New Chat.'
+  }
+  if (error.code === 'SERVICE_UNAVAILABLE') {
+    return 'The model request pool or selected model is temporarily unavailable. Retry in a moment.'
+  }
+  if (error.code === 'TRUSTED_FACTS_UNAVAILABLE') {
+    return 'The configured Provider or model is unavailable. Review Settings before retrying.'
+  }
   if (error.kind === 'authentication') return 'Sign in again to continue this Chat.'
   if (error.kind === 'authorization') return 'You do not have access to this Chat.'
   if (error.kind === 'network') return 'The Chat server could not be reached. Check the connection and retry.'
@@ -78,6 +170,23 @@ function errorLabel(error: ControlPlaneClientError | null): string | null {
   if (error.kind === 'cancelled') return 'The Chat update was cancelled.'
   if (error.kind === 'configuration') return 'Chat needs a valid server configuration.'
   return 'Chat could not be updated. Retry, or review the server status.'
+}
+
+function modelRouteEmptyText(state: ChatViewModelState): string {
+  const reason = state.modelRouteAvailability?.reason
+  if (reason === ModelRouteAvailabilityReason.CredentialMissingOrRevoked) {
+    return 'The configured model credential is missing or revoked. Review Settings.'
+  }
+  if (reason === ModelRouteAvailabilityReason.DefaultRouteInvalid) {
+    return 'The default model route is invalid. Review Settings.'
+  }
+  if (reason === ModelRouteAvailabilityReason.ProviderOrModelDisabled) {
+    return 'The configured Provider or model is disabled. Review Settings.'
+  }
+  if (reason === ModelRouteAvailabilityReason.RequestPoolUnavailable) {
+    return 'The selected model request pool is unavailable. Retry or review Settings.'
+  }
+  return 'No model route is configured because no Provider is available. Open Settings before creating a Chat.'
 }
 
 export function chatPagePresentation(state: ChatViewModelState): ChatPagePresentation {
@@ -88,7 +197,9 @@ export function chatPagePresentation(state: ChatViewModelState): ChatPagePresent
   return Object.freeze({
     statusText: stateLabel(state),
     emptyText: state.session === null
-      ? 'Select a session to start chatting.'
+      ? readyModelRoutes(state).length > 0
+        ? 'Create your first Chat to start a conversation.'
+        : modelRouteEmptyText(state)
       : 'No messages yet. Send a message to begin.',
     errorText: errorLabel(error),
     composerLabel: running
@@ -126,6 +237,34 @@ function messageStateText(state: string): string | null {
   return null
 }
 
+function confirmedRequirement(state: ChatViewModelState): string | null {
+  return [...state.messages].reverse().find(message => (
+    message.role === 'user'
+    && message.state === 'completed'
+    && message.content.trim().length > 0
+  ))?.content.trim() ?? null
+}
+
+function deliveryConversionError(state: ChatDeliveryCreatorState): string | null {
+  const error = state.error
+  if (error === null) return null
+  if (error.code.startsWith('STRONGFLOW_CREATE_')) return error.message
+  if (error.kind === 'authentication') return 'Sign in again before creating this Delivery.'
+  if (error.kind === 'authorization') {
+    return 'You do not have permission to create a Delivery in this repository.'
+  }
+  if (error.kind === 'network') {
+    return 'The StrongFlow server could not be reached. The confirmed Chat draft is still here.'
+  }
+  if (error.kind === 'cancelled') {
+    return 'Delivery creation was cancelled. The confirmed Chat draft is still here.'
+  }
+  if (error.code === 'REVISION_CONFLICT') {
+    return 'The Delivery changed before StrongFlow could start. Retry the same confirmed draft.'
+  }
+  return 'The Delivery could not be created. The confirmed Chat draft is still here; retry it.'
+}
+
 /** Mount the default, keyboard-accessible Chat page against the read/write view-model only. */
 export function mountChatPage(options: ChatPageOptions): ChatPage {
   const document = options.root.ownerDocument
@@ -140,6 +279,17 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const status = element(document, 'p', 'wwc-chat-status')
   const modelLabel = element(document, 'label', 'wwc-chat-model-label')
   const modelSelect = element(document, 'select', 'wwc-chat-model')
+  const modelSettings = element(document, 'a', 'wwc-chat-model-settings')
+  const modelNotice = element(document, 'p', 'wwc-chat-model-notice')
+  const convertDelivery = mountButton({
+    document,
+    props: {
+      className: 'wwc-chat-convert-delivery',
+      label: 'Convert to StrongFlow',
+      type: 'button',
+      variant: 'primary',
+    },
+  })
   const error = element(document, 'div', 'wwc-chat-error')
   const errorText = element(document, 'span', 'wwc-chat-error-text')
   const retry = element(document, 'button', 'wwc-chat-retry')
@@ -152,8 +302,45 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   const controls = element(document, 'div', 'wwc-chat-composer-controls')
   const cancel = element(document, 'button', 'wwc-chat-cancel')
   const send = element(document, 'button', 'wwc-chat-send')
+  const conversion = element(document, 'section', 'wwc-chat-convert')
+  const conversionHeading = element(document, 'h3', 'wwc-chat-convert-heading')
+  const conversionDetail = element(document, 'p', 'wwc-chat-convert-detail')
+  const conversionForm = element(document, 'form', 'wwc-chat-convert-form')
+  const conversionTitle = element(document, 'input', 'wwc-chat-convert-title')
+  const conversionGoal = element(document, 'textarea', 'wwc-chat-convert-goal')
+  const conversionSourceSession = element(
+    document,
+    'input',
+    'wwc-chat-convert-source-session',
+  )
+  const conversionScope = element(document, 'input', 'wwc-chat-convert-scope')
+  const conversionModel = element(document, 'input', 'wwc-chat-convert-model')
+  const conversionBaseline = element(document, 'input', 'wwc-chat-convert-baseline')
+  const conversionCriteria = element(document, 'textarea', 'wwc-chat-convert-criteria')
+  const confirmationLabel = element(document, 'label', 'wwc-chat-convert-confirm-label')
+  const confirmation = element(document, 'input', 'wwc-chat-convert-confirm')
+  const confirmationText = element(document, 'span', 'wwc-chat-convert-confirm-text')
+  const conversionError = element(document, 'p', 'wwc-chat-convert-error')
+  const conversionSubmit = mountButton({
+    document,
+    props: {
+      className: 'wwc-chat-convert-submit',
+      label: 'Confirm and create Delivery',
+      type: 'submit',
+      variant: 'primary',
+    },
+  })
+  const conversionCancel = mountButton({
+    document,
+    props: {
+      className: 'wwc-chat-convert-cancel',
+      label: 'Cancel conversion',
+      type: 'button',
+    },
+  })
   let closed = false
-  let renderedModelRoutes: readonly ModelRoute[] = Object.freeze([])
+  let conversionOpen = false
+  let conversionSessionId: ProductSessionId | null = null
 
   sessionHeading.textContent = 'Sessions'
   newSession.type = 'button'
@@ -161,9 +348,14 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   heading.textContent = 'Chat'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
-  modelLabel.textContent = 'Default model'
+  modelLabel.textContent = 'Model route'
   modelLabel.htmlFor = 'wwc-chat-model'
   modelSelect.id = 'wwc-chat-model'
+  modelSettings.href = '#/settings'
+  modelSettings.textContent = 'Review model routes in Settings'
+  modelNotice.setAttribute('role', 'status')
+  modelNotice.setAttribute('aria-live', 'polite')
+  modelNotice.hidden = true
   error.setAttribute('role', 'alert')
   error.setAttribute('aria-live', 'assertive')
   error.hidden = true
@@ -187,14 +379,200 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   controls.append(cancel, send)
   form.append(composerLabel, composer, controls)
   sessionPanel.append(sessionHeading, newSession, sessionList)
-  header.append(heading, status, modelLabel)
-  conversation.append(header, error, loadEarlier, messages, empty, form)
+  conversion.hidden = true
+  conversionHeading.textContent = 'Confirm StrongFlow Delivery'
+  conversionDetail.textContent = 'Review the confirmed requirement and exact repository context before creating a Delivery.'
+  conversionTitle.type = 'text'
+  conversionTitle.required = true
+  conversionGoal.required = true
+  conversionSourceSession.type = 'text'
+  conversionSourceSession.readOnly = true
+  conversionScope.type = 'text'
+  conversionScope.readOnly = true
+  conversionModel.type = 'text'
+  conversionModel.readOnly = true
+  conversionBaseline.type = 'text'
+  conversionBaseline.required = true
+  conversionCriteria.required = true
+  confirmation.type = 'checkbox'
+  confirmationText.textContent = 'I confirmed this target and Repository Scope.'
+  confirmationLabel.append(confirmation, confirmationText)
+  conversionError.setAttribute('role', 'alert')
+  conversionError.setAttribute('aria-live', 'assertive')
+  const conversionFields = [
+    mountFormField({
+      document,
+      props: { id: 'chat-convert-title', label: 'Delivery title', control: conversionTitle, required: true },
+    }),
+    mountFormField({
+      document,
+      props: { id: 'chat-convert-goal', label: 'Confirmed goal', control: conversionGoal, required: true },
+    }),
+    mountFormField({
+      document,
+      props: { id: 'chat-convert-session', label: 'Source Chat', control: conversionSourceSession },
+    }),
+    mountFormField({
+      document,
+      props: { id: 'chat-convert-scope', label: 'Repository Scope', control: conversionScope },
+    }),
+    mountFormField({
+      document,
+      props: { id: 'chat-convert-model', label: 'Model context', control: conversionModel },
+    }),
+    mountFormField({
+      document,
+      props: {
+        id: 'chat-convert-baseline',
+        label: 'Baseline revision',
+        control: conversionBaseline,
+        required: true,
+      },
+    }),
+    mountFormField({
+      document,
+      props: {
+        id: 'chat-convert-criteria',
+        label: 'Initial acceptance criteria',
+        help: 'Enter one required result per line.',
+        control: conversionCriteria,
+        required: true,
+      },
+    }),
+  ]
+  conversionForm.append(
+    ...conversionFields.map(field => field.root),
+    confirmationLabel,
+    conversionError,
+    conversionSubmit.root,
+    conversionCancel.root,
+  )
+  conversion.append(conversionHeading, conversionDetail, conversionForm)
+  header.append(
+    heading,
+    status,
+    modelLabel,
+    modelSettings,
+    modelNotice,
+    convertDelivery.root,
+  )
+  conversation.append(header, conversion, error, loadEarlier, messages, empty, form)
   layout.append(sessionPanel, conversation)
   options.root.replaceChildren(layout)
+
+  type ModelOption =
+    | { readonly key: 'empty' | 'placeholder'; readonly candidate: null }
+    | { readonly key: string; readonly candidate: ModelRouteAvailabilityProjection }
+  const modelOptions = mountKeyedCollection<ModelOption, string, HTMLOptionElement>({
+    parent: modelSelect,
+    key: item => item.key,
+    create: () => document.createElement('option'),
+    update(option, item) {
+      option.value = item.key
+      if (item.candidate === null) {
+        option.textContent = item.key === 'empty'
+          ? 'No model route configured'
+          : 'Choose an available model route'
+        option.disabled = false
+        return
+      }
+      const candidate = item.candidate
+      const source = modelRouteSourceLabel(candidate.catalogSource)
+      const defaultLabel = candidate.isDefault ? ' · Default' : ''
+      option.textContent = `${source} · ${candidate.providerDisplayName} / `
+        + `${candidate.modelDisplayName}${defaultLabel} · `
+        + modelRouteReasonLabel(candidate.reason)
+      option.disabled = !modelRouteReady(candidate)
+    },
+  })
+  const sessionRows = new WeakMap<HTMLLIElement, {
+    readonly button: HTMLButtonElement
+    readonly onClick: () => void
+  }>()
+  const sessionCollection = mountKeyedCollection({
+    parent: sessionList,
+    key: (session: ChatViewModelState['sessions'][number]) => session.id,
+    create(session: ChatViewModelState['sessions'][number]) {
+      const item = document.createElement('li')
+      const button = document.createElement('button')
+      const onClick = () => {
+        const productSessionId = button.dataset.sessionId as ProductSessionId | undefined
+        if (productSessionId !== undefined) void options.model.selectSession(productSessionId)
+      }
+      button.type = 'button'
+      button.addEventListener('click', onClick)
+      item.append(button)
+      sessionRows.set(item, { button, onClick })
+      return item
+    },
+    update(item, session: ChatViewModelState['sessions'][number]) {
+      const row = sessionRows.get(item)
+      if (row === undefined) return
+      row.button.textContent = session.title
+      row.button.dataset.sessionId = session.id
+      if (session.id === options.model.state.activeProductSessionId) {
+        row.button.setAttribute('aria-current', 'true')
+      } else {
+        row.button.removeAttribute('aria-current')
+      }
+    },
+    remove(item) {
+      const row = sessionRows.get(item)
+      if (row === undefined) return
+      row.button.removeEventListener('click', row.onClick)
+      sessionRows.delete(item)
+    },
+  })
+  const messageRows = new WeakMap<HTMLLIElement, {
+    readonly article: HTMLElement
+    readonly role: HTMLElement
+    readonly content: HTMLElement
+    readonly badge: HTMLElement
+  }>()
+  const messageCollection = mountKeyedCollection({
+    parent: messages,
+    key: (message: ChatViewModelState['messages'][number]) => message.id,
+    create() {
+      const item = document.createElement('li')
+      const article = document.createElement('article')
+      const role = document.createElement('h3')
+      const content = document.createElement('p')
+      const badge = document.createElement('span')
+      badge.className = 'wwc-chat-message-state'
+      article.append(role, content, badge)
+      item.append(article)
+      messageRows.set(item, { article, role, content, badge })
+      return item
+    },
+    update(item, message: ChatViewModelState['messages'][number]) {
+      const row = messageRows.get(item)
+      if (row === undefined) return
+      const stateText = messageStateText(message.state)
+      row.article.dataset.role = message.role
+      row.article.dataset.state = message.state
+      row.article.setAttribute('aria-busy', String(message.state === 'streaming'))
+      row.role.textContent = message.role === 'user' ? 'You' : 'WinWinCode'
+      row.content.textContent = message.content.length === 0 && message.state === 'streaming'
+        ? 'Responding…'
+        : message.content
+      row.badge.hidden = stateText === null
+      row.badge.textContent = stateText ?? ''
+    },
+    remove(item) { messageRows.delete(item) },
+  })
 
   function render(state: ChatViewModelState): void {
     if (closed) return
     const presentation = chatPagePresentation(state)
+    if (conversionSessionId !== null && conversionSessionId !== state.session?.id) {
+      conversionOpen = false
+      conversionSessionId = null
+      conversionTitle.value = ''
+      conversionGoal.value = ''
+      conversionBaseline.value = ''
+      conversionCriteria.value = ''
+      confirmation.checked = false
+    }
     status.textContent = presentation.statusText
     heading.textContent = state.session?.title ?? 'Chat'
     messages.setAttribute('aria-busy', String(presentation.messageListBusy))
@@ -212,90 +590,149 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     errorText.textContent = presentation.errorText ?? ''
     retry.hidden = presentation.errorText === null
 
-    const route = state.defaultModelRoute
-    const routeByIdentity = new Map<string, ModelRoute>()
-    for (const candidate of [route, ...(options.modelRoutes ?? [])]) {
-      if (candidate === null) continue
-      routeByIdentity.set(
-        `${candidate.providerId}\u0000${candidate.modelId}\u0000${candidate.credentialReferenceId}`,
-        candidate,
-      )
-    }
-    renderedModelRoutes = Object.freeze([...routeByIdentity.values()])
-    const previousModelIndex = modelSelect.selectedIndex
-    modelSelect.replaceChildren()
-    if (renderedModelRoutes.length === 0) {
-      const option = document.createElement('option')
-      option.value = ''
-      option.textContent = 'No model configured'
-      modelSelect.append(option)
-    } else {
-      modelSelect.append(...renderedModelRoutes.map((candidate, index) => {
-        const option = document.createElement('option')
-        option.value = String(index)
-        option.textContent = `${candidate.providerId} / ${candidate.modelId}`
-        return option
-      }))
-      modelSelect.selectedIndex = previousModelIndex < 0
-        ? 0
-        : Math.min(previousModelIndex, renderedModelRoutes.length - 1)
+    const renderedModelRoutes = state.modelRouteAvailability?.items ?? Object.freeze([])
+    const availableRoutes = renderedModelRoutes.filter(modelRouteReady)
+    const selectedIdentity = state.selectedModelRoute === null
+      ? null
+      : modelRouteIdentity(state.selectedModelRoute)
+    const optionsToRender: readonly ModelOption[] = renderedModelRoutes.length === 0
+      ? [{ key: 'empty', candidate: null }]
+      : [
+          ...(selectedIdentity === null && availableRoutes.length > 0
+            ? [{ key: 'placeholder' as const, candidate: null }]
+            : []),
+          ...renderedModelRoutes.map(candidate => ({
+            key: modelRouteIdentity(candidate.route),
+            candidate,
+          })),
+        ]
+    modelOptions.update(optionsToRender)
+    const selectedOption = selectedIdentity === null
+      ? optionsToRender.findIndex(item => item.candidate === null)
+      : optionsToRender.findIndex(item => item.key === selectedIdentity)
+    if (modelSelect.selectedIndex !== Math.max(0, selectedOption)) {
+      modelSelect.selectedIndex = Math.max(0, selectedOption)
     }
     const pageUnavailable = state.status === 'authentication-required'
       || state.status === 'authorization-denied'
       || state.status === 'closed'
+      || state.status === 'loading'
+      || state.status === 'refreshing'
+      || state.status === 'cancelled'
+      || state.status === 'error'
       || ['submitting', 'cancelling'].includes(state.interaction.status)
-    modelSelect.disabled = renderedModelRoutes.length < 2 || pageUnavailable
+    modelSelect.disabled = availableRoutes.length === 0 || pageUnavailable
+    modelSettings.hidden = availableRoutes.length > 0
+    modelNotice.hidden = state.modelRouteSelectionIssue === null
+    modelNotice.textContent = state.modelRouteSelectionIssue === null
+      ? ''
+      : 'The previously selected model route is no longer ready: '
+        + `${modelRouteReasonLabel(state.modelRouteSelectionIssue)}. `
+        + 'Choose an enabled route.'
     newSession.disabled = options.nextProductSessionId === undefined
-      || renderedModelRoutes.length === 0
+      || state.selectedModelRoute === null
       || pageUnavailable
+    convertDelivery.update({
+      className: 'wwc-chat-convert-delivery',
+      label: 'Convert to StrongFlow',
+      type: 'button',
+      variant: 'primary',
+      disabled: options.deliveryCreator === undefined
+        || options.scope === undefined
+        || state.session === null
+        || confirmedRequirement(state) === null
+        || pageUnavailable,
+      onActivate() {
+        const session = options.model.state.session
+        const requirement = confirmedRequirement(options.model.state)
+        if (
+          options.deliveryCreator === undefined
+          || options.scope === undefined
+          || session === null
+          || requirement === null
+        ) return
+        if (conversionSessionId !== session.id) {
+          conversionSessionId = session.id
+          conversionTitle.value = session.title
+          conversionGoal.value = requirement
+          conversionSourceSession.value = session.id
+          conversionScope.value = [
+            options.scope.organizationId,
+            options.scope.workspaceId,
+            options.scope.projectId,
+            options.scope.repositoryId,
+          ].join(' / ')
+          const route = options.model.state.selectedModelRoute
+          conversionModel.value = route === null
+            ? 'Model context unavailable'
+            : `${route.providerId} / ${route.modelId}`
+          conversionBaseline.value = ''
+          conversionCriteria.value = ''
+          confirmation.checked = false
+        }
+        conversionOpen = true
+        renderConversion(options.deliveryCreator.state)
+      },
+    })
 
-    sessionList.replaceChildren(...state.sessions.map(session => {
-      const item = document.createElement('li')
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = session.title
-      button.dataset.sessionId = session.id
-      if (session.id === state.activeProductSessionId) button.setAttribute('aria-current', 'true')
-      button.addEventListener('click', () => { void options.model.selectSession(session.id) })
-      item.append(button)
-      return item
-    }))
-
-    messages.replaceChildren(...state.messages.map(message => {
-      const item = document.createElement('li')
-      const article = document.createElement('article')
-      const role = document.createElement('h3')
-      const content = document.createElement('p')
-      const stateText = messageStateText(message.state)
-      article.dataset.role = message.role
-      article.dataset.state = message.state
-      article.setAttribute('aria-busy', String(message.state === 'streaming'))
-      role.textContent = message.role === 'user' ? 'You' : 'WinWinCode'
-      content.textContent = message.content.length === 0 && message.state === 'streaming'
-        ? 'Responding…'
-        : message.content
-      article.append(role, content)
-      if (stateText !== null) {
-        const badge = document.createElement('span')
-        badge.className = 'wwc-chat-message-state'
-        badge.textContent = stateText
-        article.append(badge)
-      }
-      item.append(article)
-      return item
-    }))
+    sessionCollection.update(state.sessions)
+    messageCollection.update(state.messages)
   }
 
-  composer.addEventListener('input', () => {
+  function renderConversion(state: ChatDeliveryCreatorState): void {
+    if (closed) return
+    const busy = state.status === 'submitting' || state.status === 'waiting'
+    conversion.hidden = !conversionOpen
+    conversionForm.setAttribute('aria-busy', String(busy))
+    const visibleError = deliveryConversionError(state)
+    conversionError.hidden = visibleError === null
+    conversionError.textContent = visibleError ?? ''
+    conversionSubmit.update({
+      className: 'wwc-chat-convert-submit',
+      label: 'Confirm and create Delivery',
+      busy,
+      busyLabel: state.status === 'waiting' ? 'Waiting for Delivery…' : 'Creating Delivery…',
+      disabled: !conversionOpen || state.status === 'created' || state.status === 'closed',
+      type: 'submit',
+      variant: 'primary',
+    })
+    conversionCancel.update({
+      className: 'wwc-chat-convert-cancel',
+      label: busy ? 'Cancel pending creation' : 'Cancel conversion',
+      type: 'button',
+      onActivate() {
+        if (options.deliveryCreator === undefined) return
+        if (busy) {
+          options.deliveryCreator.cancelPending()
+          return
+        }
+        conversionOpen = false
+        conversion.hidden = true
+        conversionSessionId = null
+      },
+    })
+  }
+
+  const onComposerInput = () => {
     send.disabled = chatPagePresentation(options.model.state).composerDisabled
       || composer.value.trim().length === 0
-  })
-  composer.addEventListener('keydown', event => {
+  }
+  const onModelRouteChange = () => {
+    const selectedOption = modelSelect.children[modelSelect.selectedIndex] as
+      | HTMLOptionElement
+      | undefined
+    const selected = options.model.state.modelRouteAvailability?.items.find(candidate => (
+      modelRouteIdentity(candidate.route) === selectedOption?.value
+    ))
+    if (selected === undefined || !modelRouteReady(selected)) return
+    options.model.selectModelRoute(selected.route)
+  }
+  const onComposerKeydown = (event: KeyboardEvent) => {
     if (chatComposerKeyAction(event) !== 'submit') return
     event.preventDefault()
     form.requestSubmit()
-  })
-  form.addEventListener('submit', event => {
+  }
+  const onComposerSubmit = (event: SubmitEvent) => {
     event.preventDefault()
     const draft = composer.value.trim()
     if (draft.length === 0) return
@@ -305,23 +742,50 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
         render(options.model.state)
       }
     })
-  })
-  cancel.addEventListener('click', () => {
+  }
+  const onConversionSubmit = (event: SubmitEvent) => {
+    event.preventDefault()
+    if (
+      options.deliveryCreator === undefined
+      || !conversionOpen
+      || !confirmation.checked
+      || ['submitting', 'waiting', 'created', 'closed'].includes(
+        options.deliveryCreator.state.status,
+      )
+    ) return
+    void options.deliveryCreator.create({
+      title: conversionTitle.value,
+      goal: conversionGoal.value,
+      baseRevision: conversionBaseline.value,
+      acceptanceCriteria: conversionCriteria.value.split(/\r?\n/u),
+    })
+  }
+  const onCancel = () => {
     void options.model.cancelSession('Stopped from the Chat page.')
-  })
-  newSession.addEventListener('click', () => {
-    const route = renderedModelRoutes[modelSelect.selectedIndex]
-    if (route === undefined || options.nextProductSessionId === undefined) return
+  }
+  const onNewSession = () => {
+    if (options.model.state.selectedModelRoute === null
+      || options.nextProductSessionId === undefined) return
     void options.model.createSession({
       productSessionId: options.nextProductSessionId(),
       title: 'New Chat',
-      modelRoute: route,
     })
-  })
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  loadEarlier.addEventListener('click', () => { void options.model.loadMoreMessages() })
+  }
+  const onRetry = () => { void options.model.refresh() }
+  const onLoadEarlier = () => { void options.model.loadMoreMessages() }
+
+  composer.addEventListener('input', onComposerInput)
+  modelSelect.addEventListener('change', onModelRouteChange)
+  composer.addEventListener('keydown', onComposerKeydown)
+  form.addEventListener('submit', onComposerSubmit)
+  conversionForm.addEventListener('submit', onConversionSubmit)
+  cancel.addEventListener('click', onCancel)
+  newSession.addEventListener('click', onNewSession)
+  retry.addEventListener('click', onRetry)
+  loadEarlier.addEventListener('click', onLoadEarlier)
 
   const unsubscribe = options.model.subscribe(render)
+  const unsubscribeDeliveryCreator = options.deliveryCreator?.subscribe(renderConversion)
   void options.model.start()
 
   return {
@@ -329,6 +793,24 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       if (closed) return
       closed = true
       unsubscribe()
+      unsubscribeDeliveryCreator?.()
+      composer.removeEventListener('input', onComposerInput)
+      modelSelect.removeEventListener('change', onModelRouteChange)
+      composer.removeEventListener('keydown', onComposerKeydown)
+      form.removeEventListener('submit', onComposerSubmit)
+      conversionForm.removeEventListener('submit', onConversionSubmit)
+      cancel.removeEventListener('click', onCancel)
+      newSession.removeEventListener('click', onNewSession)
+      retry.removeEventListener('click', onRetry)
+      loadEarlier.removeEventListener('click', onLoadEarlier)
+      for (const field of conversionFields) field.close()
+      convertDelivery.close()
+      conversionSubmit.close()
+      conversionCancel.close()
+      options.deliveryCreator?.close()
+      messageCollection.close()
+      sessionCollection.close()
+      modelOptions.close()
       options.model.close()
       options.root.replaceChildren()
     },

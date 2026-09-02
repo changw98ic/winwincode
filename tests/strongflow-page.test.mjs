@@ -40,7 +40,11 @@ const application = await import(`${pathToFileURL(resolve(
   '.cache/strongflow-page-tests/application.js',
 )).href}`)
 
-const { mountStrongFlowPage, strongFlowPagePresentation } = page
+const {
+  mountStrongFlowCreatePage,
+  mountStrongFlowPage,
+  strongFlowPagePresentation,
+} = page
 const { boundedItems } = rendering
 const { clientSurfaceFromHash, strongFlowRouteHash } = application
 const deliveryId = 'dlv_00000000000000000000000001'
@@ -223,12 +227,16 @@ class FakeElement {
 
   attributes = new Map()
   children = []
+  parentNode = null
   listeners = new Map()
   dataset = {}
   className = ''
   disabled = false
   hidden = false
+  readOnly = false
+  required = false
   type = ''
+  value = ''
   href = ''
   #textContent = ''
 
@@ -238,15 +246,33 @@ class FakeElement {
 
   set textContent(value) {
     this.#textContent = String(value)
-    this.children = []
+    this.replaceChildren()
   }
 
+  get childNodes() { return this.children }
+
   append(...children) {
-    this.children.push(...children)
+    for (const child of children) this.insertBefore(child, null)
   }
 
   replaceChildren(...children) {
-    this.children = [...children]
+    for (const child of [...this.children]) child.remove()
+    for (const child of children) this.insertBefore(child, null)
+  }
+
+  insertBefore(child, reference) {
+    child.remove?.()
+    const index = reference === null ? this.children.length : this.children.indexOf(reference)
+    this.children.splice(index < 0 ? this.children.length : index, 0, child)
+    child.parentNode = this
+    return child
+  }
+
+  remove() {
+    if (this.parentNode === null) return
+    const index = this.parentNode.children.indexOf(this)
+    if (index >= 0) this.parentNode.children.splice(index, 1)
+    this.parentNode = null
   }
 
   setAttribute(name, value) {
@@ -257,10 +283,19 @@ class FakeElement {
     return this.attributes.get(name) ?? null
   }
 
+  removeAttribute(name) {
+    this.attributes.delete(name)
+  }
+
   addEventListener(name, listener) {
     const listeners = this.listeners.get(name) ?? []
     listeners.push(listener)
     this.listeners.set(name, listeners)
+  }
+
+  removeEventListener(name, listener) {
+    const listeners = this.listeners.get(name) ?? []
+    this.listeners.set(name, listeners.filter(candidate => candidate !== listener))
   }
 
   emit(name, values = {}) {
@@ -317,6 +352,27 @@ class FakeStrongFlowViewModel {
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
   cancelPending() { this.calls.push(['cancelPending']) }
   reconnect() { this.calls.push(['reconnect']) }
+  close() { this.calls.push(['close']) }
+}
+
+class FakeStrongFlowCreateViewModel {
+  state = { status: 'idle', error: null }
+  calls = []
+  listener = null
+
+  subscribe(listener) {
+    this.listener = listener
+    listener(this.state)
+    return () => { this.listener = null }
+  }
+
+  publish(next) {
+    this.state = next
+    this.listener?.(next)
+  }
+
+  async create(input) { this.calls.push(['create', input]) }
+  cancelPending() { this.calls.push(['cancelPending']) }
   close() { this.calls.push(['close']) }
 }
 
@@ -416,6 +472,64 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.deepEqual(rootElement.children, [])
 })
 
+test('empty StrongFlow keeps one complete creation draft through command errors', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowCreateViewModel()
+  const mounted = mountStrongFlowCreatePage({ root: rootElement, model, scope: {
+    kind: 'repository',
+    organizationId: 'org_00000000000000000000000001',
+    workspaceId: 'wsp_00000000000000000000000001',
+    projectId: 'prj_00000000000000000000000001',
+    repositoryId: 'rep_00000000000000000000000001',
+  } })
+  const title = findByClass(rootElement, 'wwc-strongflow-create-title')
+  const goal = findByClass(rootElement, 'wwc-strongflow-create-goal')
+  const baseline = findByClass(rootElement, 'wwc-strongflow-create-baseline')
+  const criteria = findByClass(rootElement, 'wwc-strongflow-create-criteria')
+  const scopeValue = findByClass(rootElement, 'wwc-strongflow-create-scope')
+  title.value = 'First StrongFlow Delivery'
+  goal.value = 'Open the advanced workspace.'
+  baseline.value = '0123456789abcdef0123456789abcdef01234567'
+  criteria.value = 'Load the real Delivery snapshot.\nSubscribe to Delivery events.'
+
+  findByClass(rootElement, 'wwc-strongflow-create-form').emit('submit', {
+    preventDefault() {},
+  })
+  assert.deepEqual(model.calls.at(-1), ['create', {
+    title: 'First StrongFlow Delivery',
+    goal: 'Open the advanced workspace.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    acceptanceCriteria: [
+      'Load the real Delivery snapshot.',
+      'Subscribe to Delivery events.',
+    ],
+  }])
+  assert.equal(scopeValue.readOnly, true)
+  assert.match(scopeValue.value, /rep_00000000000000000000000001/u)
+
+  model.publish({
+    status: 'error',
+    error: error('server', 'private command details'),
+  })
+  assert.equal(title.value, 'First StrongFlow Delivery')
+  assert.equal(goal.value, 'Open the advanced workspace.')
+  assert.equal(baseline.value, '0123456789abcdef0123456789abcdef01234567')
+  assert.equal(criteria.value, 'Load the real Delivery snapshot.\nSubscribe to Delivery events.')
+  assert.match(findByClass(rootElement, 'wwc-strongflow-create-error').textContent, /retry/iu)
+
+  model.publish({ status: 'submitting', error: null })
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-create-submit').disabled, true)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-create-form').getAttribute('aria-busy'), 'true')
+  const cancel = findByClass(rootElement, 'wwc-strongflow-create-cancel')
+  assert.equal(cancel.hidden, false)
+  cancel.emit('click')
+  assert.deepEqual(model.calls.at(-1), ['cancelPending'])
+  mounted.close()
+  assert.deepEqual(model.calls.at(-1), ['close'])
+  assert.deepEqual(rootElement.children, [])
+})
+
 test('default route remains Chat while StrongFlow query routes stay on the advanced surface', () => {
   assert.equal(clientSurfaceFromHash('').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
@@ -455,6 +569,73 @@ test('review controls send only current view-model decisions and disable while w
   assert.equal(findByClass(rootElement, 'wwc-strongflow-approve-solution').disabled, true)
   assert.equal(findByClass(rootElement, 'wwc-strongflow-actions').getAttribute('aria-busy'), 'true')
   mounted.close()
+})
+
+test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, and large views', () => {
+  const document = new FakeDocument()
+  document.activeElement = null
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.solutionReview.reviewStatus = 'pending'
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: many(5, deliverySummary),
+    limits,
+  })
+  const workspace = findByClass(rootElement, 'wwc-strongflow-workspace')
+  const deliveryList = findByClass(rootElement, 'wwc-strongflow-delivery-list')
+  const taskList = findByClass(rootElement, 'wwc-strongflow-task-list')
+  const actions = findByClass(rootElement, 'wwc-strongflow-solution-actions')
+  const comments = actions.children[0].children[0]
+  const attentionGroup = findByClass(rootElement, 'wwc-strongflow-attention-actions')
+  const resolution = attentionGroup.children[1].children[0]
+  const candidate = findByClass(rootElement, 'wwc-strongflow-view-candidate')
+  const diagrams = findByClass(rootElement, 'wwc-strongflow-diagrams')
+  const deliveryRow = deliveryList.children[0]
+  const taskRow = taskList.children[0]
+  const approve = findByClass(rootElement, 'wwc-strongflow-approve-solution')
+
+  comments.value = 'dirty solution review'
+  comments.selectionStart = 8
+  resolution.value = 'dirty Attention note'
+  document.activeElement = comments
+  workspace.scrollTop = 108
+  deliveryList.scrollTop = 21
+
+  for (let index = 0; index < 200; index += 1) {
+    model.publish(state({
+      projection: current,
+      realtime: index % 2 === 0 ? 'reloading' : 'subscribed',
+      interaction: {
+        status: index % 2 === 0 ? 'waiting' : 'idle',
+        error: null,
+      },
+    }))
+  }
+
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-workspace'), workspace)
+  assert.equal(deliveryList.children[0], deliveryRow)
+  assert.equal(taskList.children[0], taskRow)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-view-candidate'), candidate)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-diagrams'), diagrams)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-attention-actions'), attentionGroup)
+  assert.equal(comments.value, 'dirty solution review')
+  assert.equal(comments.selectionStart, 8)
+  assert.equal(resolution.value, 'dirty Attention note')
+  assert.equal(document.activeElement, comments)
+  assert.equal(workspace.scrollTop, 108)
+  assert.equal(deliveryList.scrollTop, 21)
+  assert.equal(deliveryList.children.length, 2)
+  assert.equal(taskList.children.length, 2)
+  assert.equal(findAllByClass(rootElement, 'wwc-strongflow-view-candidate').length, 1)
+
+  mounted.close()
+  assert.equal((approve.listeners.get('click') ?? []).length, 0)
+  assert.equal(comments.value, '')
+  assert.equal(resolution.value, '')
+  assert.equal(model.listener, null)
 })
 
 test('verdict control stays hidden until all active StageRuns settle', () => {

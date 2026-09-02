@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use winwincode_domain::{ExecutionMessageId, Instant, ModelExchangeId, RequestId, Sha256Digest};
 
-use crate::SqliteStorage;
+use crate::{SqliteStorage, StateCommit, commit_in_transaction};
 
 const PROVIDER_EXCHANGE_SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS internal_provider_exchanges (
@@ -612,9 +612,13 @@ impl<'storage> ProviderExchangeStore<'storage> {
         &mut self,
         begin: &ProviderExchangeBegin,
         pool_authority_json: &[u8],
+        readiness_commit: &StateCommit,
     ) -> Result<ProviderExchangeSnapshot, ProviderExchangeStoreError> {
         validate_begin(begin)?;
         validate_json(pool_authority_json)?;
+        readiness_commit
+            .validate_for_storage_adapter()
+            .map_err(|_| ProviderExchangeStoreError::invalid())?;
         let transaction = self
             .storage
             .connection_mut()
@@ -622,6 +626,11 @@ impl<'storage> ProviderExchangeStore<'storage> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ProviderExchangeStoreError::storage())?;
         let snapshot = begin_open_in(&transaction, begin)?;
+        let readiness = commit_in_transaction(&transaction, readiness_commit)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        if snapshot.idempotent_replay != readiness.idempotent_replay {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
         if !snapshot.idempotent_replay {
             save_pool_authority_in(&transaction, pool_authority_json, &begin.started_at)?;
         }
@@ -745,12 +754,16 @@ impl<'storage> ProviderExchangeStore<'storage> {
         open_digest: &Sha256Digest,
         failure: &ProviderExchangeFailure,
         pool_authority_json: &[u8],
+        readiness_commit: &StateCommit,
     ) -> Result<ProviderExchangeSnapshot, ProviderExchangeStoreError> {
         validate_exchange_id(model_exchange_id)?;
         validate_digest(open_digest)?;
         validate_token(&failure.failure_kind)?;
         validate_instant(&failure.failed_at)?;
         validate_json(pool_authority_json)?;
+        readiness_commit
+            .validate_for_storage_adapter()
+            .map_err(|_| ProviderExchangeStoreError::invalid())?;
         let transaction = self
             .storage
             .connection_mut()
@@ -758,7 +771,14 @@ impl<'storage> ProviderExchangeStore<'storage> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ProviderExchangeStoreError::storage())?;
         let snapshot = commit_failed_in(&transaction, model_exchange_id, open_digest, failure)?;
-        save_pool_authority_in(&transaction, pool_authority_json, &failure.failed_at)?;
+        let readiness = commit_in_transaction(&transaction, readiness_commit)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        if snapshot.idempotent_replay != readiness.idempotent_replay {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
+        if !snapshot.idempotent_replay {
+            save_pool_authority_in(&transaction, pool_authority_json, &failure.failed_at)?;
+        }
         transaction
             .commit()
             .map_err(|_| ProviderExchangeStoreError::storage())?;
@@ -909,6 +929,44 @@ impl<'storage> ProviderExchangeStore<'storage> {
         })
     }
 
+    /// Atomically replaces pool authority and advances one secret-free Project
+    /// readiness revision. Exact receipt replays leave both authorities
+    /// unchanged and reuse the original public outbox event.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed input, changed replay identity, or storage failure.
+    pub fn save_pool_authority_with_readiness(
+        &mut self,
+        state_json: &[u8],
+        updated_at: &Instant,
+        readiness_commit: &StateCommit,
+    ) -> Result<ModelRequestPoolAuthority, ProviderExchangeStoreError> {
+        validate_json(state_json)?;
+        validate_instant(updated_at)?;
+        readiness_commit
+            .validate_for_storage_adapter()
+            .map_err(|_| ProviderExchangeStoreError::invalid())?;
+        let transaction = self
+            .storage
+            .connection_mut()
+            .map_err(|_| ProviderExchangeStoreError::storage())?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        let readiness = commit_in_transaction(&transaction, readiness_commit)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        if !readiness.idempotent_replay {
+            save_pool_authority_in(&transaction, state_json, updated_at)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        Ok(ModelRequestPoolAuthority {
+            state_json: state_json.to_vec(),
+            updated_at: updated_at.clone(),
+        })
+    }
+
     /// Loads the complete bounded request-pool authority.
     ///
     /// # Errors
@@ -957,6 +1015,7 @@ impl<'storage> ProviderExchangeStore<'storage> {
     ///
     /// Rejects non-terminal exchanges, changed acknowledgements, malformed
     /// canonical receipts, or unavailable storage.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_final_ack_with_pool_authority(
         &mut self,
         model_exchange_id: &ModelExchangeId,
@@ -965,6 +1024,7 @@ impl<'storage> ProviderExchangeStore<'storage> {
         receipt_json: &[u8],
         pool_authority_json: &[u8],
         acked_at: &Instant,
+        readiness_commit: &StateCommit,
     ) -> Result<ProviderExchangeFinalAck, ProviderExchangeStoreError> {
         validate_exchange_id(model_exchange_id)?;
         validate_digest(ack_digest)?;
@@ -974,6 +1034,9 @@ impl<'storage> ProviderExchangeStore<'storage> {
         validate_json(receipt_json)?;
         validate_json(pool_authority_json)?;
         validate_instant(acked_at)?;
+        readiness_commit
+            .validate_for_storage_adapter()
+            .map_err(|_| ProviderExchangeStoreError::invalid())?;
         let transaction = self
             .storage
             .connection_mut()
@@ -990,6 +1053,11 @@ impl<'storage> ProviderExchangeStore<'storage> {
                 || replay.ack_sequence != ack_sequence
                 || replay.receipt_json != receipt_json
             {
+                return Err(ProviderExchangeStoreError::conflict());
+            }
+            let readiness = commit_in_transaction(&transaction, readiness_commit)
+                .map_err(|_| ProviderExchangeStoreError::storage())?;
+            if !readiness.idempotent_replay {
                 return Err(ProviderExchangeStoreError::conflict());
             }
             replay.idempotent_replay = true;
@@ -1015,6 +1083,11 @@ impl<'storage> ProviderExchangeStore<'storage> {
                 ],
             )
             .map_err(|_| ProviderExchangeStoreError::storage())?;
+        let readiness = commit_in_transaction(&transaction, readiness_commit)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        if readiness.idempotent_replay {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
         save_pool_authority_in(&transaction, pool_authority_json, acked_at)?;
         let acknowledgement = load_final_ack(&transaction, model_exchange_id)?
             .ok_or_else(ProviderExchangeStoreError::storage)?;
@@ -1077,9 +1150,13 @@ impl<'storage> ProviderExchangeStore<'storage> {
         model_exchange_id: &ModelExchangeId,
         terminal: &ProviderExchangeTerminal,
         pool_authority_json: &[u8],
+        readiness_commit: &StateCommit,
     ) -> Result<ProviderExchangeSnapshot, ProviderExchangeStoreError> {
         validate_exchange_id(model_exchange_id)?;
         validate_json(pool_authority_json)?;
+        readiness_commit
+            .validate_for_storage_adapter()
+            .map_err(|_| ProviderExchangeStoreError::invalid())?;
         let transaction = self
             .storage
             .connection_mut()
@@ -1087,7 +1164,14 @@ impl<'storage> ProviderExchangeStore<'storage> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ProviderExchangeStoreError::storage())?;
         let snapshot = commit_terminal_in(&transaction, model_exchange_id, terminal)?;
-        save_pool_authority_in(&transaction, pool_authority_json, &terminal.settled_at)?;
+        let readiness = commit_in_transaction(&transaction, readiness_commit)
+            .map_err(|_| ProviderExchangeStoreError::storage())?;
+        if snapshot.idempotent_replay != readiness.idempotent_replay {
+            return Err(ProviderExchangeStoreError::conflict());
+        }
+        if !snapshot.idempotent_replay {
+            save_pool_authority_in(&transaction, pool_authority_json, &terminal.settled_at)?;
+        }
         transaction
             .commit()
             .map_err(|_| ProviderExchangeStoreError::storage())?;

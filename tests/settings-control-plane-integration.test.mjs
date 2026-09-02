@@ -441,6 +441,7 @@ class FakeElement {
 
   attributes = new Map()
   children = []
+  parentNode = null
   listeners = new Map()
   dataset = {}
   className = ''
@@ -464,15 +465,33 @@ class FakeElement {
 
   set textContent(value) {
     this.#textContent = String(value)
-    this.children = []
+    this.replaceChildren()
   }
 
+  get childNodes() { return this.children }
+
   append(...children) {
-    this.children.push(...children)
+    for (const child of children) this.insertBefore(child, null)
   }
 
   replaceChildren(...children) {
-    this.children = [...children]
+    for (const child of [...this.children]) child.remove()
+    for (const child of children) this.insertBefore(child, null)
+  }
+
+  insertBefore(child, reference) {
+    child.remove?.()
+    const index = reference === null ? this.children.length : this.children.indexOf(reference)
+    this.children.splice(index < 0 ? this.children.length : index, 0, child)
+    child.parentNode = this
+    return child
+  }
+
+  remove() {
+    if (this.parentNode === null) return
+    const index = this.parentNode.children.indexOf(this)
+    if (index >= 0) this.parentNode.children.splice(index, 1)
+    this.parentNode = null
   }
 
   setAttribute(name, value) {
@@ -487,6 +506,11 @@ class FakeElement {
     const current = this.listeners.get(name) ?? []
     current.push(listener)
     this.listeners.set(name, current)
+  }
+
+  removeEventListener(name, listener) {
+    const current = this.listeners.get(name) ?? []
+    this.listeners.set(name, current.filter(candidate => candidate !== listener))
   }
 
   dispatch(name) {
@@ -555,6 +579,13 @@ test('settings page clears each write-only input before handing it to the view-m
     close() {},
   }
   const mounted = mountSettingsPage({ root: rootElement, model })
+  assert.equal(byClass(rootElement, 'wwc-settings').dataset.wwcPage, 'management')
+  assert.equal(byClass(rootElement, 'wwc-settings-heading').dataset.wwcComponent, 'page-header')
+  assert.equal(byClass(rootElement, 'wwc-settings-status').dataset.wwcComponent, 'status-badge')
+  assert.equal(byClass(rootElement, 'wwc-settings-retry').dataset.wwcComponent, 'button')
+  assert.equal(byClass(rootElement, 'wwc-settings-route').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-settings-create-credential').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-settings-credentials').dataset.wwcComponent, 'panel')
 
   const createSecret = byClass(rootElement, 'wwc-settings-create-secret')
   const createForm = byClass(rootElement, 'wwc-settings-create-form')
@@ -596,7 +627,86 @@ test('settings page clears each write-only input before handing it to the view-m
   assert.equal(visibleText(rootElement).includes('Revoked'), true)
   assert.equal(byClass(rootElement, 'wwc-settings-rotate').disabled, true)
   assert.equal(byClass(rootElement, 'wwc-settings-revoke').disabled, true)
+
+  state = pageState({ credentials: [] })
+  listener(state)
+  assert.equal(
+    byClass(rootElement, 'wwc-settings-credential-empty').dataset.wwcComponent,
+    'empty-state',
+  )
   mounted.close()
+})
+
+test('settings keyed updates preserve route drafts, Credential row identity, focus, and scroll', () => {
+  const document = new FakeDocument()
+  document.activeElement = null
+  const rootElement = new FakeElement(document, 'div')
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings() {},
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const credentialSelect = byClass(rootElement, 'wwc-settings-credential')
+  const references = byClass(rootElement, 'wwc-settings-credential-list')
+  const credentialRow = byClass(rootElement, 'wwc-settings-credential-item')
+  const rotateSecret = byClass(rootElement, 'wwc-settings-rotate-secret')
+  const rotateForm = byClass(rootElement, 'wwc-settings-rotate-form')
+  const credentialChoice = credentialSelect.children[1]
+
+  provider.value = 'dirty-provider'
+  provider.selectionStart = 6
+  provider.dispatch('input')
+  credentialSelect.value = credentialId
+  credentialSelect.dispatch('change')
+  rotateSecret.value = 'dirty-secret'
+  rotateSecret.selectionStart = 5
+  document.activeElement = rotateSecret
+  references.scrollTop = 84
+
+  for (let index = 0; index < 200; index += 1) {
+    current = pageState({
+      realtime: index % 2 === 0 ? 'reloading' : 'subscribed',
+      credentials: [credential({
+        displayName: index === 199 ? 'Updated local key' : 'Local model key',
+        revision: index + 2,
+      })],
+    })
+    listener(current)
+  }
+
+  assert.equal(byClass(rootElement, 'wwc-settings-credential-item'), credentialRow)
+  assert.equal(credentialSelect.children[1], credentialChoice)
+  assert.equal(byClass(rootElement, 'wwc-settings-credential-title').textContent, 'Updated local key')
+  assert.equal(provider.value, 'dirty-provider')
+  assert.equal(provider.selectionStart, 6)
+  assert.equal(credentialSelect.value, credentialId)
+  assert.equal(rotateSecret.value, 'dirty-secret')
+  assert.equal(rotateSecret.selectionStart, 5)
+  assert.equal(document.activeElement, rotateSecret)
+  assert.equal(references.scrollTop, 84)
+  assert.equal(references.children.length, 1)
+  assert.equal(credentialSelect.children.length, 2)
+
+  mounted.close()
+  assert.equal((provider.listeners.get('input') ?? []).length, 0)
+  assert.equal((rotateForm.listeners.get('submit') ?? []).length, 0)
+  assert.equal(rotateSecret.value, '')
 })
 
 test('invalid settings scope fails before transport and produces a clear page prompt', async () => {

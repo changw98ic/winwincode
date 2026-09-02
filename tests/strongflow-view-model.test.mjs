@@ -36,7 +36,7 @@ const facade = await import(`${pathToFileURL(resolve(
   '.cache/strongflow-view-model-tests/control-plane-client.js',
 )).href}`)
 
-const { createStrongFlowViewModel } = module
+const { createStrongFlowCreateViewModel, createStrongFlowViewModel } = module
 const { ControlPlaneClientError } = facade
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
@@ -469,6 +469,388 @@ test('initial bounded pair composes the complete StrongFlow projection and sourc
     'attention.changed.v1',
     'runtime-projection.invalidated.v1',
   ])
+})
+
+test('empty StrongFlow creates and advances one Delivery with exact authority and revisions', async () => {
+  const calls = []
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'First StrongFlow Delivery',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = {
+    ...created,
+    revision: 2,
+    status: 'clarifying',
+    activeStageRunId: stageRunId,
+  }
+  const client = {
+    async command(request) {
+      calls.push(structuredClone(request))
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+    close() {},
+  }
+  const createdIds = []
+  let requestSequence = 0
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated(value) { createdIds.push(value) },
+  })
+
+  await model.create({
+    title: '  First StrongFlow Delivery  ',
+    goal: '  Enter the advanced workspace without a reload.  ',
+    baseRevision: '  0123456789abcdef0123456789abcdef01234567  ',
+    acceptanceCriteria: [
+      '  The created Delivery is loaded from the Control Plane.  ',
+      'The Delivery event stream is subscribed.',
+    ],
+  })
+
+  assert.deepEqual(calls, [{
+    schemaVersion,
+    requestId: requestId(1),
+    actor,
+    scope,
+    command: 'delivery.create',
+    expectedRevision: 0,
+    payload: {
+      deliveryId,
+      spec: {
+        acceptanceCriteria: [{
+          id: 'criterion:1',
+          required: true,
+          title: 'The created Delivery is loaded from the Control Plane.',
+        }, {
+          id: 'criterion:2',
+          required: true,
+          title: 'The Delivery event stream is subscribed.',
+        }],
+        baseRevision: '0123456789abcdef0123456789abcdef01234567',
+        goal: 'Enter the advanced workspace without a reload.',
+        publicationTarget: null,
+        repositoryId: scope.repositoryId,
+        title: 'First StrongFlow Delivery',
+      },
+      tasks: [],
+    },
+  }, {
+    schemaVersion,
+    requestId: requestId(2),
+    actor,
+    scope,
+    command: 'delivery.advance',
+    expectedRevision: 1,
+    payload: { deliveryId },
+  }])
+  assert.deepEqual(createdIds, [deliveryId])
+  assert.equal(model.state.status, 'created')
+  assert.equal(model.state.error, null)
+})
+
+test('Delivery conversion retries the same create and advance requests without duplicate creation', async () => {
+  const calls = []
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'Confirmed Chat requirement',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = {
+    ...created,
+    revision: 2,
+    status: 'clarifying',
+    activeStageRunId: stageRunId,
+  }
+  let createCalls = 0
+  let advanceCalls = 0
+  const client = {
+    async command(request) {
+      calls.push(structuredClone(request))
+      if (request.command === 'delivery.create') {
+        createCalls += 1
+        if (createCalls === 1) throw new ControlPlaneClientError({
+          kind: 'authorization',
+          code: 'PERMISSION_DENIED',
+          message: 'private permission detail',
+          requestId: request.requestId,
+          retryable: false,
+        })
+      } else {
+        advanceCalls += 1
+        if (advanceCalls === 1) throw new ControlPlaneClientError({
+          kind: 'network',
+          code: 'NETWORK_ERROR',
+          message: 'response was lost',
+          requestId: request.requestId,
+          retryable: true,
+        })
+      }
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+  }
+  let requestSequence = 0
+  const opened = []
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated(value) { opened.push(value) },
+  })
+  const input = {
+    title: 'Confirmed Chat requirement',
+    goal: 'Implement the requirement confirmed in Chat.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    acceptanceCriteria: ['The confirmed result is delivered.'],
+  }
+
+  await model.create(input)
+  assert.equal(model.state.error.code, 'PERMISSION_DENIED')
+  await model.create(input)
+  assert.equal(model.state.error.code, 'NETWORK_ERROR')
+  await model.create(input)
+
+  assert.equal(createCalls, 2)
+  assert.equal(advanceCalls, 2)
+  assert.deepEqual(calls[1], calls[0], 'permission retry must reuse the create idempotency key')
+  assert.deepEqual(calls[3], calls[2], 'response-loss retry must reuse the advance idempotency key')
+  assert.equal(calls[2].expectedRevision, 1)
+  assert.deepEqual(opened, [deliveryId])
+  assert.equal(model.state.status, 'created')
+})
+
+test('cancelling and duplicate activation retain one Delivery attempt for exact retry', async () => {
+  const calls = []
+  let first = true
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'Cancelable conversion',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = { ...created, revision: 2, status: 'clarifying', activeStageRunId: stageRunId }
+  const client = {
+    async command(request, options) {
+      calls.push(structuredClone(request))
+      if (first) {
+        first = false
+        return new Promise((resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            reject(new ControlPlaneClientError({
+              kind: 'cancelled',
+              code: 'REQUEST_CANCELLED',
+              message: 'cancelled locally',
+              requestId: request.requestId,
+              retryable: false,
+            }))
+          }, { once: true })
+        })
+      }
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+  }
+  let requestSequence = 0
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated() {},
+  })
+  const input = {
+    title: 'Cancelable conversion',
+    goal: 'Retry the exact request.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    acceptanceCriteria: ['Only one Delivery is created.'],
+  }
+
+  const pending = model.create(input)
+  await Promise.resolve()
+  void model.create(input)
+  assert.equal(calls.length, 1)
+  assert.equal(model.state.status, 'submitting')
+  model.cancelPending()
+  await pending
+  assert.equal(model.state.error.code, 'REQUEST_CANCELLED')
+  await model.create(input)
+
+  assert.deepEqual(calls[1], calls[0], 'cancel retry must reuse the original request')
+  assert.equal(calls[2].command, 'delivery.advance')
+  assert.equal(model.state.status, 'created')
+})
+
+test('an accepted Delivery command can be cancelled and retried with its exact request', async () => {
+  const calls = []
+  const created = {
+    schemaVersion,
+    deliveryId,
+    revision: 1,
+    status: 'draft',
+    title: 'Accepted conversion',
+    updatedAt: '2026-09-02T01:00:00.000Z',
+    ownership: {
+      organizationId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
+      repositoryId: scope.repositoryId,
+    },
+    activeStageRunId: null,
+    openAttentionCount: 0,
+    taskCounts: {
+      total: 0,
+      pending: 0,
+      active: 0,
+      blocked: 0,
+      verifying: 0,
+      completed: 0,
+      failed: 0,
+    },
+  }
+  const advanced = { ...created, revision: 2, status: 'clarifying', activeStageRunId: stageRunId }
+  let accepted = true
+  const client = {
+    async command(request) {
+      calls.push(structuredClone(request))
+      if (accepted) {
+        accepted = false
+        return {
+          schemaVersion,
+          requestId: request.requestId,
+          command: request.command,
+          outcome: 'accepted',
+          acceptedAt: '2026-09-02T01:00:00.000Z',
+        }
+      }
+      const result = request.command === 'delivery.create' ? created : advanced
+      return {
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: request.expectedRevision,
+        currentRevision: result.revision,
+        result,
+      }
+    },
+  }
+  let requestSequence = 0
+  const model = createStrongFlowCreateViewModel({
+    client,
+    actor,
+    scope,
+    nextDeliveryId: () => deliveryId,
+    nextRequestId: () => requestId(++requestSequence),
+    onCreated() {},
+  })
+  const input = {
+    title: 'Accepted conversion',
+    goal: 'Retry a command accepted by the server.',
+    baseRevision: '0123456789abcdef0123456789abcdef01234567',
+    acceptanceCriteria: ['The exact accepted request is retried.'],
+  }
+
+  await model.create(input)
+  assert.equal(model.state.status, 'waiting')
+  model.cancelPending()
+  assert.equal(model.state.error.code, 'REQUEST_CANCELLED')
+  await model.create(input)
+
+  assert.deepEqual(calls[1], calls[0])
+  assert.equal(calls[2].command, 'delivery.advance')
+  assert.equal(model.state.status, 'created')
 })
 
 test('pending Worker attachment keeps the exact Delivery StageRun readable', async () => {

@@ -1,10 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ControlPlaneClientError } from './control-plane-client.js'
+import {
+  mountButton,
+  mountEmptyState,
+  mountErrorState,
+  mountPageHeader,
+  mountPanel,
+  mountStatusBadge,
+  type StatusTone,
+} from './components/index.js'
 import type {
   ChatInputInteractionProjection,
+  ChatInteractionOptionProjection,
+  DeliveryAttentionOptionProjection,
   InteractiveInputValue,
 } from './generated/contracts.js'
+import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import type {
   LocalApprovalDecision,
   LocalAttentionDecision,
@@ -138,6 +150,13 @@ function decisionContext(document: Document, entries: readonly string[]): HTMLUL
   return list
 }
 
+function updateDecisionContext(list: HTMLUListElement, entries: readonly string[]): void {
+  entries.forEach((entry, index) => {
+    const item = list.children[index]
+    if (item !== undefined && item.textContent !== entry) item.textContent = entry
+  })
+}
+
 function inputStateLabel(input: LocalInputDecision): string {
   return input.expired ? 'Expired · submission disabled' : 'Pending'
 }
@@ -164,44 +183,131 @@ function attentionTypeLabel(item: LocalAttentionDecision): string {
 export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): LocalDecisionsPage {
   const document = options.root.ownerDocument
   const layout = element(document, 'main', 'wwc-local-decisions')
-  const heading = element(document, 'h1', 'wwc-local-decisions-heading')
+  layout.dataset.wwcPage = 'management'
+  const pageHeader = mountPageHeader({
+    document,
+    props: {
+      title: 'Local decisions',
+      eyebrow: 'Approvals and attention',
+      description: 'Review pending inputs, tool approvals, and business Attention with current revision bindings.',
+      headingLevel: 1,
+      className: 'wwc-local-decisions-heading',
+    },
+  })
+  const heading = pageHeader.root
   const help = element(document, 'p', 'wwc-local-decisions-help')
-  const status = element(document, 'p', 'wwc-local-decisions-status')
-  const error = element(document, 'div', 'wwc-local-decisions-error')
-  const errorText = element(document, 'span', 'wwc-local-decisions-error-text')
-  const retry = element(document, 'button', 'wwc-local-decisions-retry')
-  const reconnect = element(document, 'button', 'wwc-local-decisions-reconnect')
-  const inputsSection = element(document, 'section', 'wwc-local-inputs')
-  const inputsHeading = element(document, 'h2', 'wwc-local-decisions-section-heading')
+  const statusBadge = mountStatusBadge({
+    document,
+    props: {
+      label: 'Loading local decisions…',
+      tone: 'info',
+      live: 'polite',
+      className: 'wwc-local-decisions-status',
+    },
+  })
+  const status = statusBadge.root
+  const retryButton = mountButton({
+    document,
+    props: {
+      label: 'Retry snapshot',
+      className: 'wwc-local-decisions-retry',
+      onActivate: () => { void options.model.refresh() },
+    },
+  })
+  const retry = retryButton.root
+  const reconnectButton = mountButton({
+    document,
+    props: {
+      label: 'Reconnect events',
+      className: 'wwc-local-decisions-reconnect',
+      onActivate: () => { options.model.reconnect() },
+    },
+  })
+  const reconnect = reconnectButton.root
+  const errorState = mountErrorState({
+    document,
+    props: {
+      title: 'Local decisions unavailable',
+      message: '',
+      actions: [retry, reconnect],
+      visible: false,
+      className: 'wwc-local-decisions-error',
+    },
+  })
+  const error = errorState.root
+  errorState.message.className = 'wwc-local-decisions-error-text'
+  const inputsPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-local-inputs',
+      title: 'Pending inputs',
+      description: 'Responses remain bound to the current ProductSession and execution identity.',
+      className: 'wwc-local-inputs',
+    },
+  })
+  const inputsSection = inputsPanel.root
+  const inputsHeading = inputsPanel.title
+  inputsHeading.className = 'wwc-local-decisions-section-heading'
   const inputs = element(document, 'ul', 'wwc-local-input-list')
-  const approvalsSection = element(document, 'section', 'wwc-local-approvals')
-  const approvalsHeading = element(document, 'h2', 'wwc-local-decisions-section-heading')
+  const inputsEmpty = mountEmptyState({
+    document,
+    props: {
+      title: 'No pending inputs',
+      detail: 'New input requests will appear here when a session needs a response.',
+      className: 'wwc-local-input-empty',
+    },
+  })
+  const approvalsPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-local-approvals',
+      title: 'Tool approvals',
+      description: 'Each decision is submitted with the current session identity and revision.',
+      className: 'wwc-local-approvals',
+    },
+  })
+  const approvalsSection = approvalsPanel.root
+  const approvalsHeading = approvalsPanel.title
+  approvalsHeading.className = 'wwc-local-decisions-section-heading'
   const approvals = element(document, 'ul', 'wwc-local-approval-list')
-  const attentionSection = element(document, 'section', 'wwc-local-attention')
-  const attentionHeading = element(document, 'h2', 'wwc-local-decisions-section-heading')
+  const approvalsEmpty = mountEmptyState({
+    document,
+    props: {
+      title: 'No pending tool approvals',
+      detail: 'Tool requests that require a decision will appear here.',
+      className: 'wwc-local-approval-empty',
+    },
+  })
+  const attentionPanel = mountPanel({
+    document,
+    props: {
+      id: 'wwc-local-attention',
+      title: 'Business Attention',
+      description: 'Resolve Delivery questions and blockers against the current Delivery revision.',
+      className: 'wwc-local-attention',
+    },
+  })
+  const attentionSection = attentionPanel.root
+  const attentionHeading = attentionPanel.title
+  attentionHeading.className = 'wwc-local-decisions-section-heading'
   const attention = element(document, 'ul', 'wwc-local-attention-list')
+  const attentionEmpty = mountEmptyState({
+    document,
+    props: {
+      title: 'No open business Attention',
+      detail: 'Delivery questions and blocking decisions will appear here.',
+      className: 'wwc-local-attention-empty',
+    },
+  })
   let closed = false
 
-  heading.textContent = 'Local decisions'
   help.textContent = 'Inputs include exact current choices such as Plan Delta or Replan. Submitted responses are cleared immediately.'
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  error.setAttribute('role', 'alert')
-  error.setAttribute('aria-live', 'assertive')
-  retry.type = 'button'
-  retry.textContent = 'Retry snapshot'
-  reconnect.type = 'button'
-  reconnect.textContent = 'Reconnect events'
-  error.append(errorText, retry, reconnect)
-  inputsHeading.textContent = 'Pending inputs'
-  approvalsHeading.textContent = 'Tool approvals'
-  attentionHeading.textContent = 'Business Attention'
   inputs.setAttribute('aria-live', 'polite')
   approvals.setAttribute('aria-live', 'polite')
   attention.setAttribute('aria-live', 'polite')
-  inputsSection.append(inputsHeading, inputs)
-  approvalsSection.append(approvalsHeading, approvals)
-  attentionSection.append(attentionHeading, attention)
+  inputsPanel.content.append(inputs, inputsEmpty.root)
+  approvalsPanel.content.append(approvals, approvalsEmpty.root)
+  attentionPanel.content.append(attention, attentionEmpty.root)
   layout.append(
     heading,
     help,
@@ -213,223 +319,455 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
   )
   options.root.replaceChildren(layout)
 
-  function renderInput(
-    item: LocalInputDecision,
-    disabled: boolean,
-    inputIndex: number,
-  ): HTMLLIElement {
-    const projection = item.projection
-    const row = element(document, 'li', 'wwc-local-input')
-    const title = element(document, 'h3', 'wwc-local-input-prompt')
-    const context = decisionContext(document, [
-      inputModeLabel(projection),
-      inputStateLabel(item),
-      projection.binding.sessionIdentity.stageRunId === undefined
-        ? 'ProductSession-bound'
-        : 'ProductSession and StageRun-bound',
-      'Execution job and Worker session-bound',
-      `Revision ${String(projection.revision)}`,
-      `Expires ${projection.expiresAt}`,
-    ])
-    const controls = element(document, 'div', 'wwc-local-input-controls')
-    const cancel = element(document, 'button', 'wwc-local-input-cancel')
-    const decisionDisabled = disabled || item.expired
-    title.textContent = projection.prompt
-    cancel.type = 'button'
-    cancel.textContent = 'Cancel input'
-    cancel.disabled = decisionDisabled
-    cancel.addEventListener('click', () => { void options.model.cancelInput(projection.inputRequestId) })
-
-    if (projection.mode === 'text') {
-      const form = element(document, 'form', 'wwc-local-input-form')
+  interface InputRow {
+    current: LocalInputDecision
+    readonly title: HTMLElement
+    readonly context: HTMLUListElement
+    readonly textForm: HTMLFormElement
+    readonly response: HTMLTextAreaElement
+    readonly submit: HTMLButtonElement
+    readonly choices: HTMLElement
+    readonly optionCollection: KeyedCollectionView<
+      ChatInteractionOptionProjection,
+      string,
+      HTMLButtonElement
+    >
+    readonly cancel: HTMLButtonElement
+    readonly onSubmit: (event: SubmitEvent) => void
+    readonly onCancel: () => void
+  }
+  const inputRows = new WeakMap<HTMLLIElement, InputRow>()
+  const inputCollection = mountKeyedCollection({
+    parent: inputs,
+    key: (item: LocalInputDecision) => item.projection.inputRequestId,
+    create(item: LocalInputDecision) {
+      const projection = item.projection
+      const row = element(document, 'li', 'wwc-local-input')
+      const title = element(document, 'h3', 'wwc-local-input-prompt')
+      const context = decisionContext(document, ['', '', '', '', '', ''])
+      const controls = element(document, 'div', 'wwc-local-input-controls')
+      const textForm = element(document, 'form', 'wwc-local-input-form')
       const label = element(document, 'label', 'wwc-local-input-response-label')
       const response = element(document, 'textarea', 'wwc-local-input-response')
       const submit = element(document, 'button', 'wwc-local-input-submit')
-      const inputId = `wwc-local-input-response-${String(inputIndex)}`
+      const choices = element(document, 'div', 'wwc-local-input-options')
+      const cancel = element(document, 'button', 'wwc-local-input-cancel')
+      const inputId = `wwc-local-input-response-${projection.inputRequestId}`
       label.htmlFor = inputId
       label.textContent = 'Response'
       response.id = inputId
       response.autocomplete = 'off'
       response.spellcheck = false
-      response.disabled = decisionDisabled
       submit.type = 'submit'
       submit.textContent = 'Submit response'
-      submit.disabled = decisionDisabled
-      form.addEventListener('submit', event => {
-        event.preventDefault()
-        const value: InteractiveInputValue = { mode: projection.mode, value: response.value }
-        response.value = ''
-        void options.model.provideInput(projection.inputRequestId, value)
+      submit.dataset.wwcComponent = 'button'
+      submit.dataset.variant = 'primary'
+      cancel.type = 'button'
+      cancel.textContent = 'Cancel input'
+      cancel.dataset.wwcComponent = 'button'
+      cancel.dataset.variant = 'destructive'
+      const optionStates = new WeakMap<HTMLButtonElement, ChatInteractionOptionProjection>()
+      const optionListeners = new WeakMap<HTMLButtonElement, () => void>()
+      const optionCollection = mountKeyedCollection<
+        ChatInteractionOptionProjection,
+        string,
+        HTMLButtonElement
+      >({
+        parent: choices,
+        key: option => option.value,
+        create() {
+          const choice = element(document, 'button', 'wwc-local-input-option')
+          choice.type = 'button'
+          choice.dataset.wwcComponent = 'button'
+          choice.dataset.variant = 'default'
+          const onClick = () => {
+            const currentRow = inputRows.get(row)
+            const currentOption = optionStates.get(choice)
+            if (currentRow === undefined || currentOption === undefined) return
+            const value: InteractiveInputValue = {
+              mode: currentRow.current.projection.mode,
+              value: currentOption.value,
+            }
+            void options.model.provideInput(
+              currentRow.current.projection.inputRequestId,
+              value,
+            )
+          }
+          choice.addEventListener('click', onClick)
+          optionListeners.set(choice, onClick)
+          return choice
+        },
+        update(choice, option) {
+          optionStates.set(choice, option)
+          choice.textContent = option.label
+        },
+        remove(choice) {
+          const onClick = optionListeners.get(choice)
+          if (onClick !== undefined) choice.removeEventListener('click', onClick)
+          optionListeners.delete(choice)
+          optionStates.delete(choice)
+        },
       })
-      label.append(response)
-      form.append(label, submit)
-      controls.append(form)
-    } else {
-      const choices = element(document, 'div', 'wwc-local-input-options')
-      for (const option of projection.options) {
-        const choice = element(document, 'button', 'wwc-local-input-option')
-        choice.type = 'button'
-        choice.textContent = option.label
-        choice.disabled = decisionDisabled
-        choice.addEventListener('click', () => {
-          const value: InteractiveInputValue = { mode: projection.mode, value: option.value }
-          void options.model.provideInput(projection.inputRequestId, value)
-        })
-        choices.append(choice)
+      const onSubmit = (event: SubmitEvent) => {
+        event.preventDefault()
+        const current = inputRows.get(row)
+        if (current === undefined || current.current.projection.mode !== 'text') return
+        const value: InteractiveInputValue = {
+          mode: current.current.projection.mode,
+          value: current.response.value,
+        }
+        current.response.value = ''
+        void options.model.provideInput(
+          current.current.projection.inputRequestId,
+          value,
+        )
       }
-      controls.append(choices)
-    }
-    controls.append(cancel)
-    row.append(title, context, controls)
-    return row
-  }
+      const onCancel = () => {
+        const current = inputRows.get(row)
+        if (current !== undefined) {
+          void options.model.cancelInput(current.current.projection.inputRequestId)
+        }
+      }
+      textForm.addEventListener('submit', onSubmit)
+      cancel.addEventListener('click', onCancel)
+      label.append(response)
+      textForm.append(label, submit)
+      controls.append(textForm, choices, cancel)
+      row.append(title, context, controls)
+      inputRows.set(row, {
+        current: item,
+        title,
+        context,
+        textForm,
+        response,
+        submit,
+        choices,
+        optionCollection,
+        cancel,
+        onSubmit,
+        onCancel,
+      })
+      return row
+    },
+    update(row, item: LocalInputDecision) {
+      const mounted = inputRows.get(row)
+      if (mounted === undefined) return
+      const projection = item.projection
+      const decisionDisabled = localDecisionsPagePresentation(
+        options.model.state,
+      ).decisionsDisabled || item.expired
+      mounted.current = item
+      mounted.title.textContent = projection.prompt
+      row.dataset.state = item.expired ? 'expired' : 'pending'
+      updateDecisionContext(mounted.context, [
+        inputModeLabel(projection),
+        inputStateLabel(item),
+        projection.binding.sessionIdentity.stageRunId === undefined
+          ? 'ProductSession-bound'
+          : 'ProductSession and StageRun-bound',
+        'Execution job and Worker session-bound',
+        `Revision ${String(projection.revision)}`,
+        `Expires ${projection.expiresAt}`,
+      ])
+      mounted.textForm.hidden = projection.mode !== 'text'
+      mounted.choices.hidden = projection.mode === 'text'
+      mounted.response.disabled = decisionDisabled
+      mounted.submit.disabled = decisionDisabled
+      mounted.cancel.disabled = decisionDisabled
+      mounted.optionCollection.update(projection.mode === 'text' ? [] : projection.options)
+      for (const choice of mounted.choices.children) {
+        const button = choice as HTMLButtonElement
+        button.disabled = decisionDisabled
+      }
+    },
+    remove(row) {
+      const mounted = inputRows.get(row)
+      if (mounted === undefined) return
+      mounted.response.value = ''
+      mounted.textForm.removeEventListener('submit', mounted.onSubmit)
+      mounted.cancel.removeEventListener('click', mounted.onCancel)
+      mounted.optionCollection.close()
+      inputRows.delete(row)
+    },
+  })
 
-  function renderApproval(
-    item: LocalApprovalDecision,
-    disabled: boolean,
-    approvalIndex: number,
-  ): HTMLLIElement {
-    const projection = item.projection
-    const row = element(document, 'li', 'wwc-local-approval')
-    const title = element(document, 'h3', 'wwc-local-approval-subject')
-    const context = decisionContext(document, [
-      approvalStateLabel(item),
-      projection.binding.sessionIdentity.stageRunId === undefined
-        ? 'ProductSession-bound'
-        : 'ProductSession and StageRun-bound',
-      'Execution job and Worker session-bound',
-      `Revision ${String(projection.revision)}`,
-      `Expires ${projection.expiresAt}`,
-    ])
-    const form = element(document, 'form', 'wwc-local-approval-form')
-    const label = element(document, 'label', 'wwc-local-approval-reason-label')
-    const reason = element(document, 'textarea', 'wwc-local-approval-reason')
-    const controls = element(document, 'div', 'wwc-local-approval-controls')
-    const approve = element(document, 'button', 'wwc-local-approval-approve')
-    const reject = element(document, 'button', 'wwc-local-approval-reject')
-    const decisionDisabled = disabled || item.expired
-    const inputId = `wwc-local-approval-reason-${String(approvalIndex)}`
-    title.textContent = projection.subject
-    label.htmlFor = inputId
-    label.textContent = 'Decision reason'
-    reason.id = inputId
-    reason.autocomplete = 'off'
-    reason.spellcheck = false
-    reason.disabled = decisionDisabled
-    approve.type = 'button'
-    approve.textContent = 'Approve'
-    approve.disabled = decisionDisabled
-    reject.type = 'button'
-    reject.textContent = 'Reject'
-    reject.disabled = decisionDisabled
-    const decide = (decision: 'approve' | 'reject') => {
-      const explanation = reason.value
-      reason.value = ''
-      void options.model.decideApproval(projection.id, decision, explanation)
-    }
-    approve.addEventListener('click', () => { decide('approve') })
-    reject.addEventListener('click', () => { decide('reject') })
-    label.append(reason)
-    controls.append(approve, reject)
-    form.append(label, controls)
-    row.append(title, context, form)
-    return row
+  interface ApprovalRow {
+    current: LocalApprovalDecision
+    readonly title: HTMLElement
+    readonly context: HTMLUListElement
+    readonly reason: HTMLTextAreaElement
+    readonly approve: HTMLButtonElement
+    readonly reject: HTMLButtonElement
+    readonly onApprove: () => void
+    readonly onReject: () => void
   }
+  const approvalRows = new WeakMap<HTMLLIElement, ApprovalRow>()
+  const approvalCollection = mountKeyedCollection({
+    parent: approvals,
+    key: (item: LocalApprovalDecision) => item.projection.id,
+    create(item: LocalApprovalDecision) {
+      const projection = item.projection
+      const row = element(document, 'li', 'wwc-local-approval')
+      const title = element(document, 'h3', 'wwc-local-approval-subject')
+      const context = decisionContext(document, ['', '', '', '', ''])
+      const form = element(document, 'form', 'wwc-local-approval-form')
+      const label = element(document, 'label', 'wwc-local-approval-reason-label')
+      const reason = element(document, 'textarea', 'wwc-local-approval-reason')
+      const controls = element(document, 'div', 'wwc-local-approval-controls')
+      const approve = element(document, 'button', 'wwc-local-approval-approve')
+      const reject = element(document, 'button', 'wwc-local-approval-reject')
+      const inputId = `wwc-local-approval-reason-${projection.id}`
+      label.htmlFor = inputId
+      label.textContent = 'Decision reason'
+      reason.id = inputId
+      reason.autocomplete = 'off'
+      reason.spellcheck = false
+      approve.type = 'button'
+      approve.textContent = 'Approve'
+      approve.dataset.wwcComponent = 'button'
+      approve.dataset.variant = 'primary'
+      reject.type = 'button'
+      reject.textContent = 'Reject'
+      reject.dataset.wwcComponent = 'button'
+      reject.dataset.variant = 'destructive'
+      const decide = (decision: 'approve' | 'reject') => {
+        const current = approvalRows.get(row)
+        if (current === undefined) return
+        const explanation = current.reason.value
+        current.reason.value = ''
+        void options.model.decideApproval(
+          current.current.projection.id,
+          decision,
+          explanation,
+        )
+      }
+      const onApprove = () => { decide('approve') }
+      const onReject = () => { decide('reject') }
+      approve.addEventListener('click', onApprove)
+      reject.addEventListener('click', onReject)
+      label.append(reason)
+      controls.append(approve, reject)
+      form.append(label, controls)
+      row.append(title, context, form)
+      approvalRows.set(row, {
+        current: item,
+        title,
+        context,
+        reason,
+        approve,
+        reject,
+        onApprove,
+        onReject,
+      })
+      return row
+    },
+    update(row, item: LocalApprovalDecision) {
+      const mounted = approvalRows.get(row)
+      if (mounted === undefined) return
+      const projection = item.projection
+      const decisionDisabled = localDecisionsPagePresentation(
+        options.model.state,
+      ).decisionsDisabled || item.expired
+      mounted.current = item
+      mounted.title.textContent = projection.subject
+      row.dataset.state = item.expired ? 'expired' : 'pending'
+      updateDecisionContext(mounted.context, [
+        approvalStateLabel(item),
+        projection.binding.sessionIdentity.stageRunId === undefined
+          ? 'ProductSession-bound'
+          : 'ProductSession and StageRun-bound',
+        'Execution job and Worker session-bound',
+        `Revision ${String(projection.revision)}`,
+        `Expires ${projection.expiresAt}`,
+      ])
+      mounted.reason.disabled = decisionDisabled
+      mounted.approve.disabled = decisionDisabled
+      mounted.reject.disabled = decisionDisabled
+    },
+    remove(row) {
+      const mounted = approvalRows.get(row)
+      if (mounted === undefined) return
+      mounted.reason.value = ''
+      mounted.approve.removeEventListener('click', mounted.onApprove)
+      mounted.reject.removeEventListener('click', mounted.onReject)
+      approvalRows.delete(row)
+    },
+  })
 
-  function renderAttention(
-    item: LocalAttentionDecision,
-    disabled: boolean,
-    attentionIndex: number,
-  ): HTMLLIElement {
-    const projection = item.projection
-    const row = element(document, 'li', 'wwc-local-attention-item')
-    const title = element(document, 'h3', 'wwc-local-attention-title')
-    const context = decisionContext(document, [
-      attentionTypeLabel(item),
-      projection.blocking ? 'Blocking' : 'Non-blocking',
-      projection.stageRunId === null ? 'Delivery-bound' : 'Delivery and StageRun-bound',
-      item.candidateDigest === null ? 'No candidate is currently bound' : 'Current candidate-bound',
-      `Delivery revision ${String(item.deliveryRevision)}`,
-    ])
-    const choices = element(document, 'ul', 'wwc-local-attention-options')
-    const form = element(document, 'form', 'wwc-local-attention-form')
-    const label = element(document, 'label', 'wwc-local-attention-resolution-label')
-    const resolution = element(document, 'textarea', 'wwc-local-attention-resolution')
-    const controls = element(document, 'div', 'wwc-local-attention-controls')
-    const resolve = element(document, 'button', 'wwc-local-attention-resolve')
-    const dismiss = element(document, 'button', 'wwc-local-attention-dismiss')
-    const inputId = `wwc-local-attention-resolution-${String(attentionIndex)}`
-    title.textContent = projection.title
-    for (const option of projection.options) {
-      const optionItem = document.createElement('li')
-      const optionTitle = element(document, 'strong', 'wwc-local-attention-option-label')
-      const optionDescription = element(document, 'span', 'wwc-local-attention-option-description')
-      optionTitle.textContent = option.label
-      optionDescription.textContent = option.description
-      optionItem.append(optionTitle, optionDescription)
-      choices.append(optionItem)
-    }
-    label.htmlFor = inputId
-    label.textContent = 'Resolution'
-    resolution.id = inputId
-    resolution.autocomplete = 'off'
-    resolution.spellcheck = false
-    resolution.disabled = disabled
-    resolve.type = 'button'
-    resolve.textContent = 'Resolve'
-    resolve.disabled = disabled
-    dismiss.type = 'button'
-    dismiss.textContent = 'Dismiss'
-    dismiss.disabled = disabled
-    const decide = (decision: 'resolve' | 'dismiss') => {
-      const explanation = resolution.value
-      resolution.value = ''
-      void options.model.resolveAttention(projection.id, decision, explanation)
-    }
-    resolve.addEventListener('click', () => { decide('resolve') })
-    dismiss.addEventListener('click', () => { decide('dismiss') })
-    label.append(resolution)
-    controls.append(resolve, dismiss)
-    form.append(label, controls)
-    row.append(title, context, choices, form)
-    return row
+  interface AttentionRow {
+    current: LocalAttentionDecision
+    readonly title: HTMLElement
+    readonly context: HTMLUListElement
+    readonly optionCollection: KeyedCollectionView<
+      DeliveryAttentionOptionProjection,
+      string,
+      HTMLLIElement
+    >
+    readonly resolution: HTMLTextAreaElement
+    readonly resolve: HTMLButtonElement
+    readonly dismiss: HTMLButtonElement
+    readonly onResolve: () => void
+    readonly onDismiss: () => void
   }
-
-  function empty(label: string, className: string): HTMLLIElement {
-    const item = element(document, 'li', className)
-    item.textContent = label
-    return item
-  }
+  const attentionRows = new WeakMap<HTMLLIElement, AttentionRow>()
+  const attentionCollection = mountKeyedCollection({
+    parent: attention,
+    key: (item: LocalAttentionDecision) => item.projection.id,
+    create(item: LocalAttentionDecision) {
+      const projection = item.projection
+      const row = element(document, 'li', 'wwc-local-attention-item')
+      const title = element(document, 'h3', 'wwc-local-attention-title')
+      const context = decisionContext(document, ['', '', '', '', ''])
+      const choices = element(document, 'ul', 'wwc-local-attention-options')
+      const form = element(document, 'form', 'wwc-local-attention-form')
+      const label = element(document, 'label', 'wwc-local-attention-resolution-label')
+      const resolution = element(document, 'textarea', 'wwc-local-attention-resolution')
+      const controls = element(document, 'div', 'wwc-local-attention-controls')
+      const resolve = element(document, 'button', 'wwc-local-attention-resolve')
+      const dismiss = element(document, 'button', 'wwc-local-attention-dismiss')
+      const inputId = `wwc-local-attention-resolution-${projection.id}`
+      label.htmlFor = inputId
+      label.textContent = 'Resolution'
+      resolution.id = inputId
+      resolution.autocomplete = 'off'
+      resolution.spellcheck = false
+      resolve.type = 'button'
+      resolve.textContent = 'Resolve'
+      resolve.dataset.wwcComponent = 'button'
+      resolve.dataset.variant = 'primary'
+      dismiss.type = 'button'
+      dismiss.textContent = 'Dismiss'
+      dismiss.dataset.wwcComponent = 'button'
+      dismiss.dataset.variant = 'destructive'
+      const optionRows = new WeakMap<HTMLLIElement, {
+        readonly title: HTMLElement
+        readonly description: HTMLElement
+      }>()
+      const optionCollection = mountKeyedCollection<
+        DeliveryAttentionOptionProjection,
+        string,
+        HTMLLIElement
+      >({
+        parent: choices,
+        key: option => option.id,
+        create() {
+          const optionItem = document.createElement('li')
+          const optionTitle = element(document, 'strong', 'wwc-local-attention-option-label')
+          const optionDescription = element(document, 'span', 'wwc-local-attention-option-description')
+          optionItem.append(optionTitle, optionDescription)
+          optionRows.set(optionItem, { title: optionTitle, description: optionDescription })
+          return optionItem
+        },
+        update(optionItem, option) {
+          const mountedOption = optionRows.get(optionItem)
+          if (mountedOption === undefined) return
+          mountedOption.title.textContent = option.label
+          mountedOption.description.textContent = option.description
+        },
+        remove(optionItem) { optionRows.delete(optionItem) },
+      })
+      const decide = (decision: 'resolve' | 'dismiss') => {
+        const current = attentionRows.get(row)
+        if (current === undefined) return
+        const explanation = current.resolution.value
+        current.resolution.value = ''
+        void options.model.resolveAttention(
+          current.current.projection.id,
+          decision,
+          explanation,
+        )
+      }
+      const onResolve = () => { decide('resolve') }
+      const onDismiss = () => { decide('dismiss') }
+      resolve.addEventListener('click', onResolve)
+      dismiss.addEventListener('click', onDismiss)
+      label.append(resolution)
+      controls.append(resolve, dismiss)
+      form.append(label, controls)
+      row.append(title, context, choices, form)
+      attentionRows.set(row, {
+        current: item,
+        title,
+        context,
+        optionCollection,
+        resolution,
+        resolve,
+        dismiss,
+        onResolve,
+        onDismiss,
+      })
+      return row
+    },
+    update(row, item: LocalAttentionDecision) {
+      const mounted = attentionRows.get(row)
+      if (mounted === undefined) return
+      const projection = item.projection
+      const disabled = localDecisionsPagePresentation(options.model.state).decisionsDisabled
+      mounted.current = item
+      mounted.title.textContent = projection.title
+      row.dataset.state = projection.blocking ? 'blocking' : 'open'
+      updateDecisionContext(mounted.context, [
+        attentionTypeLabel(item),
+        projection.blocking ? 'Blocking' : 'Non-blocking',
+        projection.stageRunId === null ? 'Delivery-bound' : 'Delivery and StageRun-bound',
+        item.candidateDigest === null ? 'No candidate is currently bound' : 'Current candidate-bound',
+        `Delivery revision ${String(item.deliveryRevision)}`,
+      ])
+      mounted.optionCollection.update(projection.options)
+      mounted.resolution.disabled = disabled
+      mounted.resolve.disabled = disabled
+      mounted.dismiss.disabled = disabled
+    },
+    remove(row) {
+      const mounted = attentionRows.get(row)
+      if (mounted === undefined) return
+      mounted.resolution.value = ''
+      mounted.resolve.removeEventListener('click', mounted.onResolve)
+      mounted.dismiss.removeEventListener('click', mounted.onDismiss)
+      mounted.optionCollection.close()
+      attentionRows.delete(row)
+    },
+  })
 
   function render(state: LocalDecisionsViewModelState): void {
     if (closed) return
     const presentation = localDecisionsPagePresentation(state)
-    status.textContent = presentation.statusText
+    const tone: StatusTone = presentation.errorText !== null
+      ? 'danger'
+      : state.realtime === 'reconnecting'
+        ? 'warning'
+        : presentation.busy
+          ? 'info'
+          : state.status === 'ready'
+            ? 'success'
+            : 'neutral'
+    statusBadge.update({
+      label: presentation.statusText,
+      tone,
+      live: 'polite',
+      className: 'wwc-local-decisions-status',
+    })
     layout.setAttribute('aria-busy', String(presentation.busy))
-    error.hidden = presentation.errorText === null
-    errorText.textContent = presentation.errorText ?? ''
+    errorState.update({
+      title: 'Local decisions unavailable',
+      message: presentation.errorText ?? '',
+      actions: [retry, reconnect],
+      visible: presentation.errorText !== null,
+      className: 'wwc-local-decisions-error',
+    })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    inputs.replaceChildren(...state.inputs.map((item, index) => (
-      renderInput(item, presentation.decisionsDisabled, index)
-    )))
-    approvals.replaceChildren(...state.approvals.map((item, index) => (
-      renderApproval(item, presentation.decisionsDisabled, index)
-    )))
-    attention.replaceChildren(...state.attention.map((item, index) => (
-      renderAttention(item, presentation.decisionsDisabled, index)
-    )))
-    if (state.inputs.length === 0) inputs.append(empty('No pending inputs.', 'wwc-local-input-empty'))
-    if (state.approvals.length === 0) {
-      approvals.append(empty('No pending tool approvals.', 'wwc-local-approval-empty'))
-    }
-    if (state.attention.length === 0) {
-      attention.append(empty('No open business Attention.', 'wwc-local-attention-empty'))
-    }
+    inputCollection.update(state.inputs)
+    approvalCollection.update(state.approvals)
+    attentionCollection.update(state.attention)
+    inputs.hidden = state.inputs.length === 0
+    approvals.hidden = state.approvals.length === 0
+    attention.hidden = state.attention.length === 0
+    inputsEmpty.root.hidden = state.inputs.length !== 0
+    approvalsEmpty.root.hidden = state.approvals.length !== 0
+    attentionEmpty.root.hidden = state.attention.length !== 0
   }
 
-  retry.addEventListener('click', () => { void options.model.refresh() })
-  reconnect.addEventListener('click', () => { options.model.reconnect() })
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -437,7 +775,21 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       if (closed) return
       closed = true
       unsubscribe()
+      inputCollection.close()
+      approvalCollection.close()
+      attentionCollection.close()
       options.model.close()
+      retryButton.close()
+      reconnectButton.close()
+      errorState.close()
+      attentionEmpty.close()
+      attentionPanel.close()
+      approvalsEmpty.close()
+      approvalsPanel.close()
+      inputsEmpty.close()
+      inputsPanel.close()
+      statusBadge.close()
+      pageHeader.close()
       options.root.replaceChildren()
     },
   }

@@ -781,6 +781,19 @@ fn settings_get_request(request: u64, scope_seed: u64) -> QueryRequest {
     .expect("generated settings.get query")
 }
 
+fn model_route_availability_request(request: u64, scope_seed: u64) -> QueryRequest {
+    serde_json::from_value(serde_json::json!({
+        "schemaVersion": "winwincode/v1",
+        "requestId": id("req", request),
+        "query": "model.route.availability.list",
+        "actor": { "kind": "user", "id": id("usr", 1) },
+        "scope": repository_scope_json(scope_seed),
+        "parameters": {},
+        "page": { "cursor": null, "limit": 20 }
+    }))
+    .expect("generated model.route.availability.list query")
+}
+
 #[test]
 fn settings_routes_replay_conflict_isolate_and_recover_after_restart() {
     let root = temporary_root("settings");
@@ -837,6 +850,19 @@ fn settings_routes_replay_conflict_isolate_and_recover_after_restart() {
     let foreign = serde_json::to_value(foreign).expect("encode isolated settings");
     assert_eq!(foreign["result"]["revision"], 0);
     assert_eq!(foreign["result"]["workerConcurrencyLimit"], 1);
+
+    let routes = application
+        .query(
+            &principal,
+            QueryFamily::Settings,
+            model_route_availability_request(55, 1),
+        )
+        .expect("read server-owned ModelRoute availability");
+    let routes = serde_json::to_value(routes).expect("encode ModelRoute availability");
+    assert_eq!(routes["query"], "model.route.availability.list");
+    assert_eq!(routes["result"]["kind"], "model_route_availability_page");
+    assert_eq!(routes["result"]["reason"], "no_provider");
+    assert_eq!(routes["result"]["items"], serde_json::json!([]));
 
     application.shutdown().expect("first shutdown");
     let restarted = open_application(&root, &subject).expect("restart application");

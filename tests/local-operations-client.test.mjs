@@ -392,6 +392,13 @@ test('local operations page shows safe diagnostics and delegates Worker commands
     close() {},
   }
   const mounted = mountLocalOperationsPage({ root: rootElement, model })
+  assert.equal(byClass(rootElement, 'wwc-local-operations').dataset.wwcPage, 'management')
+  assert.equal(byClass(rootElement, 'wwc-local-operations-heading').dataset.wwcComponent, 'page-header')
+  assert.equal(byClass(rootElement, 'wwc-local-operations-status').dataset.wwcComponent, 'status-badge')
+  assert.equal(byClass(rootElement, 'wwc-local-operations-retry').dataset.wwcComponent, 'button')
+  assert.equal(byClass(rootElement, 'wwc-local-repository').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-local-resources').dataset.wwcComponent, 'panel')
+  assert.equal(byClass(rootElement, 'wwc-local-workers').dataset.wwcComponent, 'panel')
   const text = visibleText(rootElement)
   assert.equal(text.includes('Repository paths hidden'), true)
   assert.equal(text.includes('0123456789ab'), true)
@@ -417,6 +424,10 @@ test('local operations page shows safe diagnostics and delegates Worker commands
   assert.equal(byClass(rootElement, 'wwc-local-worker-drain').disabled, true)
   byClass(rootElement, 'wwc-local-worker-enable').dispatch('click')
   assert.deepEqual(calls[1], { operation: 'enable', id: workerId })
+
+  state = pageState({ workers: [] })
+  listener(state)
+  assert.equal(byClass(rootElement, 'wwc-local-worker-empty').dataset.wwcComponent, 'empty-state')
   mounted.close()
 })
 

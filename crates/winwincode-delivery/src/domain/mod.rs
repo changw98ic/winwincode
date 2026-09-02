@@ -33,7 +33,7 @@ pub use candidate::{
     CandidatePathFact, CandidatePathState, FreezeCandidateFacts, FrozenDeliveryCandidate,
     ValidatedGitSnapshotFact, freeze_delivery_candidate,
 };
-pub use evidence::{EvidenceRef, EvidenceRefType};
+pub use evidence::{EvidenceRef, EvidenceRefType, VerifiedEvidenceOutcome};
 pub use session_binding::{
     SessionBinding, SessionBindingSourceKind, SessionBindingSourceProvenance,
 };

@@ -11,8 +11,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{Actor, Scope};
-use winwincode_domain::{CredentialReferenceId, RequestId, Sha256Digest};
+use winwincode_api::generated::{
+    Actor, ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource, Scope,
+};
+use winwincode_domain::{CredentialReferenceId, Instant, RequestId, Sha256Digest};
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, StateCommit, StorageError,
     StorageErrorKind, StoredState,
@@ -21,7 +23,10 @@ use winwincode_storage::{
 use crate::credential_leak_gate::{
     CredentialLeakError, CredentialLeakGate, CredentialOutputBoundary,
 };
-use crate::{receipt_actor_key, receipt_scope_key};
+use crate::{
+    model_route_availability::model_route_availability_invalidated_event, receipt_actor_key,
+    receipt_scope_key,
+};
 
 const STATE_SCHEMA: &str = "winwincode.provider-catalog.v1";
 const STREAM_PREFIX: &str = "provider-catalog:";
@@ -385,6 +390,7 @@ impl<'a> ProviderCatalogService<'a> {
         &mut self,
         request: &ProviderCatalogRequest,
         descriptor: &ProviderDescriptor,
+        occurred_at: Instant,
     ) -> Result<ProviderCatalogMutationReceipt, ProviderCatalogError> {
         validate_request(request)?;
         let descriptor = canonical_descriptor(descriptor)?;
@@ -413,7 +419,7 @@ impl<'a> ProviderCatalogService<'a> {
         state
             .providers
             .insert(provider.provider_id.clone(), provider);
-        self.commit(request, command, &state, &event)
+        self.commit(request, command, &state, &event, occurred_at)
     }
 
     /// Disables one Provider at a precise catalog version.
@@ -426,6 +432,7 @@ impl<'a> ProviderCatalogService<'a> {
         &mut self,
         request: &ProviderCatalogRequest,
         provider_id: &str,
+        occurred_at: Instant,
     ) -> Result<ProviderCatalogMutationReceipt, ProviderCatalogError> {
         validate_request(request)?;
         validate_token(provider_id, 128)?;
@@ -458,7 +465,7 @@ impl<'a> ProviderCatalogService<'a> {
             catalog_version,
             provider,
         );
-        self.commit(request, command, &state, &event)
+        self.commit(request, command, &state, &event, occurred_at)
     }
 
     /// Returns the complete sorted projection for exactly one scope.
@@ -552,6 +559,7 @@ impl<'a> ProviderCatalogService<'a> {
         command: CommandReceipt,
         state: &ProviderCatalogState,
         event: &ProviderCatalogVersionEvent,
+        occurred_at: Instant,
     ) -> Result<ProviderCatalogMutationReceipt, ProviderCatalogError> {
         let state_payload =
             serde_json::to_vec(state).map_err(|_| ProviderCatalogError::invalid())?;
@@ -562,17 +570,28 @@ impl<'a> ProviderCatalogService<'a> {
         CredentialLeakGate::default()
             .inspect_json_bytes(CredentialOutputBoundary::Event, &event_payload)?;
         let event_id = catalog_event_id(request, event)?;
+        let invalidation = model_route_availability_invalidated_event(
+            &request.actor,
+            &request.scope,
+            ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::ProviderCatalog,
+            state.catalog_version,
+            occurred_at,
+            request.request_id.0.as_bytes(),
+        )?;
         let commit = StateCommit::new(
             command.identity,
             command.digest,
             catalog_stream_id(&request.scope)?,
             request.expected_catalog_version,
             state_payload,
-            vec![NewOutboxEvent::internal(
-                event_id,
-                PROVIDER_CATALOG_VERSION_EVENT_TOPIC,
-                event_payload,
-            )],
+            vec![
+                NewOutboxEvent::internal(
+                    event_id,
+                    PROVIDER_CATALOG_VERSION_EVENT_TOPIC,
+                    event_payload,
+                ),
+                invalidation,
+            ],
         );
         let receipt = self.storage.commit(&commit)?;
         let durable = version_event_from_receipt(&receipt)?;

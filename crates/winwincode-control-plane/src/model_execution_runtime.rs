@@ -17,8 +17,13 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use winwincode_api::generated::{
+    Actor, ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource, ProjectScope, Scope,
+    SystemActor, SystemActorKind,
+};
 use winwincode_domain::{
-    ExecutionMessageId, ExecutionSequence, Instant, ModelExchangeId, Sha256Digest,
+    ExecutionMessageId, ExecutionSequence, Instant, ModelExchangeId, RequestId, Sha256Digest,
+    SystemActorId,
 };
 use winwincode_execution_port::{
     generated::{
@@ -32,7 +37,7 @@ use winwincode_storage::{
     ProviderExchangeFailure, ProviderExchangeFinalAck, ProviderExchangeOpened,
     ProviderExchangeSnapshot, ProviderExchangeState, ProviderExchangeStoreError,
     ProviderExchangeStoreErrorCode, ProviderExchangeTerminal, ProviderExchangeTerminalProgress,
-    ProviderExchangeTerminalStage, SqliteStorage,
+    ProviderExchangeTerminalStage, SqliteStorage, StateCommit,
 };
 
 use crate::{
@@ -49,11 +54,30 @@ use crate::{
     ProviderGatewayErrorKind, ProviderGatewayOpenReceipt, ProviderGatewayTerminal,
     ProviderGatewayTerminalOutcome, ProviderGatewayTerminalProgress,
     ProviderGatewayTerminalProgressPort, ProviderGatewayTerminalProgressStage,
-    ProviderGatewayTerminalReceipt, ProviderPolicyErrorKind,
+    ProviderGatewayTerminalReceipt, ProviderPolicyErrorKind, command_receipt_identity,
+    model_route_availability::{
+        model_request_pool_readiness_stream_id, model_route_availability_invalidated_event,
+    },
 };
 
 const FAILURE_INTERRUPTED: &str = "provider_acceptance_unknown";
 const FAILURE_GATEWAY_PREFIX: &str = "gateway_";
+const POOL_READINESS_STATE_SCHEMA: &str = "winwincode.model-request-pool-readiness.v1";
+const POOL_READINESS_SYSTEM_ACTOR: &str = "sys_00000000000000000000000002";
+
+fn pool_submit_operation(
+    model_exchange_id: &ModelExchangeId,
+    open_digest: &Sha256Digest,
+) -> String {
+    format!("submit\0{}\0{}", model_exchange_id.0, open_digest.0)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PoolReadinessState<'scope> {
+    schema: &'static str,
+    scope: &'scope ProjectScope,
+}
 
 /// Stable production runtime failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,11 +208,19 @@ impl DurableModelExchangeAuthority {
         &self,
         request: &ProviderExchangeBegin,
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeSnapshot, ModelExecutionRuntimeError> {
+        let operation = pool_submit_operation(&request.model_exchange_id, &request.open_digest);
+        let readiness = self.pool_readiness_commit(
+            scope,
+            &operation,
+            pool_authority_json,
+            &request.started_at,
+        )?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
-            .begin_open_with_pool_authority(request, pool_authority_json)
+            .begin_open_with_pool_authority(request, pool_authority_json, &readiness)
             .map_err(Into::into)
     }
 
@@ -211,7 +243,14 @@ impl DurableModelExchangeAuthority {
         open_digest: &Sha256Digest,
         failure: &ProviderExchangeFailure,
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeSnapshot, ModelExecutionRuntimeError> {
+        let operation = format!(
+            "failed\0{}\0{}\0{}",
+            model_exchange_id.0, open_digest.0, failure.failure_kind
+        );
+        let readiness =
+            self.pool_readiness_commit(scope, &operation, pool_authority_json, &failure.failed_at)?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
@@ -220,6 +259,7 @@ impl DurableModelExchangeAuthority {
                 open_digest,
                 failure,
                 pool_authority_json,
+                &readiness,
             )
             .map_err(Into::into)
     }
@@ -229,11 +269,27 @@ impl DurableModelExchangeAuthority {
         model_exchange_id: &ModelExchangeId,
         terminal: &ProviderExchangeTerminal,
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeSnapshot, ModelExecutionRuntimeError> {
+        let operation = format!(
+            "terminal\0{}\0{}",
+            model_exchange_id.0, terminal.terminal_digest.0
+        );
+        let readiness = self.pool_readiness_commit(
+            scope,
+            &operation,
+            pool_authority_json,
+            &terminal.settled_at,
+        )?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
-            .commit_terminal_with_pool_authority(model_exchange_id, terminal, pool_authority_json)
+            .commit_terminal_with_pool_authority(
+                model_exchange_id,
+                terminal,
+                pool_authority_json,
+                &readiness,
+            )
             .map_err(Into::into)
     }
 
@@ -270,6 +326,22 @@ impl DurableModelExchangeAuthority {
             .map_err(Into::into)
     }
 
+    fn save_pool_authority_with_readiness(
+        &self,
+        bytes: &[u8],
+        updated_at: &Instant,
+        scope: &ProjectScope,
+        operation: &str,
+    ) -> Result<(), ModelExecutionRuntimeError> {
+        let readiness = self.pool_readiness_commit(scope, operation, bytes, updated_at)?;
+        let mut storage = self.lock()?;
+        storage
+            .provider_exchange_store()?
+            .save_pool_authority_with_readiness(bytes, updated_at, &readiness)
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     fn final_ack(
         &self,
         model_exchange_id: &ModelExchangeId,
@@ -287,7 +359,18 @@ impl DurableModelExchangeAuthority {
         ack_digest: &Sha256Digest,
         receipt_json: &[u8],
         pool_authority_json: &[u8],
+        scope: &ProjectScope,
     ) -> Result<ProviderExchangeFinalAck, ModelExecutionRuntimeError> {
+        let operation = format!(
+            "final-ack\0{}\0{}",
+            acknowledgement.model_exchange_id.0, ack_digest.0
+        );
+        let readiness = self.pool_readiness_commit(
+            scope,
+            &operation,
+            pool_authority_json,
+            &acknowledgement.sent_at,
+        )?;
         let mut storage = self.lock()?;
         storage
             .provider_exchange_store()?
@@ -298,6 +381,7 @@ impl DurableModelExchangeAuthority {
                 receipt_json,
                 pool_authority_json,
                 &acknowledgement.sent_at,
+                &readiness,
             )
             .map_err(Into::into)
     }
@@ -317,6 +401,67 @@ impl DurableModelExchangeAuthority {
         self.storage
             .lock()
             .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))
+    }
+
+    fn pool_readiness_commit(
+        &self,
+        project_scope: &ProjectScope,
+        operation: &str,
+        authority_json: &[u8],
+        occurred_at: &Instant,
+    ) -> Result<StateCommit, ModelExecutionRuntimeError> {
+        let scope = Scope::ProjectScope(project_scope.clone());
+        let stream_id = model_request_pool_readiness_stream_id(project_scope).map_err(|_| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+        })?;
+        let expected_revision = self
+            .lock()?
+            .load_state(&stream_id)
+            .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?
+            .map_or(0, |stored| stored.revision);
+        let revision = expected_revision.checked_add(1).ok_or_else(|| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+        })?;
+        let actor = Actor::SystemActor(SystemActor {
+            id: SystemActorId(POOL_READINESS_SYSTEM_ACTOR.to_owned()),
+            kind: SystemActorKind::System,
+        });
+        let mut request_digest = Sha256::new();
+        request_digest.update(b"winwincode.model-request-pool-readiness-request.v1\0");
+        request_digest.update(operation.as_bytes());
+        let request_hex = format!("{:X}", request_digest.finalize());
+        let request_id = RequestId(format!("req_{}", &request_hex[..26]));
+        let identity = command_receipt_identity(&actor, &scope, request_id).map_err(|_| {
+            ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage)
+        })?;
+        let mut command_digest = Sha256::new();
+        command_digest.update(b"winwincode.model-request-pool-readiness-command.v1\0");
+        command_digest.update(operation.as_bytes());
+        command_digest.update([0]);
+        command_digest.update(authority_json);
+        let command_digest = Sha256Digest(format!("sha256:{:x}", command_digest.finalize()));
+        let event = model_route_availability_invalidated_event(
+            &actor,
+            &scope,
+            ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::RequestPool,
+            revision,
+            occurred_at.clone(),
+            operation.as_bytes(),
+        )
+        .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?;
+        let state = serde_json::to_vec(&PoolReadinessState {
+            schema: POOL_READINESS_STATE_SCHEMA,
+            scope: project_scope,
+        })
+        .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Storage))?;
+        Ok(StateCommit::new(
+            identity,
+            command_digest,
+            stream_id,
+            expected_revision,
+            state,
+            vec![event],
+        ))
     }
 }
 
@@ -663,6 +808,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
     ///
     /// Fails closed for missing/corrupt context, changed input, interrupted
     /// opening, Gateway failure, or pool failure.
+    #[allow(clippy::too_many_lines)]
     pub fn open(
         &mut self,
         message: &ModelOpenMessage,
@@ -701,10 +847,13 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             }
         };
         if pool.state == ModelRequestState::Queued {
-            if let Err(error) = self
-                .exchanges
-                .save_pool_authority(&pool_authority_json, &message.sent_at)
-            {
+            let operation = pool_submit_operation(&message.model_exchange_id, &open_digest);
+            if let Err(error) = self.exchanges.save_pool_authority_with_readiness(
+                &pool_authority_json,
+                &message.sent_at,
+                &route_authority.route_key().project_scope(),
+                &operation,
+            ) {
                 *self.pool = pool_before_submit;
                 return Err(error);
             }
@@ -719,10 +868,11 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
             ));
         }
 
-        let snapshot = match self
-            .exchanges
-            .begin_with_pool_authority(&begin, &pool_authority_json)
-        {
+        let snapshot = match self.exchanges.begin_with_pool_authority(
+            &begin,
+            &pool_authority_json,
+            &route_authority.route_key().project_scope(),
+        ) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 *self.pool = pool_before_submit;
@@ -1000,6 +1150,12 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 &ack_digest,
                 &receipt_json,
                 &authority,
+                &self
+                    .pool
+                    .project_scope_for_exchange(&acknowledgement.model_exchange_id)
+                    .map_err(|_| {
+                        ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Flow)
+                    })?,
             )?;
         } else {
             let authority = staged_pool.export_authority().map_err(|_| {
@@ -1117,6 +1273,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                         failed_at: message.sent_at.clone(),
                     },
                     &pool_authority_json,
+                    &active_authority(context)?.route_key().project_scope(),
                 )?;
                 Err(ModelExecutionRuntimeError::new(
                     ModelExecutionRuntimeErrorKind::OpenInterrupted,
@@ -1342,6 +1499,9 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 failed_at: message.sent_at.clone(),
             },
             &pool_authority_json,
+            &active_authority(&self.load_planned_context(&message.model_exchange_id)?)?
+                .route_key()
+                .project_scope(),
         )?;
         Ok(())
     }
@@ -1381,6 +1541,10 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
     ) -> Result<(), ModelExecutionRuntimeError> {
         let receipt_json = terminal_receipt_json(receipt)?;
         let pool_authority_json = self.pool_authority_json()?;
+        let project_scope = self
+            .pool
+            .project_scope_for_exchange(model_exchange_id)
+            .map_err(|_| ModelExecutionRuntimeError::new(ModelExecutionRuntimeErrorKind::Flow))?;
         self.release_failed_enterprise_quota(model_exchange_id, command, settled_at)?;
         self.exchanges.terminal_with_pool_authority(
             model_exchange_id,
@@ -1390,6 +1554,7 @@ impl<'a, 'storage> ModelExecutionRuntime<'a, 'storage> {
                 settled_at.clone(),
             )?,
             &pool_authority_json,
+            &project_scope,
         )?;
         Ok(())
     }

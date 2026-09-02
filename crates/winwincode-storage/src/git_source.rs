@@ -6,6 +6,7 @@
 //! controlled repository and rebuilds every commit/tree/diff/path/hunk value;
 //! values reported by a Worker are never copied into a validated source fact.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,6 +109,154 @@ pub struct GitSourceHunk {
     hunk_sha256: String,
 }
 
+/// Closed file status rebuilt from one exact retained Candidate range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitCandidateReviewFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+}
+
+/// Closed content classification for exact Git diff bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitCandidateReviewFileEncoding {
+    Utf8,
+    Binary,
+    Unknown8Bit,
+}
+
+/// Secret-free file metadata rebuilt from controlled Git.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitCandidateReviewFile {
+    path: String,
+    old_path: Option<String>,
+    status: GitCandidateReviewFileStatus,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    binary: bool,
+    encoding: GitCandidateReviewFileEncoding,
+}
+
+impl GitCandidateReviewFile {
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn old_path(&self) -> Option<&str> {
+        self.old_path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> GitCandidateReviewFileStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn additions(&self) -> Option<u64> {
+        self.additions
+    }
+
+    #[must_use]
+    pub const fn deletions(&self) -> Option<u64> {
+        self.deletions
+    }
+
+    #[must_use]
+    pub const fn is_binary(&self) -> bool {
+        self.binary
+    }
+
+    #[must_use]
+    pub const fn encoding(&self) -> GitCandidateReviewFileEncoding {
+        self.encoding
+    }
+}
+
+/// Opaque, validated changed-file inventory for one exact Candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedGitCandidateReview {
+    candidate_commit_id: String,
+    candidate_tree_id: String,
+    diff_sha256: String,
+    files: Vec<GitCandidateReviewFile>,
+}
+
+impl ValidatedGitCandidateReview {
+    #[must_use]
+    pub fn candidate_commit_id(&self) -> &str {
+        &self.candidate_commit_id
+    }
+
+    #[must_use]
+    pub fn candidate_tree_id(&self) -> &str {
+        &self.candidate_tree_id
+    }
+
+    #[must_use]
+    pub fn diff_sha256(&self) -> &str {
+        &self.diff_sha256
+    }
+
+    #[must_use]
+    pub fn files(&self) -> &[GitCandidateReviewFile] {
+        &self.files
+    }
+}
+
+/// Opaque, validated unified-diff bytes for one trusted Candidate path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedGitCandidateDiff {
+    path: String,
+    old_path: Option<String>,
+    status: GitCandidateReviewFileStatus,
+    file_diff_sha256: String,
+    binary: bool,
+    encoding: GitCandidateReviewFileEncoding,
+    bytes: Vec<u8>,
+}
+
+impl ValidatedGitCandidateDiff {
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn old_path(&self) -> Option<&str> {
+        self.old_path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> GitCandidateReviewFileStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub fn file_diff_sha256(&self) -> &str {
+        &self.file_diff_sha256
+    }
+
+    #[must_use]
+    pub const fn is_binary(&self) -> bool {
+        self.binary
+    }
+
+    #[must_use]
+    pub const fn encoding(&self) -> GitCandidateReviewFileEncoding {
+        self.encoding
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl GitSourceHunk {
     #[must_use]
     pub fn file_path(&self) -> &str {
@@ -167,6 +316,44 @@ pub trait GitSourceResolver: Send {
     /// to different repository trees.  Remote adapters may leave this unset.
     fn controlled_repository_root(&self) -> Option<&Path> {
         None
+    }
+
+    /// Rebuilds a closed changed-file inventory from an already validated
+    /// Candidate source.
+    ///
+    /// Adapter implementations that cannot provide review reads fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an Artifact error when the exact retained source cannot be
+    /// revalidated or this adapter does not implement review reads.
+    fn candidate_review(
+        &self,
+        _source: &ValidatedGitSourceArtifact,
+    ) -> Result<ValidatedGitCandidateReview, ArtifactError> {
+        Err(ArtifactError::adapter(
+            "Git Candidate review reads are unavailable",
+        ))
+    }
+
+    /// Rebuilds exact unified-diff bytes for one path selected from the trusted
+    /// Candidate inventory.
+    ///
+    /// Adapter implementations that cannot provide review reads fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an Artifact error when the source or path is invalid, the
+    /// retained Git facts changed, or this adapter does not implement review
+    /// reads.
+    fn candidate_diff(
+        &self,
+        _source: &ValidatedGitSourceArtifact,
+        _path: &str,
+    ) -> Result<ValidatedGitCandidateDiff, ArtifactError> {
+        Err(ArtifactError::adapter(
+            "Git Candidate diff reads are unavailable",
+        ))
     }
 }
 
@@ -280,6 +467,318 @@ impl LocalGitSourceResolver {
     #[must_use]
     pub fn controlled_repository_root(&self) -> &Path {
         &self.allowed_root
+    }
+
+    fn candidate_review(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+    ) -> Result<ValidatedGitCandidateReview, ArtifactError> {
+        let repository = self.revalidate_candidate_source(source)?;
+        let revision_range = format!("{}..{}", source.base_commit_id, source.candidate_commit_id);
+        let statuses = candidate_file_statuses(&repository, &revision_range)?;
+        let stats = candidate_file_stats(&repository, &revision_range)?;
+        if statuses.len() != stats.len()
+            || statuses
+                .iter()
+                .any(|status| !stats.contains_key(status.path.as_str()))
+        {
+            return Err(ArtifactError::corrupt(
+                "Candidate changed-file status and stat inventories differ",
+            ));
+        }
+        let mut files = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            let stat = stats
+                .get(status.path.as_str())
+                .ok_or_else(|| ArtifactError::corrupt("Candidate changed-file stat is missing"))?;
+            let path_diff = candidate_path_diff(&repository, &revision_range, &status.path)?;
+            if path_diff.is_empty() || path_diff.len() > MAX_DIFF_BYTES {
+                return Err(ArtifactError::corrupt(
+                    "Candidate path diff is empty or over limit",
+                ));
+            }
+            files.push(GitCandidateReviewFile {
+                path: status.path,
+                old_path: status.old_path,
+                status: status.status,
+                additions: stat.additions,
+                deletions: stat.deletions,
+                binary: stat.binary,
+                encoding: candidate_file_encoding(stat.binary, &path_diff),
+            });
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        if files.is_empty() || files.len() > MAX_CHANGED_PATHS {
+            return Err(ArtifactError::corrupt(
+                "Candidate changed-file inventory is empty or over limit",
+            ));
+        }
+        Ok(ValidatedGitCandidateReview {
+            candidate_commit_id: source.candidate_commit_id.clone(),
+            candidate_tree_id: source.candidate_tree_id.clone(),
+            diff_sha256: source.diff_sha256.clone(),
+            files,
+        })
+    }
+
+    fn candidate_diff(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+        path: &str,
+    ) -> Result<ValidatedGitCandidateDiff, ArtifactError> {
+        portable_path(path)?;
+        let review = self.candidate_review(source)?;
+        let file = review
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .ok_or_else(|| {
+                ArtifactError::new(ArtifactErrorKind::NotFound, "Candidate path is not changed")
+            })?;
+        let repository = controlled_repository(&self.allowed_root, &source.repository_locator)?;
+        let revision_range = format!("{}..{}", source.base_commit_id, source.candidate_commit_id);
+        let bytes = candidate_path_diff(&repository, &revision_range, path)?;
+        if bytes.is_empty() || bytes.len() > MAX_DIFF_BYTES {
+            return Err(ArtifactError::corrupt(
+                "Candidate path diff is empty or over limit",
+            ));
+        }
+        Ok(ValidatedGitCandidateDiff {
+            path: path.to_owned(),
+            old_path: file.old_path.clone(),
+            status: file.status,
+            file_diff_sha256: format!("{:x}", Sha256::digest(&bytes)),
+            binary: file.binary,
+            encoding: file.encoding,
+            bytes,
+        })
+    }
+
+    fn revalidate_candidate_source(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+    ) -> Result<PathBuf, ArtifactError> {
+        let repository = controlled_repository(&self.allowed_root, &source.repository_locator)?;
+        assert_git_repository(&repository)?;
+        let base_tree = rev_parse_tree(&repository, &source.base_commit_id, "base tree")?;
+        let candidate_tree =
+            rev_parse_tree(&repository, &source.candidate_commit_id, "candidate tree")?;
+        if base_tree != source.base_tree_id || candidate_tree != source.candidate_tree_id {
+            return Err(ArtifactError::conflict(
+                "Candidate commit/tree identity changed before review read",
+            ));
+        }
+        let revision_range = format!("{}..{}", source.base_commit_id, source.candidate_commit_id);
+        let diff = candidate_diff(&repository, &revision_range)?;
+        if format!("{:x}", Sha256::digest(&diff)) != source.diff_sha256 {
+            return Err(ArtifactError::conflict(
+                "Candidate diff digest changed before review read",
+            ));
+        }
+        Ok(repository)
+    }
+}
+
+#[derive(Debug)]
+struct CandidateFileStatusFact {
+    path: String,
+    old_path: Option<String>,
+    status: GitCandidateReviewFileStatus,
+}
+
+#[derive(Debug)]
+struct CandidateFileStatFact {
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    binary: bool,
+}
+
+fn candidate_file_statuses(
+    repository: &Path,
+    revision_range: &str,
+) -> Result<Vec<CandidateFileStatusFact>, ArtifactError> {
+    let bytes = git_output(
+        repository,
+        &[
+            "diff".into(),
+            "--name-status".into(),
+            "-z".into(),
+            "--find-renames=50%".into(),
+            "--find-copies=50%".into(),
+            revision_range.into(),
+        ],
+        "Candidate changed-file statuses",
+    )?;
+    let fields = bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let mut index = 0_usize;
+    let mut statuses = Vec::new();
+    while index < fields.len() {
+        let token = std::str::from_utf8(fields[index])
+            .map_err(|_| ArtifactError::corrupt("Candidate file status is not UTF-8"))?;
+        index += 1;
+        let kind = token
+            .as_bytes()
+            .first()
+            .copied()
+            .ok_or_else(|| ArtifactError::corrupt("Candidate file status is empty"))?;
+        let status = match kind {
+            b'A' => GitCandidateReviewFileStatus::Added,
+            b'M' => GitCandidateReviewFileStatus::Modified,
+            b'D' => GitCandidateReviewFileStatus::Deleted,
+            b'R' => GitCandidateReviewFileStatus::Renamed,
+            b'C' => GitCandidateReviewFileStatus::Copied,
+            b'T' => GitCandidateReviewFileStatus::TypeChanged,
+            _ => {
+                return Err(ArtifactError::corrupt(
+                    "Candidate file status is unsupported",
+                ));
+            }
+        };
+        let (old_path, path) = if matches!(kind, b'R' | b'C') {
+            let old = fields.get(index).ok_or_else(|| {
+                ArtifactError::corrupt("Candidate renamed path is missing its old name")
+            })?;
+            let new = fields.get(index + 1).ok_or_else(|| {
+                ArtifactError::corrupt("Candidate renamed path is missing its new name")
+            })?;
+            index += 2;
+            (Some(decode_path(old)?), decode_path(new)?)
+        } else {
+            let path = fields.get(index).ok_or_else(|| {
+                ArtifactError::corrupt("Candidate file status is missing its path")
+            })?;
+            index += 1;
+            (None, decode_path(path)?)
+        };
+        statuses.push(CandidateFileStatusFact {
+            path,
+            old_path,
+            status,
+        });
+    }
+    statuses.sort_by(|left, right| left.path.cmp(&right.path));
+    if statuses
+        .windows(2)
+        .any(|entries| entries[0].path == entries[1].path)
+    {
+        return Err(ArtifactError::corrupt(
+            "Candidate file status inventory contains duplicate paths",
+        ));
+    }
+    Ok(statuses)
+}
+
+fn candidate_file_stats(
+    repository: &Path,
+    revision_range: &str,
+) -> Result<BTreeMap<String, CandidateFileStatFact>, ArtifactError> {
+    let bytes = git_output(
+        repository,
+        &[
+            "diff".into(),
+            "--numstat".into(),
+            "-z".into(),
+            "--find-renames=50%".into(),
+            "--find-copies=50%".into(),
+            revision_range.into(),
+        ],
+        "Candidate changed-file stats",
+    )?;
+    let fields = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut index = 0_usize;
+    let mut stats = BTreeMap::new();
+    while index < fields.len() {
+        let field = fields[index];
+        index += 1;
+        if field.is_empty() {
+            continue;
+        }
+        let mut columns = field.splitn(3, |byte| *byte == b'\t');
+        let additions = columns
+            .next()
+            .ok_or_else(|| ArtifactError::corrupt("Candidate numstat additions are missing"))?;
+        let deletions = columns
+            .next()
+            .ok_or_else(|| ArtifactError::corrupt("Candidate numstat deletions are missing"))?;
+        let encoded_path = columns
+            .next()
+            .ok_or_else(|| ArtifactError::corrupt("Candidate numstat path is missing"))?;
+        let path = if encoded_path.is_empty() {
+            let _old_path = fields
+                .get(index)
+                .ok_or_else(|| ArtifactError::corrupt("Candidate numstat old path is missing"))?;
+            let new_path = fields
+                .get(index + 1)
+                .ok_or_else(|| ArtifactError::corrupt("Candidate numstat new path is missing"))?;
+            index += 2;
+            decode_path(new_path)?
+        } else {
+            decode_path(encoded_path)?
+        };
+        let binary = additions == b"-" && deletions == b"-";
+        if !binary && (additions == b"-" || deletions == b"-") {
+            return Err(ArtifactError::corrupt(
+                "Candidate binary numstat markers differ",
+            ));
+        }
+        let (additions, deletions) = if binary {
+            (None, None)
+        } else {
+            (
+                Some(decimal_count(additions)?),
+                Some(decimal_count(deletions)?),
+            )
+        };
+        if stats
+            .insert(
+                path,
+                CandidateFileStatFact {
+                    additions,
+                    deletions,
+                    binary,
+                },
+            )
+            .is_some()
+        {
+            return Err(ArtifactError::corrupt(
+                "Candidate numstat inventory contains duplicate paths",
+            ));
+        }
+    }
+    Ok(stats)
+}
+
+fn decode_path(bytes: &[u8]) -> Result<String, ArtifactError> {
+    let path = std::str::from_utf8(bytes)
+        .map_err(|_| ArtifactError::invalid("Candidate path is not UTF-8"))?
+        .to_owned();
+    portable_path(&path)?;
+    Ok(path)
+}
+
+fn decimal_count(bytes: &[u8]) -> Result<u64, ArtifactError> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| ArtifactError::corrupt("Candidate numstat count is not UTF-8"))?
+        .parse::<u64>()
+        .map_err(|_| ArtifactError::corrupt("Candidate numstat count is invalid"))?;
+    if value > 9_007_199_254_740_991 {
+        return Err(ArtifactError::corrupt(
+            "Candidate numstat count exceeds the safe integer limit",
+        ));
+    }
+    Ok(value)
+}
+
+fn candidate_file_encoding(binary: bool, diff: &[u8]) -> GitCandidateReviewFileEncoding {
+    if binary {
+        GitCandidateReviewFileEncoding::Binary
+    } else if std::str::from_utf8(diff).is_ok() {
+        GitCandidateReviewFileEncoding::Utf8
+    } else {
+        GitCandidateReviewFileEncoding::Unknown8Bit
     }
 }
 
@@ -535,6 +1034,21 @@ impl GitSourceResolver for LocalGitSourceResolver {
 
     fn controlled_repository_root(&self) -> Option<&Path> {
         Some(self.controlled_repository_root())
+    }
+
+    fn candidate_review(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+    ) -> Result<ValidatedGitCandidateReview, ArtifactError> {
+        Self::candidate_review(self, source)
+    }
+
+    fn candidate_diff(
+        &self,
+        source: &ValidatedGitSourceArtifact,
+        path: &str,
+    ) -> Result<ValidatedGitCandidateDiff, ArtifactError> {
+        Self::candidate_diff(self, source, path)
     }
 }
 

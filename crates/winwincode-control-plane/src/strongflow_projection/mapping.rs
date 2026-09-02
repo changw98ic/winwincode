@@ -2,25 +2,28 @@
 
 //! Lossless mapping from Delivery-owned read models to generated transport DTOs.
 
+use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
     domain::{
         AttentionItemStatus, AttentionItemType, CriterionVerdict, DeliveryStage,
         DeliveryStatus as DomainDeliveryStatus, DeliveryTaskStatus as DomainTaskStatus,
-        EvidenceRefType, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
-        StageRunStatus,
+        DeliveryVerdict, EvidenceRef, EvidenceRefType, FrozenDeliveryCandidate, RepositoryKind,
+        SessionBindingSourceKind, StageRunActorType, StageRunStatus,
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
 use winwincode_domain::{
-    Count, GitHubRepositorySlug, Instant, Revision, SchemaVersion, SessionBindingSourceIdentity,
-    SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
+    Count, EvidenceId, GitHubRepositorySlug, Instant, Revision, SchemaVersion,
+    SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, Sha256Digest,
 };
 
 use super::{
     StrongFlowProjectionError, application::EstablishedDeliveryRead,
     sources::TrustedProductSessionRuntimeSession,
 };
+
+const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 pub(super) fn cursor(
     read: &EstablishedDeliveryRead,
@@ -276,7 +279,11 @@ fn task(source: &delivery_projection::DeliveryTaskProjection) -> api::DeliveryTa
             DomainTaskStatus::Failed => api::DeliveryTaskStatus::Failed,
         },
         stage_run_ids: source.stage_run_ids().to_vec(),
-        evidence_refs: source.evidence_refs().to_vec(),
+        evidence_refs: source
+            .evidence_refs()
+            .iter()
+            .map(public_evidence_id)
+            .collect(),
     }
 }
 
@@ -320,11 +327,11 @@ fn attention(
     })
 }
 
-fn evidence(
+pub(super) fn evidence(
     source: &delivery_projection::EvidenceProjection,
 ) -> Result<api::DeliveryEvidenceProjection, StrongFlowProjectionError> {
     Ok(api::DeliveryEvidenceProjection {
-        id: source.id().clone(),
+        id: public_evidence_id(source.id()),
         delivery_spec_id: source.delivery_spec_id().0.clone(),
         delivery_spec_revision: revision(
             source.delivery_spec_revision(),
@@ -349,7 +356,7 @@ fn evidence(
     })
 }
 
-fn candidate(
+pub(super) fn candidate(
     source: &delivery_projection::CurrentCandidateProjection,
 ) -> Result<api::FrozenCandidateSummaryProjection, StrongFlowProjectionError> {
     Ok(api::FrozenCandidateSummaryProjection {
@@ -365,6 +372,98 @@ fn candidate(
         candidate_tree_id: source.candidate_tree_id().to_owned(),
         diff_sha256: digest(source.diff_sha256())?,
         frozen_at: millis_to_instant(source.frozen_at())?,
+    })
+}
+
+pub(super) fn frozen_candidate(
+    source: &FrozenDeliveryCandidate,
+) -> Result<api::FrozenCandidateSummaryProjection, StrongFlowProjectionError> {
+    Ok(api::FrozenCandidateSummaryProjection {
+        candidate_ref: source.candidate_ref().to_owned(),
+        delivery_spec_id: source.delivery_spec_id().0.clone(),
+        delivery_spec_revision: revision(
+            source.delivery_spec_revision(),
+            "historical candidate spec revision",
+        )?,
+        producer_stage_run_id: source.producer_stage_run_id().clone(),
+        producer_session_binding_id: source.producer_session_binding_id().0.clone(),
+        candidate_commit_id: source.candidate_commit_id().to_owned(),
+        candidate_tree_id: source.candidate_tree_id().to_owned(),
+        diff_sha256: digest(source.diff_sha256())?,
+        frozen_at: millis_to_instant(source.producer_finished_at_millis())?,
+    })
+}
+
+pub(super) fn historical_evidence(
+    source: &EvidenceRef,
+) -> Result<api::DeliveryEvidenceProjection, StrongFlowProjectionError> {
+    Ok(api::DeliveryEvidenceProjection {
+        id: public_evidence_id(&source.id),
+        delivery_spec_id: source.delivery_spec_id.0.clone(),
+        delivery_spec_revision: revision(
+            source.delivery_spec_revision,
+            "historical evidence spec revision",
+        )?,
+        stage_run_id: source.stage_run_id.clone(),
+        session_binding_id: source.session_binding_id.0.clone(),
+        candidate_ref: source.candidate_ref.clone(),
+        type_value: match source.evidence_type {
+            EvidenceRefType::Test => "test",
+            EvidenceRefType::Command => "command",
+            EvidenceRefType::Diff => "diff",
+            EvidenceRefType::File => "file",
+            EvidenceRefType::Commit => "commit",
+            EvidenceRefType::PullRequest => "pull_request",
+            EvidenceRefType::RuntimeEvent => "runtime_event",
+            EvidenceRefType::ReviewFinding => "review_finding",
+        }
+        .to_owned(),
+        source_ref: source.source_ref.clone(),
+        created_at: millis_to_instant(source.created_at_millis)?,
+    })
+}
+
+pub(super) fn historical_verdict(
+    source: &DeliveryVerdict,
+    candidate: &FrozenDeliveryCandidate,
+) -> Result<api::DeliveryVerdictProjection, StrongFlowProjectionError> {
+    if source.delivery_id != *candidate.delivery_id()
+        || source.delivery_spec_id != *candidate.delivery_spec_id()
+        || source.candidate_ref != candidate.candidate_ref()
+    {
+        return Err(StrongFlowProjectionError::TrustedFactsUnavailable(
+            "historical Verdict is not bound to its original Candidate".to_owned(),
+        ));
+    }
+    Ok(api::DeliveryVerdictProjection {
+        id: source.id.0.clone(),
+        delivery_spec_id: source.delivery_spec_id.0.clone(),
+        delivery_spec_revision: revision(
+            candidate.delivery_spec_revision(),
+            "historical verdict spec revision",
+        )?,
+        candidate_ref: source.candidate_ref.clone(),
+        status: criterion_verdict(source.status).to_owned(),
+        criteria: source
+            .criteria
+            .iter()
+            .map(|criterion| {
+                Ok(api::DeliveryCriterionResultProjection {
+                    result_id: criterion.id.0.clone(),
+                    criterion_id: criterion.criterion_id.0.clone(),
+                    verdict: criterion_verdict(criterion.verdict).to_owned(),
+                    evidence_refs: criterion
+                        .evidence_refs
+                        .iter()
+                        .map(public_evidence_id)
+                        .collect(),
+                    explanation: criterion.explanation.clone(),
+                    evaluated_at: millis_to_instant(criterion.evaluated_at_millis)?,
+                })
+            })
+            .collect::<Result<_, StrongFlowProjectionError>>()?,
+        unresolved_findings: source.unresolved_findings.clone(),
+        produced_at: millis_to_instant(source.produced_at_millis)?,
     })
 }
 
@@ -385,7 +484,11 @@ fn verdict(
                     result_id: criterion.result_id().0.clone(),
                     criterion_id: criterion.criterion_id().0.clone(),
                     verdict: criterion_verdict(criterion.verdict()).to_owned(),
-                    evidence_refs: criterion.evidence_refs().to_vec(),
+                    evidence_refs: criterion
+                        .evidence_refs()
+                        .iter()
+                        .map(public_evidence_id)
+                        .collect(),
                     explanation: criterion.explanation().to_owned(),
                     evaluated_at: millis_to_instant(criterion.evaluated_at())?,
                 })
@@ -393,6 +496,38 @@ fn verdict(
             .collect::<Result<_, StrongFlowProjectionError>>()?,
         unresolved_findings: source.unresolved_findings().to_vec(),
         produced_at: millis_to_instant(source.produced_at())?,
+    })
+}
+
+/// Maps the durable Evidence source identity to the one canonical public id.
+///
+/// Delivery currently derives Evidence identities from a full SHA-256 source
+/// seal. The public contract uses a fixed Crockford identifier, so projection
+/// code deterministically narrows that seal rather than exposing an invalid or
+/// transport-specific identifier. Already-canonical ids remain unchanged.
+pub(super) fn public_evidence_id(source: &EvidenceId) -> EvidenceId {
+    if is_public_evidence_id(&source.0) {
+        return source.clone();
+    }
+    let digest = Sha256::digest(source.0.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let mut value = u128::from_be_bytes(bytes);
+    let mut encoded = ['0'; 26];
+    for character in encoded.iter_mut().rev() {
+        *character = char::from(CROCKFORD_BASE32[(value & 31) as usize]);
+        value >>= 5;
+    }
+    EvidenceId(format!("evd_{}", encoded.iter().collect::<String>()))
+}
+
+fn is_public_evidence_id(value: &str) -> bool {
+    value.strip_prefix("evd_").is_some_and(|suffix| {
+        suffix.len() == 26
+            && suffix.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(byte, b'A'..=b'H' | b'J'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+            })
     })
 }
 

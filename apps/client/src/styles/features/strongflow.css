@@ -1,0 +1,198 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-strongflow {
+  padding: var(--wwc-space-4);
+}
+
+.wwc-strongflow-status {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-strongflow-error {
+  margin-bottom: var(--wwc-space-4);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-strongflow-retry,
+.wwc-strongflow-reconnect {
+  margin-left: var(--wwc-space-3);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
+  border-radius: var(--wwc-radius-md);
+  color: inherit;
+  background: var(--wwc-color-surface);
+}
+
+.wwc-strongflow-content {
+  display: grid;
+  grid-template-columns: minmax(13rem, 18rem) minmax(0, 1fr);
+  gap: var(--wwc-space-4);
+}
+
+.wwc-strongflow-deliveries {
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-strongflow-deliveries-heading,
+.wwc-strongflow-heading,
+.wwc-strongflow-section-heading,
+.wwc-strongflow-subheading,
+.wwc-strongflow-diagram-heading,
+.wwc-strongflow-execution-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+}
+
+.wwc-strongflow-delivery-list,
+.wwc-strongflow-task-list,
+.wwc-strongflow-stage-list,
+.wwc-strongflow-attention-list,
+.wwc-strongflow-diagram-nodes,
+.wwc-strongflow-diagram-edges,
+.wwc-strongflow-agent-nodes,
+.wwc-strongflow-agent-edges,
+.wwc-strongflow-activities,
+.wwc-strongflow-evidence {
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-strongflow-delivery-list li {
+  display: grid;
+  gap: var(--wwc-space-1);
+  margin-bottom: var(--wwc-space-2);
+}
+
+.wwc-strongflow-delivery-list a {
+  padding: var(--wwc-space-2);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-info-text);
+  text-decoration: none;
+}
+
+.wwc-strongflow-delivery-list a[aria-current='page'] {
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-selection);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-strongflow-delivery-list span {
+  padding-left: var(--wwc-space-2);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-details {
+  display: grid;
+  min-width: var(--wwc-space-0);
+  gap: var(--wwc-space-4);
+}
+
+.wwc-strongflow-overview,
+.wwc-strongflow-tasks,
+.wwc-strongflow-stages,
+.wwc-strongflow-attention,
+.wwc-strongflow-view-solution,
+.wwc-strongflow-view-execution,
+.wwc-strongflow-view-candidate {
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-strongflow-goal,
+.wwc-strongflow-metadata,
+.wwc-strongflow-empty,
+.wwc-strongflow-omitted,
+.wwc-strongflow-execution-metadata {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-strongflow-task-list li,
+.wwc-strongflow-stage-list li,
+.wwc-strongflow-attention-list li,
+.wwc-strongflow-evidence li,
+.wwc-strongflow-agent-nodes li,
+.wwc-strongflow-activities li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--wwc-space-4);
+  padding: var(--wwc-space-2) var(--wwc-space-0);
+  border-bottom: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+}
+
+.wwc-strongflow-diagrams {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--wwc-space-4);
+}
+
+.wwc-strongflow-diagram,
+.wwc-strongflow-execution-session,
+.wwc-strongflow-verdict,
+.wwc-strongflow-publication {
+  margin-top: var(--wwc-space-3);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-strongflow-diagram-nodes li {
+  margin-bottom: var(--wwc-space-2);
+  padding: var(--wwc-space-3);
+  border-left: var(--wwc-focus-width) solid var(--wwc-color-focus);
+  background: var(--wwc-color-info-surface);
+}
+
+.wwc-strongflow-diagram-nodes p,
+.wwc-strongflow-evidence p {
+  margin: var(--wwc-space-1) var(--wwc-space-0) var(--wwc-space-0);
+}
+
+.wwc-strongflow-diagram-edges li,
+.wwc-strongflow-agent-edges li {
+  padding: var(--wwc-space-1) var(--wwc-space-0);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-strongflow-candidate-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--wwc-space-2) var(--wwc-space-4);
+  margin: var(--wwc-space-0);
+}
+
+.wwc-strongflow-candidate-details dt {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-strongflow-candidate-details dd {
+  min-width: var(--wwc-space-0);
+  margin: var(--wwc-space-0);
+  overflow-wrap: anywhere;
+}
+
+.wwc-strongflow-verdict[data-status='pass'] {
+  border-color: var(--wwc-color-success-border);
+  color: var(--wwc-color-success-text);
+  background: var(--wwc-color-success-surface);
+}
+
+@media (max-width: 64rem) {
+  .wwc-strongflow-content,
+  .wwc-strongflow-diagrams {
+    grid-template-columns: 1fr;
+  }
+}

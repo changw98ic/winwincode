@@ -22,8 +22,12 @@ import type {
   InputRespondCompletedResponse,
   InteractiveInputValue,
   ModelRoute,
+  ModelRouteAvailabilityListResultResponse,
+  ModelRouteAvailabilityPage,
+  ModelRouteAvailabilityProjection,
   OpaqueCursor,
   PageInfo,
+  ProjectScope,
   ProductSessionId,
   ProductSessionProjection,
   QueryResultResponse,
@@ -31,15 +35,17 @@ import type {
   RequestId,
   RuntimeProjectionSnapshot,
   RuntimeProjectionGetResultResponse,
+  Scope,
   SessionCancelCompletedResponse,
   SessionCreateCompletedResponse,
   SessionGetResultResponse,
   SessionMessagesListResultResponse,
-  SettingsGetResultResponse,
 } from './generated/contracts.js'
 import {
   CommandName,
   ControlPlaneWebSocketEventType,
+  ModelRouteAvailabilityReason,
+  ModelRouteAvailabilityStatus,
   QueryName,
 } from './generated/contracts.js'
 
@@ -48,6 +54,8 @@ const DEFAULT_MESSAGE_PAGE_SIZE = 50
 const DEFAULT_RUNTIME_PAGE_SIZE = 50
 const DEFAULT_APPROVAL_PAGE_SIZE = 50
 const DEFAULT_INTERACTION_PAGE_SIZE = 50
+const MODEL_ROUTE_PAGE_SIZE = 200
+const MAX_MODEL_ROUTE_PAGES = 10
 
 export type ChatViewStatus =
   | 'idle'
@@ -92,12 +100,14 @@ export interface ChatMessagePagination {
 export interface ChatViewModelState {
   readonly status: ChatViewStatus
   readonly realtime: ChatRealtimeStatus
-  readonly activeProductSessionId: ProductSessionId
+  readonly activeProductSessionId: ProductSessionId | null
   readonly sessions: readonly ProductSessionProjection[]
   readonly session: ProductSessionProjection | null
   readonly messages: readonly ChatMessageProjection[]
   readonly messagePagination: ChatMessagePagination
-  readonly defaultModelRoute: ModelRoute | null
+  readonly modelRouteAvailability: ModelRouteAvailabilityPage | null
+  readonly selectedModelRoute: ModelRoute | null
+  readonly modelRouteSelectionIssue: ModelRouteAvailabilityReason | null
   readonly runtime: RuntimeProjectionSnapshot | null
   /** Exact Control Plane binding used by input.respond. */
   readonly pendingInputs: readonly ChatInputInteractionProjection[]
@@ -113,9 +123,11 @@ export interface ChatViewModelOptions {
   readonly client: ControlPlaneClient
   readonly actor: Actor
   readonly scope: RepositoryScope
-  readonly productSessionId: ProductSessionId
+  readonly productSessionId: ProductSessionId | null
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
+  /** Keep the browser route bound to the ProductSession selected by this view-model. */
+  readonly onActiveSessionChange?: (productSessionId: ProductSessionId) => void
   readonly messagePageSize?: number
   readonly runtimePageSize?: number
   readonly approvalPageSize?: number
@@ -127,7 +139,6 @@ export interface ChatViewModelOptions {
 export interface ChatCreateSessionInput {
   readonly productSessionId: ProductSessionId
   readonly title: string
-  readonly modelRoute: ModelRoute
 }
 
 export interface ChatViewModel {
@@ -136,6 +147,7 @@ export interface ChatViewModel {
   start(): Promise<void>
   refresh(): Promise<void>
   selectSession(productSessionId: ProductSessionId): Promise<void>
+  selectModelRoute(modelRoute: ModelRoute): void
   createSession(input: ChatCreateSessionInput): Promise<void>
   submitMessage(message: string): Promise<void>
   cancelSession(reason: string): Promise<void>
@@ -157,11 +169,11 @@ export interface ChatViewModel {
 
 interface ChatSnapshot {
   readonly sessions: readonly ProductSessionProjection[]
-  readonly session: ProductSessionProjection
+  readonly session: ProductSessionProjection | null
   readonly messages: readonly ChatMessageProjection[]
   readonly messagePage: PageInfo
-  readonly defaultModelRoute: ModelRoute | null
-  readonly runtime: RuntimeProjectionSnapshot
+  readonly modelRouteAvailability: ModelRouteAvailabilityPage
+  readonly runtime: RuntimeProjectionSnapshot | null
   readonly pendingInputs: readonly ChatInputInteractionProjection[]
   readonly pendingApprovals: readonly ApprovalProjection[]
 }
@@ -185,12 +197,14 @@ function initialState(): ChatViewModelState {
   return Object.freeze({
     status: 'idle',
     realtime: 'inactive',
-    activeProductSessionId: '' as ProductSessionId,
+    activeProductSessionId: null,
     sessions: Object.freeze([]),
     session: null,
     messages: Object.freeze([]),
     messagePagination: frozenPagination('idle', EMPTY_PAGE),
-    defaultModelRoute: null,
+    modelRouteAvailability: null,
+    selectedModelRoute: null,
+    modelRouteSelectionIssue: null,
     runtime: null,
     pendingInputs: Object.freeze([]),
     pendingApprovals: Object.freeze([]),
@@ -261,7 +275,7 @@ interface ChatQueryResponses {
   ).SessionListResultResponse
   readonly [QueryName.SessionGet]: SessionGetResultResponse
   readonly [QueryName.SessionMessagesList]: SessionMessagesListResultResponse
-  readonly [QueryName.SettingsGet]: SettingsGetResultResponse
+  readonly [QueryName.ModelRouteAvailabilityList]: ModelRouteAvailabilityListResultResponse
   readonly [QueryName.RuntimeProjectionGet]: RuntimeProjectionGetResultResponse
   readonly [QueryName.SessionInteractionsList]: ChatInteractionListResultResponse
   readonly [QueryName.ApprovalList]: ApprovalListResultResponse
@@ -317,6 +331,28 @@ function sameScope(left: RepositoryScope, right: RepositoryScope): boolean {
     && left.repositoryId === right.repositoryId
 }
 
+function sameProject(
+  project: ProjectScope,
+  repository: RepositoryScope,
+): boolean {
+  return project.organizationId === repository.organizationId
+    && project.workspaceId === repository.workspaceId
+    && project.projectId === repository.projectId
+}
+
+function scopeIdentity(scope: Scope): string {
+  if (scope.kind === 'organization') return `${scope.kind}\u0000${scope.organizationId}`
+  if (scope.kind === 'workspace') {
+    return `${scope.kind}\u0000${scope.organizationId}\u0000${scope.workspaceId}`
+  }
+  if (scope.kind === 'project') {
+    return `${scope.kind}\u0000${scope.organizationId}\u0000${scope.workspaceId}`
+      + `\u0000${scope.projectId}`
+  }
+  return `${scope.kind}\u0000${scope.organizationId}\u0000${scope.workspaceId}`
+    + `\u0000${scope.projectId}\u0000${scope.repositoryId}`
+}
+
 function assertMessages(
   messages: readonly ChatMessageProjection[],
   productSessionId: ProductSessionId,
@@ -361,6 +397,39 @@ function orderSessions(
   return Object.freeze([...byId.values()].sort((left, right) => (
     right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)
   )))
+}
+
+function modelRouteIdentity(route: ModelRoute): string {
+  return `${route.providerId}\u0000${route.modelId}\u0000${route.credentialReferenceId}`
+}
+
+function isReadyModelRoute(candidate: ModelRouteAvailabilityProjection): boolean {
+  return candidate.status === ModelRouteAvailabilityStatus.Enabled
+    && candidate.reason === ModelRouteAvailabilityReason.Ready
+}
+
+function availabilitySubscriptionId(
+  subscriptionId: ControlPlaneWebSocketSubscriptionId,
+  offset: number,
+): ControlPlaneWebSocketSubscriptionId {
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+  const value = [...subscriptionId]
+  let carry = offset
+  for (let index = value.length - 1; index >= 4 && carry > 0; index -= 1) {
+    const digit = alphabet.indexOf(value[index] ?? '')
+    if (digit < 0) throw clientFailure(
+      'CHAT_SUBSCRIPTION_ID_INVALID',
+      'The Chat subscription identity is not canonical.',
+    )
+    const sum = digit + carry
+    value[index] = alphabet[sum % alphabet.length] ?? '0'
+    carry = Math.floor(sum / alphabet.length)
+  }
+  if (carry > 0) throw clientFailure(
+    'CHAT_SUBSCRIPTION_ID_EXHAUSTED',
+    'The Chat subscription identity range is exhausted.',
+  )
+  return value.join('') as ControlPlaneWebSocketSubscriptionId
 }
 
 function assertRuntime(
@@ -486,9 +555,14 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   const controllers = new Set<AbortController>()
   let currentState = initialState()
   let realtime: ControlPlaneSubscription | null = null
+  let modelRouteRealtime: ControlPlaneSubscription[] = []
   let generation = 0
   let closed = false
   let activeProductSessionId = options.productSessionId
+  let lastNotifiedProductSessionId = options.productSessionId
+  let selectedModelRouteIdentity: string | null = null
+  let modelRouteSelectionEstablished = false
+  let modelRouteSelectionIssue: ModelRouteAvailabilityReason | null = null
   const nowMillis = options.nowMillis ?? Date.now
 
   currentState = Object.freeze({
@@ -503,6 +577,55 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
 
   function patch(update: Partial<ChatViewModelState>): void {
     publish({ ...currentState, ...update })
+  }
+
+  function reconcileSelectedModelRoute(
+    availability: ModelRouteAvailabilityPage,
+  ): ModelRoute | null {
+    if (!modelRouteSelectionEstablished) {
+      const defaultRoute = availability.items.find(candidate => (
+        candidate.isDefault && isReadyModelRoute(candidate)
+      ))
+      if (defaultRoute === undefined) return null
+      selectedModelRouteIdentity = modelRouteIdentity(defaultRoute.route)
+      modelRouteSelectionEstablished = true
+      modelRouteSelectionIssue = null
+      return defaultRoute.route
+    }
+    if (selectedModelRouteIdentity === null) return null
+    const matching = availability.items.find(candidate => (
+      modelRouteIdentity(candidate.route) === selectedModelRouteIdentity
+    ))
+    if (matching === undefined || !isReadyModelRoute(matching)) {
+      modelRouteSelectionIssue = matching?.reason ?? availability.reason
+      selectedModelRouteIdentity = null
+      return null
+    }
+    return matching.route
+  }
+
+  function clearModelRouteSelection(): void {
+    if (selectedModelRouteIdentity !== null || currentState.selectedModelRoute !== null) {
+      modelRouteSelectionEstablished = true
+    }
+    selectedModelRouteIdentity = null
+  }
+
+  function notifyActiveSession(): void {
+    if (
+      activeProductSessionId === null
+      || activeProductSessionId === lastNotifiedProductSessionId
+    ) return
+    lastNotifiedProductSessionId = activeProductSessionId
+    options.onActiveSessionChange?.(activeProductSessionId)
+  }
+
+  function requireActiveSession(): ProductSessionId {
+    if (activeProductSessionId !== null) return activeProductSessionId
+    throw clientFailure(
+      'CHAT_SESSION_REQUIRED',
+      'Select or create a Chat session before continuing.',
+    )
   }
 
   function controller(): AbortController {
@@ -532,12 +655,130 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     }
   }
 
+  async function modelRouteAvailability(
+    signal: AbortSignal,
+  ): Promise<ModelRouteAvailabilityPage> {
+    const items: ModelRouteAvailabilityProjection[] = []
+    const identities = new Set<string>()
+    const cursors = new Set<OpaqueCursor>()
+    let firstPage: ModelRouteAvailabilityPage | null = null
+    let cursor: OpaqueCursor | null = null
+    for (let index = 0; index < MAX_MODEL_ROUTE_PAGES; index += 1) {
+      const response: ModelRouteAvailabilityListResultResponse = expectResponse(
+        await options.client.query({
+          ...requestBase(),
+          requestId: options.nextRequestId(),
+          query: QueryName.ModelRouteAvailabilityList,
+          parameters: {},
+          page: requestPage(cursor, MODEL_ROUTE_PAGE_SIZE),
+        }, { signal }), QueryName.ModelRouteAvailabilityList)
+      assertPage(response.page, response.query)
+      if (!sameScope(response.result.scope, options.scope)) throw clientFailure(
+        'CHAT_MODEL_ROUTE_SCOPE_MISMATCH',
+        'The model-route availability page belongs to another repository.',
+      )
+      if (!sameProject(response.result.requestPoolSource, options.scope)) {
+        throw clientFailure(
+          'CHAT_MODEL_ROUTE_REQUEST_POOL_SCOPE_MISMATCH',
+          'The model-route request-pool source belongs to another Project.',
+        )
+      }
+      if (firstPage === null) {
+        firstPage = response.result
+      } else if (
+        !sameScope(firstPage.scope, response.result.scope)
+        || firstPage.settingsRevision !== response.result.settingsRevision
+        || firstPage.defaultProviderId !== response.result.defaultProviderId
+        || firstPage.defaultModelId !== response.result.defaultModelId
+        || firstPage.status !== response.result.status
+        || firstPage.reason !== response.result.reason
+        || firstPage.requestPoolRevision !== response.result.requestPoolRevision
+        || scopeIdentity(firstPage.requestPoolSource)
+          !== scopeIdentity(response.result.requestPoolSource)
+        || (firstPage.settingsSource === null) !== (response.result.settingsSource === null)
+        || (
+          firstPage.settingsSource !== null
+          && response.result.settingsSource !== null
+          && scopeIdentity(firstPage.settingsSource)
+            !== scopeIdentity(response.result.settingsSource)
+        )
+      ) throw clientFailure(
+        'CHAT_MODEL_ROUTE_SNAPSHOT_MISMATCH',
+        'The paginated model-route availability response changed during one read.',
+      )
+      for (const item of response.result.items) {
+        const identity = modelRouteIdentity(item.route)
+        if (identities.has(identity)) throw clientFailure(
+          'CHAT_MODEL_ROUTE_DUPLICATE',
+          'The model-route availability page contains duplicate routes.',
+        )
+        identities.add(identity)
+        items.push(item)
+      }
+      if (!response.page.hasMore) return Object.freeze({
+        ...firstPage,
+        items: Object.freeze(items),
+      })
+      const next: OpaqueCursor | null = response.page.nextCursor
+      if (next === null || cursors.has(next)) throw clientFailure(
+        'CHAT_MODEL_ROUTE_CURSOR_INVALID',
+        'The model-route availability query returned an invalid continuation cursor.',
+      )
+      cursors.add(next)
+      cursor = next
+    }
+    throw clientFailure(
+      'CHAT_MODEL_ROUTE_PAGE_LIMIT',
+      'The model-route availability query exceeded the bounded page limit.',
+    )
+  }
+
   async function querySnapshot(signal: AbortSignal): Promise<ChatSnapshot> {
+    if (activeProductSessionId === null) {
+      const [sessionsValue, routes] = await Promise.all([
+        options.client.query({
+          ...requestBase(),
+          requestId: options.nextRequestId(),
+          query: QueryName.SessionList,
+          parameters: { states: [] },
+          page: requestPage(null, 50),
+        }, { signal }),
+        modelRouteAvailability(signal),
+      ])
+      const sessions = expectResponse(sessionsValue, QueryName.SessionList)
+      assertPage(sessions.page, sessions.query)
+      for (const item of sessions.result.items) {
+        if (
+          item.projectId !== options.scope.projectId
+          || item.repositoryId !== options.scope.repositoryId
+        ) throw clientFailure(
+          'CHAT_SESSION_LIST_SCOPE_MISMATCH',
+          'The session list contains a ProductSession from another repository.',
+        )
+      }
+      const orderedSessions = orderSessions(sessions.result.items)
+      const firstSession = orderedSessions[0]
+      if (firstSession !== undefined) {
+        activeProductSessionId = firstSession.id
+        return querySnapshot(signal)
+      }
+      return Object.freeze({
+        sessions: orderedSessions,
+        session: null,
+        messages: Object.freeze([]),
+        messagePage: EMPTY_PAGE,
+        modelRouteAvailability: routes,
+        runtime: null,
+        pendingInputs: Object.freeze([]),
+        pendingApprovals: Object.freeze([]),
+      })
+    }
+    const productSessionId = activeProductSessionId
     const [
       sessionsValue,
       sessionValue,
       messagesValue,
-      settingsValue,
+      routes,
       runtimeValue,
       interactionsValue,
       approvalsValue,
@@ -554,30 +795,24 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
           ...requestBase(),
           requestId: options.nextRequestId(),
           query: QueryName.SessionGet,
-          parameters: { productSessionId: activeProductSessionId },
+          parameters: { productSessionId },
           page: requestPage(null, 1),
         }, { signal }),
         options.client.query({
           ...requestBase(),
           requestId: options.nextRequestId(),
           query: QueryName.SessionMessagesList,
-          parameters: { productSessionId: activeProductSessionId },
+          parameters: { productSessionId },
           page: requestPage(null, messagePageSize),
         }, { signal }),
-        options.client.query({
-          ...requestBase(),
-          requestId: options.nextRequestId(),
-          query: QueryName.SettingsGet,
-          parameters: {},
-          page: requestPage(null, 1),
-        }, { signal }),
+        modelRouteAvailability(signal),
         options.client.query({
           ...requestBase(),
           requestId: options.nextRequestId(),
           query: QueryName.RuntimeProjectionGet,
           parameters: {
             kind: 'product-session',
-            productSessionId: activeProductSessionId,
+            productSessionId,
           },
           page: requestPage(null, runtimePageSize),
         }, { signal }),
@@ -586,7 +821,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
           requestId: options.nextRequestId(),
           query: QueryName.SessionInteractionsList,
           parameters: {
-            productSessionId: activeProductSessionId,
+            productSessionId,
             states: ['pending'],
           },
           page: requestPage(null, interactionPageSize),
@@ -603,7 +838,6 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     const sessions = expectResponse(sessionsValue, QueryName.SessionList)
     const session = expectResponse(sessionValue, QueryName.SessionGet)
     const messages = expectResponse(messagesValue, QueryName.SessionMessagesList)
-    const settings = expectResponse(settingsValue, QueryName.SettingsGet)
     const runtime = expectResponse(runtimeValue, QueryName.RuntimeProjectionGet)
     const interactions = expectResponse(
       interactionsValue,
@@ -614,7 +848,6 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       sessions,
       session,
       messages,
-      settings,
       runtime,
       interactions,
       approvals,
@@ -622,7 +855,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       assertPage(response.page, response.query)
     }
     if (
-      session.result.id !== activeProductSessionId
+      session.result.id !== productSessionId
       || session.result.projectId !== options.scope.projectId
       || session.result.repositoryId !== options.scope.repositoryId
     ) {
@@ -643,22 +876,22 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     const sessionById = new Map(sessions.result.items.map(item => [item.id, item]))
     sessionById.set(session.result.id, session.result)
     const orderedSessions = orderSessions([...sessionById.values()])
-    assertRuntime(runtime.result, options.scope, activeProductSessionId)
+    assertRuntime(runtime.result, options.scope, productSessionId)
     return Object.freeze({
       sessions: orderedSessions,
       session: session.result,
-      messages: assertMessages(messages.result.items, activeProductSessionId),
+      messages: assertMessages(messages.result.items, productSessionId),
       messagePage: messages.page,
-      defaultModelRoute: settings.result.defaultModelRoute,
+      modelRouteAvailability: routes,
       runtime: runtime.result,
       pendingInputs: assertPendingInputs(
         interactions.result.items,
-        activeProductSessionId,
+        productSessionId,
         nowMillis(),
       ),
       pendingApprovals: assertPendingApprovals(
         approvals.result.items,
-        activeProductSessionId,
+        productSessionId,
         nowMillis(),
       ),
     })
@@ -668,6 +901,9 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     snapshot: ChatSnapshot,
     realtimeStatus: ChatRealtimeStatus,
   ): void {
+    const selectedModelRoute = reconcileSelectedModelRoute(
+      snapshot.modelRouteAvailability,
+    )
     publish({
       status: 'ready',
       realtime: realtimeStatus,
@@ -676,13 +912,16 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       session: snapshot.session,
       messages: snapshot.messages,
       messagePagination: frozenPagination('idle', snapshot.messagePage),
-      defaultModelRoute: snapshot.defaultModelRoute,
+      modelRouteAvailability: snapshot.modelRouteAvailability,
+      selectedModelRoute,
+      modelRouteSelectionIssue,
       runtime: snapshot.runtime,
       pendingInputs: snapshot.pendingInputs,
       pendingApprovals: snapshot.pendingApprovals,
       interaction: frozenInteraction('idle'),
       error: null,
     })
+    notifyActiveSession()
   }
 
   function clearForReset(): void {
@@ -694,7 +933,9 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       session: null,
       messages: Object.freeze([]),
       messagePagination: frozenPagination('idle', EMPTY_PAGE),
-      defaultModelRoute: null,
+      modelRouteAvailability: null,
+      selectedModelRoute: null,
+      modelRouteSelectionIssue,
       runtime: null,
       pendingInputs: Object.freeze([]),
       pendingApprovals: Object.freeze([]),
@@ -713,15 +954,19 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       const snapshot = await querySnapshot(active.signal)
       if (!isCurrent(ownGeneration)) return null
       publishSnapshot(snapshot, realtime === null ? 'inactive' : 'subscribed')
-      return snapshot.runtime.eventCursor
+      return snapshot.runtime?.eventCursor ?? null
     } catch (error) {
       if (!isCurrent(ownGeneration)) return null
       const normalized = normalizedError(error, active.signal)
+      clearModelRouteSelection()
       patch({
         status: statusForError(normalized),
         realtime: normalized.kind === 'authentication' || normalized.kind === 'authorization'
           ? 'access-revoked'
           : 'reconnecting',
+        modelRouteAvailability: null,
+        selectedModelRoute: null,
+        modelRouteSelectionIssue,
         error: normalized,
       })
       throw normalized
@@ -740,17 +985,18 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     )
     const active = controller()
     try {
+      const productSessionId = requireActiveSession()
       const response = expectResponse(await options.client.query({
         ...requestBase(),
         requestId: options.nextRequestId(),
         query: QueryName.SessionGet,
-        parameters: { productSessionId: activeProductSessionId },
+        parameters: { productSessionId },
         page: requestPage(null, 1),
       }, { signal: active.signal }), QueryName.SessionGet)
       if (!isCurrent(ownGeneration)) return
       assertPage(response.page, response.query)
       if (
-        response.result.id !== activeProductSessionId
+        response.result.id !== productSessionId
         || response.result.projectId !== options.scope.projectId
         || response.result.repositoryId !== options.scope.repositoryId
         || response.result.revision < event.event.revision
@@ -780,19 +1026,20 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   ): Promise<void> {
     const active = controller()
     try {
+      const productSessionId = requireActiveSession()
       const response = expectResponse(await options.client.query({
         ...requestBase(),
         requestId: options.nextRequestId(),
         query: QueryName.RuntimeProjectionGet,
         parameters: {
           kind: 'product-session',
-          productSessionId: activeProductSessionId,
+          productSessionId,
         },
         page: requestPage(null, runtimePageSize),
       }, { signal: active.signal }), QueryName.RuntimeProjectionGet)
       if (!isCurrent(ownGeneration)) return
       assertPage(response.page, response.query)
-      assertRuntime(response.result, options.scope, activeProductSessionId)
+      assertRuntime(response.result, options.scope, productSessionId)
       if (
         event.event.type === 'runtime-projection.invalidated.v1'
         && response.result.revision < event.event.projectionRevision
@@ -809,6 +1056,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   async function reloadApprovals(ownGeneration: number): Promise<void> {
     const active = controller()
     try {
+      const productSessionId = requireActiveSession()
       const response = expectResponse(await options.client.query({
         ...requestBase(),
         requestId: options.nextRequestId(),
@@ -823,7 +1071,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         realtime: 'subscribed',
         pendingApprovals: assertPendingApprovals(
           response.result.items,
-          activeProductSessionId,
+          productSessionId,
           nowMillis(),
         ),
         error: null,
@@ -836,12 +1084,13 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   async function reloadInteractions(ownGeneration: number): Promise<void> {
     const active = controller()
     try {
+      const productSessionId = requireActiveSession()
       const response = expectResponse(await options.client.query({
         ...requestBase(),
         requestId: options.nextRequestId(),
         query: QueryName.SessionInteractionsList,
         parameters: {
-          productSessionId: activeProductSessionId,
+          productSessionId,
           states: ['pending'],
         },
         page: requestPage(null, interactionPageSize),
@@ -853,7 +1102,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         realtime: 'subscribed',
         pendingInputs: assertPendingInputs(
           response.result.items,
-          activeProductSessionId,
+          productSessionId,
           nowMillis(),
         ),
         error: null,
@@ -863,13 +1112,103 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     }
   }
 
+  async function reloadModelRouteAvailability(
+    ownGeneration: number,
+    minimumRequestPoolRevision: number | null = null,
+  ): Promise<void> {
+    const active = controller()
+    try {
+      const availability = await modelRouteAvailability(active.signal)
+      if (!isCurrent(ownGeneration)) return
+      if (
+        minimumRequestPoolRevision !== null
+        && availability.requestPoolRevision < minimumRequestPoolRevision
+      ) throw clientFailure(
+        'CHAT_MODEL_ROUTE_EVENT_STALE',
+        'The model-route availability snapshot is older than its request-pool event.',
+      )
+      const selectedModelRoute = reconcileSelectedModelRoute(availability)
+      patch({
+        status: 'ready',
+        modelRouteAvailability: availability,
+        selectedModelRoute,
+        modelRouteSelectionIssue,
+        interaction: frozenInteraction('idle'),
+        error: null,
+      })
+      subscribeModelRouteAvailability(availability)
+    } catch (error) {
+      if (!isCurrent(ownGeneration)) return
+      const normalized = normalizedError(error, active.signal)
+      if (normalized.kind === 'authentication' || normalized.kind === 'authorization') {
+        accessRevoked(normalized)
+      } else {
+        clearModelRouteSelection()
+        patch({
+          status: statusForError(normalized),
+          modelRouteAvailability: null,
+          selectedModelRoute: null,
+          modelRouteSelectionIssue,
+          error: normalized,
+        })
+      }
+      throw normalized
+    } finally {
+      releaseController(active)
+    }
+  }
+
+  async function applyModelRouteEvent(
+    frame: ControlPlaneWebSocketEventFrame,
+    binding: {
+      readonly scope: Scope
+      readonly authority: boolean
+      readonly requestPool: boolean
+    },
+  ): Promise<void> {
+    const ownGeneration = generation
+    if (!isCurrent(ownGeneration)) return
+    const event = frame.event
+    if (
+      event.type !== 'model-route-availability.invalidated.v1'
+      || event.reloadQueries.length !== 1
+      || event.reloadQueries[0] !== QueryName.ModelRouteAvailabilityList
+    ) throw clientFailure(
+      'CHAT_MODEL_ROUTE_EVENT_INVALID',
+      'The model-route subscription received an invalid reload instruction.',
+    )
+    if (event.source === 'request_pool') {
+      const availability = currentState.modelRouteAvailability
+      if (
+        !binding.requestPool
+        || availability === null
+        || scopeIdentity(binding.scope) !== scopeIdentity(availability.requestPoolSource)
+      ) throw clientFailure(
+        'CHAT_MODEL_ROUTE_EVENT_SCOPE_MISMATCH',
+        'The request-pool invalidation came from another Project.',
+      )
+      if (event.sourceRevision <= availability.requestPoolRevision) return
+    } else if (!binding.authority) {
+      throw clientFailure(
+        'CHAT_MODEL_ROUTE_EVENT_SCOPE_MISMATCH',
+        'The model-route authority invalidation came from an unrelated Scope.',
+      )
+    }
+    patch({ status: 'refreshing' })
+    await reloadModelRouteAvailability(
+      ownGeneration,
+      event.source === 'request_pool' ? event.sourceRevision : null,
+    )
+  }
+
   async function applyEvent(frame: ControlPlaneWebSocketEventFrame): Promise<void> {
     const ownGeneration = generation
     if (!isCurrent(ownGeneration)) return
     patch({ realtime: 'reloading' })
     try {
+      const productSessionId = requireActiveSession()
       const event = frame.event
-      if ('productSessionId' in event && event.productSessionId !== activeProductSessionId) {
+      if ('productSessionId' in event && event.productSessionId !== productSessionId) {
         throw clientFailure(
           'CHAT_EVENT_SESSION_MISMATCH',
           'A Chat event belongs to another ProductSession.',
@@ -878,14 +1217,14 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       if (event.type === 'product-session.changed.v1') {
         await reloadSession(frame, ownGeneration)
       } else if (event.type === 'product-session.message.appended.v1') {
-        const incoming = assertMessages([event.message], activeProductSessionId)
+        const incoming = assertMessages([event.message], productSessionId)
         if (isCurrent(ownGeneration)) patch({
           status: 'ready',
           realtime: 'subscribed',
           messages: mergeMessages(
             currentState.messages,
             incoming,
-            activeProductSessionId,
+            productSessionId,
           ),
           interaction: frozenInteraction('idle'),
           error: null,
@@ -914,11 +1253,18 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     }
   }
 
+  function closeModelRouteRealtime(): void {
+    for (const subscription of modelRouteRealtime) subscription.close()
+    modelRouteRealtime = []
+  }
+
   function accessRevoked(error: ControlPlaneClientError): void {
     generation += 1
     abortRequests()
     realtime?.close()
     realtime = null
+    closeModelRouteRealtime()
+    clearModelRouteSelection()
     publish({
       status: statusForError(error),
       realtime: 'access-revoked',
@@ -927,7 +1273,9 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       session: null,
       messages: Object.freeze([]),
       messagePagination: frozenPagination('idle', EMPTY_PAGE),
-      defaultModelRoute: null,
+      modelRouteAvailability: null,
+      selectedModelRoute: null,
+      modelRouteSelectionIssue: null,
       runtime: null,
       pendingInputs: Object.freeze([]),
       pendingApprovals: Object.freeze([]),
@@ -936,13 +1284,87 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     })
   }
 
+  function subscribeModelRouteAvailability(
+    availability: ModelRouteAvailabilityPage,
+  ): void {
+    closeModelRouteRealtime()
+    const bindings = new Map<string, {
+      scope: Scope
+      authority: boolean
+      requestPool: boolean
+    }>()
+    function add(scope: Scope, source: 'authority' | 'request-pool'): void {
+      const identity = scopeIdentity(scope)
+      const current = bindings.get(identity) ?? {
+        scope,
+        authority: false,
+        requestPool: false,
+      }
+      if (source === 'authority') current.authority = true
+      else current.requestPool = true
+      bindings.set(identity, current)
+    }
+    add(availability.scope, 'authority')
+    if (availability.settingsSource !== null) {
+      add(availability.settingsSource, 'authority')
+    }
+    for (const candidate of availability.items) {
+      add(candidate.catalogSource, 'authority')
+    }
+    add(availability.requestPoolSource, 'request-pool')
+
+    modelRouteRealtime = [...bindings.values()].map((binding, index) => (
+      options.client.subscribe({
+        subscriptionId: availabilitySubscriptionId(options.subscriptionId, index + 1),
+        subscription: {
+          scope: binding.scope,
+          stream: { kind: 'scope' },
+          eventTypes: [
+            ControlPlaneWebSocketEventType.ModelRouteAvailabilityInvalidatedV1,
+          ],
+        },
+        onEvent(frame) {
+          return applyModelRouteEvent(frame, binding)
+        },
+        async onResetRequired(frame) {
+          if (frame === null) throw clientFailure(
+            'CHAT_MODEL_ROUTE_RESET_INVALID',
+            'The model-route subscription reset did not include a replay cursor.',
+          )
+          const ownGeneration = generation
+          patch({ status: 'refreshing' })
+          await reloadModelRouteAvailability(ownGeneration)
+          return frame.earliestAvailable
+        },
+        onAuthorizationRevoked() {
+          accessRevoked(new ControlPlaneClientError({
+            kind: 'authentication',
+            code: 'AUTHENTICATION_REQUIRED',
+            message: 'The model-route subscription authorization is no longer valid.',
+            requestId: null,
+            retryable: false,
+          }))
+        },
+        onError(error) {
+          if (closed) return
+          if (error.kind === 'authentication' || error.kind === 'authorization') {
+            accessRevoked(error)
+            return
+          }
+          patch({ status: statusForError(error), error })
+        },
+      })
+    ))
+  }
+
   function subscribeRealtime(cursor: EventReadCursor): void {
+    const productSessionId = requireActiveSession()
     realtime?.close()
     realtime = options.client.subscribe({
       subscriptionId: options.subscriptionId,
       subscription: {
         scope: options.scope,
-        stream: { kind: 'product-session', productSessionId: activeProductSessionId },
+        stream: { kind: 'product-session', productSessionId },
         eventTypes: [
           ControlPlaneWebSocketEventType.ProductSessionChangedV1,
           ControlPlaneWebSocketEventType.ProductSessionMessageAppendedV1,
@@ -1010,17 +1432,18 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
   async function reloadFirstMessagePage(ownGeneration: number): Promise<void> {
     const active = controller()
     try {
+      const productSessionId = requireActiveSession()
       const response = expectResponse(await options.client.query({
         ...requestBase(),
         requestId: options.nextRequestId(),
         query: QueryName.SessionMessagesList,
-        parameters: { productSessionId: activeProductSessionId },
+        parameters: { productSessionId },
         page: requestPage(null, messagePageSize),
       }, { signal: active.signal }), QueryName.SessionMessagesList)
       if (!isCurrent(ownGeneration)) return
       assertPage(response.page, response.query)
       patch({
-        messages: assertMessages(response.result.items, activeProductSessionId),
+        messages: assertMessages(response.result.items, productSessionId),
         messagePagination: frozenPagination('idle', response.page),
       })
     } finally {
@@ -1039,6 +1462,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       interactionFailure('CHAT_SESSION_REQUIRED', 'Select a Chat session before sending.')
       return
     }
+    const productSessionId = requireActiveSession()
     const ownGeneration = generation
     const active = controller()
     patch({ interaction: frozenInteraction('submitting') })
@@ -1048,7 +1472,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         requestId: options.nextRequestId(),
         command: CommandName.ChatSubmit,
         expectedRevision: session.revision,
-        payload: { productSessionId: activeProductSessionId, message: value },
+        payload: { productSessionId, message: value },
       }, { signal: active.signal })
       if (!isCurrent(ownGeneration)) return
       const completed = expectCompletedCommand(response, CommandName.ChatSubmit)
@@ -1072,6 +1496,28 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       interactionFailure('CHAT_SESSION_TITLE_REQUIRED', 'Enter a title for the new Chat.')
       return
     }
+    if (currentState.status !== 'ready') {
+      interactionFailure(
+        'CHAT_MODEL_ROUTE_REFRESH_REQUIRED',
+        'Wait for the current model-route refresh before creating a Chat.',
+      )
+      return
+    }
+    const modelRoute = currentState.selectedModelRoute
+    if (
+      modelRoute === null
+      || currentState.modelRouteAvailability === null
+      || !currentState.modelRouteAvailability.items.some(candidate => (
+        isReadyModelRoute(candidate)
+        && modelRouteIdentity(candidate.route) === modelRouteIdentity(modelRoute)
+      ))
+    ) {
+      interactionFailure(
+        'CHAT_MODEL_ROUTE_UNAVAILABLE',
+        'Select a currently available model route before creating a Chat.',
+      )
+      return
+    }
     const ownGeneration = generation
     const active = controller()
     patch({ interaction: frozenInteraction('submitting') })
@@ -1086,7 +1532,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
           projectId: options.scope.projectId,
           repositoryId: options.scope.repositoryId,
           title,
-          modelRoute: input.modelRoute,
+          modelRoute,
         },
       }, { signal: active.signal })
       if (!isCurrent(ownGeneration)) return
@@ -1101,6 +1547,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       )
       activeProductSessionId = input.productSessionId
       applySessionMutation(completed.result)
+      notifyActiveSession()
       await load(true)
     } catch (error) {
       if (!isCurrent(ownGeneration)) return
@@ -1121,6 +1568,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       interactionFailure('CHAT_SESSION_REQUIRED', 'Select a Chat session before stopping it.')
       return
     }
+    const productSessionId = requireActiveSession()
     const ownGeneration = generation
     const active = controller()
     patch({ interaction: frozenInteraction('cancelling') })
@@ -1130,7 +1578,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         requestId: options.nextRequestId(),
         command: CommandName.SessionCancel,
         expectedRevision: session.revision,
-        payload: { productSessionId: activeProductSessionId, reason: value },
+        payload: { productSessionId, reason: value },
       }, { signal: active.signal })
       if (!isCurrent(ownGeneration)) return
       const completed = expectCompletedCommand(response, CommandName.SessionCancel)
@@ -1161,7 +1609,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       interactionFailure('CHAT_INPUT_EXPIRED', 'The pending input request has expired.')
       return
     }
-    assertBinding(input.binding, activeProductSessionId)
+    assertBinding(input.binding, requireActiveSession())
     const ownGeneration = generation
     const active = controller()
     patch({ interaction: frozenInteraction('submitting') })
@@ -1211,7 +1659,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       interactionFailure('CHAT_APPROVAL_EXPIRED', 'The pending approval has expired.')
       return
     }
-    assertBinding(approval.binding, activeProductSessionId)
+    assertBinding(approval.binding, requireActiveSession())
     const ownGeneration = generation
     const active = controller()
     patch({ interaction: frozenInteraction('submitting') })
@@ -1254,6 +1702,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     abortRequests()
     realtime?.close()
     realtime = null
+    closeModelRouteRealtime()
     patch({
       status: replace ? 'loading' : 'refreshing',
       realtime: 'inactive',
@@ -1264,7 +1713,9 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
             session: null,
             messages: Object.freeze([]),
             messagePagination: frozenPagination('idle', EMPTY_PAGE),
-            defaultModelRoute: null,
+            modelRouteAvailability: null,
+            selectedModelRoute: null,
+            modelRouteSelectionIssue,
             runtime: null,
             pendingInputs: Object.freeze([]),
             pendingApprovals: Object.freeze([]),
@@ -1275,8 +1726,11 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     })
     try {
       const cursor = await completeSnapshot(ownGeneration, false)
-      if (cursor === null || !isCurrent(ownGeneration)) return
-      subscribeRealtime(cursor)
+      if (!isCurrent(ownGeneration)) return
+      if (currentState.modelRouteAvailability !== null) {
+        subscribeModelRouteAvailability(currentState.modelRouteAvailability)
+      }
+      if (cursor !== null) subscribeRealtime(cursor)
     } catch {
       // completeSnapshot has already published one bounded error.
     }
@@ -1303,6 +1757,36 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       activeProductSessionId = productSessionId
       await load(true)
     },
+    selectModelRoute(modelRoute) {
+      if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
+      if (currentState.status !== 'ready') {
+        interactionFailure(
+          'CHAT_MODEL_ROUTE_REFRESH_REQUIRED',
+          'Wait for the current model-route refresh before selecting a model.',
+        )
+        return
+      }
+      const identity = modelRouteIdentity(modelRoute)
+      const selected = currentState.modelRouteAvailability?.items.find(candidate => (
+        isReadyModelRoute(candidate)
+        && modelRouteIdentity(candidate.route) === identity
+      ))
+      if (selected === undefined) {
+        interactionFailure(
+          'CHAT_MODEL_ROUTE_UNAVAILABLE',
+          'Refresh Chat and select a currently available model route.',
+        )
+        return
+      }
+      selectedModelRouteIdentity = identity
+      modelRouteSelectionEstablished = true
+      modelRouteSelectionIssue = null
+      patch({
+        selectedModelRoute: selected.route,
+        modelRouteSelectionIssue: null,
+        interaction: frozenInteraction('idle'),
+      })
+    },
     async createSession(input) {
       await createSession(input)
     },
@@ -1328,21 +1812,22 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         messagePagination: frozenPagination('loading', currentState.messagePagination),
       })
       try {
+        const productSessionId = requireActiveSession()
         const response = expectResponse(await options.client.query({
           ...requestBase(),
           requestId: options.nextRequestId(),
           query: QueryName.SessionMessagesList,
-          parameters: { productSessionId: activeProductSessionId },
+          parameters: { productSessionId },
           page: requestPage(cursor, messagePageSize),
         }, { signal: active.signal }), QueryName.SessionMessagesList)
         if (!isCurrent(ownGeneration)) return
         assertPage(response.page, response.query)
-        const messages = assertMessages(response.result.items, activeProductSessionId)
+        const messages = assertMessages(response.result.items, productSessionId)
         patch({
           messages: mergeMessages(
             currentState.messages,
             messages,
-            activeProductSessionId,
+            productSessionId,
           ),
           messagePagination: frozenPagination('idle', response.page),
         })
@@ -1366,6 +1851,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       abortRequests()
       realtime?.close()
       realtime = null
+      closeModelRouteRealtime()
       patch({
         status: 'cancelled',
         realtime: 'inactive',
@@ -1380,12 +1866,13 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     },
     reconnect() {
       if (closed) throw clientFailure('CHAT_VIEW_MODEL_CLOSED', 'The Chat view-model is closed.')
-      if (realtime === null) throw clientFailure(
+      if (realtime === null && modelRouteRealtime.length === 0) throw clientFailure(
         'CHAT_SUBSCRIPTION_INACTIVE',
         'The Chat subscription is not active.',
       )
       patch({ realtime: 'reconnecting', error: null })
-      realtime.reconnect()
+      realtime?.reconnect()
+      for (const subscription of modelRouteRealtime) subscription.reconnect()
     },
     close() {
       if (closed) return
@@ -1394,6 +1881,8 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       abortRequests()
       realtime?.close()
       realtime = null
+      closeModelRouteRealtime()
+      clearModelRouteSelection()
       publish({
         status: 'closed',
         realtime: 'closed',
@@ -1402,7 +1891,9 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
         session: null,
         messages: Object.freeze([]),
         messagePagination: frozenPagination('idle', EMPTY_PAGE),
-        defaultModelRoute: null,
+        modelRouteAvailability: null,
+        selectedModelRoute: null,
+        modelRouteSelectionIssue: null,
         runtime: null,
         pendingInputs: Object.freeze([]),
         pendingApprovals: Object.freeze([]),

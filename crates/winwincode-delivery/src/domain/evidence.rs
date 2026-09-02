@@ -67,9 +67,10 @@ pub struct EvidenceRef {
 /// Outcome classified from one already persisted source fact.
 ///
 /// This value is sealed inside [`ResolvedDeliveryEvidence`]. API callers do not
-/// submit it to verdict computation.
+/// submit it to verdict computation. Read-only projections may expose this
+/// closed classification after rebuilding the same accepted source authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VerifiedEvidenceOutcome {
+pub enum VerifiedEvidenceOutcome {
     Observed,
     Succeeded,
     Failed,
@@ -301,7 +302,9 @@ impl ResolvedDeliveryEvidence {
         &self.evidence
     }
 
-    pub(crate) const fn outcome(&self) -> VerifiedEvidenceOutcome {
+    /// Returns the closed outcome rebuilt from the accepted source authority.
+    #[must_use]
+    pub const fn outcome(&self) -> VerifiedEvidenceOutcome {
         self.outcome
     }
 

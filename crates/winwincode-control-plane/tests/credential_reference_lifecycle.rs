@@ -388,7 +388,7 @@ fn lifecycle_is_scope_bound_replayable_and_revocation_stops_new_resolution() {
     let outbox = storage
         .pending_events()
         .expect("load Credential reference lifecycle events");
-    assert_eq!(outbox.len(), 4);
+    assert_eq!(outbox.len(), 8);
     let stored = storage
         .load_state(&format!(
             "credential-reference:{}",
@@ -755,7 +755,7 @@ fn concurrent_exact_create_returns_the_one_durable_original_response() {
     assert!(responses.windows(2).all(|pair| pair[0] == pair[1]));
 
     let storage = SqliteStorage::open(&root).expect("reopen concurrent Credential storage");
-    assert_eq!(storage.pending_events().expect("pending events").len(), 1);
+    assert_eq!(storage.pending_events().expect("pending events").len(), 2);
     assert_eq!(
         storage
             .pending_audit_events()
@@ -816,7 +816,7 @@ fn concurrent_distinct_creates_share_one_complete_scope_catalog() {
     );
     assert_eq!(
         storage.pending_events().expect("pending events").len(),
-        CALLERS
+        CALLERS * 2
     );
     assert_eq!(
         storage

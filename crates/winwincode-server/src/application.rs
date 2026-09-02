@@ -24,11 +24,12 @@ use winwincode_control_plane::{
     ChatInteractionApiService, ChatInteractionServiceError, ChatInteractionServiceErrorCode,
     CollaborationClock, CollaborationClockError, CollaborationError, CollaborationErrorKind,
     CollaborationService, ControlPlane, DeliveryApplicationError, DurableWorkerInteractionOutbound,
-    EnterpriseRbacService, ModelSettingsError, ModelSettingsErrorKind, ModelSettingsService,
-    ProductSessionApiClock, ProductSessionApiService, ProductSessionExecutionConfig,
-    ProductSessionServiceError, ProductSessionServiceErrorCode, PublicationCommandError,
-    ScopeWorkerHealthEventPort, WorkerManagementService, WorkerManagementServiceError,
-    WorkerManagementServiceErrorKind,
+    EnterpriseRbacService, ModelRequestPoolConfig, ModelRouteAvailabilityError,
+    ModelRouteAvailabilityErrorKind, ModelRouteAvailabilityService, ModelSettingsError,
+    ModelSettingsErrorKind, ModelSettingsService, ProductSessionApiClock, ProductSessionApiService,
+    ProductSessionExecutionConfig, ProductSessionServiceError, ProductSessionServiceErrorCode,
+    PublicationCommandError, ScopeWorkerHealthEventPort, WorkerManagementService,
+    WorkerManagementServiceError, WorkerManagementServiceErrorKind,
 };
 use winwincode_domain::{ControlPlaneWebSocketAuthorizationEpoch, Instant};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
@@ -91,6 +92,9 @@ pub(crate) struct ApplicationState {
     /// by the supervised Worker runtime. It is resolved once at composition
     /// time; request handlers never inspect the checkout or create defaults.
     pub(crate) execution_config: ProductSessionExecutionConfig,
+    /// Immutable startup bounds used to interpret the durable request-pool
+    /// authority for the secret-safe `ModelRoute` availability projection.
+    pub(crate) model_request_pool_config: Option<ModelRequestPoolConfig>,
 }
 
 struct ApplicationComposition {
@@ -273,6 +277,7 @@ impl StandaloneControlPlaneApplication {
                 storage,
                 worker_outbound,
                 execution_config: composition.execution_config,
+                model_request_pool_config: None,
             }))),
             hub,
             clock,
@@ -291,6 +296,25 @@ impl StandaloneControlPlaneApplication {
     pub fn with_runtime_health(mut self, runtime: Arc<dyn RuntimeHealthPort>) -> Self {
         self.runtime = runtime;
         self
+    }
+
+    /// Attaches the same immutable request-pool bounds used by the supervised
+    /// model execution runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns service unavailable if the application state lock is poisoned
+    /// or the application has already been shut down.
+    pub fn with_model_request_pool_config(
+        self,
+        config: ModelRequestPoolConfig,
+    ) -> Result<Self, ApiError> {
+        {
+            let mut guard = self.state()?;
+            let state = guard.as_mut().ok_or_else(service_unavailable)?;
+            state.model_request_pool_config = Some(config);
+        }
+        Ok(self)
     }
 
     pub(crate) fn shared_runtime_state(&self) -> Arc<Mutex<Option<ApplicationState>>> {
@@ -608,12 +632,13 @@ impl StandaloneControlPlaneApplication {
         &self,
         request: CommandRequest,
     ) -> Result<CommandDispatchResponse, ApiError> {
+        let occurred_at = self.clock.now_instant();
         let mut guard = self.state()?;
         let state = guard.as_mut().ok_or_else(service_unavailable)?;
         let response = match request {
             CommandRequest::SettingsUpdateCommand(command) => {
                 ModelSettingsService::new(&mut state.storage)
-                    .update_generated(&command)
+                    .update_generated(&command, occurred_at)
                     .map(CommandCompletedResponse::SettingsUpdateCompletedResponse)
             }
             _ => return Err(application_variant_mismatch()),
@@ -631,10 +656,19 @@ impl StandaloneControlPlaneApplication {
         match request {
             QueryRequest::SettingsGetQuery(query) => ModelSettingsService::new(&mut state.storage)
                 .get(&query)
-                .map(QueryResultResponse::SettingsGetResultResponse),
-            _ => return Err(application_variant_mismatch()),
+                .map(QueryResultResponse::SettingsGetResultResponse)
+                .map_err(|error| model_settings_error(&error)),
+            QueryRequest::ModelRouteAvailabilityListQuery(query) => {
+                ModelRouteAvailabilityService::new(
+                    &mut state.storage,
+                    state.model_request_pool_config,
+                )
+                .list(&query)
+                .map(QueryResultResponse::ModelRouteAvailabilityListResultResponse)
+                .map_err(|error| model_route_availability_error(&error))
+            }
+            _ => Err(application_variant_mismatch()),
         }
-        .map_err(|error| model_settings_error(&error))
     }
 
     fn collaboration_command(
@@ -696,6 +730,30 @@ impl StandaloneControlPlaneApplication {
             QueryRequest::RuntimeProjectionGetQuery(query) => state
                 .control_plane
                 .runtime_projection_get(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::CandidateFilesListQuery(query) => state
+                .control_plane
+                .candidate_files_list(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::CandidateDiffGetQuery(query) => state
+                .control_plane
+                .candidate_diff_get(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::CandidateHistoryListQuery(query) => state
+                .control_plane
+                .candidate_history_list(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::CandidateHistoricalReviewGetQuery(query) => state
+                .control_plane
+                .candidate_historical_review_get(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::EvidenceGetQuery(query) => state
+                .control_plane
+                .evidence_get(&query)
+                .map_err(|error| strongflow_error(&error)),
+            QueryRequest::EvidenceArtifactContentGetQuery(query) => state
+                .control_plane
+                .evidence_artifact_content_get(&query)
                 .map_err(|error| strongflow_error(&error)),
             QueryRequest::DeliveryListQuery(query) => state
                 .control_plane
@@ -1032,6 +1090,27 @@ fn model_settings_error(error: &ModelSettingsError) -> ApiError {
     }
 }
 
+fn model_route_availability_error(error: &ModelRouteAvailabilityError) -> ApiError {
+    match error.kind() {
+        ModelRouteAvailabilityErrorKind::InvalidRequest => ApiError::new(
+            400,
+            "INVALID_REQUEST",
+            "ModelRoute availability request is invalid",
+        ),
+        ModelRouteAvailabilityErrorKind::ScopeDenied => ApiError::new(
+            403,
+            "PERMISSION_DENIED",
+            "ModelRoute availability scope is not authorized",
+        ),
+        ModelRouteAvailabilityErrorKind::CredentialLeak
+        | ModelRouteAvailabilityErrorKind::Storage => ApiError::new(
+            503,
+            "TRUSTED_FACTS_UNAVAILABLE",
+            "ModelRoute availability facts are unavailable",
+        ),
+    }
+}
+
 fn delivery_application_error(error: &DeliveryApplicationError) -> ApiError {
     match error.code() {
         ErrorCode::InvalidRequest => {
@@ -1132,8 +1211,8 @@ fn publication_error(error: &PublicationCommandError) -> ApiError {
 
 fn strongflow_error(error: &StrongFlowProjectionError) -> ApiError {
     use StrongFlowProjectionError::{
-        Internal, InvalidRequest, PermissionDenied, ReadCursorExpired, ResourceNotFound,
-        RevisionConflict, ServiceUnavailable, TrustedFactsUnavailable,
+        CandidateStale, Internal, InvalidRequest, PermissionDenied, ReadCursorExpired,
+        ResourceNotFound, RevisionConflict, ServiceUnavailable, TrustedFactsUnavailable,
     };
     match error {
         InvalidRequest(_) => ApiError::new(400, "INVALID_REQUEST", "StrongFlow query is invalid"),
@@ -1145,6 +1224,9 @@ fn strongflow_error(error: &StrongFlowProjectionError) -> ApiError {
         ResourceNotFound(_) => resource_not_found(),
         RevisionConflict(_) => {
             ApiError::new(409, "REVISION_CONFLICT", "StrongFlow read cut changed")
+        }
+        CandidateStale(_) => {
+            ApiError::new(409, "CANDIDATE_STALE", "Candidate review binding is stale")
         }
         ReadCursorExpired(_) => ApiError::new(
             409,
