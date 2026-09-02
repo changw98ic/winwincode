@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import test from 'node:test'
+import test, { mock } from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
 const compiler = spawnSync('corepack', [
@@ -201,6 +201,54 @@ test('snapshot handoff retains stale data while repeated invalidations produce o
   assert.equal(calls.length, 3)
   assert.equal(cache.peek(base).status, 'fresh')
   cache.close()
+})
+
+test('serialized WebSocket invalidation bursts still coalesce to one trailing HTTP reload', async () => {
+  const calls = []
+  let delayReload = false
+  const fake = fakeClient(async queryRequest => {
+    calls.push(queryRequest)
+    if (delayReload) await new Promise(resolvePromise => { setTimeout(resolvePromise, 5) })
+    return response(`snapshot-${String(calls.length)}`, queryRequest)
+  })
+  const cache = createQueryCache({ client: fake.client })
+  const base = request()
+  await cache.client.query(base)
+  let requestSequence = 1
+  cache.client.subscribe({
+    subscriptionId: 'sub_00000000000000000000000001',
+    subscription: { scope, stream: { kind: 'scope' }, eventTypes: ['activity.recorded.v1'] },
+    async onEvent() {
+      requestSequence += 1
+      await cache.client.query(request({
+        requestId: `req_${String(requestSequence).padStart(26, '0')}`,
+      }))
+    },
+  })
+
+  delayReload = true
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    // The generated WebSocket client awaits each callback before applying the next queued frame.
+    for (let sequence = 1; sequence <= 40; sequence += 1) {
+      const applied = fake.options.onEvent({
+        type: 'event.v1',
+        subscriptionId: 'sub_00000000000000000000000001',
+        authorizationEpoch: 1,
+        sequence,
+        scope,
+        stream: { kind: 'scope' },
+        event: { type: 'activity.recorded.v1' },
+      })
+      mock.timers.tick(5)
+      await applied
+    }
+  } finally {
+    mock.timers.reset()
+    cache.close()
+  }
+
+  assert.ok(calls.length <= 3, `serialized invalidations issued ${String(calls.length - 1)} reloads`)
 })
 
 test('retention reset, authorization epoch change, revocation, resume, and reconnect discard snapshots', async () => {

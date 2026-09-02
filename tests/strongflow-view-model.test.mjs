@@ -35,9 +35,14 @@ const facade = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-view-model-tests/control-plane-client.js',
 )).href}`)
+const queryCacheModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-view-model-tests/core/query-cache.js',
+)).href}`)
 
 const { createStrongFlowCreateViewModel, createStrongFlowViewModel } = module
 const { ControlPlaneClientError } = facade
+const { createQueryCache } = queryCacheModule
 const schemaVersion = 'winwincode/v1'
 const actor = { kind: 'user', id: 'usr_00000000000000000000000001' }
 const scope = {
@@ -1170,6 +1175,52 @@ test('a transiently stale Delivery invalidation retries within the same generati
     'delivery.get',
     'runtime.projection.get',
   ])
+})
+
+test('the production QueryCache lets a StrongFlow consistency retry reach HTTP again', async () => {
+  const rawClient = new FakeClient()
+  const rawQuery = rawClient.query.bind(rawClient)
+  rawClient.query = async request => ({
+    ...await rawQuery(request),
+    requestId: request.requestId,
+  })
+  const cache = createQueryCache({ client: rawClient })
+  const { model } = view(cache.client)
+  try {
+    await model.start()
+    const staleDelivery = delivery(1)
+    const currentDelivery = delivery(2)
+    rawClient.enqueue('delivery.get', response('delivery.get', staleDelivery))
+    rawClient.enqueue('delivery.get', response('delivery.get', currentDelivery))
+    rawClient.enqueue('runtime.projection.get', response(
+      'runtime.projection.get',
+      runtime(currentDelivery),
+    ))
+
+    await rawClient.subscription.onEvent({
+      sequence: 2,
+      authorizationEpoch: 1,
+      event: {
+        type: 'delivery.changed.v1',
+        deliveryId,
+        revision: 2,
+        changeKind: 'advanced',
+      },
+    })
+
+    assert.equal(model.state.status, 'ready')
+    assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+    assert.deepEqual(rawClient.calls.map(call => call.query), [
+      'delivery.get',
+      'runtime.projection.get',
+      'delivery.get',
+      'delivery.get',
+      'runtime.projection.get',
+    ])
+  } finally {
+    model.close()
+    cache.close()
+  }
 })
 
 test('a StageRun rebind invalidation uses its zero runtime sequence as the Delivery minimum', async () => {
