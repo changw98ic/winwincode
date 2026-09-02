@@ -18,6 +18,30 @@
   background: var(--wwc-color-danger-surface);
 }
 
+.wwc-strongflow-review-conflict,
+.wwc-strongflow-attention-conflict {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-warning-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-warning-text);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-strongflow-review-conflict[hidden],
+.wwc-strongflow-attention-conflict[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-review-conflict p,
+.wwc-strongflow-attention-conflict p {
+  flex: 1 1 100%;
+  margin: var(--wwc-space-0);
+}
+
 .wwc-strongflow-retry,
 .wwc-strongflow-reconnect {
   margin-left: var(--wwc-space-3);

@@ -690,6 +690,118 @@ test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, a
   assert.equal(model.listener, null)
 })
 
+test('StrongFlow review isolates its draft, exposes revision changes, and submits one snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.solutionReview.reviewStatus = 'pending'
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const actions = findByClass(rootElement, 'wwc-strongflow-solution-actions')
+  const comments = actions.children[0].children[0]
+  const changes = actions.children[1].children[0]
+
+  comments.value = 'browser review'
+  comments.emit('input')
+  changes.value = 'change one\nchange two'
+  changes.emit('input')
+  const refreshed = structuredClone(current)
+  refreshed.metadata.revisions.delivery = 5
+  model.publish(state({ projection: refreshed }))
+
+  const conflict = findByClass(rootElement, 'wwc-strongflow-review-conflict')
+  assert.equal(comments.value, 'browser review')
+  assert.equal(changes.value, 'change one\nchange two')
+  assert.equal(conflict.hidden, false)
+  assert.match(
+    findByClass(rootElement, 'wwc-strongflow-review-conflict-text').textContent,
+    /revision 4.*revision 5/u,
+  )
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-approve-solution').disabled, true)
+
+  findByClass(rootElement, 'wwc-strongflow-review-keep-draft').emit('click')
+  assert.equal(conflict.hidden, true)
+  findByClass(rootElement, 'wwc-strongflow-request-changes').emit('click')
+  assert.deepEqual(model.calls.at(-1), ['decideSolutionReview', {
+    action: 'request_changes',
+    comments: 'browser review',
+    requestedChanges: ['change one', 'change two'],
+  }])
+
+  model.publish(state({
+    projection: refreshed,
+    interaction: {
+      status: 'error',
+      error: {
+        kind: 'protocol',
+        code: 'REVISION_CONFLICT',
+        message: 'changed',
+        requestId: null,
+        retryable: false,
+      },
+    },
+  }))
+  assert.equal(comments.value, 'browser review')
+
+  const nextCandidate = structuredClone(refreshed)
+  nextCandidate.currentCandidate.diffSha256 = `sha256:${'7'.repeat(64)}`
+  model.publish(state({ projection: nextCandidate }))
+  assert.equal(comments.value, '')
+  assert.equal(changes.value, '')
+  mounted.close()
+})
+
+test('Attention decision drafts keep exact submissions and clear with their entity', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const group = findByClass(rootElement, 'wwc-strongflow-attention-actions')
+  const resolution = group.children[1].children[0]
+  resolution.value = 'browser Attention decision'
+  resolution.emit('input')
+
+  const refreshed = structuredClone(current)
+  refreshed.metadata.revisions.delivery = 5
+  model.publish(state({ projection: refreshed }))
+  assert.equal(resolution.value, 'browser Attention decision')
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-attention-conflict').hidden, false)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-resolve-attention').disabled, true)
+
+  findByClass(rootElement, 'wwc-strongflow-attention-keep-draft').emit('click')
+  findByClass(rootElement, 'wwc-strongflow-resolve-attention').emit('click')
+  assert.deepEqual(model.calls.at(-1), ['resolveAttention', {
+    attentionItemId: current.attention[0].id,
+    decision: 'resolve',
+    resolution: 'browser Attention decision',
+    remediation: null,
+  }])
+
+  model.publish(state({
+    projection: refreshed,
+    interaction: {
+      status: 'error',
+      error: {
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'cancelled',
+        requestId: null,
+        retryable: false,
+      },
+    },
+  }))
+  assert.equal(resolution.value, 'browser Attention decision')
+
+  const deleted = structuredClone(refreshed)
+  deleted.attention = []
+  deleted.delivery.attention = []
+  model.publish(state({ projection: deleted }))
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-attention-actions'), null)
+  assert.equal(resolution.value, '')
+  mounted.close()
+})
+
 test('verdict control stays hidden until all active StageRuns settle', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')

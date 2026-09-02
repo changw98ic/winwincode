@@ -108,6 +108,8 @@ export interface CredentialReferenceRotateInput {
 
 export interface SettingsViewModel {
   readonly state: SettingsViewModelState
+  /** Browser draft owner; changes with the authenticated Actor or exact Scope. */
+  readonly draftScope: string
   subscribe(listener: SettingsViewModelListener): () => void
   start(): Promise<void>
   refresh(): Promise<void>
@@ -244,6 +246,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
   let realtime: ControlPlaneSubscription | null = null
   let generation = 0
   let closed = false
+  const draftScope = JSON.stringify([options.actor, options.scope])
 
   function publish(state: SettingsViewModelState): void {
     currentState = Object.freeze(state)
@@ -492,6 +495,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
 
   return {
     get state() { return currentState },
+    draftScope,
     subscribe(listener) {
       listeners.add(listener)
       listener(currentState)

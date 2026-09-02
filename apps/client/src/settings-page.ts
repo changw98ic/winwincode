@@ -11,6 +11,7 @@ import {
   type StatusTone,
 } from './components/index.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
+import { createEditableDraft, type EditableDraft } from './editable-draft.js'
 import type {
   CredentialReferenceId,
   CredentialReferenceProjection,
@@ -160,6 +161,7 @@ function lifecycleLabel(reference: CredentialReferenceProjection): string {
 /** Mount local Provider settings and write-only Credential reference controls. */
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
+  const pageDraftScope = options.model.draftScope ?? 'mounted-settings-scope'
   const layout = element(document, 'main', 'wwc-settings')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
@@ -243,6 +245,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const routeControls = element(document, 'div', 'wwc-settings-route-controls')
   const saveRoute = element(document, 'button', 'wwc-settings-save-route')
   const clearRoute = element(document, 'button', 'wwc-settings-clear-route')
+  const routeConflict = element(document, 'div', 'wwc-settings-route-conflict')
+  const routeConflictText = element(document, 'p', 'wwc-settings-route-conflict-text')
+  const keepRouteDraft = element(document, 'button', 'wwc-settings-route-keep-draft')
+  const useServerRoute = element(document, 'button', 'wwc-settings-route-use-server')
 
   const createPanel = mountPanel({
     document,
@@ -317,12 +323,20 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   clearRoute.textContent = 'Clear default route'
   clearRoute.dataset.wwcComponent = 'button'
   clearRoute.dataset.variant = 'destructive'
+  routeConflict.setAttribute('role', 'alert')
+  routeConflict.hidden = true
+  keepRouteDraft.type = 'button'
+  keepRouteDraft.textContent = 'Keep my draft'
+  useServerRoute.type = 'button'
+  useServerRoute.textContent = 'Use server values'
+  routeConflict.append(routeConflictText, keepRouteDraft, useServerRoute)
   routeControls.append(saveRoute, clearRoute)
   routeForm.append(
     provider.label,
     model.label,
     credentialLabel,
     concurrency.label,
+    routeConflict,
     routeControls,
   )
   routePanel.content.append(routeForm)
@@ -371,11 +385,47 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     readonly rotateSecret: HTMLInputElement
     readonly rotate: HTMLButtonElement
     readonly revoke: HTMLButtonElement
+    readonly conflict: HTMLElement
+    readonly keepDraft: HTMLButtonElement
+    readonly useServer: HTMLButtonElement
+    readonly draft: EditableDraft<RotateDraftValues>
     readonly onRotate: (event: SubmitEvent) => void
     readonly onRevoke: () => void
+    readonly onSecretInput: () => void
+    readonly onKeepDraft: () => void
+    readonly onUseServer: () => void
   }
-  let routeDirty = false
-  const markRouteDirty = () => { routeDirty = true }
+  type CreateDraftValues = {
+    readonly credentialReferenceId: string
+    readonly displayName: string
+    readonly providerId: string
+  }
+  type RotateDraftValues = {
+    readonly secretState: string
+    readonly rotationVersion: string
+  }
+  const createDraft = createEditableDraft<CreateDraftValues>()
+  type RouteDraftValues = {
+    readonly providerId: string
+    readonly modelId: string
+    readonly credentialReferenceId: string
+    readonly workerConcurrencyLimit: string
+  }
+  const routeDraft = createEditableDraft<RouteDraftValues>()
+  const routeFieldLabels: Readonly<Record<keyof RouteDraftValues, string>> = Object.freeze({
+    providerId: 'Provider ID',
+    modelId: 'Model ID',
+    credentialReferenceId: 'Credential reference',
+    workerConcurrencyLimit: 'Worker concurrency',
+  })
+  const editProvider = () => { routeDraft.edit('providerId', provider.input.value) }
+  const editModel = () => { routeDraft.edit('modelId', model.input.value) }
+  const editCredential = () => {
+    routeDraft.edit('credentialReferenceId', credential.value)
+  }
+  const editConcurrency = () => {
+    routeDraft.edit('workerConcurrencyLimit', concurrency.input.value)
+  }
   const credentialOptions = mountKeyedCollection<CredentialChoice, string, HTMLOptionElement>({
     parent: credential,
     key: choice => choice.key,
@@ -405,6 +455,14 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       )
       const rotate = element(document, 'button', 'wwc-settings-rotate')
       const revoke = element(document, 'button', 'wwc-settings-revoke')
+      const conflict = element(document, 'div', 'wwc-settings-rotate-conflict')
+      const conflictText = element(document, 'p', 'wwc-settings-rotate-conflict-text')
+      const keepDraft = element(document, 'button', 'wwc-settings-rotate-keep-draft')
+      const useServer = element(document, 'button', 'wwc-settings-rotate-use-server')
+      const draft = createEditableDraft<RotateDraftValues>({
+        revisionSensitive: true,
+        redactFields: ['secretState'],
+      })
       const terms = [
         'Reference ID',
         'Provider ID',
@@ -431,13 +489,22 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       revoke.textContent = 'Revoke reference'
       revoke.dataset.wwcComponent = 'button'
       revoke.dataset.variant = 'destructive'
+      conflict.setAttribute('role', 'alert')
+      conflict.hidden = true
+      keepDraft.type = 'button'
+      keepDraft.textContent = 'Keep local secret'
+      useServer.type = 'button'
+      useServer.textContent = 'Discard local secret'
+      conflict.append(conflictText, keepDraft, useServer)
       const onRotate = (event: SubmitEvent) => {
         event.preventDefault()
         if (options.readOnly === true) return
         const row = credentialRows.get(item)
         if (row === undefined) return
         const secret = row.rotateSecret.value
-        row.rotateSecret.value = ''
+        row.draft.edit('secretState', secret.length === 0 ? '' : 'present')
+        const submission = row.draft.beginSubmission()
+        if (submission === null) return
         void options.model.rotateCredentialReference({
           credentialReferenceId: row.current.id,
           vaultLocator: secret,
@@ -448,10 +515,25 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         const row = credentialRows.get(item)
         if (row !== undefined) void options.model.revokeCredentialReference(row.current.id)
       }
+      const onSecretInput = () => {
+        draft.edit('secretState', rotateSecret.input.value.length === 0 ? '' : 'present')
+      }
+      const onKeepDraft = () => {
+        draft.resolveConflicts('keep-draft')
+        render(options.model.state)
+      }
+      const onUseServer = () => {
+        draft.resolveConflicts('use-server')
+        rotateSecret.input.value = ''
+        render(options.model.state)
+      }
       rotateForm.addEventListener('submit', onRotate)
       revoke.addEventListener('click', onRevoke)
+      rotateSecret.input.addEventListener('input', onSecretInput)
+      keepDraft.addEventListener('click', onKeepDraft)
+      useServer.addEventListener('click', onUseServer)
       rotateForm.append(rotateSecret.label, rotate)
-      item.append(title, metadata, rotateForm, revoke)
+      item.append(title, metadata, rotateForm, conflict, revoke)
       credentialRows.set(item, {
         current: reference,
         title,
@@ -460,8 +542,15 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         rotateSecret: rotateSecret.input,
         rotate,
         revoke,
+        conflict,
+        keepDraft,
+        useServer,
+        draft,
         onRotate,
         onRevoke,
+        onSecretInput,
+        onKeepDraft,
+        onUseServer,
       })
       return item
     },
@@ -469,6 +558,47 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const row = credentialRows.get(item)
       if (row === undefined) return
       row.current = reference
+      if (row.draft.state.scope !== null && row.draft.state.submission === null) {
+        row.draft.edit('secretState', row.rotateSecret.value.length === 0 ? '' : 'present')
+      }
+      if (
+        row.draft.state.submission !== null
+        && options.model.state.interaction.status === 'error'
+        && (
+          options.model.state.interaction.operation === 'credential.reference.rotate'
+          || options.model.state.interaction.operation === null
+        )
+      ) {
+        row.draft.finishSubmission(
+          options.model.state.interaction.error?.kind === 'cancelled'
+            ? 'cancelled'
+            : 'failure',
+        )
+      }
+      if (options.model.state.interaction.error?.kind === 'cancelled') {
+        row.draft.edit('secretState', '')
+        row.rotateSecret.value = ''
+      }
+      row.draft.synchronize({
+        scope: `${pageDraftScope}:${reference.id}`,
+        revision: reference.revision,
+        values: {
+          secretState: '',
+          rotationVersion: String(reference.rotationVersion),
+        },
+      })
+      const rotateSubmission = row.draft.state.submission
+      if (
+        rotateSubmission !== null
+        && options.model.state.interaction.status === 'idle'
+        && reference.rotationVersion > Number(rotateSubmission.values.rotationVersion)
+      ) {
+        row.draft.finishSubmission('success')
+        row.rotateSecret.value = ''
+      } else if (
+        rotateSubmission !== null
+        && options.model.state.interaction.status === 'idle'
+      ) row.draft.finishSubmission('failure')
       row.title.textContent = reference.displayName
       const values = [
         reference.id,
@@ -488,9 +618,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const disabled = options.readOnly === true
         || settingsPagePresentation(options.model.state).mutationsDisabled
         || reference.secretState === 'revoked'
-      row.rotate.disabled = disabled
+      row.rotate.disabled = disabled || row.draft.state.revisionConflict
       row.rotateSecret.disabled = disabled
       row.revoke.disabled = disabled
+      row.conflict.hidden = !row.draft.state.revisionConflict
+      const conflictText = row.conflict.children[0]
+      if (conflictText !== undefined) conflictText.textContent = row.draft.state.revisionConflict
+        ? `This Credential reference changed from revision ${String(
+            row.draft.state.baseRevision,
+          )} to revision ${String(row.draft.state.serverRevision)}.`
+        : ''
+      row.keepDraft.disabled = disabled
+      row.useServer.disabled = disabled
     },
     remove(item) {
       const row = credentialRows.get(item)
@@ -498,6 +637,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       row.rotateSecret.value = ''
       row.rotateForm.removeEventListener('submit', row.onRotate)
       row.revoke.removeEventListener('click', row.onRevoke)
+      row.rotateSecret.removeEventListener('input', row.onSecretInput)
+      row.keepDraft.removeEventListener('click', row.onKeepDraft)
+      row.useServer.removeEventListener('click', row.onUseServer)
+      row.draft.reset()
       credentialRows.delete(item)
     },
   })
@@ -506,6 +649,92 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     if (closed) return
     const presentation = settingsPagePresentation(state)
     const route = state.settings?.defaultModelRoute ?? null
+    if (createDraft.state.scope !== null && createDraft.state.submission === null) {
+      createDraft.edit('credentialReferenceId', createId.input.value)
+      createDraft.edit('displayName', createName.input.value)
+      createDraft.edit('providerId', createProvider.input.value)
+    }
+    if (
+      createDraft.state.submission !== null
+      && state.interaction.status === 'error'
+      && (
+        state.interaction.operation === 'credential.reference.create'
+        || state.interaction.operation === null
+      )
+    ) {
+      createDraft.finishSubmission(
+        state.interaction.error?.kind === 'cancelled' ? 'cancelled' : 'failure',
+      )
+    }
+    if (state.interaction.error?.kind === 'cancelled') {
+      createSecret.input.value = ''
+    }
+    createDraft.synchronize(state.settings === null
+      ? null
+      : {
+          scope: `${pageDraftScope}:credential-reference-create`,
+          revision: 0,
+          values: {
+            credentialReferenceId: '',
+            displayName: '',
+            providerId: '',
+          },
+        })
+    const createSubmission = createDraft.state.submission
+    if (
+      createSubmission !== null
+      && state.interaction.status === 'idle'
+      && state.credentials.some(reference => (
+        reference.id === createSubmission.values.credentialReferenceId
+        && reference.displayName === createSubmission.values.displayName.trim()
+        && reference.providerId === createSubmission.values.providerId.trim()
+      ))
+    ) {
+      createDraft.finishSubmission('success')
+      createSecret.input.value = ''
+    }
+    else if (createSubmission !== null && state.interaction.status === 'idle') {
+      createDraft.finishSubmission('failure')
+    }
+    if (
+      routeDraft.state.submission !== null
+      && state.interaction.status === 'error'
+      && (
+        state.interaction.operation === 'settings.update'
+        || state.interaction.operation === null
+      )
+    ) routeDraft.finishSubmission(
+      state.interaction.error?.kind === 'cancelled' ? 'cancelled' : 'failure',
+    )
+    routeDraft.synchronize(state.settings === null
+      ? null
+      : {
+          scope: `${pageDraftScope}:settings`,
+          revision: state.settings.revision,
+          values: {
+            providerId: route?.providerId ?? '',
+            modelId: route?.modelId ?? '',
+            credentialReferenceId: route?.credentialReferenceId ?? '',
+            workerConcurrencyLimit: String(state.settings.workerConcurrencyLimit),
+          },
+        })
+    const submittedRoute = routeDraft.state.submission
+    const routeSubmissionSucceeded = submittedRoute !== null
+      && state.interaction.status === 'idle'
+      && state.settings !== null
+      && state.settings.revision > submittedRoute.revision
+      && (route?.providerId ?? '') === submittedRoute.values.providerId.trim()
+      && (route?.modelId ?? '') === submittedRoute.values.modelId.trim()
+      && (route?.credentialReferenceId ?? '') === submittedRoute.values.credentialReferenceId
+      && String(state.settings.workerConcurrencyLimit)
+        === submittedRoute.values.workerConcurrencyLimit
+    if (
+      submittedRoute !== null
+      && routeSubmissionSucceeded
+    ) routeDraft.finishSubmission('success')
+    else if (submittedRoute !== null && state.interaction.status === 'idle') {
+      routeDraft.finishSubmission('failure')
+    }
     const tone: StatusTone = presentation.errorText !== null
       ? 'danger'
       : state.realtime === 'reconnecting'
@@ -531,37 +760,59 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    if (!routeDirty) {
-      const providerValue = route?.providerId ?? ''
-      const modelValue = route?.modelId ?? ''
-      const concurrencyValue = String(state.settings?.workerConcurrencyLimit ?? 1)
-      const credentialValue = route?.credentialReferenceId ?? ''
-      if (provider.input.value !== providerValue) provider.input.value = providerValue
-      if (model.input.value !== modelValue) model.input.value = modelValue
-      if (concurrency.input.value !== concurrencyValue) concurrency.input.value = concurrencyValue
-    }
     credentialOptions.update([
       { key: '', reference: null },
       ...state.credentials
         .filter(reference => reference.secretState === 'available')
         .map(reference => ({ key: reference.id, reference })),
     ])
-    if (!routeDirty) {
-      const credentialValue = route?.credentialReferenceId ?? ''
-      if (credential.value !== credentialValue) credential.value = credentialValue
+    const routeValues = routeDraft.state.values
+    const routeProviderId = routeValues.providerId ?? ''
+    const routeModelId = routeValues.modelId ?? ''
+    const routeCredentialId = routeValues.credentialReferenceId ?? ''
+    const routeConcurrency = routeValues.workerConcurrencyLimit ?? ''
+    if (provider.input.value !== routeProviderId) provider.input.value = routeProviderId
+    if (model.input.value !== routeModelId) model.input.value = routeModelId
+    if (concurrency.input.value !== routeConcurrency) {
+      concurrency.input.value = routeConcurrency
     }
+    if (credential.value !== routeCredentialId) {
+      credential.value = routeCredentialId
+    }
+    const routeConflicts = routeDraft.state.conflicts
+    routeConflict.hidden = routeConflicts.length === 0
+    routeConflictText.textContent = routeConflicts.length === 0
+      ? ''
+      : `The server changed this draft. ${routeConflicts.map(conflict => (
+          `${routeFieldLabels[conflict.field as keyof RouteDraftValues]}: `
+          + `server “${conflict.serverValue}”; your draft “${conflict.draftValue}”.`
+        )).join(' ')}`
     const mutationsDisabled = options.readOnly === true || presentation.mutationsDisabled
     provider.input.disabled = mutationsDisabled
     model.input.disabled = mutationsDisabled
     credential.disabled = mutationsDisabled
     concurrency.input.disabled = mutationsDisabled
-    saveRoute.disabled = mutationsDisabled
-    clearRoute.disabled = mutationsDisabled || route === null
+    saveRoute.disabled = mutationsDisabled || routeDraft.state.revisionConflict
+    clearRoute.disabled = mutationsDisabled
+      || route === null
+      || routeDraft.state.revisionConflict
+    keepRouteDraft.disabled = mutationsDisabled
+    useServerRoute.disabled = mutationsDisabled
     createId.input.disabled = mutationsDisabled
     createName.input.disabled = mutationsDisabled
     createProvider.input.disabled = mutationsDisabled
     createSecret.input.disabled = mutationsDisabled
     createButton.disabled = mutationsDisabled
+    const createValues = createDraft.state.values
+    if (createId.input.value !== (createValues.credentialReferenceId ?? '')) {
+      createId.input.value = createValues.credentialReferenceId ?? ''
+    }
+    if (createName.input.value !== (createValues.displayName ?? '')) {
+      createName.input.value = createValues.displayName ?? ''
+    }
+    if (createProvider.input.value !== (createValues.providerId ?? '')) {
+      createProvider.input.value = createValues.providerId ?? ''
+    }
     credentialReferences.update(state.credentials)
     references.hidden = state.credentials.length === 0
     referencesEmpty.root.hidden = state.credentials.length !== 0
@@ -570,51 +821,78 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const onRouteSubmit = (event: SubmitEvent) => {
     event.preventDefault()
     if (options.readOnly === true) return
+    const submission = routeDraft.beginSubmission()
+    if (submission === null) {
+      render(options.model.state)
+      return
+    }
     void options.model.updateSettings({
       defaultModelRoute: {
-        providerId: provider.input.value,
-        modelId: model.input.value,
-        credentialReferenceId: credential.value as CredentialReferenceId,
+        providerId: submission.values.providerId,
+        modelId: submission.values.modelId,
+        credentialReferenceId: submission.values.credentialReferenceId as CredentialReferenceId,
       },
-      workerConcurrencyLimit: Number(concurrency.input.value),
-    }).then(() => {
-      if (options.model.state.interaction.status !== 'error') routeDirty = false
+      workerConcurrencyLimit: Number(submission.values.workerConcurrencyLimit),
     })
   }
   const onClearRoute = () => {
     if (options.readOnly === true) return
+    routeDraft.edit('providerId', '')
+    routeDraft.edit('modelId', '')
+    routeDraft.edit('credentialReferenceId', '')
+    const submission = routeDraft.beginSubmission()
+    if (submission === null) {
+      render(options.model.state)
+      return
+    }
     void options.model.updateSettings({
       defaultModelRoute: null,
-      workerConcurrencyLimit: Number(concurrency.input.value),
-    }).then(() => {
-      if (options.model.state.interaction.status !== 'error') routeDirty = false
+      workerConcurrencyLimit: Number(submission.values.workerConcurrencyLimit),
     })
+  }
+  const onKeepRouteDraft = () => {
+    routeDraft.resolveConflicts('keep-draft')
+    render(options.model.state)
+  }
+  const onUseServerRoute = () => {
+    routeDraft.resolveConflicts('use-server')
+    render(options.model.state)
   }
   const onCreateCredential = (event: SubmitEvent) => {
     event.preventDefault()
     if (options.readOnly === true) return
+    createDraft.edit('credentialReferenceId', createId.input.value)
+    createDraft.edit('displayName', createName.input.value)
+    createDraft.edit('providerId', createProvider.input.value)
     const secret = createSecret.input.value
-    createSecret.input.value = ''
+    const submission = createDraft.beginSubmission()
+    if (submission === null) return
     void options.model.createCredentialReference({
-      credentialReferenceId: createId.input.value as CredentialReferenceId,
-      displayName: createName.input.value,
-      providerId: createProvider.input.value,
+      credentialReferenceId: submission.values.credentialReferenceId as CredentialReferenceId,
+      displayName: submission.values.displayName,
+      providerId: submission.values.providerId,
       vaultLocator: secret,
-    }).then(() => {
-      if (options.model.state.interaction.status !== 'error') {
-        createId.input.value = ''
-        createName.input.value = ''
-        createProvider.input.value = ''
-      }
     })
   }
-  provider.input.addEventListener('input', markRouteDirty)
-  model.input.addEventListener('input', markRouteDirty)
-  credential.addEventListener('change', markRouteDirty)
-  concurrency.input.addEventListener('input', markRouteDirty)
+  const onCreateIdInput = () => {
+    createDraft.edit('credentialReferenceId', createId.input.value)
+  }
+  const onCreateNameInput = () => { createDraft.edit('displayName', createName.input.value) }
+  const onCreateProviderInput = () => {
+    createDraft.edit('providerId', createProvider.input.value)
+  }
+  provider.input.addEventListener('input', editProvider)
+  model.input.addEventListener('input', editModel)
+  credential.addEventListener('change', editCredential)
+  concurrency.input.addEventListener('input', editConcurrency)
   routeForm.addEventListener('submit', onRouteSubmit)
   clearRoute.addEventListener('click', onClearRoute)
+  keepRouteDraft.addEventListener('click', onKeepRouteDraft)
+  useServerRoute.addEventListener('click', onUseServerRoute)
   createForm.addEventListener('submit', onCreateCredential)
+  createId.input.addEventListener('input', onCreateIdInput)
+  createName.input.addEventListener('input', onCreateNameInput)
+  createProvider.input.addEventListener('input', onCreateProviderInput)
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -622,15 +900,23 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       if (closed) return
       closed = true
       unsubscribe()
-      provider.input.removeEventListener('input', markRouteDirty)
-      model.input.removeEventListener('input', markRouteDirty)
-      credential.removeEventListener('change', markRouteDirty)
-      concurrency.input.removeEventListener('input', markRouteDirty)
+      provider.input.removeEventListener('input', editProvider)
+      model.input.removeEventListener('input', editModel)
+      credential.removeEventListener('change', editCredential)
+      concurrency.input.removeEventListener('input', editConcurrency)
       routeForm.removeEventListener('submit', onRouteSubmit)
       clearRoute.removeEventListener('click', onClearRoute)
+      keepRouteDraft.removeEventListener('click', onKeepRouteDraft)
+      useServerRoute.removeEventListener('click', onUseServerRoute)
       createForm.removeEventListener('submit', onCreateCredential)
+      createId.input.removeEventListener('input', onCreateIdInput)
+      createName.input.removeEventListener('input', onCreateNameInput)
+      createProvider.input.removeEventListener('input', onCreateProviderInput)
+      createSecret.input.value = ''
       credentialReferences.close()
       credentialOptions.close()
+      routeDraft.reset()
+      createDraft.reset()
       options.model.close()
       retryButton.close()
       reconnectButton.close()

@@ -555,7 +555,7 @@ function pageState(overrides = {}) {
   }
 }
 
-test('settings page clears each write-only input before handing it to the view-model', async () => {
+test('settings keeps write-only inputs only in mounted controls until success or cancel', async () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
   const calls = []
@@ -594,19 +594,54 @@ test('settings page clears each write-only input before handing it to the view-m
   byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
   createSecret.value = 'PAGE_CREATE_SECRET'
   createForm.dispatch('submit')
-  assert.equal(createSecret.value, '')
+  assert.equal(createSecret.value, 'PAGE_CREATE_SECRET')
   assert.equal(calls[0].input.vaultLocator, 'PAGE_CREATE_SECRET')
+
+  state = pageState({
+    interaction: {
+      status: 'error',
+      operation: 'credential.reference.create',
+      error: { kind: 'network', code: 'TEST', message: 'offline' },
+    },
+  })
+  listener(state)
+  assert.equal(createSecret.value, 'PAGE_CREATE_SECRET')
+  state = pageState({
+    status: 'cancelled',
+    interaction: {
+      status: 'error',
+      operation: null,
+      error: { kind: 'cancelled', code: 'REQUEST_CANCELLED', message: 'cancelled' },
+    },
+  })
+  listener(state)
+  assert.equal(createSecret.value, '')
 
   const rotateSecret = byClass(rootElement, 'wwc-settings-rotate-secret')
   const rotateForm = byClass(rootElement, 'wwc-settings-rotate-form')
   rotateSecret.value = 'PAGE_ROTATE_SECRET'
   rotateForm.dispatch('submit')
-  assert.equal(rotateSecret.value, '')
+  assert.equal(rotateSecret.value, 'PAGE_ROTATE_SECRET')
   assert.equal(calls[1].input.vaultLocator, 'PAGE_ROTATE_SECRET')
 
+  state = pageState({
+    interaction: {
+      status: 'error',
+      operation: 'credential.reference.rotate',
+      error: { kind: 'network', code: 'TEST', message: 'offline' },
+    },
+  })
+  listener(state)
+  assert.equal(rotateSecret.value, 'PAGE_ROTATE_SECRET')
+  rotateForm.dispatch('submit')
+  assert.equal(calls[2].input.vaultLocator, 'PAGE_ROTATE_SECRET')
+  state = pageState({ credentials: [credential({ revision: 2, rotationVersion: 2 })] })
+  listener(state)
+  assert.equal(rotateSecret.value, '')
+
   byClass(rootElement, 'wwc-settings-revoke').dispatch('click')
-  assert.equal(calls[2].operation, 'revoke')
-  assert.equal(calls[2].id, credentialId)
+  assert.equal(calls[3].operation, 'revoke')
+  assert.equal(calls[3].id, credentialId)
 
   assert.equal(visibleText(rootElement).includes('PAGE_CREATE_SECRET'), false)
   assert.equal(visibleText(rootElement).includes('PAGE_ROTATE_SECRET'), false)
@@ -743,6 +778,131 @@ test('settings keyed updates preserve route drafts, Credential row identity, foc
   assert.equal(rotateSecret.value, '')
 })
 
+test('settings merges clean fields, exposes revision conflicts, and submits one draft snapshot', async () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  let current = pageState({
+    settings: {
+      revision: 4,
+      defaultModelRoute: {
+        providerId: 'server-provider-a',
+        modelId: 'server-model-a',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 2,
+    },
+  })
+  let listener = () => {}
+  const calls = []
+  let finishUpdate = () => {}
+  const model = {
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    updateSettings(input) {
+      calls.push(structuredClone(input))
+      current = pageState({
+        ...current,
+        interaction: { status: 'submitting', operation: 'settings.update', error: null },
+      })
+      listener(current)
+      return new Promise(resolve => { finishUpdate = resolve })
+    },
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const modelId = byClass(rootElement, 'wwc-settings-model')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const form = byClass(rootElement, 'wwc-settings-route-form')
+  const conflict = byClass(rootElement, 'wwc-settings-route-conflict')
+
+  provider.value = 'browser-provider'
+  provider.dispatch('input')
+  current = pageState({
+    settings: {
+      revision: 5,
+      defaultModelRoute: {
+        providerId: 'server-provider-b',
+        modelId: 'server-model-b',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+
+  assert.equal(provider.value, 'browser-provider')
+  assert.equal(modelId.value, 'server-model-b')
+  assert.equal(concurrency.value, '3')
+  assert.equal(conflict.hidden, false)
+  assert.match(visibleText(conflict), /Provider ID.*server-provider-b.*browser-provider/u)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
+
+  byClass(rootElement, 'wwc-settings-route-keep-draft').dispatch('click')
+  assert.equal(conflict.hidden, true)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, false)
+  form.dispatch('submit')
+  assert.deepEqual(calls[0], {
+    defaultModelRoute: {
+      providerId: 'browser-provider',
+      modelId: 'server-model-b',
+      credentialReferenceId: credentialId,
+    },
+    workerConcurrencyLimit: 3,
+  })
+
+  provider.value = 'attempted-late-edit'
+  provider.dispatch('input')
+  assert.equal(provider.value, 'attempted-late-edit')
+  current = pageState({
+    settings: {
+      revision: 6,
+      defaultModelRoute: {
+        providerId: 'browser-provider',
+        modelId: 'server-model-b',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+    interaction: { status: 'idle', operation: null, error: null },
+  })
+  listener(current)
+  finishUpdate()
+  await Promise.resolve()
+  assert.equal(provider.value, 'browser-provider')
+
+  provider.value = 'draft-to-discard'
+  provider.dispatch('input')
+  current = pageState({
+    settings: {
+      revision: 7,
+      defaultModelRoute: {
+        providerId: 'external-provider',
+        modelId: 'server-model-c',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 4,
+    },
+  })
+  listener(current)
+  byClass(rootElement, 'wwc-settings-route-use-server').dispatch('click')
+  assert.equal(provider.value, 'external-provider')
+  assert.equal(modelId.value, 'server-model-c')
+  assert.equal(concurrency.value, '4')
+  mounted.close()
+})
+
 test('invalid settings scope fails before transport and produces a clear page prompt', async () => {
   const fake = contractFake()
   const client = createControlPlaneClient({
@@ -774,6 +934,7 @@ test('invalid settings scope fails before transport and produces a clear page pr
 
 test('settings page keeps its network boundary in the view-model and renders only safe errors', () => {
   const pageSource = readFileSync(resolve(root, 'apps/client/src/settings-page.ts'), 'utf8')
+  const draftSource = readFileSync(resolve(root, 'apps/client/src/editable-draft.ts'), 'utf8')
   const viewModelSource = readFileSync(
     resolve(root, 'apps/client/src/settings-view-model.ts'),
     'utf8',
@@ -782,6 +943,7 @@ test('settings page keeps its network boundary in the view-model and renders onl
   assert.doesNotMatch(pageSource, /new\s+WebSocket/u)
   assert.doesNotMatch(pageSource, /innerHTML/u)
   assert.doesNotMatch(pageSource, /console\./u)
+  assert.doesNotMatch(`${pageSource}\n${draftSource}`, /localStorage|sessionStorage/u)
   assert.doesNotMatch(viewModelSource, /\bfetch\s*\(/u)
   assert.doesNotMatch(viewModelSource, /new\s+WebSocket/u)
   assert.doesNotMatch(viewModelSource, /console\./u)
