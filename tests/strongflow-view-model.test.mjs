@@ -476,6 +476,451 @@ test('initial bounded pair composes the complete StrongFlow projection and sourc
   ])
 })
 
+test('Candidate files load progressively from the exact current Candidate read cut', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        path: 'src/app.ts',
+        oldPath: null,
+        status: 'modified',
+        additions: 7,
+        deletions: 2,
+        binary: false,
+        encoding: 'utf-8',
+      }],
+    },
+    page: { hasMore: true, nextCursor: 'candidate-files:2' },
+  })
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        path: 'src/current.ts',
+        oldPath: 'src/legacy.ts',
+        status: 'renamed',
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        encoding: 'utf-8',
+      }],
+    },
+    page: { hasMore: false, nextCursor: null },
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.deepEqual(client.calls[2], {
+    schemaVersion,
+    requestId: requestId(3),
+    actor,
+    scope,
+    query: 'candidate.files.list',
+    parameters: {
+      deliveryId,
+      atCursor: readCursor(),
+      readPageLimit: 1,
+      candidateRef: currentCandidate.candidateRef,
+      candidateTreeId: currentCandidate.candidateTreeId,
+      diffSha256: currentCandidate.diffSha256,
+      statuses: [],
+      pathPrefix: null,
+    },
+    page: { cursor: null, limit: 200 },
+  })
+  assert.equal(model.state.candidateFiles.status, 'ready')
+  assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), ['src/app.ts'])
+  assert.equal(model.state.candidateFiles.hasMore, true)
+
+  await model.loadMoreCandidateFiles()
+  assert.equal(client.calls[3].page.cursor, 'candidate-files:2')
+  assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), [
+    'src/app.ts',
+    'src/current.ts',
+  ])
+  assert.equal(model.state.candidateFiles.hasMore, false)
+})
+
+test('Candidate file selection updates the deep link and loads one bounded Diff at a time', async () => {
+  const selectedPaths = []
+  const { client, model } = view(undefined, {
+    selectedCandidatePath: null,
+    onCandidatePathChange(path) { selectedPaths.push(path) },
+  })
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'src/app.ts',
+    oldPath: null,
+    status: 'modified',
+    additions: 7,
+    deletions: 2,
+    binary: false,
+    encoding: 'utf-8',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [file],
+    },
+    page: page(),
+  })
+  client.enqueue('candidate.diff.get', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.diff.get',
+    result: {
+      kind: 'candidate_diff_chunk',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      path: file.path,
+      oldPath: null,
+      status: 'modified',
+      binary: false,
+      contentEncoding: 'utf-8',
+      encoding: 'base64',
+      mediaType: 'application/vnd.winwincode.git-diff',
+      fileDiffSha256: `sha256:${'4'.repeat(64)}`,
+      offset: 0,
+      returnedBytes: 4,
+      totalBytes: 9,
+      dataBase64: 'ZGlmZg==',
+      nextOffset: 4,
+    },
+    page: page(),
+  })
+  client.enqueue('candidate.diff.get', {
+    schemaVersion,
+    requestId: requestId(5),
+    query: 'candidate.diff.get',
+    result: {
+      kind: 'candidate_diff_chunk',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      path: file.path,
+      oldPath: null,
+      status: 'modified',
+      binary: false,
+      contentEncoding: 'utf-8',
+      encoding: 'base64',
+      mediaType: 'application/vnd.winwincode.git-diff',
+      fileDiffSha256: `sha256:${'4'.repeat(64)}`,
+      offset: 4,
+      returnedBytes: 5,
+      totalBytes: 9,
+      dataBase64: 'IG1vcmU=',
+      nextOffset: null,
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+  await model.selectCandidateFile(file.path)
+
+  assert.deepEqual(selectedPaths, [file.path])
+  assert.equal(client.calls[3].query, 'candidate.diff.get')
+  assert.deepEqual(client.calls[3].parameters, {
+    deliveryId,
+    atCursor: readCursor(),
+    readPageLimit: 1,
+    candidateRef: currentCandidate.candidateRef,
+    candidateTreeId: currentCandidate.candidateTreeId,
+    diffSha256: currentCandidate.diffSha256,
+    path: file.path,
+    offset: 0,
+    length: 65_536,
+  })
+  assert.equal(model.state.candidateFiles.selectedPath, file.path)
+  assert.equal(model.state.candidateFiles.diff.content, 'diff')
+  assert.equal(model.state.candidateFiles.diff.hasMore, true)
+
+  await model.loadMoreCandidateDiff()
+  assert.equal(client.calls[4].parameters.offset, 4)
+  assert.equal(model.state.candidateFiles.diff.content, 'diff more')
+  assert.equal(model.state.candidateFiles.diff.hasMore, false)
+  assert.equal(model.state.candidateFiles.diff.fileDiffSha256, `sha256:${'4'.repeat(64)}`)
+})
+
+test('Candidate deep links select the exact file after its bounded page arrives', async () => {
+  const pathChanges = []
+  const { client, model } = view(undefined, {
+    selectedCandidatePath: 'src/deep-link.ts',
+    onCandidatePathChange(path) { pathChanges.push(path) },
+  })
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'src/deep-link.ts',
+    oldPath: null,
+    status: 'added',
+    additions: 1,
+    deletions: 0,
+    binary: false,
+    encoding: 'utf-8',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [file],
+    },
+    page: page(),
+  })
+  client.enqueue('candidate.diff.get', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.diff.get',
+    result: {
+      kind: 'candidate_diff_chunk',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      path: file.path,
+      oldPath: null,
+      status: 'added',
+      binary: false,
+      contentEncoding: 'utf-8',
+      encoding: 'base64',
+      mediaType: 'application/vnd.winwincode.git-diff',
+      fileDiffSha256: `sha256:${'5'.repeat(64)}`,
+      offset: 0,
+      returnedBytes: 4,
+      totalBytes: 4,
+      dataBase64: 'ZGlmZg==',
+      nextOffset: null,
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.equal(model.state.candidateFiles.selectedPath, file.path)
+  assert.equal(model.state.candidateFiles.diff.content, 'diff')
+  assert.deepEqual(pathChanges, [])
+  assert.deepEqual(client.calls.map(call => call.query), [
+    'delivery.get',
+    'runtime.projection.get',
+    'candidate.files.list',
+    'candidate.diff.get',
+  ])
+})
+
+test('binary Candidate files report an unavailable preview without a Diff request', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'public/logo.png',
+    oldPath: null,
+    status: 'modified',
+    additions: null,
+    deletions: null,
+    binary: true,
+    encoding: 'binary',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [file],
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+  await model.selectCandidateFile(file.path)
+
+  assert.equal(model.state.candidateFiles.diff.status, 'unavailable')
+  assert.equal(model.state.candidateFiles.diff.unavailableReason, 'binary')
+  assert.deepEqual(client.calls.map(call => call.query), [
+    'delivery.get',
+    'runtime.projection.get',
+    'candidate.files.list',
+  ])
+})
+
+test('Candidate file metadata is discarded when the frozen Candidate identity changes', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
+      items: [{
+        path: 'src/old-candidate.ts',
+        oldPath: null,
+        status: 'modified',
+        additions: 1,
+        deletions: 1,
+        binary: false,
+        encoding: 'utf-8',
+      }],
+    },
+    page: page(),
+  })
+  await model.start()
+  await model.loadCandidateFiles()
+
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  nextDelivery.currentCandidate = {
+    ...nextDelivery.currentCandidate,
+    candidateCommitId: '3333333333333333333333333333333333333333',
+    candidateTreeId: '4444444444444444444444444444444444444444',
+    diffSha256: `sha256:${'5'.repeat(64)}`,
+  }
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+
+  await model.refresh()
+
+  assert.equal(model.state.candidateFiles.status, 'idle')
+  assert.deepEqual(model.state.candidateFiles.items, [])
+  assert.equal(model.state.candidateFiles.diff.status, 'idle')
+})
+
+test('Candidate file pages fail closed when their Candidate digest does not match', async () => {
+  const { client, model } = view()
+  const mismatchedCandidate = {
+    ...delivery().currentCandidate,
+    diffSha256: `sha256:${'9'.repeat(64)}`,
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(3),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: mismatchedCandidate,
+      readCursor: readCursor(),
+      items: [],
+    },
+    page: page(),
+  })
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.equal(model.state.candidateFiles.status, 'error')
+  assert.equal(model.state.candidateFiles.error.code, 'STRONGFLOW_CANDIDATE_FILES_MISMATCH')
+  assert.deepEqual(model.state.candidateFiles.items, [])
+})
+
+test('large Candidate inventories page progressively into one bounded client preview', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+    client.enqueue('candidate.files.list', {
+      schemaVersion,
+      requestId: requestId(pageIndex + 3),
+      query: 'candidate.files.list',
+      result: {
+        kind: 'candidate_file_page',
+        candidate: currentCandidate,
+        readCursor: readCursor(),
+        items: Array.from({ length: 200 }, (_, itemIndex) => ({
+          path: `src/page-${String(pageIndex)}-file-${String(itemIndex).padStart(3, '0')}.ts`,
+          oldPath: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          encoding: 'utf-8',
+        })),
+      },
+      page: {
+        hasMore: true,
+        nextCursor: `candidate-files:${String(pageIndex + 2)}`,
+      },
+    })
+  }
+
+  await model.start()
+  await model.loadCandidateFiles()
+  for (let pageIndex = 1; pageIndex < 10; pageIndex += 1) {
+    await model.loadMoreCandidateFiles()
+  }
+
+  assert.equal(model.state.candidateFiles.items.length, 2_000)
+  assert.equal(model.state.candidateFiles.previewLimited, true)
+  assert.equal(model.state.candidateFiles.hasMore, false)
+  const queryCount = client.calls.length
+  await model.loadMoreCandidateFiles()
+  assert.equal(client.calls.length, queryCount)
+})
+
+test('Candidate Diff decoding preserves UTF-8 characters split across bounded chunks', async () => {
+  const { client, model } = view()
+  const currentCandidate = delivery().currentCandidate
+  const file = {
+    path: 'src/unicode.ts', oldPath: null, status: 'modified', additions: 1, deletions: 0,
+    binary: false, encoding: 'utf-8',
+  }
+  client.enqueue('candidate.files.list', {
+    schemaVersion, requestId: requestId(3), query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page', candidate: currentCandidate,
+      readCursor: readCursor(), items: [file],
+    },
+    page: page(),
+  })
+  for (const [request, offset, dataBase64, nextOffset] of [
+    [4, 0, 'ww==', 1],
+    [5, 1, 'qQ==', null],
+  ]) {
+    client.enqueue('candidate.diff.get', {
+      schemaVersion, requestId: requestId(request), query: 'candidate.diff.get',
+      result: {
+        kind: 'candidate_diff_chunk', candidate: currentCandidate,
+        readCursor: readCursor(), path: file.path, oldPath: null, status: 'modified',
+        binary: false, contentEncoding: 'utf-8', encoding: 'base64',
+        mediaType: 'application/vnd.winwincode.git-diff',
+        fileDiffSha256: `sha256:${'6'.repeat(64)}`,
+        offset, returnedBytes: 1, totalBytes: 2, dataBase64, nextOffset,
+      },
+      page: page(),
+    })
+  }
+
+  await model.start()
+  await model.loadCandidateFiles()
+  await model.selectCandidateFile(file.path)
+  assert.equal(model.state.candidateFiles.diff.content, '')
+  await model.loadMoreCandidateDiff()
+  assert.equal(model.state.candidateFiles.diff.content, 'é')
+})
+
 test('empty StrongFlow creates and advances one Delivery with exact authority and revisions', async () => {
   const calls = []
   const created = {

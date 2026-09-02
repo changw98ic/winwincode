@@ -107,10 +107,12 @@ export function strongFlowRouteHash(
   deliveryId: DeliveryId,
   productSessionId: ProductSessionId,
   stageRunId: StageRunId,
+  candidatePath: string | null = null,
 ): string {
   return `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
     + `&session=${encodeURIComponent(productSessionId)}`
     + `&stageRun=${encodeURIComponent(stageRunId)}`
+    + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
 }
 
 function repositoryScope(
@@ -698,6 +700,10 @@ export function mountWinWinCodeClient(
       }
       const detail = (detailValue as DeliveryGetResultResponse).result
       const requestedStageRunId = parameters.get('stageRun') as StageRunId | null
+      const routeCandidatePath = parameters.get('file')
+      let selectedCandidatePath = routeCandidatePath === null || routeCandidatePath.length === 0
+        ? null
+        : routeCandidatePath
       const stage = requestedStageRunId === null
         ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
         : detail.stages.find(candidate => candidate.id === requestedStageRunId)
@@ -709,12 +715,19 @@ export function mountWinWinCodeClient(
         return
       }
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      let routeProductSessionId = productSessionId
+      let routeStageRunId = stage.id
       if (
         parameters.get('delivery') === null
         || parameters.get('session') === null
         || parameters.get('stageRun') === null
       ) {
-        replaceHash(strongFlowRouteHash(deliveryId, productSessionId, stage.id))
+        replaceHash(strongFlowRouteHash(
+          deliveryId,
+          productSessionId,
+          stage.id,
+          selectedCandidatePath,
+        ))
       }
       const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
         import('./strongflow-view-model.js'),
@@ -733,12 +746,26 @@ export function mountWinWinCodeClient(
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        selectedCandidatePath,
+        onCandidatePathChange(path) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          selectedCandidatePath = path
+          replaceHash(strongFlowRouteHash(
+            deliveryId,
+            routeProductSessionId,
+            routeStageRunId,
+            path,
+          ))
+        },
         onStageBindingChange(binding) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          routeProductSessionId = binding.productSessionId
+          routeStageRunId = binding.stageRunId
           replaceHash(strongFlowRouteHash(
             deliveryId,
             binding.productSessionId,
             binding.stageRunId,
+            selectedCandidatePath,
           ))
         },
       })

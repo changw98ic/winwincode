@@ -15,7 +15,7 @@ import { mountKeyedCollection, type KeyedCollectionView } from './components/key
 import { mountSplitPane } from './components/split-pane.js'
 import { mountTabs, type TabItem } from './components/tabs.js'
 import { createEditableDraft, type EditableDraft } from './editable-draft.js'
-import { renderStrongFlowCandidate } from './strongflow-candidate.js'
+import { mountStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
   boundedItems,
@@ -755,11 +755,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let navigationDrawerOpen = false
   let contextDrawerOpen = false
   let diagramsNode: HTMLElement | null = null
-  let candidateNode: HTMLElement | null = null
   let contextEvidenceNode: HTMLElement | null = null
   let artifactEvidenceNode: HTMLElement | null = null
   let diagramsFingerprint: string | null = null
-  let candidateFingerprint: string | null = null
   let lastEvidenceKey: string | null = null
   let lastLayoutKey: string | null = null
   let activeDeliveryId: string | null = null
@@ -1025,6 +1023,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   content.append(workspace, navigationDrawer.root, contextDrawer.root)
   layout.append(status, error, content)
   options.root.replaceChildren(layout)
+
+  const candidateView = mountStrongFlowCandidate({
+    document,
+    limits,
+    onLoadFiles() { void options.model.loadCandidateFiles() },
+    onLoadMoreFiles() { void options.model.loadMoreCandidateFiles() },
+    onSelectFile(path) { void options.model.selectCandidateFile(path) },
+    onLoadMoreDiff() { void options.model.loadMoreCandidateDiff() },
+  })
+  candidateHost.append(candidateView.root)
 
   const deliveryRows = new WeakMap<HTMLLIElement, {
     readonly link: HTMLAnchorElement
@@ -1500,7 +1508,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(deliveriesOmitted, bounded.omitted, 'Deliveries')
   }
 
-  function renderProjection(projection: StrongFlowProjection | null, stateStatus: string): void {
+  function renderProjection(
+    projection: StrongFlowProjection | null,
+    stateStatus: string,
+    candidateFiles: StrongFlowViewModelState['candidateFiles'],
+  ): void {
     empty.hidden = projection !== null
     overview.hidden = projection === null
     tasksSection.hidden = projection === null
@@ -1519,16 +1531,14 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
       if (diagramsNode !== null) diagramsNode.remove()
-      if (candidateNode !== null) candidateNode.remove()
       if (contextEvidenceNode !== null) contextEvidenceNode.remove()
       if (artifactEvidenceNode !== null) artifactEvidenceNode.remove()
       diagramsNode = null
-      candidateNode = null
       contextEvidenceNode = null
       artifactEvidenceNode = null
       diagramsFingerprint = null
-      candidateFingerprint = null
       lastEvidenceKey = null
+      candidateView.update({ projection: null, candidateFiles })
       return
     }
 
@@ -1559,18 +1569,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       diagramsHost.append(diagramsNode)
       diagramsFingerprint = nextDiagramsFingerprint
     }
-    const nextCandidateFingerprint = JSON.stringify([
-      projection.currentCandidate,
-      projection.evidence,
-      projection.verdict,
-      projection.publication,
-    ])
-    if (candidateNode === null || candidateFingerprint !== nextCandidateFingerprint) {
-      candidateNode?.remove()
-      candidateNode = renderStrongFlowCandidate(document, projection, limits)
-      candidateHost.append(candidateNode)
-      candidateFingerprint = nextCandidateFingerprint
-    }
+    candidateView.update({ projection, candidateFiles })
     if (
       contextEvidenceNode === null
       || artifactEvidenceNode === null
@@ -1885,7 +1884,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
     renderDeliveries(state)
-    renderProjection(state.projection, state.status)
+    renderProjection(state.projection, state.status, state.candidateFiles)
     renderActions(state)
     renderLayout(strongFlowLayoutMode(viewport.width))
   }
@@ -1921,7 +1920,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       taskCollection.close()
       deliveryCollection.close()
       diagramsNode?.remove()
-      candidateNode?.remove()
+      candidateView.close()
       contextEvidenceNode?.remove()
       artifactEvidenceNode?.remove()
       navigationResize.close()

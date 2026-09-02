@@ -198,6 +198,26 @@ function state(overrides = {}) {
     status: 'ready',
     realtime: 'subscribed',
     projection: projection(),
+    candidateFiles: {
+      status: 'idle',
+      items: [],
+      hasMore: false,
+      previewLimited: false,
+      selectedPath: null,
+      diff: {
+        status: 'idle',
+        path: null,
+        content: '',
+        loadedBytes: 0,
+        totalBytes: null,
+        hasMore: false,
+        previewLimited: false,
+        fileDiffSha256: null,
+        unavailableReason: null,
+        error: null,
+      },
+      error: null,
+    },
     interaction: { status: 'idle', error: null },
     error: null,
     ...overrides,
@@ -246,7 +266,7 @@ class FakeElement {
   #textContent = ''
 
   get textContent() {
-    return this.#textContent
+    return this.#textContent + this.children.map(child => child.textContent).join('')
   }
 
   set textContent(value) {
@@ -304,11 +324,31 @@ class FakeElement {
   }
 
   emit(name, values = {}) {
-    for (const listener of this.listeners.get(name) ?? []) listener(values)
+    const event = {
+      target: this,
+      preventDefault() {},
+      ...values,
+    }
+    let current = this
+    while (current !== null) {
+      for (const listener of current.listeners.get(name) ?? []) listener(event)
+      current = current.parentNode
+    }
   }
+
+  closest(selector) {
+    if (selector.startsWith('.') && this.className.split(' ').includes(selector.slice(1))) return this
+    return this.parentNode?.closest?.(selector) ?? null
+  }
+
+  focus() { this.ownerDocument.activeElement = this }
+
+  click() { this.emit('click') }
 }
 
 class FakeDocument {
+  activeElement = null
+
   createElement(tagName) {
     return new FakeElement(this, tagName)
   }
@@ -350,6 +390,10 @@ class FakeStrongFlowViewModel {
 
   async start() { this.calls.push(['start']) }
   async refresh() { this.calls.push(['refresh']) }
+  async loadCandidateFiles() { this.calls.push(['loadCandidateFiles']) }
+  async loadMoreCandidateFiles() { this.calls.push(['loadMoreCandidateFiles']) }
+  async selectCandidateFile(path) { this.calls.push(['selectCandidateFile', path]) }
+  async loadMoreCandidateDiff() { this.calls.push(['loadMoreCandidateDiff']) }
   async decideSolutionReview(input) { this.calls.push(['decideSolutionReview', input]) }
   async approveTaskBreakdown() { this.calls.push(['approveTaskBreakdown']) }
   async resolveAttention(input) { this.calls.push(['resolveAttention', input]) }
@@ -477,6 +521,68 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.deepEqual(rootElement.children, [])
 })
 
+test('Candidate workspace renders a bounded searchable tree and linked Diff without promoting digests', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const files = many(230, value => ({
+    path: value === 1 ? 'src/current.ts' : `src/feature-${String(value).padStart(3, '0')}.ts`,
+    oldPath: value === 1 ? 'src/legacy.ts' : null,
+    status: value === 1 ? 'renamed' : value === 2 ? 'added' : 'modified',
+    additions: value === 3 ? null : value,
+    deletions: value === 3 ? null : 1,
+    binary: value === 3,
+    encoding: value === 3 ? 'binary' : 'utf-8',
+  }))
+  const candidateState = state()
+  candidateState.candidateFiles = {
+    status: 'ready',
+    items: files,
+    hasMore: true,
+    previewLimited: false,
+    selectedPath: 'src/current.ts',
+    diff: {
+      status: 'ready',
+      path: 'src/current.ts',
+      content: 'diff --git a/src/legacy.ts b/src/current.ts',
+      loadedBytes: 45,
+      totalBytes: 90,
+      hasMore: true,
+      previewLimited: false,
+      fileDiffSha256: `sha256:${'4'.repeat(64)}`,
+      unavailableReason: null,
+      error: null,
+    },
+    error: null,
+  }
+  const model = new FakeStrongFlowViewModel(candidateState)
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+
+  const tree = findByClass(rootElement, 'wwc-candidate-file-tree')
+  const summary = findByClass(rootElement, 'wwc-candidate-file-summary')
+  const rows = findAllByClass(rootElement, 'wwc-candidate-file-row')
+  assert.equal(tree.getAttribute('role'), 'tree')
+  assert.match(summary.textContent, /230 files/u)
+  assert.match(summary.textContent, /\+26,562/u)
+  assert.equal(rows.length <= 200, true)
+  assert.match(findByClass(rootElement, 'wwc-candidate-file-renamed').textContent, /src\/legacy\.ts/u)
+  assert.match(findByClass(rootElement, 'wwc-candidate-file-preview-unavailable').textContent, /Binary/u)
+  assert.equal(findByClass(rootElement, 'wwc-candidate-diff-content').textContent,
+    'diff --git a/src/legacy.ts b/src/current.ts')
+  assert.match(findByClass(rootElement, 'wwc-candidate-technical-details').textContent,
+    new RegExp(`sha256:${'3'.repeat(64)}`, 'u'))
+  assert.doesNotMatch(findByClass(rootElement, 'wwc-candidate-file-summary').textContent, /sha256|refs\//u)
+
+  findByClass(rootElement, 'wwc-candidate-load-more-files').emit('click')
+  assert.deepEqual(model.calls.at(-1), ['loadMoreCandidateFiles'])
+  findByClass(rootElement, 'wwc-candidate-load-more-diff').emit('click')
+  assert.deepEqual(model.calls.at(-1), ['loadMoreCandidateDiff'])
+  const selected = rows.find(row => row.dataset.path === 'src/current.ts')
+  selected.emit('click')
+  assert.deepEqual(model.calls.at(-1), ['selectCandidateFile', 'src/current.ts'])
+
+  mounted.close()
+})
+
 test('empty StrongFlow keeps one complete creation draft through command errors', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
@@ -561,6 +667,18 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003',
+  )
+  assert.equal(
+    strongFlowRouteHash(
+      deliveryId,
+      'psn_00000000000000000000000002',
+      'run_00000000000000000000000003',
+      'src/current file.ts',
+    ),
+    `#/strongflow?delivery=${deliveryId}`
+      + '&session=psn_00000000000000000000000002'
+      + '&stageRun=run_00000000000000000000000003'
+      + '&file=src%2Fcurrent%20file.ts',
   )
 })
 
