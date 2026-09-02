@@ -460,12 +460,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let closed = false
   let diagramsNode: HTMLElement | null = null
   let candidateNode: HTMLElement | null = null
-  let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
-  let lastRuntime: StrongFlowProjection['runtime'] | null = null
-  let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
-  let lastEvidence: StrongFlowProjection['evidence'] | null = null
-  let lastVerdict: StrongFlowProjection['verdict'] | null = null
-  let lastPublication: StrongFlowProjection['publication'] | null = null
+  let diagramsFingerprint: string | null = null
+  let candidateFingerprint: string | null = null
+  let activeDeliveryId: string | null = null
   let solutionDraftKey: string | null = null
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
@@ -561,7 +558,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       row.link.textContent = delivery.title
       row.link.dataset.deliveryId = delivery.deliveryId
       row.status.textContent = `${delivery.status} · r${String(delivery.revision)}`
-      if (delivery.deliveryId === options.model.state.projection?.delivery.deliveryId) {
+      if (delivery.deliveryId === activeDeliveryId) {
         row.link.setAttribute('aria-current', 'page')
       } else {
         row.link.removeAttribute('aria-current')
@@ -823,6 +820,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
 
   function renderDeliveries(state: StrongFlowViewModelState): void {
     const active = state.projection?.delivery ?? null
+    activeDeliveryId = active?.deliveryId ?? null
     const byId = new Map(
       (options.deliveries ?? []).map(delivery => [delivery.deliveryId, delivery]),
     )
@@ -875,12 +873,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       if (candidateNode !== null) candidateNode.remove()
       diagramsNode = null
       candidateNode = null
-      lastSolutionReview = null
-      lastRuntime = null
-      lastCandidate = null
-      lastEvidence = null
-      lastVerdict = null
-      lastPublication = null
+      diagramsFingerprint = null
+      candidateFingerprint = null
       return
     }
 
@@ -899,38 +893,39 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(stagesOmitted, boundedStages.omitted, 'stages')
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
 
-    if (
-      diagramsNode === null
-      || lastSolutionReview !== projection.solutionReview
-      || lastRuntime !== projection.runtime
-    ) {
+    const nextDiagramsFingerprint = JSON.stringify([
+      projection.solutionReview?.architectureDiagram ?? null,
+      projection.solutionReview?.processDiagram ?? null,
+      projection.runtime.sessions,
+    ])
+    if (diagramsNode === null || diagramsFingerprint !== nextDiagramsFingerprint) {
       diagramsNode?.remove()
       diagramsNode = renderStrongFlowDiagrams(document, projection, limits)
       diagramsHost.append(diagramsNode)
-      lastSolutionReview = projection.solutionReview
-      lastRuntime = projection.runtime
+      diagramsFingerprint = nextDiagramsFingerprint
     }
-    if (
-      candidateNode === null
-      || lastCandidate !== projection.currentCandidate
-      || lastEvidence !== projection.evidence
-      || lastVerdict !== projection.verdict
-      || lastPublication !== projection.publication
-    ) {
+    const nextCandidateFingerprint = JSON.stringify([
+      projection.currentCandidate,
+      projection.evidence,
+      projection.verdict,
+      projection.publication,
+    ])
+    if (candidateNode === null || candidateFingerprint !== nextCandidateFingerprint) {
       candidateNode?.remove()
       candidateNode = renderStrongFlowCandidate(document, projection, limits)
       candidateHost.append(candidateNode)
-      lastCandidate = projection.currentCandidate
-      lastEvidence = projection.evidence
-      lastVerdict = projection.verdict
-      lastPublication = projection.publication
+      candidateFingerprint = nextCandidateFingerprint
     }
   }
 
   function renderActions(state: StrongFlowViewModelState): void {
     const projection = state.projection
     const interaction = state.interaction ?? { status: 'idle', error: null }
-    const busy = interaction.status === 'submitting' || interaction.status === 'waiting'
+    const busy = interaction.status === 'submitting'
+      || interaction.status === 'waiting'
+      || state.status === 'loading'
+      || state.status === 'refreshing'
+      || state.realtime === 'reloading'
     actions.setAttribute('aria-busy', String(busy))
     const review = projection?.solutionReview ?? null
     const pendingReview = review?.reviewStatus === 'pending'
