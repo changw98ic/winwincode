@@ -76,7 +76,8 @@ use crate::stage_runtime_projection::{
 };
 use crate::store::{
     AdapterStore, AdapterStoreError, StoredApprovalOperation, StoredApprovalOperationKind,
-    StoredApprovalOperationState, StoredInputOperation, StoredInputOperationState,
+    StoredApprovalOperationState, StoredInputChoiceIdentity, StoredInputOperation,
+    StoredInputOperationState,
 };
 
 const DEFAULT_EVENT_POLL_MILLIS: u64 = 25;
@@ -1147,24 +1148,14 @@ impl ProductionCodexAdapter {
                 question.id.as_bytes(),
             ],
         );
-        let choices = project_interactive_input_choices(&input_request_id, question)?;
+        let choice_replay_keys = interactive_input_choice_replay_keys(question)?;
         let request_digest =
             private_payload_digest(b"winwincode.kernel-input-request.v1", request)?;
-        let operation = StoredInputOperation {
-            input_request_id: input_request_id.clone(),
-            run_key: run_key.to_owned(),
-            kernel_session_id: run.record.kernel_session_id.clone(),
-            question_id: question.id.clone(),
-            turn_id,
-            request_digest,
-            resolution_digest: None,
-            state: StoredInputOperationState::Pending,
-        };
-        let already_resolved = if let Some(existing) = self
+        let existing = self
             .store
             .load_input_operation(&input_request_id)
-            .map_err(map_store_error)?
-        {
+            .map_err(map_store_error)?;
+        let operation = if let Some(existing) = existing {
             // A resumed Core turn can replay the exact tool call after the
             // host response was durably accepted.  The response is already
             // queued in the new Session waiter, so the replayed event is an
@@ -1172,24 +1163,41 @@ impl ProductionCodexAdapter {
             // all request fields immutable and suppress only this exact,
             // already-resolved operation; any changed request remains a
             // conflict.
-            if existing.run_key != operation.run_key
-                || existing.kernel_session_id != operation.kernel_session_id
-                || existing.question_id != operation.question_id
-                || existing.turn_id != operation.turn_id
-                || existing.request_digest != operation.request_digest
+            if existing.run_key != run_key
+                || existing.kernel_session_id != run.record.kernel_session_id
+                || existing.question_id != question.id
+                || existing.turn_id != turn_id
+                || existing.request_digest != request_digest
             {
                 return Err(conflict());
             }
-            existing.state == StoredInputOperationState::Resolved
+            existing
         } else {
+            let operation = StoredInputOperation {
+                input_request_id: input_request_id.clone(),
+                run_key: run_key.to_owned(),
+                kernel_session_id: run.record.kernel_session_id.clone(),
+                question_id: question.id.clone(),
+                turn_id,
+                request_digest,
+                choice_identities: allocate_interactive_input_choice_identities(
+                    choice_replay_keys.as_deref().unwrap_or_default(),
+                ),
+                resolution_digest: None,
+                state: StoredInputOperationState::Pending,
+            };
             self.store
                 .retain_input_operation(&operation)
-                .map_err(map_store_error)?;
-            false
+                .map_err(map_store_error)?
         };
-        if already_resolved {
+        if operation.state == StoredInputOperationState::Resolved {
             return Ok(None);
         }
+        let choices = project_interactive_input_choices(
+            question,
+            choice_replay_keys.as_deref(),
+            &operation.choice_identities,
+        )?;
         let authority = &run.binding.authority;
         let mode = if choices.as_ref().is_some_and(|choices| !choices.is_empty()) {
             InteractiveInputMode::SingleChoice
@@ -2596,39 +2604,106 @@ fn canonical_parts_id(prefix: &str, namespace: &[u8], parts: &[&[u8]]) -> String
     format!("{prefix}_{}", &hex[..26].to_ascii_uppercase())
 }
 
-fn project_interactive_input_choices(
-    input_request_id: &str,
+fn interactive_input_choice_replay_keys(
     question: &RequestUserInputQuestion,
-) -> Result<Option<Vec<InteractiveInputChoice>>, ProductionCodexError> {
+) -> Result<Option<Vec<(String, u64)>>, ProductionCodexError> {
     let Some(options) = question.options.as_ref() else {
         return Ok(None);
     };
-    let mut choice_ids = HashSet::with_capacity(options.len());
-    let mut choices = Vec::with_capacity(options.len());
+    let mut option_identities = HashSet::with_capacity(options.len());
+    let mut label_occurrences = HashMap::with_capacity(options.len());
+    let mut replay_keys = Vec::with_capacity(options.len());
     for option in options {
-        let choice_id = canonical_parts_id(
-            "ich",
-            b"winwincode-kernel-input-choice.v1",
-            &[
-                input_request_id.as_bytes(),
-                option.label.as_bytes(),
-                option.description.as_bytes(),
-            ],
-        );
-        if !choice_ids.insert(choice_id.clone()) {
+        if !option_identities.insert((option.label.as_str(), option.description.as_str())) {
             // Upstream options have no identity separate from their public
-            // label and description. Exact duplicates cannot be assigned a
-            // stable business identity without using their array position,
-            // so fail before retaining an ambiguous operation.
+            // label and private description. Exact duplicates would leave
+            // no stable semantic discriminator, so fail closed before the
+            // ambiguous operation is retained.
             return Err(conflict());
         }
-        choices.push(InteractiveInputChoice {
-            id: InteractiveInputChoiceId(choice_id),
-            label: option.label.clone(),
-            value: option.label.clone(),
-        });
+        let occurrence = label_occurrences
+            .entry(option.label.as_str())
+            .or_insert(0_u64);
+        replay_keys.push((option.label.clone(), *occurrence));
+        *occurrence = (*occurrence).checked_add(1).ok_or_else(conflict)?;
     }
-    Ok(Some(choices))
+    Ok(Some(replay_keys))
+}
+
+fn allocate_interactive_input_choice_identities(
+    replay_keys: &[(String, u64)],
+) -> Vec<StoredInputChoiceIdentity> {
+    // IDs are opaque server allocations. No request, prompt, option, or
+    // credential bytes participate in the public `ich_*` value. The
+    // secret-free replay keys only attach each allocation to its public
+    // occurrence when the durable operation is reopened.
+    let mut allocated = HashSet::with_capacity(replay_keys.len());
+    replay_keys
+        .iter()
+        .map(|(public_label, public_occurrence)| {
+            let choice_id = loop {
+                let random = Uuid::new_v4().simple().to_string().to_ascii_uppercase();
+                let candidate = format!("ich_{}", &random[..26]);
+                if allocated.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            StoredInputChoiceIdentity {
+                public_label: public_label.clone(),
+                public_occurrence: *public_occurrence,
+                choice_id,
+            }
+        })
+        .collect()
+}
+
+fn project_interactive_input_choices(
+    question: &RequestUserInputQuestion,
+    replay_keys: Option<&[(String, u64)]>,
+    identities: &[StoredInputChoiceIdentity],
+) -> Result<Option<Vec<InteractiveInputChoice>>, ProductionCodexError> {
+    let Some(options) = question.options.as_ref() else {
+        return if replay_keys.is_none() && identities.is_empty() {
+            Ok(None)
+        } else {
+            Err(conflict())
+        };
+    };
+    let Some(replay_keys) = replay_keys else {
+        return Err(conflict());
+    };
+    if options.len() != replay_keys.len() || identities.len() != replay_keys.len() {
+        return Err(conflict());
+    }
+
+    let identity_by_key = identities
+        .iter()
+        .map(|identity| {
+            (
+                (identity.public_label.as_str(), identity.public_occurrence),
+                identity.choice_id.as_str(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if identity_by_key.len() != identities.len() {
+        return Err(conflict());
+    }
+
+    options
+        .iter()
+        .zip(replay_keys)
+        .map(|(option, (public_label, public_occurrence))| {
+            let choice_id = identity_by_key
+                .get(&(public_label.as_str(), *public_occurrence))
+                .ok_or_else(conflict)?;
+            Ok(InteractiveInputChoice {
+                id: InteractiveInputChoiceId((*choice_id).to_owned()),
+                label: option.label.clone(),
+                value: option.label.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn private_payload_digest(
@@ -3242,11 +3317,15 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 mod tests {
     use super::{
         HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES, ProductionCodexErrorKind,
-        bounded_helper_handshake, decode_kernel_event, project_helper, read_helper_bytes,
-        seal_helper, submission_input_digest, terminate_helper_process_group,
-        validate_helper_image, validate_sealed_helper,
+        allocate_interactive_input_choice_identities, bounded_helper_handshake,
+        decode_kernel_event, interactive_input_choice_replay_keys, project_helper,
+        project_interactive_input_choices, read_helper_bytes, seal_helper, submission_input_digest,
+        terminate_helper_process_group, validate_helper_image, validate_sealed_helper,
     };
     use crate::helper_release::HelperReleaseManifest;
+    use codex_protocol::request_user_input::{
+        RequestUserInputQuestion, RequestUserInputQuestionOption,
+    };
     use std::path::PathBuf;
 
     #[cfg(unix)]
@@ -3341,6 +3420,162 @@ mod tests {
         assert_eq!(original, submission_input_digest("exact prompt"));
         assert_ne!(original, submission_input_digest("exact prompt\n"));
         assert_ne!(original, submission_input_digest("Exact prompt"));
+    }
+
+    fn input_choice_question(options: &[(&str, &str)]) -> RequestUserInputQuestion {
+        RequestUserInputQuestion {
+            id: "continue".to_owned(),
+            header: "Continue".to_owned(),
+            question: "Continue this turn?".to_owned(),
+            is_other: false,
+            is_secret: false,
+            options: Some(
+                options
+                    .iter()
+                    .map(|(label, description)| RequestUserInputQuestionOption {
+                        label: (*label).to_owned(),
+                        description: (*description).to_owned(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn choice_identities(
+        question: &RequestUserInputQuestion,
+    ) -> Vec<crate::store::StoredInputChoiceIdentity> {
+        let replay_keys = interactive_input_choice_replay_keys(question)
+            .expect("validate choice replay keys")
+            .unwrap_or_default();
+        allocate_interactive_input_choice_identities(&replay_keys)
+    }
+
+    fn projected_choice_ids(
+        question: &RequestUserInputQuestion,
+        identities: &[crate::store::StoredInputChoiceIdentity],
+    ) -> Vec<String> {
+        let replay_keys =
+            interactive_input_choice_replay_keys(question).expect("validate choice replay keys");
+        project_interactive_input_choices(question, replay_keys.as_deref(), identities)
+            .expect("project interactive input choices")
+            .expect("question carries options")
+            .into_iter()
+            .map(|choice| choice.id.0)
+            .collect()
+    }
+
+    #[test]
+    fn choice_identity_is_blind_to_private_description_bytes() {
+        let original = input_choice_question(&[
+            ("Continue", "PRIVATE_PLAN_ALPHA"),
+            ("Continue", "PRIVATE_PLAN_BETA"),
+        ]);
+        let rewritten = input_choice_question(&[
+            ("Continue", "purely private rewrite of the first plan"),
+            ("Continue", "purely private rewrite of the second plan"),
+        ]);
+        let identities = choice_identities(&original);
+        let original_ids = projected_choice_ids(&original, &identities);
+        assert_eq!(
+            original_ids,
+            projected_choice_ids(&rewritten, &identities),
+            "changing only private descriptions must not change public choice identities"
+        );
+        assert_eq!(
+            original_ids,
+            projected_choice_ids(&original, &identities),
+            "the same options must keep the same identities"
+        );
+    }
+
+    #[test]
+    fn choice_identity_cannot_be_enumerated_from_private_text() {
+        let dictionary = [
+            "PRIVATE_PLAN_ALPHA",
+            "PRIVATE_PLAN_BETA",
+            "unrelated private planning note",
+            "candidate continuation the observer must not confirm",
+        ];
+        let reference_question =
+            input_choice_question(&[("Continue", dictionary[0]), ("Continue", dictionary[1])]);
+        let identities = choice_identities(&reference_question);
+        let reference = projected_choice_ids(&reference_question, &identities);
+        for first in dictionary {
+            for second in dictionary {
+                if first == second {
+                    continue;
+                }
+                let observed = projected_choice_ids(
+                    &input_choice_question(&[("Continue", first), ("Continue", second)]),
+                    &identities,
+                );
+                assert_eq!(
+                    observed, reference,
+                    "an offline dictionary over private text must not move the public identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_public_choices_keep_unique_stable_ids() {
+        let question = input_choice_question(&[
+            ("Continue", "PRIVATE_PLAN_ALPHA"),
+            ("Continue", "PRIVATE_PLAN_BETA"),
+        ]);
+        let identities = choice_identities(&question);
+        let ids = projected_choice_ids(&question, &identities);
+        assert_eq!(ids.len(), 2);
+        assert_ne!(
+            ids[0], ids[1],
+            "duplicate labels must keep distinct identities"
+        );
+        for id in &ids {
+            assert!(id.starts_with("ich_"));
+            assert_eq!(id.len(), "ich_".len() + 26);
+        }
+        assert_eq!(ids, projected_choice_ids(&question, &identities));
+    }
+
+    #[test]
+    fn choice_identity_follows_public_occurrence_across_reordering() {
+        let original = input_choice_question(&[
+            ("Continue", "PRIVATE_PLAN_ALPHA"),
+            ("Stop", "PRIVATE_PLAN_BETA"),
+            ("Continue", "PRIVATE_PLAN_GAMMA"),
+        ]);
+        let reordered = input_choice_question(&[
+            ("Stop", "PRIVATE_PLAN_BETA"),
+            ("Continue", "PRIVATE_PLAN_ALPHA"),
+            ("Continue", "PRIVATE_PLAN_GAMMA"),
+        ]);
+        let identities = choice_identities(&original);
+        let original_ids = projected_choice_ids(&original, &identities);
+        let reordered_ids = projected_choice_ids(&reordered, &identities);
+
+        assert_eq!(
+            original_ids[0], reordered_ids[1],
+            "the first Continue occurrence must keep its identity when another label moves"
+        );
+        assert_eq!(
+            original_ids[1], reordered_ids[0],
+            "the Stop choice must keep its identity when its array position changes"
+        );
+        assert_eq!(
+            original_ids[2], reordered_ids[2],
+            "the second Continue occurrence must keep its public identity"
+        );
+    }
+
+    #[test]
+    fn indistinguishable_duplicate_choices_fail_closed() {
+        let question = input_choice_question(&[
+            ("Continue", "identical private description"),
+            ("Continue", "identical private description"),
+        ]);
+        let error = interactive_input_choice_replay_keys(&question)
+            .expect_err("completely indistinguishable options must fail closed");
+        assert_eq!(error.kind(), ProductionCodexErrorKind::Conflict);
     }
 
     #[cfg(unix)]
