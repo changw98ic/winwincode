@@ -11,7 +11,11 @@ import {
   type StatusTone,
 } from './components/index.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
-import { createEditableDraft, type EditableDraft } from './editable-draft.js'
+import {
+  createEditableDraft,
+  settleDraftSubmission,
+  type EditableDraft,
+} from './editable-draft.js'
 import type {
   CredentialReferenceId,
   CredentialReferenceProjection,
@@ -158,10 +162,18 @@ function lifecycleLabel(reference: CredentialReferenceProjection): string {
   return 'Available'
 }
 
+/** ADR-0029 §5: every warning also carries a non-color icon beside its text. */
+function conflictWarningIcon(document: Document, className: string): HTMLElement {
+  const icon = element(document, 'span', className)
+  icon.setAttribute('aria-hidden', 'true')
+  icon.textContent = '!'
+  return icon
+}
+
 /** Mount local Provider settings and write-only Credential reference controls. */
 export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const document = options.root.ownerDocument
-  const pageDraftScope = options.model.draftScope ?? 'mounted-settings-scope'
+  const pageDraftScope = options.model.draftScope
   const layout = element(document, 'main', 'wwc-settings')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
@@ -246,6 +258,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   const saveRoute = element(document, 'button', 'wwc-settings-save-route')
   const clearRoute = element(document, 'button', 'wwc-settings-clear-route')
   const routeConflict = element(document, 'div', 'wwc-settings-route-conflict')
+  const routeConflictIcon = conflictWarningIcon(
+    document,
+    'wwc-settings-route-conflict-icon',
+  )
   const routeConflictText = element(document, 'p', 'wwc-settings-route-conflict-text')
   const keepRouteDraft = element(document, 'button', 'wwc-settings-route-keep-draft')
   const useServerRoute = element(document, 'button', 'wwc-settings-route-use-server')
@@ -329,7 +345,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   keepRouteDraft.textContent = 'Keep my draft'
   useServerRoute.type = 'button'
   useServerRoute.textContent = 'Use server values'
-  routeConflict.append(routeConflictText, keepRouteDraft, useServerRoute)
+  routeConflict.append(routeConflictIcon, routeConflictText, keepRouteDraft, useServerRoute)
   routeControls.append(saveRoute, clearRoute)
   routeForm.append(
     provider.label,
@@ -386,6 +402,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     readonly rotate: HTMLButtonElement
     readonly revoke: HTMLButtonElement
     readonly conflict: HTMLElement
+    readonly conflictText: HTMLElement
     readonly keepDraft: HTMLButtonElement
     readonly useServer: HTMLButtonElement
     readonly draft: EditableDraft<RotateDraftValues>
@@ -456,6 +473,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const rotate = element(document, 'button', 'wwc-settings-rotate')
       const revoke = element(document, 'button', 'wwc-settings-revoke')
       const conflict = element(document, 'div', 'wwc-settings-rotate-conflict')
+      const conflictIcon = conflictWarningIcon(
+        document,
+        'wwc-settings-rotate-conflict-icon',
+      )
       const conflictText = element(document, 'p', 'wwc-settings-rotate-conflict-text')
       const keepDraft = element(document, 'button', 'wwc-settings-rotate-keep-draft')
       const useServer = element(document, 'button', 'wwc-settings-rotate-use-server')
@@ -495,7 +516,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       keepDraft.textContent = 'Keep local secret'
       useServer.type = 'button'
       useServer.textContent = 'Discard local secret'
-      conflict.append(conflictText, keepDraft, useServer)
+      conflict.append(conflictIcon, conflictText, keepDraft, useServer)
       const onRotate = (event: SubmitEvent) => {
         event.preventDefault()
         if (options.readOnly === true) return
@@ -543,6 +564,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         rotate,
         revoke,
         conflict,
+        conflictText,
         keepDraft,
         useServer,
         draft,
@@ -558,24 +580,11 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const row = credentialRows.get(item)
       if (row === undefined) return
       row.current = reference
+      const state = options.model.state
       if (row.draft.state.scope !== null && row.draft.state.submission === null) {
         row.draft.edit('secretState', row.rotateSecret.value.length === 0 ? '' : 'present')
       }
-      if (
-        row.draft.state.submission !== null
-        && options.model.state.interaction.status === 'error'
-        && (
-          options.model.state.interaction.operation === 'credential.reference.rotate'
-          || options.model.state.interaction.operation === null
-        )
-      ) {
-        row.draft.finishSubmission(
-          options.model.state.interaction.error?.kind === 'cancelled'
-            ? 'cancelled'
-            : 'failure',
-        )
-      }
-      if (options.model.state.interaction.error?.kind === 'cancelled') {
+      if (state.interaction.error?.kind === 'cancelled') {
         row.draft.edit('secretState', '')
         row.rotateSecret.value = ''
       }
@@ -588,17 +597,23 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         },
       })
       const rotateSubmission = row.draft.state.submission
-      if (
-        rotateSubmission !== null
-        && options.model.state.interaction.status === 'idle'
+      const rotateConfirmed = rotateSubmission !== null
         && reference.rotationVersion > Number(rotateSubmission.values.rotationVersion)
-      ) {
-        row.draft.finishSubmission('success')
-        row.rotateSecret.value = ''
-      } else if (
-        rotateSubmission !== null
-        && options.model.state.interaction.status === 'idle'
-      ) row.draft.finishSubmission('failure')
+      const rotateOutcome = settleDraftSubmission(rotateSubmission, {
+        busy: settingsPagePresentation(state).busy,
+        failed: state.interaction.status === 'error'
+          && (
+            state.interaction.operation === 'credential.reference.rotate'
+            || state.interaction.operation === null
+          ),
+        cancelled: state.interaction.error?.kind === 'cancelled',
+        confirmed: rotateConfirmed,
+        refuted: !rotateConfirmed,
+      })
+      if (rotateOutcome !== 'in-flight') {
+        row.draft.finishSubmission(rotateOutcome)
+        if (rotateOutcome === 'success') row.rotateSecret.value = ''
+      }
       row.title.textContent = reference.displayName
       const values = [
         reference.id,
@@ -622,8 +637,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       row.rotateSecret.disabled = disabled
       row.revoke.disabled = disabled
       row.conflict.hidden = !row.draft.state.revisionConflict
-      const conflictText = row.conflict.children[0]
-      if (conflictText !== undefined) conflictText.textContent = row.draft.state.revisionConflict
+      row.conflictText.textContent = row.draft.state.revisionConflict
         ? `This Credential reference changed from revision ${String(
             row.draft.state.baseRevision,
           )} to revision ${String(row.draft.state.serverRevision)}.`
@@ -654,18 +668,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       createDraft.edit('displayName', createName.input.value)
       createDraft.edit('providerId', createProvider.input.value)
     }
-    if (
-      createDraft.state.submission !== null
-      && state.interaction.status === 'error'
-      && (
-        state.interaction.operation === 'credential.reference.create'
-        || state.interaction.operation === null
-      )
-    ) {
-      createDraft.finishSubmission(
-        state.interaction.error?.kind === 'cancelled' ? 'cancelled' : 'failure',
-      )
-    }
     if (state.interaction.error?.kind === 'cancelled') {
       createSecret.input.value = ''
     }
@@ -681,31 +683,27 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
           },
         })
     const createSubmission = createDraft.state.submission
-    if (
-      createSubmission !== null
-      && state.interaction.status === 'idle'
+    const createConfirmed = createSubmission !== null
       && state.credentials.some(reference => (
         reference.id === createSubmission.values.credentialReferenceId
         && reference.displayName === createSubmission.values.displayName.trim()
         && reference.providerId === createSubmission.values.providerId.trim()
       ))
-    ) {
-      createDraft.finishSubmission('success')
-      createSecret.input.value = ''
+    const createOutcome = settleDraftSubmission(createSubmission, {
+      busy: presentation.busy,
+      failed: state.interaction.status === 'error'
+        && (
+          state.interaction.operation === 'credential.reference.create'
+          || state.interaction.operation === null
+        ),
+      cancelled: state.interaction.error?.kind === 'cancelled',
+      confirmed: createConfirmed,
+      refuted: !createConfirmed,
+    })
+    if (createOutcome !== 'in-flight') {
+      createDraft.finishSubmission(createOutcome)
+      if (createOutcome === 'success') createSecret.input.value = ''
     }
-    else if (createSubmission !== null && state.interaction.status === 'idle') {
-      createDraft.finishSubmission('failure')
-    }
-    if (
-      routeDraft.state.submission !== null
-      && state.interaction.status === 'error'
-      && (
-        state.interaction.operation === 'settings.update'
-        || state.interaction.operation === null
-      )
-    ) routeDraft.finishSubmission(
-      state.interaction.error?.kind === 'cancelled' ? 'cancelled' : 'failure',
-    )
     routeDraft.synchronize(state.settings === null
       ? null
       : {
@@ -720,7 +718,6 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         })
     const submittedRoute = routeDraft.state.submission
     const routeSubmissionSucceeded = submittedRoute !== null
-      && state.interaction.status === 'idle'
       && state.settings !== null
       && state.settings.revision > submittedRoute.revision
       && (route?.providerId ?? '') === submittedRoute.values.providerId.trim()
@@ -728,13 +725,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       && (route?.credentialReferenceId ?? '') === submittedRoute.values.credentialReferenceId
       && String(state.settings.workerConcurrencyLimit)
         === submittedRoute.values.workerConcurrencyLimit
-    if (
-      submittedRoute !== null
-      && routeSubmissionSucceeded
-    ) routeDraft.finishSubmission('success')
-    else if (submittedRoute !== null && state.interaction.status === 'idle') {
-      routeDraft.finishSubmission('failure')
-    }
+    const routeOutcome = settleDraftSubmission(submittedRoute, {
+      busy: presentation.busy,
+      failed: state.interaction.status === 'error'
+        && (
+          state.interaction.operation === 'settings.update'
+          || state.interaction.operation === null
+        ),
+      cancelled: state.interaction.error?.kind === 'cancelled',
+      confirmed: routeSubmissionSucceeded,
+      refuted: !routeSubmissionSucceeded,
+    })
+    if (routeOutcome !== 'in-flight') routeDraft.finishSubmission(routeOutcome)
     const tone: StatusTone = presentation.errorText !== null
       ? 'danger'
       : state.realtime === 'reconnecting'

@@ -26,7 +26,7 @@ assert.equal(
   `Editable draft state did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const { createEditableDraft } = await import(`${pathToFileURL(resolve(
+const { createEditableDraft, settleDraftSubmission } = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/editable-draft.js',
 )).href}`)
@@ -60,6 +60,72 @@ test('editable draft merges clean fields and reports conflicting dirty fields', 
   draft.resolveConflicts('use-server')
   assert.deepEqual(draft.state.values, { provider: 'server-b', model: 'model-b' })
   assert.deepEqual(draft.state.dirtyFields, [])
+})
+
+test('a clean server refresh becomes the baseline for edits started afterwards', () => {
+  const fieldSensitive = createEditableDraft()
+  fieldSensitive.synchronize(snapshot(1, { provider: 'server-a', model: 'model-a' }))
+  fieldSensitive.synchronize(snapshot(2, { provider: 'server-a', model: 'model-b' }))
+  fieldSensitive.edit('model', 'browser-model')
+  fieldSensitive.synchronize(snapshot(2, { provider: 'server-a', model: 'model-b' }))
+
+  assert.equal(fieldSensitive.state.baseRevision, 2)
+  assert.deepEqual(fieldSensitive.state.conflicts, [])
+
+  const revisionSensitive = createEditableDraft({ revisionSensitive: true })
+  revisionSensitive.synchronize(snapshot(1, { comments: '' }))
+  revisionSensitive.synchronize(snapshot(2, { comments: '' }))
+  revisionSensitive.edit('comments', 'browser review')
+  revisionSensitive.synchronize(snapshot(2, { comments: '' }))
+
+  assert.equal(revisionSensitive.state.baseRevision, 2)
+  assert.deepEqual(revisionSensitive.state.conflicts, [])
+})
+
+test('mixed refreshes advance clean-field baselines while dirty fields keep theirs', () => {
+  const draft = createEditableDraft()
+  draft.synchronize(snapshot(1, { provider: 'server-a', model: 'model-a' }))
+  draft.edit('provider', 'browser-provider')
+  draft.synchronize(snapshot(2, { provider: 'server-a', model: 'model-b' }))
+  draft.edit('model', 'browser-model')
+  draft.synchronize(snapshot(2, { provider: 'server-a', model: 'model-b' }))
+
+  assert.equal(draft.state.baseRevision, 1)
+  assert.deepEqual(draft.state.conflicts, [])
+  assert.deepEqual(draft.state.dirtyFields, ['provider', 'model'])
+})
+
+test('submission settlement waits for decisive evidence instead of unrelated snapshot resets', () => {
+  const draft = createEditableDraft()
+  draft.synchronize(snapshot(4, { comments: '' }))
+  draft.edit('comments', 'browser review')
+  const submission = draft.beginSubmission()
+  const evidence = (overrides = {}) => ({
+    busy: false,
+    cancelled: false,
+    confirmed: false,
+    failed: false,
+    refuted: false,
+    ...overrides,
+  })
+
+  assert.equal(settleDraftSubmission(null, evidence({ busy: true })), 'in-flight')
+  assert.equal(settleDraftSubmission(submission, evidence({ busy: true })), 'in-flight')
+  assert.equal(settleDraftSubmission(submission, evidence()), 'in-flight')
+  assert.equal(
+    settleDraftSubmission(submission, evidence({ busy: true, confirmed: true })),
+    'in-flight',
+  )
+  assert.equal(
+    settleDraftSubmission(submission, evidence({ busy: true, failed: true })),
+    'failure',
+  )
+  assert.equal(
+    settleDraftSubmission(submission, evidence({ busy: true, failed: true, cancelled: true })),
+    'cancelled',
+  )
+  assert.equal(settleDraftSubmission(submission, evidence({ confirmed: true })), 'success')
+  assert.equal(settleDraftSubmission(submission, evidence({ refuted: true })), 'failure')
 })
 
 test('editable draft captures one immutable submission and retains it on failure', () => {

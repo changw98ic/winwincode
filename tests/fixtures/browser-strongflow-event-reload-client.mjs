@@ -122,6 +122,7 @@ function ready(projection = createProjection()) {
 }
 
 class BrowserStrongFlowModel {
+  draftScope = '["browser-strongflow-actor","browser-strongflow-scope"]'
   state = ready()
 
   subscribe(listener) {
@@ -141,7 +142,9 @@ class BrowserStrongFlowModel {
   async loadMoreCandidateFiles() {}
   async selectCandidateFile() {}
   async loadMoreCandidateDiff() {}
-  async decideSolutionReview() {}
+  async decideSolutionReview(input) {
+    this.calls.push(['decideSolutionReview', structuredClone(input)])
+  }
   async approveTaskBreakdown() {}
   async resolveAttention() {}
   async submitVerdict() {}
@@ -149,6 +152,8 @@ class BrowserStrongFlowModel {
   cancelPending() {}
   reconnect() {}
   close() {}
+
+  calls = []
 }
 
 const model = new BrowserStrongFlowModel()
@@ -196,19 +201,71 @@ globalThis.runStrongFlowEventReloadScenario = () => {
   const candidateAfterChange = document.querySelector('.wwc-strongflow-view-candidate')
   const diagramsAfterCandidate = document.querySelector('.wwc-strongflow-diagrams')
   model.publish(ready(createProjection({ candidateDigest: '4', runtimeSource: '2' })))
+  const runtimeChange = {
+    candidateRetained: document.querySelector('.wwc-strongflow-view-candidate')
+      === candidateAfterChange,
+    diagramsRebuilt: document.querySelector('.wwc-strongflow-diagrams')
+      !== diagramsAfterCandidate,
+  }
+
+  comments.value = 'conflicted review draft'
+  comments.dispatchEvent(new Event('input', { bubbles: true }))
+  const conflicted = structuredClone(createProjection({ candidateDigest: '4', runtimeSource: '2' }))
+  conflicted.metadata.revisions.delivery = 5
+  conflicted.delivery.deliveryRevision = 5
+  model.publish(ready(conflicted))
+  const revisionConflict = {
+    icon: document.querySelector('.wwc-strongflow-review-conflict [aria-hidden="true"]')
+      !== null,
+    visible: !document.querySelector('.wwc-strongflow-review-conflict').hidden,
+  }
+  document.querySelector('.wwc-strongflow-review-keep-draft').click()
+
+  comments.value = 'accepted review decision'
+  comments.dispatchEvent(new Event('input', { bubbles: true }))
+  document.querySelector('.wwc-strongflow-approve-solution').click()
+  const acceptedCall = model.calls.at(-1)
+  model.publish({
+    status: 'ready',
+    realtime: 'subscribed',
+    projection: conflicted,
+    interaction: { status: 'waiting', error: null },
+    error: null,
+  })
+  model.publish({
+    status: 'refreshing',
+    realtime: 'reloading',
+    projection: conflicted,
+    interaction: { status: 'idle', error: null },
+    error: null,
+  })
+  model.publish(ready(conflicted))
+  const acceptedReview = {
+    approveDisabled: document.querySelector('.wwc-strongflow-approve-solution').disabled,
+    decision: acceptedCall,
+    submittedOnce: model.calls
+      .filter(([name]) => name === 'decideSolutionReview').length === 1,
+  }
+
+  comments.value = 'draft for the next candidate'
+  comments.dispatchEvent(new Event('input', { bubbles: true }))
+  const sameDigestNewIdentity = createProjection({ candidateDigest: '4', runtimeSource: '2' })
+  sameDigestNewIdentity.currentCandidate.candidateRef = 'refs/winwincode/candidate/browser-event-2'
+  sameDigestNewIdentity.currentCandidate.candidateCommitId = '9999999999999999999999999999999999999999'
+  model.publish(ready(sameDigestNewIdentity))
+  const identityChange = { draftReset: comments.value === '' }
+
   return {
+    acceptedReview,
     afterEquivalentEvents,
     candidateChange: {
       candidateRetained: candidateAfterChange === candidateBefore,
       diagramsRetained: diagramsAfterCandidate === diagramsBefore,
     },
     duringReload,
-    runtimeChange: {
-      candidateRetained: document.querySelector('.wwc-strongflow-view-candidate')
-        === candidateAfterChange,
-      diagramsRebuilt: document.querySelector('.wwc-strongflow-diagrams')
-        !== diagramsAfterCandidate,
-    },
+    identityChange,
+    revisionConflict,
+    runtimeChange,
   }
 }
 

@@ -85,5 +85,19 @@ test('real Chrome retains StrongFlow review work across event reloads', async t 
     candidateRetained: true,
     diagramsRebuilt: true,
   })
+  assert.deepEqual(result.revisionConflict, {
+    icon: true,
+    visible: true,
+  })
+  assert.deepEqual(result.acceptedReview, {
+    approveDisabled: true,
+    decision: ['decideSolutionReview', {
+      action: 'approve',
+      comments: 'accepted review decision',
+      requestedChanges: [],
+    }],
+    submittedOnce: true,
+  })
+  assert.deepEqual(result.identityChange, { draftReset: true })
   assert.equal(exceptions.length, 0, JSON.stringify(exceptions))
 })

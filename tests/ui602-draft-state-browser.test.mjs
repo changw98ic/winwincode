@@ -66,6 +66,7 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
     cleanModel: 'server-model-b',
     dirtyProvider: 'browser-provider',
     focused: true,
+    icon: true,
     message: 'The server changed this draft. Provider ID: server “server-provider-b”; your draft “browser-provider”.',
     visible: true,
   })
@@ -93,5 +94,20 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
   }])
   assert.equal(result.secret.localStorage.includes('BROWSER_ONLY_SECRET'), false)
   assert.equal(result.secret.sessionStorage.includes('BROWSER_ONLY_SECRET'), false)
+  assert.deepEqual(result.acceptedDuringReload, {
+    createDisabled: true,
+    secretRetained: 'DEFERRED_BROWSER_SECRET',
+  })
+  assert.deepEqual(result.acceptedConfirmed, {
+    createCalls: 2,
+    deferredCall: ['createCredentialReference', {
+      credentialReferenceId: 'crd_00000000000000000000000003',
+      displayName: 'Browser deferred Credential',
+      providerId: 'server-provider-c',
+      vaultLocator: 'DEFERRED_BROWSER_SECRET',
+    }],
+    secretCleared: true,
+    storageClean: true,
+  })
   assert.equal(exceptions.length, 0, JSON.stringify(exceptions))
 })
