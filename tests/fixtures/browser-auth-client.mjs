@@ -181,8 +181,9 @@ async function runRealApplicationFlows() {
     states: [],
   })
 
+  const productSessionSubscriptionId = id('sub', 1)
   activeSubscription = application.controlPlane.subscribe({
-    subscriptionId: id('sub', 1),
+    subscriptionId: productSessionSubscriptionId,
     subscription: {
       scope,
       stream: { kind: 'product-session', productSessionId },
@@ -203,8 +204,13 @@ async function runRealApplicationFlows() {
     },
   })
   await waitFor(
-    () => transportFrameTypes.includes('transport.subscription-accepted.v1'),
-    'subscription acceptance',
+    () => transportFrames.some(frame =>
+      frame.type === 'transport.subscription-accepted.v1'
+      && frame.subscriptionId === productSessionSubscriptionId
+      && frame.cursor?.stream?.kind === 'product-session'
+      && frame.cursor.stream.productSessionId === productSessionId,
+    ),
+    'ProductSession subscription acceptance',
   )
 
   const created = await command(20, 'session.create', 0, {
