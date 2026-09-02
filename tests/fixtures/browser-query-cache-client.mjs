@@ -90,15 +90,18 @@ globalThis.runQueryCacheScenario = async () => {
 
   settingsRevision = 2
   reloadGate = deferred()
-  const frame = {
+  const frames = Array.from({ length: 100 }, (_, index) => ({
     type: 'event.v1',
     subscriptionId: 'sub_00000000000000000000000001',
     authorizationEpoch: 7,
+    sequence: index + 1,
     scope,
     stream: { kind: 'scope' },
     event: { type: 'activity.recorded.v1' },
-  }
-  const invalidations = Array.from({ length: 100 }, async () => subscriptionOptions.onEvent(frame))
+  }))
+  subscriptionOptions.onEventQueued?.(frames[0])
+  const firstInvalidation = subscriptionOptions.onEvent(frames[0])
+  for (const frame of frames.slice(1)) subscriptionOptions.onEventQueued?.(frame)
   const duringReload = {
     ariaBusy: document.querySelector('[data-wwc-page="management"]')?.getAttribute('aria-busy'),
     draft: provider.value,
@@ -106,7 +109,8 @@ globalThis.runQueryCacheScenario = async () => {
     revision: model.state.settings?.revision ?? null,
   }
   reloadGate.resolve()
-  await Promise.all(invalidations)
+  await firstInvalidation
+  for (const frame of frames.slice(1)) await subscriptionOptions.onEvent(frame)
   reloadGate = null
   await waitFor(() => model.state.status === 'ready' && model.state.settings?.revision === 2, 'coalesced snapshot')
   return {

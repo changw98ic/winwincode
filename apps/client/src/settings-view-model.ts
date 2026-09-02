@@ -5,7 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
-import { invalidateClientQueryCache } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   CommandAcceptedResponse,
@@ -241,6 +241,7 @@ function checkedSecret(value: string): string {
 
 /** Build the local settings surface from generated Settings and Credential reference contracts. */
 export function createSettingsViewModel(options: SettingsViewModelOptions): SettingsViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<SettingsViewModelListener>()
   const controllers = new Set<AbortController>()
   let currentState = initialState()
@@ -507,11 +508,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-      })
+      queryCache.refresh()
       await load(false, realtime === null ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && realtime === null && !closed) subscribeRealtime()
     },
@@ -744,12 +741,7 @@ export function createSettingsViewModel(options: SettingsViewModelOptions): Sett
     close() {
       if (closed) return
       closed = true
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-        discard: true,
-      })
+      queryCache.close()
       generation += 1
       abortRequests()
       realtime?.close()

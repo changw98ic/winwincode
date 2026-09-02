@@ -5,7 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
-import { invalidateClientQueryCache } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   AttentionItemId,
@@ -28,6 +28,7 @@ import type {
   DeliveryTaskId,
   EventReadCursor,
   ProductSessionId,
+  QueryRequest,
   QueryResultResponse,
   RepositoryScope,
   RequestId,
@@ -969,6 +970,7 @@ export function createStrongFlowViewModel(
 ): StrongFlowViewModel {
   const listeners = new Set<StrongFlowViewModelListener>()
   const controllers = new Set<AbortController>()
+  const queryCache = createQueryCacheLifecycle(options)
   let currentState = initialState()
   let realtime: ControlPlaneSubscription | null = null
   let generation = 0
@@ -1029,26 +1031,31 @@ export function createStrongFlowViewModel(
   ): Promise<StrongFlowSnapshot> {
     let restarts = 0
     let consistencyRetries = 0
-    async function retryForConsistency(): Promise<boolean> {
+    async function retryForConsistency(...queries: readonly QueryRequest[]): Promise<boolean> {
       if (consistencyRetries >= MAX_SNAPSHOT_CONSISTENCY_RETRIES) return false
       consistencyRetries += 1
+      queryCache.revalidate(...queries)
       await waitForSnapshotConsistencyRetry(signal)
       return true
     }
     for (;;) {
-      const deliveryResponse = expectResponse(await options.client.query({
+      const deliveryRequest: QueryRequest = {
         ...requestBase(),
         requestId: options.nextRequestId(),
         query: QueryName.DeliveryGet,
         parameters: { deliveryId: options.deliveryId },
         page: requestPage(),
-      }, { signal }), QueryName.DeliveryGet)
+      }
+      const deliveryResponse = expectResponse(
+        await options.client.query(deliveryRequest, { signal }),
+        QueryName.DeliveryGet,
+      )
       const deliveryEventSequence = deliveryResponse.result.readCursor.eventCursor.sequence
       if (
         minimum.eventSequence !== undefined
         && deliveryEventSequence < minimum.eventSequence
       ) {
-        if (await retryForConsistency()) continue
+        if (await retryForConsistency(deliveryRequest)) continue
         throw clientFailure(
           'STRONGFLOW_SNAPSHOT_STALE',
           'The StrongFlow snapshot is older than its invalidation event.',
@@ -1064,7 +1071,7 @@ export function createStrongFlowViewModel(
           || consistencyMinimum.deliveryRevision > acceptedDeliveryRevision
         )
       if (isBehindAnnouncedDelivery) {
-        if (await retryForConsistency()) continue
+        if (await retryForConsistency(deliveryRequest)) continue
         throw clientFailure(
           'STRONGFLOW_SNAPSHOT_STALE',
           'The StrongFlow snapshot is older than its invalidation event.',
@@ -1099,27 +1106,31 @@ export function createStrongFlowViewModel(
       )
       if (consistencyMinimum.deliveryRevision !== undefined
         && deliveryResponse.result.deliveryRevision < consistencyMinimum.deliveryRevision) {
-        if (await retryForConsistency()) continue
+        if (await retryForConsistency(deliveryRequest)) continue
         throw clientFailure(
           'STRONGFLOW_SNAPSHOT_STALE',
           'The StrongFlow snapshot is older than its invalidation event.',
         )
       }
       let runtimeResponse: RuntimeProjectionGetResultResponse
+      const runtimeRequest: QueryRequest = {
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.RuntimeProjectionGet,
+        parameters: {
+          kind: 'delivery-stage',
+          productSessionId: active.binding.productSessionId,
+          deliveryId: options.deliveryId,
+          stageRunId: active.binding.stageRunId,
+          atCursor: deliveryResponse.result.readCursor,
+        },
+        page: requestPage(),
+      }
       try {
-        runtimeResponse = expectResponse(await options.client.query({
-          ...requestBase(),
-          requestId: options.nextRequestId(),
-          query: QueryName.RuntimeProjectionGet,
-          parameters: {
-            kind: 'delivery-stage',
-            productSessionId: active.binding.productSessionId,
-            deliveryId: options.deliveryId,
-            stageRunId: active.binding.stageRunId,
-            atCursor: deliveryResponse.result.readCursor,
-          },
-          page: requestPage(),
-        }, { signal }), QueryName.RuntimeProjectionGet)
+        runtimeResponse = expectResponse(
+          await options.client.query(runtimeRequest, { signal }),
+          QueryName.RuntimeProjectionGet,
+        )
       } catch (error) {
         if (
           error instanceof ControlPlaneClientError
@@ -1127,6 +1138,7 @@ export function createStrongFlowViewModel(
           && restarts < MAX_READ_CURSOR_RESTARTS
         ) {
           restarts += 1
+          queryCache.revalidate(deliveryRequest)
           continue
         }
         throw error
@@ -1143,7 +1155,7 @@ export function createStrongFlowViewModel(
         || (consistencyMinimum.runtimeSequence !== undefined
           && runtimeResponse.result.lastProjectionSequence < consistencyMinimum.runtimeSequence)
       ) {
-        if (await retryForConsistency()) continue
+        if (await retryForConsistency(deliveryRequest, runtimeRequest)) continue
         throw clientFailure(
           'STRONGFLOW_SNAPSHOT_STALE',
           'The StrongFlow snapshot is older than its invalidation event.',
@@ -1378,11 +1390,7 @@ export function createStrongFlowViewModel(
       'STRONGFLOW_VIEW_MODEL_CLOSED',
       'The StrongFlow view-model is closed.',
     )
-    invalidateClientQueryCache(options.client, {
-      actor: options.actor,
-      scope: options.scope,
-      reason: 'manual',
-    })
+    queryCache.refresh()
     generation += 1
     const ownGeneration = generation
     abortRequests()
@@ -1707,12 +1715,7 @@ export function createStrongFlowViewModel(
     close() {
       if (closed) return
       closed = true
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-        discard: true,
-      })
+      queryCache.close()
       generation += 1
       supersedingGeneration = null
       abortRequests()

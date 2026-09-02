@@ -1180,6 +1180,49 @@ test('WebSocket acknowledges only applied events, deduplicates, pongs, and resum
   })
 })
 
+test('WebSocket exposes every validated queued event before serial application completes', async () => {
+  const factory = fakeWebSocketFactory()
+  const firstApplication = deferred()
+  const queued = []
+  const applied = []
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    onEventQueued(frame) {
+      queued.push(frame.sequence)
+    },
+    async onEvent(frame) {
+      applied.push(frame.sequence)
+      if (frame.sequence === 1) await firstApplication.promise
+    },
+  })
+  client.subscribe(subscriptionId, {
+    scope,
+    stream: { kind: 'delivery', deliveryId },
+    eventTypes: ['delivery.changed.v1'],
+  })
+  factory.sockets[0].open()
+  factory.sockets[0].receive(acceptedFrame())
+
+  for (let sequence = 1; sequence <= 40; sequence += 1) {
+    factory.sockets[0].receive(deliveryChangedEvent(sequence))
+  }
+  await flush()
+
+  assert.deepEqual(queued, Array.from({ length: 40 }, (_, index) => index + 1))
+  assert.deepEqual(applied, [1])
+  assert.equal(factory.sockets[0].sent.some(frame => frame.type === 'transport.ack.v1'), false)
+
+  firstApplication.resolve()
+  await flush()
+  assert.deepEqual(applied, Array.from({ length: 40 }, (_, index) => index + 1))
+  assert.deepEqual(
+    factory.sockets[0].sent
+      .filter(frame => frame.type === 'transport.ack.v1')
+      .map(frame => frame.cursor.sequence),
+    Array.from({ length: 40 }, (_, index) => index + 1),
+  )
+})
+
 test('WebSocket handler failure sends no acknowledgement and 4403 stops reconnects', async () => {
   const factory = fakeWebSocketFactory()
   const errors = []

@@ -1323,6 +1323,79 @@ test('expired bounded read restarts Delivery before Runtime and never mixes cuts
   assert.deepEqual(client.calls[3].parameters.atCursor, secondDelivery.readCursor)
 })
 
+test('the production QueryCache forces a fresh Delivery after READ_CURSOR_EXPIRED', async () => {
+  const rawClient = new FakeClient()
+  const rawQuery = rawClient.query.bind(rawClient)
+  rawClient.query = async request => ({
+    ...await rawQuery(request),
+    requestId: request.requestId,
+  })
+  const firstDelivery = delivery(1)
+  const secondDelivery = delivery(2)
+  rawClient.enqueue('delivery.get', response('delivery.get', firstDelivery))
+  rawClient.enqueue('runtime.projection.get', new ControlPlaneClientError({
+    kind: 'server',
+    code: 'READ_CURSOR_EXPIRED',
+    message: 'The bounded read expired.',
+    requestId: null,
+    retryable: true,
+  }))
+  rawClient.enqueue('delivery.get', response('delivery.get', secondDelivery))
+  rawClient.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(secondDelivery),
+  ))
+  const cache = createQueryCache({ client: rawClient })
+  const { model } = view(cache.client)
+  try {
+    await model.start()
+    assert.deepEqual(rawClient.calls.map(call => call.query), [
+      'delivery.get',
+      'runtime.projection.get',
+      'delivery.get',
+      'runtime.projection.get',
+    ])
+    assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+    assert.deepEqual(rawClient.calls[3].parameters.atCursor, secondDelivery.readCursor)
+  } finally {
+    model.close()
+    cache.close()
+  }
+})
+
+test('the production QueryCache discards the StrongFlow read cut on retention reset', async () => {
+  const rawClient = new FakeClient()
+  const rawQuery = rawClient.query.bind(rawClient)
+  rawClient.query = async request => ({
+    ...await rawQuery(request),
+    requestId: request.requestId,
+  })
+  const cache = createQueryCache({ client: rawClient })
+  const { model } = view(cache.client)
+  try {
+    await model.start()
+    const nextDelivery = delivery(2)
+    rawClient.enqueue('delivery.get', response('delivery.get', nextDelivery))
+    rawClient.enqueue('runtime.projection.get', response(
+      'runtime.projection.get',
+      runtime(nextDelivery),
+    ))
+
+    const cursor = await rawClient.subscription.onResetRequired(null)
+    assert.deepEqual(rawClient.calls.map(call => call.query), [
+      'delivery.get',
+      'runtime.projection.get',
+      'delivery.get',
+      'runtime.projection.get',
+    ])
+    assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+    assert.deepEqual(cursor, nextDelivery.readCursor.eventCursor)
+  } finally {
+    model.close()
+    cache.close()
+  }
+})
+
 test('a retryable trusted-facts command keeps its shape while rotating request keys', async () => {
   const client = new FakeClient()
   const requests = []

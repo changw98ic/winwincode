@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
@@ -40,6 +41,26 @@ const scope = Object.freeze({
   workspaceId: 'wsp_00000000000000000000000001',
   projectId: 'prj_00000000000000000000000001',
   repositoryId: 'rep_00000000000000000000000001',
+})
+
+test('all six feature view-models use the one cache-only lifecycle seam', () => {
+  const files = [
+    'chat-view-model.ts',
+    'enterprise-management-view-model.ts',
+    'local-decisions-view-model.ts',
+    'local-operations-view-model.ts',
+    'settings-view-model.ts',
+    'strongflow-view-model.ts',
+  ]
+  for (const file of files) {
+    const source = readFileSync(resolve(root, 'apps/client/src', file), 'utf8')
+    assert.equal(
+      source.match(/createQueryCacheLifecycle\(options\)/gu)?.length,
+      1,
+      `${file} must bind exactly one cache-only lifecycle`,
+    )
+    assert.doesNotMatch(source, /invalidateClientQueryCache/u)
+  }
 })
 
 function deferred() {
@@ -123,20 +144,24 @@ test('Settings public lifecycle coalesces invalidations and reloads after reconn
 
   settingsRevision = 2
   eventGate = deferred()
-  const frame = {
+  const frames = Array.from({ length: 40 }, (_, index) => ({
     type: 'event.v1',
     subscriptionId: 'sub_00000000000000000000000001',
     authorizationEpoch: 3,
+    sequence: index + 1,
     scope,
     stream: { kind: 'scope' },
     event: { type: 'activity.recorded.v1' },
-  }
-  const invalidations = Array.from({ length: 40 }, async () => subscriptionOptions.onEvent(frame))
+  }))
+  subscriptionOptions.onEventQueued?.(frames[0])
+  const firstInvalidation = subscriptionOptions.onEvent(frames[0])
+  for (const frame of frames.slice(1)) subscriptionOptions.onEventQueued?.(frame)
   assert.equal(model.state.status, 'refreshing')
   assert.equal(model.state.settings.revision, 1)
   assert.equal(queryCounts.get('settings.get'), 2)
   eventGate.resolve()
-  await Promise.all(invalidations)
+  await firstInvalidation
+  for (const frame of frames.slice(1)) await subscriptionOptions.onEvent(frame)
   assert.equal(model.state.status, 'ready')
   assert.equal(model.state.realtime, 'subscribed')
   assert.equal(model.state.settings.revision, 2)

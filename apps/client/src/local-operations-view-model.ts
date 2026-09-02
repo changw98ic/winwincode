@@ -5,7 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
-import { invalidateClientQueryCache } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   CommandAcceptedResponse,
@@ -338,6 +338,7 @@ function orderedWorkers(workers: readonly WorkerProjection[]): readonly WorkerPr
 export function createLocalOperationsViewModel(
   options: LocalOperationsViewModelOptions,
 ): LocalOperationsViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<LocalOperationsListener>()
   const controllers = new Set<AbortController>()
   const repositoryScope: RepositoryScope | null = options.scope.kind === 'repository'
@@ -636,11 +637,7 @@ export function createLocalOperationsViewModel(
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-      })
+      queryCache.refresh()
       await load(false, realtime === null ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && realtime === null && !closed) subscribeRealtime()
     },
@@ -744,12 +741,7 @@ export function createLocalOperationsViewModel(
     close() {
       if (closed) return
       closed = true
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-        discard: true,
-      })
+      queryCache.close()
       generation += 1
       abortRequests()
       realtime?.close()

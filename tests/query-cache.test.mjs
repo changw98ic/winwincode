@@ -22,7 +22,7 @@ assert.equal(
   `Query cache did not compile:\n${compiler.stdout}${compiler.stderr}`,
 )
 
-const { createQueryCache, queryCacheKey } = await import(`${pathToFileURL(resolve(
+const { createQueryCache, createQueryCacheLifecycle, queryCacheKey } = await import(`${pathToFileURL(resolve(
   root,
   '.cache/ui-components-tests/core/query-cache.js',
 )).href}`)
@@ -126,6 +126,49 @@ test('cache key isolates Actor, Scope, query discriminator, parameters, and page
   assert.notEqual(queryCacheKey(base), queryCacheKey(request({ page: { cursor: null, limit: 1 } })))
 })
 
+test('the shared lifecycle revalidates only the exact query identity', async () => {
+  const calls = []
+  const fake = fakeClient(async queryRequest => {
+    calls.push(queryRequest)
+    return response(`snapshot-${String(calls.length)}`, queryRequest)
+  })
+  const cache = createQueryCache({ client: fake.client })
+  const lifecycle = createQueryCacheLifecycle({ client: cache.client, actor, scope })
+  const idle = request({ parameters: { states: ['idle'] } })
+  const running = request({
+    requestId: 'req_00000000000000000000000002',
+    parameters: { states: ['running'] },
+  })
+  await Promise.all([cache.client.query(idle), cache.client.query(running)])
+
+  lifecycle.revalidate(request({
+    requestId: 'req_00000000000000000000000003',
+    parameters: { states: ['idle'] },
+  }))
+  const [freshIdle, cachedRunning] = await Promise.all([
+    cache.client.query(request({
+      requestId: 'req_00000000000000000000000004',
+      parameters: { states: ['idle'] },
+    })),
+    cache.client.query(request({
+      requestId: 'req_00000000000000000000000005',
+      parameters: { states: ['running'] },
+    })),
+  ])
+
+  assert.equal(calls.length, 3)
+  assert.equal(freshIdle.result.items[0], 'snapshot-3')
+  assert.equal(cachedRunning.result.items[0], 'snapshot-2')
+  assert.throws(
+    () => lifecycle.revalidate(request({ requestActor: otherActor })),
+    error => error.code === 'QUERY_CACHE_LIFECYCLE_MISMATCH',
+  )
+  lifecycle.close()
+  assert.equal(cache.peek(idle), null)
+  assert.equal(cache.peek(running), null)
+  cache.close()
+})
+
 test('cached snapshots keep each generated request correlation and coalesce concurrent reads', async () => {
   const pending = deferred()
   const calls = []
@@ -204,51 +247,63 @@ test('snapshot handoff retains stale data while repeated invalidations produce o
 })
 
 test('serialized WebSocket invalidation bursts still coalesce to one trailing HTTP reload', async () => {
-  const calls = []
-  let delayReload = false
-  const fake = fakeClient(async queryRequest => {
-    calls.push(queryRequest)
-    if (delayReload) await new Promise(resolvePromise => { setTimeout(resolvePromise, 5) })
-    return response(`snapshot-${String(calls.length)}`, queryRequest)
-  })
-  const cache = createQueryCache({ client: fake.client })
-  const base = request()
-  await cache.client.query(base)
-  let requestSequence = 1
-  cache.client.subscribe({
-    subscriptionId: 'sub_00000000000000000000000001',
-    subscription: { scope, stream: { kind: 'scope' }, eventTypes: ['activity.recorded.v1'] },
-    async onEvent() {
-      requestSequence += 1
-      await cache.client.query(request({
-        requestId: `req_${String(requestSequence).padStart(26, '0')}`,
-      }))
-    },
-  })
+  for (let round = 1; round <= 100; round += 1) {
+    const calls = []
+    let delayReload = false
+    const fake = fakeClient(async queryRequest => {
+      calls.push(queryRequest)
+      if (delayReload) await new Promise(resolvePromise => { setTimeout(resolvePromise, 5) })
+      return response(`snapshot-${String(calls.length)}`, queryRequest)
+    })
+    const cache = createQueryCache({ client: fake.client })
+    const base = request()
+    await cache.client.query(base)
+    let requestSequence = 1
+    cache.client.subscribe({
+      subscriptionId: 'sub_00000000000000000000000001',
+      subscription: { scope, stream: { kind: 'scope' }, eventTypes: ['activity.recorded.v1'] },
+      async onEvent() {
+        requestSequence += 1
+        await cache.client.query(request({
+          requestId: `req_${String(requestSequence).padStart(26, '0')}`,
+        }))
+      },
+    })
 
-  delayReload = true
-  mock.timers.enable({ apis: ['setTimeout'] })
-  try {
-    // The generated WebSocket client awaits each callback before applying the next queued frame.
-    for (let sequence = 1; sequence <= 40; sequence += 1) {
-      const applied = fake.options.onEvent({
+    delayReload = true
+    mock.timers.enable({ apis: ['setTimeout'] })
+    try {
+      // Production queues validated frames while awaiting each callback. Let the first
+      // reload enter HTTP, then queue the rest before applying them serially.
+      const frames = Array.from({ length: 40 }, (_, index) => ({
         type: 'event.v1',
         subscriptionId: 'sub_00000000000000000000000001',
         authorizationEpoch: 1,
-        sequence,
+        sequence: index + 1,
         scope,
         stream: { kind: 'scope' },
         event: { type: 'activity.recorded.v1' },
-      })
+      }))
+      fake.options.onEventQueued?.(frames[0])
+      const firstApplied = fake.options.onEvent(frames[0])
+      for (const frame of frames.slice(1)) fake.options.onEventQueued?.(frame)
       mock.timers.tick(5)
-      await applied
+      await firstApplied
+      for (const frame of frames.slice(1)) {
+        const applied = fake.options.onEvent(frame)
+        mock.timers.tick(5)
+        await applied
+      }
+    } finally {
+      mock.timers.reset()
+      cache.close()
     }
-  } finally {
-    mock.timers.reset()
-    cache.close()
-  }
 
-  assert.ok(calls.length <= 3, `serialized invalidations issued ${String(calls.length - 1)} reloads`)
+    assert.ok(
+      calls.length <= 3,
+      `round ${String(round)} issued ${String(calls.length - 1)} serialized reloads`,
+    )
+  }
 })
 
 test('retention reset, authorization epoch change, revocation, resume, and reconnect discard snapshots', async () => {

@@ -1232,6 +1232,8 @@ export interface ControlPlaneWebSocketClientOptions {
   readonly baseUrl?: string
   readonly createSocket?: ControlPlaneWebSocketFactory
   readonly reconnectDelayMillis?: number
+  /** Synchronous observer after validation and before ordered event application. */
+  readonly onEventQueued?: (event: ControlPlaneWebSocketEventFrame) => void
   readonly onEvent: (event: ControlPlaneWebSocketEventFrame) => Promise<void> | void
   readonly onResetRequired?: (
     frame: ControlPlaneWebSocketResetRequiredFrame | null,
@@ -1565,6 +1567,12 @@ export function createControlPlaneWebSocketClient(
         'INVALID_WEBSOCKET_FRAME',
         'The event sequence is not contiguous with the active subscription.',
       ))
+      return
+    }
+    try {
+      options.onEventQueued?.(frame)
+    } catch (error) {
+      failEventProcessing(error)
       return
     }
     nextReceivedSequence += 1

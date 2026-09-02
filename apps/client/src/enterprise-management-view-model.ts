@@ -5,7 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
-import { invalidateClientQueryCache } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import { ControlPlaneWebSocketEventType } from './generated/contracts.js'
 import type {
   Actor,
@@ -430,6 +430,7 @@ function validateQuery(
 export function createEnterpriseManagementViewModel(
   options: EnterpriseManagementViewModelOptions,
 ): EnterpriseManagementViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const configuredSources = options.sources ?? createEnterpriseManagementSources()
   const sources = validateSources(configuredSources)
   const listeners = new Set<EnterpriseManagementListener>()
@@ -682,11 +683,7 @@ export function createEnterpriseManagementViewModel(
       if (!closed && currentState.status !== 'authentication-required') subscribeRealtime()
     },
     async refresh(area) {
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-      })
+      queryCache.refresh()
       const areas = area === undefined ? ENTERPRISE_MANAGEMENT_AREAS : [area]
       await loadAreas(areas, false)
       if (!closed && subscription === null && currentState.status !== 'authentication-required') {
@@ -844,12 +841,7 @@ export function createEnterpriseManagementViewModel(
     close() {
       if (closed) return
       closed = true
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-        discard: true,
-      })
+      queryCache.close()
       realtimeGeneration += 1
       for (const controller of controllers.values()) controller.abort()
       controllers.clear()

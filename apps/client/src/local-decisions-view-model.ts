@@ -5,7 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
-import { invalidateClientQueryCache } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   ApprovalDecideCompletedResponse,
@@ -362,6 +362,7 @@ function validateInputValue(
 export function createLocalDecisionsViewModel(
   options: LocalDecisionsViewModelOptions,
 ): LocalDecisionsViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const listeners = new Set<LocalDecisionsListener>()
   const controllers = new Set<AbortController>()
   const subscriptions = new Set<ControlPlaneSubscription>()
@@ -816,11 +817,7 @@ export function createLocalDecisionsViewModel(
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-      })
+      queryCache.refresh()
       await load(false, subscriptions.size === 0 ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && subscriptions.size === 0 && !closed) subscribeRealtime()
     },
@@ -997,12 +994,7 @@ export function createLocalDecisionsViewModel(
     close() {
       if (closed) return
       closed = true
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-        discard: true,
-      })
+      queryCache.close()
       generation += 1
       inFlight.clear()
       abortRequests()

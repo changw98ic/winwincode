@@ -5,7 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
-import { invalidateClientQueryCache } from './core/query-cache.js'
+import { createQueryCacheLifecycle } from './core/query-cache.js'
 import type {
   Actor,
   ApprovalDecideCompletedResponse,
@@ -532,6 +532,7 @@ function assertPendingApprovals(
 
 /** Build the complete Chat read model from HTTP snapshots and one WebSocket subscription. */
 export function createChatViewModel(options: ChatViewModelOptions): ChatViewModel {
+  const queryCache = createQueryCacheLifecycle(options)
   const messagePageSize = assertPageSize(
     'messagePageSize',
     options.messagePageSize,
@@ -1750,11 +1751,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       await load(true)
     },
     async refresh() {
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-      })
+      queryCache.refresh()
       await load(false)
     },
     async selectSession(productSessionId) {
@@ -1884,12 +1881,7 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
     close() {
       if (closed) return
       closed = true
-      invalidateClientQueryCache(options.client, {
-        actor: options.actor,
-        scope: options.scope,
-        reason: 'manual',
-        discard: true,
-      })
+      queryCache.close()
       generation += 1
       abortRequests()
       realtime?.close()

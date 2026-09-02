@@ -41,18 +41,62 @@ export interface QueryCache {
   readonly client: ControlPlaneClient
   peek(query: QueryRequest): QueryCacheSnapshot | null
   invalidate(invalidation: QueryInvalidation): void
+  revalidate(query: QueryRequest): void
   clear(reason?: QueryInvalidationReason): void
+  close(): void
+}
+
+/** Cache-only lifecycle seam shared by feature view-models; it owns no business state. */
+export interface QueryCacheLifecycle {
+  refresh(queries?: readonly QueryRequest['query'][]): void
+  revalidate(...queries: readonly QueryRequest[]): void
   close(): void
 }
 
 const QUERY_CACHES = new WeakMap<ControlPlaneClient, QueryCache>()
 
-/** Invalidates a cached facade when present and is a no-op for an injected uncached facade. */
-export function invalidateClientQueryCache(
-  client: ControlPlaneClient,
-  invalidation: QueryInvalidation,
-): void {
-  QUERY_CACHES.get(client)?.invalidate(invalidation)
+export function createQueryCacheLifecycle(options: {
+  readonly client: ControlPlaneClient
+  readonly actor: Actor
+  readonly scope: Scope
+}): QueryCacheLifecycle {
+  const actor = actorIdentity(options.actor)
+  const scope = scopeIdentity(options.scope)
+
+  function cache(): QueryCache | undefined {
+    return QUERY_CACHES.get(options.client)
+  }
+
+  return Object.freeze<QueryCacheLifecycle>({
+    refresh(queries?: readonly QueryRequest['query'][]) {
+      cache()?.invalidate({
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+        ...(queries === undefined ? {} : { queries }),
+      })
+    },
+    revalidate(...queries: readonly QueryRequest[]) {
+      for (const query of queries) {
+        if (actorIdentity(query.actor) !== actor || scopeIdentity(query.scope) !== scope) {
+          throw clientFailure(
+            'QUERY_CACHE_LIFECYCLE_MISMATCH',
+            'The query retry does not belong to this cache lifecycle.',
+            query.requestId,
+          )
+        }
+        cache()?.revalidate(query)
+      }
+    },
+    close() {
+      cache()?.invalidate({
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+        discard: true,
+      })
+    },
+  })
 }
 
 interface CachedSnapshot {
@@ -230,6 +274,13 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     }
   }
 
+  function revalidate(query: QueryRequest): void {
+    const key = queryCacheKey(query)
+    const entry = entries.get(key)
+    entry?.flight?.controller.abort()
+    entries.delete(key)
+  }
+
   function clear(_reason: QueryInvalidationReason = 'manual'): void {
     for (const entry of entries.values()) entry.flight?.controller.abort()
     entries.clear()
@@ -378,19 +429,28 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
     subscribe(subscriptionOptions) {
       const scope = subscriptionOptions.subscription.scope
       let authorizationEpoch: number | null = null
+      const queuedFrames = new WeakSet<object>()
       let active = true
       let raw: ControlPlaneSubscription
+      function invalidateForEvent(frame: ControlPlaneWebSocketEventFrame): void {
+        const epochChanged = authorizationEpoch !== null
+          && frame.authorizationEpoch !== authorizationEpoch
+        authorizationEpoch = frame.authorizationEpoch
+        if (epochChanged) discardScope(scope, 'authorization-epoch')
+        else {
+          const queries = reloadQueries(frame)
+          invalidate({ scope, reason: 'event', ...(queries === undefined ? {} : { queries }) })
+        }
+      }
       raw = options.client.subscribe({
         ...subscriptionOptions,
+        onEventQueued(frame) {
+          queuedFrames.add(frame)
+          invalidateForEvent(frame)
+          subscriptionOptions.onEventQueued?.(frame)
+        },
         async onEvent(frame) {
-          const epochChanged = authorizationEpoch !== null
-            && frame.authorizationEpoch !== authorizationEpoch
-          authorizationEpoch = frame.authorizationEpoch
-          if (epochChanged) discardScope(scope, 'authorization-epoch')
-          else {
-            const queries = reloadQueries(frame)
-            invalidate({ scope, reason: 'event', ...(queries === undefined ? {} : { queries }) })
-          }
+          if (!queuedFrames.delete(frame)) invalidateForEvent(frame)
           await subscriptionOptions.onEvent(frame)
         },
         async onResetRequired(frame) {
@@ -447,6 +507,7 @@ export function createQueryCache(options: { readonly client: ControlPlaneClient 
       })
     },
     invalidate,
+    revalidate,
     clear,
     close,
   }

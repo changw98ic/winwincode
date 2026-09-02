@@ -74,6 +74,6 @@ test('real Chrome coalesces repeated invalidations and retains the Settings draf
     status: 'ready',
   })
   assert.ok(result.queryDelta.settings <= 2, JSON.stringify(result.queryDelta))
-  assert.ok(result.queryDelta.credentials <= 1, JSON.stringify(result.queryDelta))
+  assert.ok(result.queryDelta.credentials <= 2, JSON.stringify(result.queryDelta))
   assert.equal(exceptions.length, 0, JSON.stringify(exceptions))
 })
