@@ -37,6 +37,7 @@ import {
   writeApiProductionSourceSeal,
   writeHelperReleaseManifest,
 } from './run-api-production-vertical.mjs'
+import { capturedStandardOutput } from './child-process-output.mjs'
 import { releaseSourceSha256 } from './release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
@@ -91,7 +92,7 @@ function run(command, arguments_, options = {}) {
     }
     throw new Error(`${command} ${arguments_.join(' ')} failed with ${result.signal ?? `exit code ${result.status}`}`)
   }
-  return result.stdout.trim()
+  return capturedStandardOutput(result, options.capture)
 }
 
 function releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {

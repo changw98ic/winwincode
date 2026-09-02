@@ -45,6 +45,7 @@ import {
   releaseSourcePaths,
   releaseSourceSha256,
 } from '../scripts/release-source-contract.mjs'
+import { capturedStandardOutput } from '../scripts/child-process-output.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceCommit = '1234567890abcdef1234567890abcdef12345678'
@@ -299,6 +300,18 @@ test('release runner rejects source mutation around both isolated builds', () =>
     /function isolatedReleaseBuild[\s\S]*assertCleanCommit\([\s\S]*clientBuild[\s\S]*rustBuild[\s\S]*assertCleanCommit/u,
   )
   assert.match(runner, /SOURCE_MUTATION: release source changed/u)
+})
+
+test('release runner accepts inherited output and trims only captured output', () => {
+  assert.equal(capturedStandardOutput({ stdout: null }, false), '')
+  assert.equal(capturedStandardOutput({ stdout: '  captured output\n' }, true), 'captured output')
+  assert.throws(
+    () => capturedStandardOutput({ stdout: null }, true),
+    /captured child process stdout must be a string/u,
+  )
+
+  const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  assert.match(runner, /return capturedStandardOutput\(result, options\.capture\)/u)
 })
 
 test('release runner leaves the complete workspace gate to mainline and runs one release API vertical', () => {
