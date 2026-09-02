@@ -35,8 +35,7 @@
     "verify:products": "node scripts/verify-products.mjs",
     "verify:phase-6.6": "node scripts/phase-6-6-negative-gate.mjs",
     "verify:source": "node scripts/lint-workspace.mjs",
-    "verify:clean-install": "node scripts/verify-clean-install.mjs",
-    "verify": "pnpm format:check && pnpm lint && pnpm verify:phase-6.6 && pnpm test && pnpm verify:clean-install && pnpm build && pnpm verify:products && pnpm verify:api-production-vertical"
+    "verify": "pnpm format:check && pnpm lint && pnpm verify:phase-6.6 && pnpm test && pnpm build && pnpm verify:products && pnpm verify:api-production-vertical"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

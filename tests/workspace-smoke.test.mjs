@@ -3,22 +3,48 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
+import { selectSuccessfulMainlineRun } from '../scripts/verify-mainline-release-source.mjs'
+
 const root = resolve(import.meta.dirname, '..')
 const workflowPath = resolve(root, '.github/workflows/native-release.yml')
 const workflow = readFileSync(workflowPath, 'utf8')
+const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
+const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
 
-test('product release workflow runs one mainline gate before the exact four-target matrix', () => {
+test('ordinary CI owns the one canonical workspace verification', () => {
+  assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
+  assert.match(mainlineWorkflow, /^  push:$/mu)
+  assert.match(mainlineWorkflow, /^  pull_request:$/mu)
+  assert.match(mainlineWorkflow, /^      - name: Verify the exact commit once$/mu)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify$/gmu)].length, 1)
+  assert.doesNotMatch(
+    mainlineWorkflow,
+    /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX|secrets\./u,
+  )
+  assert.ok(mainlineWorkflow.includes('binutils bubblewrap pkg-config libcap-dev'))
+  assert.ok(mainlineWorkflow.includes('kernel.apparmor_restrict_unprivileged_userns=0'))
+  assert.ok(mainlineWorkflow.includes(
+    'bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net',
+  ))
+})
+
+test('product release verifies one successful exact-commit mainline run before the four-target matrix', () => {
   assert.match(workflow, /^name: Product release matrix$/mu)
   assert.match(workflow, /^  workflow_dispatch:$/mu)
+  assert.match(workflow, /^      source_commit:$/mu)
+  assert.match(workflow, /^        required: true$/mu)
   assert.doesNotMatch(workflow, /^  (?:pull_request|push):$/mu)
-  assert.doesNotMatch(workflow, /inputs\.platform|Platform family|type: choice/u)
-  assert.match(workflow, /^  mainline-verification:$/mu)
-  assert.match(workflow, /^      - name: Verify the complete workspace once$/mu)
-  assert.equal([...workflow.matchAll(/corepack pnpm verify$/gmu)].length, 1)
-  assert.match(workflow, /^    needs: mainline-verification$/mu)
-  assert.ok(workflow.includes('binutils bubblewrap pkg-config libcap-dev'))
-  assert.ok(workflow.includes('kernel.apparmor_restrict_unprivileged_userns=0'))
-  assert.ok(workflow.includes('bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net'))
+  assert.doesNotMatch(workflow, /corepack pnpm verify(?:\s|$)/u)
+  assert.match(workflow, /^  actions: read$/mu)
+  assert.match(workflow, /^  verify-source:$/mu)
+  assert.ok(workflow.includes('test "${SELECTED_REF}" = "refs/heads/${DEFAULT_BRANCH}"'))
+  assert.ok(workflow.includes('ref: ${{ github.event.repository.default_branch }}'))
+  assert.ok(workflow.includes('node scripts/verify-mainline-release-source.mjs'))
+  assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
+  assert.ok(workflow.includes('--default-branch "${DEFAULT_BRANCH}"'))
+  assert.match(workflow, /^    needs: verify-source$/mu)
+  assert.ok(workflow.includes('SOURCE_COMMIT: ${{ needs.verify-source.outputs.source_commit }}'))
+  assert.ok(workflow.includes('ref: ${{ env.SOURCE_COMMIT }}'))
   const targetMatrix = [
     ['aarch64-unknown-linux-gnu', 'ubuntu-24.04-arm'],
     ['x86_64-unknown-linux-gnu', 'ubuntu-24.04'],
@@ -45,11 +71,84 @@ test('product release workflow runs one mainline gate before the exact four-targ
   assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
 })
 
+test('mainline source verifier accepts only the default-branch exact-SHA successful push', () => {
+  const defaultBranch = 'main'
+  const repository = 'winwincode/project'
+  const sourceCommit = '1'.repeat(40)
+  const valid = {
+    id: 42,
+    html_url: 'https://github.example/runs/42',
+    head_sha: sourceCommit,
+    event: 'push',
+    status: 'completed',
+    conclusion: 'success',
+    path: '.github/workflows/mainline.yml',
+    head_repository: { full_name: repository },
+    head_branch: defaultBranch,
+  }
+  assert.deepEqual(selectSuccessfulMainlineRun({
+    defaultBranch,
+    repository,
+    sourceCommit,
+    runs: [valid],
+  }), {
+    defaultBranch,
+    runId: 42,
+    runUrl: 'https://github.example/runs/42',
+    sourceCommit,
+  })
+  assert.throws(
+    () => selectSuccessfulMainlineRun({
+      defaultBranch,
+      repository,
+      sourceCommit: 'HEAD',
+      runs: [valid],
+    }),
+    /40 lowercase hexadecimal/u,
+  )
+  for (const changed of [
+    { event: 'pull_request' },
+    { head_repository: { full_name: 'foreign/project' } },
+    { conclusion: 'failure' },
+    { head_sha: '2'.repeat(40) },
+    { head_branch: 'feature/strongflow-foundation' },
+  ]) {
+    assert.throws(
+      () => selectSuccessfulMainlineRun({
+        defaultBranch,
+        repository,
+        sourceCommit,
+        runs: [{ ...valid, ...changed }],
+      }),
+      /found 0/u,
+    )
+  }
+  assert.throws(
+    () => selectSuccessfulMainlineRun({
+      defaultBranch,
+      repository,
+      sourceCommit,
+      runs: [valid, valid],
+    }),
+    /found 2/u,
+  )
+  assert.throws(
+    () => selectSuccessfulMainlineRun({
+      defaultBranch: '../main',
+      repository,
+      sourceCommit,
+      runs: [valid],
+    }),
+    /default branch identity is invalid/u,
+  )
+})
+
 test('product release workflow passes immutable source identity to the canonical gate', () => {
   assert.ok(existsSync(resolve(root, 'scripts/run-release-artifact-gate.mjs')))
   assert.ok(workflow.includes('node scripts/run-release-artifact-gate.mjs'))
-  assert.ok(workflow.includes('--source-commit "${GITHUB_SHA}"'))
-  assert.ok(workflow.includes('--source-date-epoch "$(git show -s --format=%ct "${GITHUB_SHA}")"'))
+  assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
+  assert.ok(workflow.includes('--source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")"'))
+  assert.doesNotMatch(workflow, /GITHUB_SHA/u)
   assert.ok(workflow.includes('--output release-artifacts'))
   const productUploadStep = workflow.match(
     /      - name: Upload release artifacts\n[\s\S]*?(?=\n      - name:)/u,
@@ -90,7 +189,7 @@ test('product release workflow blocks uploads until target security verification
   ))
   assert.ok(workflow.includes(securityCommand))
   assert.ok(workflow.includes('--target "${{ matrix.target }}"'))
-  assert.ok(workflow.includes('--expected-commit "${GITHUB_SHA}"'))
+  assert.ok(workflow.includes('--expected-commit "${SOURCE_COMMIT}"'))
   assert.ok(workflow.includes('--evidence release-artifacts'))
   assert.ok(workflow.includes('--output release-artifact-security-report.json'))
   const securityOffset = workflow.indexOf(securityCommand)

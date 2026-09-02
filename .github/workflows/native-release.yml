@@ -2,66 +2,59 @@ name: Product release matrix
 
 on:
   workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-character commit with a successful Mainline verification push run
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: product-release-${{ github.workflow }}-${{ github.ref }}
+  group: product-release-${{ github.workflow }}-${{ inputs.source_commit }}
   cancel-in-progress: true
 
 jobs:
-  mainline-verification:
-    name: Mainline verification
+  verify-source:
+    name: Verify successful mainline source
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    env:
-      CARGO_INCREMENTAL: "0"
-      CI: "1"
-      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    outputs:
+      source_commit: ${{ steps.source.outputs.source_commit }}
     steps:
-      - name: Check out source
+      - name: Reject a non-default-branch workflow definition
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SELECTED_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "${SELECTED_REF}" = "refs/heads/${DEFAULT_BRANCH}"
+
+      - name: Check out the trusted verifier
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
 
-      - name: Install pinned Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version-file: .node-version
-
-      - name: Install Linux build dependencies
+      - name: Verify exact successful mainline push
+        id: source
         shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils bubblewrap pkg-config libcap-dev
-          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
-
-      - name: Install pinned Rust
-        shell: bash
-        run: |
-          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt,rust-src
-          rustup override set 1.95.0
-          rustc -Vv
-          cargo -V
-
-      - name: Install JavaScript dependencies
-        shell: bash
-        run: |
-          corepack enable
-          corepack pnpm install --frozen-lockfile
-
-      - name: Verify the complete workspace once
-        shell: bash
-        run: corepack pnpm verify
+          node scripts/verify-mainline-release-source.mjs \
+            --source-commit "${SOURCE_COMMIT}" \
+            --default-branch "${DEFAULT_BRANCH}"
+          printf 'source_commit=%s\n' "${SOURCE_COMMIT}" >> "${GITHUB_OUTPUT}"
 
   product-release:
     name: ${{ matrix.target }}
-    needs: mainline-verification
+    needs: verify-source
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -80,11 +73,13 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CI: "1"
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      SOURCE_COMMIT: ${{ needs.verify-source.outputs.source_commit }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ env.SOURCE_COMMIT }}
 
       - name: Install pinned Node.js
         uses: actions/setup-node@v7
@@ -127,8 +122,8 @@ jobs:
           set -euo pipefail
           node scripts/run-release-artifact-gate.mjs \
             --target ${{ matrix.target }} \
-            --source-commit "${GITHUB_SHA}" \
-            --source-date-epoch "$(git show -s --format=%ct "${GITHUB_SHA}")" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")" \
             --output release-artifacts
 
       - name: Verify release artifact security
@@ -143,8 +138,8 @@ jobs:
           printf '%s' "${WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX}" > "$key_file"
           node scripts/verify-release-artifact-security.mjs \
             --target "${{ matrix.target }}" \
-            --expected-commit "${GITHUB_SHA}" \
-            --source-date-epoch "$(git show -s --format=%ct "${GITHUB_SHA}")" \
+            --expected-commit "${SOURCE_COMMIT}" \
+            --source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")" \
             --evidence release-artifacts \
             --output release-artifact-security-report.json \
             --sensitive-input "$key_file"

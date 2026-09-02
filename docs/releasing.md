@@ -25,13 +25,17 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm verify
 ```
 
+`pnpm verify` 在当前 checkout 中依次执行一次格式、lint、phase 负向门、全 workspace TypeScript/Rust tests、构建、产品清单和 direct API。普通 CI 的 `actions/checkout` 是唯一干净 commit 边界；frozen install 在调用这个入口前完成，后续验证都在该 checkout 原地完成。
+
 候选必须保持干净；源码、manifest、lock、协议、测试、脚本、文档或通知变化后，旧 artifact 全部失效。
 
 四平台 workflow 使用仓库 secret `WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX` 和对应 repository variable `WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX` 为 Worker 内部 helper 生成可验证的签名清单。批准人应先确认两者属于当前发布身份且相互匹配。
 
 ## 3. 四平台 artifact
 
-在 GitHub Actions 手动运行一次 `Product release matrix`。这个 run 先执行一次完整主线 `pnpm verify`，通过后再并行启动下面四个原生 target job。每个 target 只构建 Server、Worker、内部 helper 和同一份 Client 静态包，在同一物理 Cargo target 完整清空前后执行两次冷构建比较，并用 release 二进制运行一次 direct API 完整流程；它不重复 clean checkout、全 workspace Rust 测试或压力循环。详细层级、目录与命令见 [产品发布证据门禁](release-gate.md)。
+feature 分支先通过普通 CI 和合并门；合并到默认分支后，默认分支 exact commit 的 `Mainline verification` push run 也必须成功。随后从默认分支手动启动一次 `Product release matrix`，把完整 40 位候选 SHA 填入唯一的 `source_commit` 输入。轻量 source verifier 通过只读 GitHub Actions API 确认同一仓库、默认分支、同一 SHA、push 事件、成功结论且匹配记录唯一；pull request、feature 分支、fork、失败 run、另一个 SHA 或重复记录都会在发布 job 取得签名 secret 前失败。发布 workflow 不重新执行 `pnpm verify`，也不读取分支当前 HEAD。
+
+四个原生 target job 只构建 Server、Worker、内部 helper 和同一份 Client 静态包，在同一物理 Cargo target 完整清空前后执行两次冷构建比较，并用 release 二进制运行一次 direct API 完整流程；它不运行 clean checkout、全 workspace Rust 测试或压力循环。详细层级、目录与命令见 [产品发布证据门禁](release-gate.md)。
 
 Rust 文件名固定为 `winwincode-server`、`winwincode-worker` 和 `winwincode-kernel-helper`；Local 组成使用 `winwincode-local` library。
 

@@ -61,7 +61,7 @@ corepack pnpm build
 corepack pnpm verify
 ```
 
-`corepack pnpm verify` 会再次检查格式、类型、Rust Clippy、测试、当前 Client/Server/Worker/Local 边界、包内容、上游固定项、生产纵向和干净目录安装。平台发布证据另按[发布流程](docs/releasing.md)生成。
+`corepack pnpm verify` 会在当前 checkout 中各执行一次格式、类型、Rust Clippy、负向门、全 workspace 测试、构建、产品边界和生产纵向。普通 CI 由 `actions/checkout` 提供真实的干净 commit，并在 frozen install 后调用这一个入口。平台发布证据另按[发布流程](docs/releasing.md)生成。
 
 ## 修改 Delivery 数据结构
 

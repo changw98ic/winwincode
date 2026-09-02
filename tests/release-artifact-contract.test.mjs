@@ -12,11 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
-  realpathSync,
   rmSync,
-  symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -49,18 +45,6 @@ import {
   releaseSourcePaths,
   releaseSourceSha256,
 } from '../scripts/release-source-contract.mjs'
-import {
-  RELEASE_GATE_BUILD_ROOT_ENV,
-  ReleaseCargoTargetReclaimError,
-  reclaimReleaseCargoTarget,
-} from '../scripts/release-cargo-target-reclaim.mjs'
-import {
-  CLEAN_INSTALL_COMMANDS,
-  COLD_TEST_TIMEOUT_MILLIS,
-  DEFAULT_COMMAND_TIMEOUT_MILLIS,
-  runCleanCheckoutCommand,
-  verifyCleanInstall,
-} from '../scripts/verify-clean-install.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const sourceCommit = '1234567890abcdef1234567890abcdef12345678'
@@ -317,98 +301,6 @@ test('release runner rejects source mutation around both isolated builds', () =>
   assert.match(runner, /SOURCE_MUTATION: release source changed/u)
 })
 
-test('release clean checkout reclaims only this gate\'s external Cargo target', t => {
-  const directory = mkdtempSync(join(tmpdir(), 'winwincode-release-reclaim-test-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const sourceRoot = join(directory, 'source')
-  const buildRoot = join(directory, 'build', 'winwincode-release-valid')
-  const cargoTarget = join(buildRoot, 'cargo-target')
-  mkdirSync(sourceRoot, { recursive: true })
-  mkdirSync(cargoTarget, { recursive: true })
-  writeFileSync(join(cargoTarget, 'regenerable'), 'bytes')
-  const canonicalCargoTarget = realpathSync(cargoTarget)
-
-  const result = reclaimReleaseCargoTarget({
-    environment: {
-      [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
-      CARGO_TARGET_DIR: cargoTarget,
-    },
-    sourceRoot,
-  })
-
-  assert.equal(result.reclaimed, true)
-  assert.equal(result.path, canonicalCargoTarget)
-  assert.equal(existsSync(cargoTarget), false)
-  assert.equal(typeof result.availableBytesBefore, 'bigint')
-  assert.equal(typeof result.availableBytesAfter, 'bigint')
-})
-
-test('clean checkout without the explicit release marker preserves Cargo targets', t => {
-  const directory = mkdtempSync(join(tmpdir(), 'winwincode-nonrelease-reclaim-test-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const sourceRoot = join(directory, 'source')
-  const cargoTarget = join(directory, 'arbitrary-target')
-  mkdirSync(sourceRoot, { recursive: true })
-  mkdirSync(cargoTarget, { recursive: true })
-  writeFileSync(join(cargoTarget, 'preserved'), 'bytes')
-
-  assert.deepEqual(
-    reclaimReleaseCargoTarget({ environment: { CARGO_TARGET_DIR: cargoTarget }, sourceRoot }),
-    { reclaimed: false, reason: 'not-release-gate' },
-  )
-  assert.equal(readFileSync(join(cargoTarget, 'preserved'), 'utf8'), 'bytes')
-})
-
-test('release Cargo target reclaim rejects arbitrary and unsafe paths without deleting them', t => {
-  const directory = mkdtempSync(join(tmpdir(), 'winwincode-release-reclaim-reject-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const sourceRoot = join(directory, 'source')
-  const validBuildRoot = join(directory, 'build', 'winwincode-release-valid')
-  const validCargoTarget = join(validBuildRoot, 'cargo-target')
-  const outsideTarget = join(directory, 'outside', 'cargo-target')
-  const sourceBuildRoot = join(sourceRoot, 'winwincode-release-source')
-  const sourceTarget = join(sourceBuildRoot, 'cargo-target')
-  const realTarget = join(validBuildRoot, 'real-target')
-  for (const path of [sourceRoot, validCargoTarget, outsideTarget, sourceTarget, realTarget]) {
-    mkdirSync(path, { recursive: true })
-  }
-  writeFileSync(join(validCargoTarget, 'preserved'), 'valid')
-  writeFileSync(join(outsideTarget, 'preserved'), 'outside')
-  writeFileSync(join(sourceTarget, 'preserved'), 'source')
-  writeFileSync(join(realTarget, 'preserved'), 'linked')
-
-  const reject = (buildRoot, cargoTarget) => assert.throws(
-    () => reclaimReleaseCargoTarget({
-      environment: {
-        [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
-        CARGO_TARGET_DIR: cargoTarget,
-      },
-      sourceRoot,
-    }),
-    error => error instanceof ReleaseCargoTargetReclaimError
-      && error.code === 'RELEASE_CARGO_TARGET_RECLAIM_REJECTED',
-  )
-
-  reject('relative-release-root', validCargoTarget)
-  reject(validBuildRoot, 'relative-cargo-target')
-  reject(validBuildRoot, outsideTarget)
-  reject(sourceBuildRoot, sourceTarget)
-  rmSync(validCargoTarget, { recursive: true, force: true })
-  symlinkSync(realTarget, validCargoTarget)
-  reject(validBuildRoot, validCargoTarget)
-  unlinkSync(validCargoTarget)
-  symlinkSync(join(validBuildRoot, 'missing-target'), validCargoTarget)
-  reject(validBuildRoot, validCargoTarget)
-  unlinkSync(validCargoTarget)
-  writeFileSync(validCargoTarget, 'regular-file')
-  reject(validBuildRoot, validCargoTarget)
-
-  assert.equal(readFileSync(join(outsideTarget, 'preserved'), 'utf8'), 'outside')
-  assert.equal(readFileSync(join(sourceTarget, 'preserved'), 'utf8'), 'source')
-  assert.equal(readFileSync(join(realTarget, 'preserved'), 'utf8'), 'linked')
-  assert.equal(readFileSync(validCargoTarget, 'utf8'), 'regular-file')
-})
-
 test('release runner leaves the complete workspace gate to mainline and runs one release API vertical', () => {
   const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.doesNotMatch(runner, /pnpm', 'verify|pnpm verify/u)
@@ -435,134 +327,21 @@ test('release runner leaves the complete workspace gate to mainline and runs one
   assert.equal(replay < api && api < stage, true)
 })
 
-test('clean install gives only the cold test command a twenty-minute bound', () => {
-  assert.deepEqual(
-    CLEAN_INSTALL_COMMANDS.map(({ args, timeoutMillis }) => ({ args, timeoutMillis })),
-    [
-      { args: ['install', '--frozen-lockfile', '--prefer-offline'], timeoutMillis: 600_000 },
-      { args: ['format:check'], timeoutMillis: 600_000 },
-      { args: ['lint'], timeoutMillis: 600_000 },
-      { args: ['build'], timeoutMillis: 600_000 },
-      { args: ['test'], timeoutMillis: 1_200_000 },
-      { args: ['verify:products'], timeoutMillis: 600_000 },
-      { args: ['verify:phase-6.6'], timeoutMillis: 600_000 },
-    ],
-  )
-  assert.equal(DEFAULT_COMMAND_TIMEOUT_MILLIS, 600_000)
-  assert.equal(COLD_TEST_TIMEOUT_MILLIS, 1_200_000)
-  assert.throws(
-    () => runCleanCheckoutCommand({
-      args: [],
-      cwd: root,
-      cargoTarget: join(root, 'target'),
-      timeoutMillis: 0,
-    }),
-    /positive bounded timeout/u,
-  )
-})
-
-test('clean install timeout stops descendants and removes its temporary checkout', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'winwincode-clean-timeout-test-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const sourceRoot = join(directory, 'source')
-  const temporaryBase = join(directory, 'temporary')
-  const descendantPidPath = join(directory, 'descendant.pid')
-  mkdirSync(sourceRoot)
-  mkdirSync(temporaryBase)
-  writeFileSync(join(sourceRoot, 'fixture.txt'), 'source')
-  const fixture = [
-    "const { spawn } = require('node:child_process')",
-    "const { writeFileSync } = require('node:fs')",
-    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],",
-    "  { stdio: ['ignore', 'inherit', 'inherit'] })",
-    'writeFileSync(process.argv[1], String(child.pid))',
-    "process.stdout.write('fixture ready\\n')",
-    'setInterval(() => {}, 1000)',
-  ].join('\n')
-
-  let result
-  const verified = await verifyCleanInstall({
-    sourceRoot,
-    environment: {},
-    temporaryBase,
-    commandRunner: async ({ args, cwd, cargoTarget }) => {
-      if (args[0] !== 'test') {
-        return { status: 0, signal: null, timedOut: false, stdout: '', stderr: '' }
-      }
-      result = await runCleanCheckoutCommand({
-        args: [descendantPidPath],
-        cwd,
-        cargoTarget,
-        timeoutMillis: 500,
-        terminationGraceMillis: 250,
-        executable: process.execPath,
-        argumentPrefix: ['-e', fixture, '--'],
-      })
-      return result
-    },
-  })
-
-  assert.equal(verified, false)
-  assert.equal(result.timedOut, true)
-  assert.equal(result.signal, 'SIGTERM')
-  assert.match(result.stdout, /fixture ready/u)
-  assert.deepEqual(readdirSync(temporaryBase), [])
-  const descendantPid = Number(readFileSync(descendantPidPath, 'utf8'))
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      process.kill(descendantPid, 0)
-    } catch (error) {
-      if (error?.code === 'ESRCH') return
-      throw error
-    }
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 25))
-  }
-  assert.fail(`descendant process ${descendantPid} survived the bounded timeout`)
-})
-
-test('clean install wrapper cleans both ordinary and release-marked checkouts', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'winwincode-clean-wrapper-test-'))
-  t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const sourceRoot = join(directory, 'source')
-  const ordinaryTemporaryBase = join(directory, 'ordinary')
-  const releaseTemporaryBase = join(directory, 'release')
-  const buildRoot = join(directory, 'build', 'winwincode-release-test')
-  const cargoTarget = join(buildRoot, 'cargo-target')
-  for (const path of [sourceRoot, ordinaryTemporaryBase, releaseTemporaryBase, cargoTarget]) {
-    mkdirSync(path, { recursive: true })
-  }
-  writeFileSync(join(sourceRoot, 'fixture.txt'), 'source')
-  writeFileSync(join(cargoTarget, 'regenerable'), 'target')
-  const seenTimeouts = []
-  const commandRunner = async ({ timeoutMillis }) => {
-    seenTimeouts.push(timeoutMillis)
-    return { status: 0, signal: null, timedOut: false, stdout: '', stderr: '' }
-  }
-
-  assert.equal(await verifyCleanInstall({
-    sourceRoot,
-    environment: {},
-    temporaryBase: ordinaryTemporaryBase,
-    commandRunner,
-  }), true)
-  assert.deepEqual(readdirSync(ordinaryTemporaryBase), [])
-  assert.equal(existsSync(cargoTarget), true)
-
-  assert.equal(await verifyCleanInstall({
-    sourceRoot,
-    environment: {
-      [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
-      CARGO_TARGET_DIR: cargoTarget,
-    },
-    temporaryBase: releaseTemporaryBase,
-    commandRunner,
-  }), true)
-  assert.deepEqual(readdirSync(releaseTemporaryBase), [])
-  assert.equal(existsSync(cargoTarget), false)
-  assert.deepEqual(seenTimeouts, [
-    ...CLEAN_INSTALL_COMMANDS.map(entry => entry.timeoutMillis),
-    ...CLEAN_INSTALL_COMMANDS.map(entry => entry.timeoutMillis),
+test('canonical verify runs every complete-checkout gate exactly once', () => {
+  const workspace = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  const verifyCommands = workspace.scripts.verify.split(' && ')
+  assert.deepEqual(verifyCommands, [
+    'pnpm format:check',
+    'pnpm lint',
+    'pnpm verify:phase-6.6',
+    'pnpm test',
+    'pnpm build',
+    'pnpm verify:products',
+    'pnpm verify:api-production-vertical',
   ])
+  assert.equal(new Set(verifyCommands).size, verifyCommands.length)
+  assert.equal(workspace.scripts['verify:clean-install'], undefined)
+  assert.equal(existsSync(join(root, 'scripts/verify-clean-install.mjs')), false)
 })
 
 test('release runner cold-builds twice at one physical Cargo target outside its snapshot', () => {
