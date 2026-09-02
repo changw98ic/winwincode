@@ -7,24 +7,32 @@ const root = resolve(import.meta.dirname, '..')
 const workflowPath = resolve(root, '.github/workflows/native-release.yml')
 const workflow = readFileSync(workflowPath, 'utf8')
 
-test('product release workflow exposes separate manual Linux and macOS lanes', () => {
+test('product release workflow runs one mainline gate before the exact four-target matrix', () => {
   assert.match(workflow, /^name: Product release matrix$/mu)
   assert.match(workflow, /^  workflow_dispatch:$/mu)
   assert.doesNotMatch(workflow, /^  (?:pull_request|push):$/mu)
-  const platformOptions = [...workflow.matchAll(/^          - (linux|macos)$/gmu)]
-    .map(match => match[1])
-  assert.deepEqual(platformOptions, ['linux', 'macos'])
+  assert.doesNotMatch(workflow, /inputs\.platform|Platform family|type: choice/u)
+  assert.match(workflow, /^  mainline-verification:$/mu)
+  assert.match(workflow, /^      - name: Verify the complete workspace once$/mu)
+  assert.equal([...workflow.matchAll(/corepack pnpm verify$/gmu)].length, 1)
+  assert.match(workflow, /^    needs: mainline-verification$/mu)
   assert.ok(workflow.includes('binutils bubblewrap pkg-config libcap-dev'))
   assert.ok(workflow.includes('kernel.apparmor_restrict_unprivileged_userns=0'))
   assert.ok(workflow.includes('bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net'))
-  for (const [target, runner] of [
+  const targetMatrix = [
     ['aarch64-unknown-linux-gnu', 'ubuntu-24.04-arm'],
     ['x86_64-unknown-linux-gnu', 'ubuntu-24.04'],
     ['aarch64-apple-darwin', 'macos-15'],
     ['x86_64-apple-darwin', 'macos-15-intel'],
-  ]) {
-    assert.ok(
-      workflow.includes(`\"target\":\"${target}\",\"runner\":\"${runner}\"`),
+  ]
+  assert.deepEqual(
+    [...workflow.matchAll(/^          - target: (.+)$/gmu)].map(match => match[1]).toSorted(),
+    targetMatrix.map(([target]) => target).toSorted(),
+  )
+  for (const [target, runner] of targetMatrix) {
+    assert.match(
+      workflow,
+      new RegExp(`- target: ${target}\\n            runner: ${runner}`, 'u'),
       `native release workflow is missing ${target} on ${runner}`,
     )
   }
@@ -33,6 +41,8 @@ test('product release workflow exposes separate manual Linux and macOS lanes', (
   assert.ok(workflow.includes('rustup toolchain install 1.95.0'))
   assert.ok(workflow.includes('rustup target add "${{ matrix.target }}" --toolchain 1.95.0'))
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
+  const releaseRunner = readFileSync(resolve(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
 })
 
 test('product release workflow passes immutable source identity to the canonical gate', () => {

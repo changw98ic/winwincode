@@ -25,6 +25,7 @@ import test from 'node:test'
 
 import {
   RELEASE_ARTIFACT_MANIFEST,
+  RELEASE_ARTIFACT_CHECKS,
   RELEASE_CHECKSUMS,
   HELPER_RELEASE_MANIFEST_NAME,
   RELEASE_REPORT_KIND,
@@ -290,7 +291,7 @@ test('release verification isolates both helper keys while release builds receiv
   const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
   assert.match(
     runner,
-    /\.\.\.verificationEnvironment\(target, cargoTarget, sourceDateEpoch, buildPaths\)/u,
+    /run\(process\.execPath,[\s\S]*env: verificationChildEnvironment\(\)/u,
   )
   assert.match(
     runner,
@@ -408,20 +409,30 @@ test('release Cargo target reclaim rejects arbitrary and unsafe paths without de
   assert.equal(readFileSync(validCargoTarget, 'utf8'), 'regular-file')
 })
 
-test('release verify reclaims before clean install and rebuilds the outer target afterward', () => {
+test('release runner leaves the complete workspace gate to mainline and runs one release API vertical', () => {
   const runner = readFileSync(join(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
-  const cleanInstall = readFileSync(join(root, 'scripts/verify-clean-install.mjs'), 'utf8')
-  const workspace = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  assert.match(
-    runner,
-    /\[RELEASE_GATE_BUILD_ROOT_ENV\]: buildRoot[\s\S]*pnpm', 'verify'/u,
+  assert.doesNotMatch(runner, /pnpm', 'verify|pnpm verify/u)
+  assert.deepEqual(RELEASE_ARTIFACT_CHECKS, [
+    'product-build',
+    'api-production-vertical',
+    'isolated-rebuild',
+  ])
+  assert.equal(
+    [...runner.matchAll(/\n  runReleaseApiVertical\(buildRoot, primaryRustSnapshot\)/gu)].length,
+    1,
   )
-  assert.match(
-    cleanInstall,
-    /reclaimReleaseCargoTarget\([\s\S]*cpSync\(sourceRoot, temporaryRoot/u,
-  )
-  const verify = workspace.scripts.verify
-  assert.equal(verify.indexOf('pnpm verify:clean-install') < verify.indexOf('pnpm build'), true)
+  assert.match(runner, /'scripts\/run-api-production-vertical\.mjs',[\s\S]*'--skip-build'/u)
+  assert.match(runner, /'--server-binary', paths\['winwincode-server'\]/u)
+  assert.match(runner, /'--worker-binary', paths\['winwincode-worker'\]/u)
+  assert.match(runner, /const runtimeRoot = resolve\(buildRoot, 'api-production-runtime'\)/u)
+  assert.match(runner, /report\.flow\?\.chat\?\.status !== 'Completed'/u)
+  assert.match(runner, /report\.flow\?\.strongflow\?\.verdictStatus !== 'pass'/u)
+  assert.match(runner, /report\.remoteWorker\?\.terminalAfterWorkerRestart !== true/u)
+  assert.match(runner, /report\.remoteWorker\?\.terminalAfterServerRestart !== true/u)
+  const replay = runner.indexOf("label: 'replay'")
+  const api = runner.indexOf('  runReleaseApiVertical(buildRoot, primaryRustSnapshot)')
+  const stage = runner.indexOf('  stageArtifacts(artifactRoot, primaryRustSnapshot, clientSnapshot)')
+  assert.equal(replay < api && api < stage, true)
 })
 
 test('clean install gives only the cold test command a twenty-minute bound', () => {

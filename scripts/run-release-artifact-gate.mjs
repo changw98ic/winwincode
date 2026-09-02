@@ -33,8 +33,10 @@ import {
   targetConfiguration,
   verifyReleaseArtifactDirectory,
 } from './release-artifact-contract.mjs'
-import { RELEASE_GATE_BUILD_ROOT_ENV } from './release-cargo-target-reclaim.mjs'
-import { writeHelperReleaseManifest } from './run-api-production-vertical.mjs'
+import {
+  writeApiProductionSourceSeal,
+  writeHelperReleaseManifest,
+} from './run-api-production-vertical.mjs'
 import { releaseSourceSha256 } from './release-source-contract.mjs'
 
 const root = resolve(import.meta.dirname, '..')
@@ -95,20 +97,6 @@ function run(command, arguments_, options = {}) {
 function releaseEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {
   return createReleaseBuildEnvironment({
     baseEnvironment: helperReleaseBuildBaseEnvironment(process.env),
-    root,
-    buildRoot: buildPaths.buildRoot,
-    targetDirectory,
-    targetDirectories: buildPaths.targetDirectories,
-    target,
-    runnerTemp: process.env.RUNNER_TEMP,
-    home: process.env.HOME,
-    sourceDateEpoch,
-  })
-}
-
-function verificationEnvironment(target, targetDirectory, sourceDateEpoch, buildPaths) {
-  return createReleaseBuildEnvironment({
-    baseEnvironment: verificationChildEnvironment(),
     root,
     buildRoot: buildPaths.buildRoot,
     targetDirectory,
@@ -300,6 +288,61 @@ function stageArtifacts(artifactRoot, rustBuildResult, clientSnapshot) {
   }
 }
 
+function assertReleaseApiReport(report) {
+  if (report?.health?.initial !== 'ready' || report.health.afterRestart !== 'ready') {
+    throw new Error('release API vertical did not keep the Server ready across restart')
+  }
+  if (report.flow?.chat?.status !== 'Completed'
+    || report.flow?.cancel?.state !== 'cancelled'
+    || report.flow?.strongflow?.status !== 'delivered'
+    || report.flow?.strongflow?.verdictStatus !== 'pass') {
+    throw new Error('release API vertical did not complete Chat, cancel and StrongFlow')
+  }
+  if (report.deterministic?.contentEqual !== true
+    || report.restart?.messageBytesStable !== true
+    || report.restart?.deliveryBytesStable !== true) {
+    throw new Error('release API vertical was not byte-stable across repeat and restart')
+  }
+  if (report.remoteWorker?.terminalAfterWorkerRestart !== true
+    || report.remoteWorker?.terminalAfterServerRestart !== true
+    || !Number.isInteger(report.remoteWorker.restartedPid)
+    || report.remoteWorker.restartedPid === report.remoteWorker.initialPid
+    || report.remoteWorker.survivedServerRestartPid !== report.remoteWorker.restartedPid) {
+    throw new Error('release API vertical did not prove the remote Worker restart boundary')
+  }
+}
+
+function runReleaseApiVertical(buildRoot, rustBuildResult) {
+  const runtimeRoot = resolve(buildRoot, 'api-production-runtime')
+  const binaryRoot = resolve(runtimeRoot, 'bin')
+  const fixtureRoot = resolve(runtimeRoot, 'fixture')
+  rmSync(runtimeRoot, { recursive: true, force: true })
+  mkdirSync(binaryRoot, { recursive: true })
+  const paths = Object.fromEntries(rustBuildResult.rust.map(artifact => {
+    const path = resolve(binaryRoot, artifact.binaryName)
+    copyFileSync(artifact.sourcePath, path)
+    chmodSync(path, 0o755)
+    return [artifact.binaryName, path]
+  }))
+  const helperReleaseManifest = resolve(binaryRoot, HELPER_RELEASE_MANIFEST_NAME)
+  copyFileSync(rustBuildResult.helperReleaseManifestPath, helperReleaseManifest)
+  chmodSync(helperReleaseManifest, 0o644)
+  writeApiProductionSourceSeal({
+    root,
+    serverBinary: paths['winwincode-server'],
+    helperExecutable: paths['winwincode-kernel-helper'],
+    helperReleaseManifest,
+  })
+  const report = JSON.parse(run(process.execPath, [
+    'scripts/run-api-production-vertical.mjs',
+    '--skip-build',
+    '--server-binary', paths['winwincode-server'],
+    '--worker-binary', paths['winwincode-worker'],
+    '--directory', fixtureRoot,
+  ], { capture: true, env: verificationChildEnvironment() }))
+  assertReleaseApiReport(report)
+}
+
 const { target, sourceCommit, sourceDateEpoch, output } = parseArguments(process.argv.slice(2))
 targetConfiguration(target)
 const expectedReleaseSourceSha256 = assertCleanCommit(sourceCommit, sourceDateEpoch)
@@ -319,12 +362,6 @@ const rustSnapshot = resolve(buildRoot, 'rust-primary')
 const artifactRoot = resolve(output, target)
 
 try {
-  const gateEnvironment = {
-    ...verificationEnvironment(target, cargoTarget, sourceDateEpoch, buildPaths),
-    [RELEASE_GATE_BUILD_ROOT_ENV]: buildRoot,
-  }
-  run('corepack', ['pnpm', 'verify'], { env: gateEnvironment })
-
   resetCargoTarget(cargoTarget)
   const primary = isolatedReleaseBuild({
     label: 'primary',
@@ -351,6 +388,8 @@ try {
     buildPaths,
   })
 
+  assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256)
+  runReleaseApiVertical(buildRoot, primaryRustSnapshot)
   assertCleanCommit(sourceCommit, sourceDateEpoch, expectedReleaseSourceSha256)
   stageArtifacts(artifactRoot, primaryRustSnapshot, clientSnapshot)
   const manifest = createReleaseArtifactManifest({

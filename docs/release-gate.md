@@ -13,7 +13,9 @@ GitHub Actions 的 `Product release matrix` 分别在以下原生 runner 上运�
 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | 同上 |
 | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | 同上 |
 
-每个 job 使用 Node.js 24、pnpm 11.7.0 和 Rust 1.95.0。`SOURCE_DATE_EPOCH` 必须等于候选 commit 的提交时间。runner 调用：
+一次 `Product release matrix` workflow run 先在 `mainline-verification` job 执行一次完整 `corepack pnpm verify`。它统一覆盖 frozen install、格式、类型、全 workspace Rust/TypeScript 测试、clean checkout、产品构建和提交前 API 纵向。四个 target job 只在这一个主线门通过后启动，不再各自重复完整 workspace 门。
+
+每个 target job 使用 Node.js 24、pnpm 11.7.0 和 Rust 1.95.0。`SOURCE_DATE_EPOCH` 必须等于候选 commit 的提交时间。runner 调用：
 
 仓库为发布环境配置 `WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX` secret 和对应的 `WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX` variable。public key 编译进 Server 和 Worker，用于验证随 helper 分发的签名清单；helper 是被签名的对象。private key 只在 runner 内为 helper 清单签名，不写入 artifact 或报告。
 
@@ -25,7 +27,9 @@ corepack pnpm release:artifact \
   --output release-artifacts
 ```
 
-命令先运行完整 `pnpm verify`，再在同一个物理 Cargo target 中完成两次冷构建：第一次产物复制到只读快照后，runner 完整删除并重建 target，才开始第二次构建。两次 Rust 二进制和 Client 静态文件的 SHA-256 会逐项比较；macOS 还比较 linker `LC_UUID`。任何差异都会失败。
+命令在同一个物理 Cargo target 中完成两次冷构建：第一次产物复制到只读快照后，runner 完整删除并重建 target，才开始第二次构建。两次 Rust 二进制和 Client 静态文件的 SHA-256 会逐项比较；macOS 还比较 linker `LC_UUID`。任何差异都会失败。
+
+字节比较通过后，target job 使用这份 release Server、Worker、内部 helper 和签名清单运行一次完整 direct API 流程，覆盖 Chat、取消、StrongFlow Delivery、Worker 重启与 Server 重启重连。随后才封存 artifact，并运行该 target 的架构、动态库、签名、构建路径、旧产品字符串和秘密扫描。压力测试和多轮并发回归属于 focused/nightly 或提交前的单次主线门，不在四个平台 job 中重复。
 
 每个 target 的上传目录固定为：
 
@@ -56,7 +60,8 @@ release-artifacts/TARGET/
 - helper 签名清单、发布 public key、helper 源码/二进制身份与 Ed25519 验证结果；
 - Local 同进程组成身份；
 - `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`；
-- 同一物理 Cargo target 完整清空前后的两次冷构建完全相同。
+- 同一物理 Cargo target 完整清空前后的两次冷构建完全相同；
+- release Server/Worker/helper 的一次 direct API 完整流程通过。
 
 `SHA256SUMS` 从 manifest 的文件描述符机械生成。手改文件、清单或 checksum 都会失败。
 
@@ -86,4 +91,4 @@ corepack pnpm verify:release-artifact-security \
 
 安全报告写到 target 目录外，因此不会改变已经封存的 target 文件集合；它通过 `canonicalEvidenceSha256` 绑定同一份四平台汇总结果。
 
-真实 API→Control Plane→Worker→内嵌 Codex Kernel→Provider→Delivery 纵向、本地同进程模式、分离模式与 Client 远程 Server 直连证据必须绑定相同 commit；它们是阶段 6.7 的并列验收，不用 JSON 声明代替实际运行。
+每个 target job 已用 release 二进制实际运行 API→Control Plane→Worker→内嵌 Codex Kernel→Provider→Delivery 分离模式纵向。本地同进程模式与 Client 远程 Server 直连证据也必须绑定相同 commit；JSON 声明不代替实际运行。

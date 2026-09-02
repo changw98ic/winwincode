@@ -31,7 +31,7 @@ corepack pnpm verify
 
 ## 3. 四平台 artifact
 
-在 GitHub Actions 手动运行 `Product release matrix` 的 macOS 与 Linux 两个 family。每个平台原生构建 Server、Worker、内部 helper 和同一份 Client 静态包，并在同一物理 Cargo target 完整清空前后执行两次冷构建比较。详细目录与命令见 [产品发布证据门禁](release-gate.md)。
+在 GitHub Actions 手动运行一次 `Product release matrix`。这个 run 先执行一次完整主线 `pnpm verify`，通过后再并行启动下面四个原生 target job。每个 target 只构建 Server、Worker、内部 helper 和同一份 Client 静态包，在同一物理 Cargo target 完整清空前后执行两次冷构建比较，并用 release 二进制运行一次 direct API 完整流程；它不重复 clean checkout、全 workspace Rust 测试或压力循环。详细层级、目录与命令见 [产品发布证据门禁](release-gate.md)。
 
 Rust 文件名固定为 `winwincode-server`、`winwincode-worker` 和 `winwincode-kernel-helper`；Local 组成使用 `winwincode-local` library。
 

@@ -68,11 +68,6 @@ export const RUST_RELEASE_ARTIFACTS = Object.freeze([
 ])
 
 export const RELEASE_ARTIFACT_CHECKS = Object.freeze([
-  'frozen-install',
-  'format',
-  'lint-and-typecheck',
-  'tests',
-  'clean-install',
   'product-build',
   'api-production-vertical',
   'isolated-rebuild',

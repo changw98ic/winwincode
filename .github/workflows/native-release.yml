@@ -2,32 +2,80 @@ name: Product release matrix
 
 on:
   workflow_dispatch:
-    inputs:
-      platform:
-        description: Platform family to verify
-        required: true
-        default: linux
-        type: choice
-        options:
-          - linux
-          - macos
 
 permissions:
   contents: read
 
 concurrency:
-  group: product-release-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform }}
+  group: product-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  mainline-verification:
+    name: Mainline verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CI: "1"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils bubblewrap pkg-config libcap-dev
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net --as-pid-1 -- true
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt,rust-src
+          rustup override set 1.95.0
+          rustc -Vv
+          cargo -V
+
+      - name: Install JavaScript dependencies
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+
+      - name: Verify the complete workspace once
+        shell: bash
+        run: corepack pnpm verify
+
   product-release:
     name: ${{ matrix.target }}
+    needs: mainline-verification
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.platform == 'linux' && '[{"target":"aarch64-unknown-linux-gnu","runner":"ubuntu-24.04-arm"},{"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-24.04"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-15"},{"target":"x86_64-apple-darwin","runner":"macos-15-intel"}]') }}
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
       CI: "1"

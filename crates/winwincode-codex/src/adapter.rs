@@ -2735,6 +2735,7 @@ fn project_helper(path: &Path, manifest: &HelperReleaseManifest) -> Option<Arc<[
         validate_helper_image(
             &canonical_path,
             manifest,
+            HELPER_RELEASE_BINARY_MODE,
             expected.as_bytes(),
             identity.as_bytes(),
         )
@@ -2838,22 +2839,6 @@ fn repair_sealed_helper_permissions(_path: &Path, _manifest: &HelperReleaseManif
 }
 
 fn validate_sealed_helper(path: &Path, manifest: &HelperReleaseManifest) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o777 != 0o700 {
-        return false;
-    }
-    let Ok(bytes) = read_helper_bytes(path) else {
-        return false;
-    };
-    if helper_digest(&bytes) != manifest.binary_digest().0 {
-        return false;
-    }
     #[cfg(unix)]
     {
         let expected = format!(
@@ -2865,8 +2850,14 @@ fn validate_sealed_helper(path: &Path, manifest: &HelperReleaseManifest) -> bool
             env!("CARGO_PKG_VERSION"),
             env!("WINWINCODE_HELPER_SOURCE_SHA256")
         );
-        bounded_helper_handshake(path, expected.as_bytes())
-            && bounded_helper_identity(path, identity.as_bytes())
+        validate_helper_image(
+            path,
+            manifest,
+            0o700,
+            expected.as_bytes(),
+            identity.as_bytes(),
+        )
+        .is_some()
     }
     #[cfg(not(unix))]
     {
@@ -2964,16 +2955,14 @@ fn bounded_helper_identity(path: &Path, expected: &[u8]) -> bool {
 fn validate_helper_image(
     path: &Path,
     manifest: &HelperReleaseManifest,
+    required_mode: u32,
     handshake: &[u8],
     identity: &[u8],
 ) -> Option<Arc<[u8]>> {
-    let Ok(mut validated) = HELPER_VALIDATIONS.lock() else {
-        return None;
-    };
     let bytes = read_helper_bytes(path).ok()?;
     if helper_digest(&bytes) != manifest.binary_digest().0
         || !path.metadata().is_ok_and(|metadata| {
-            metadata.permissions().mode() & 0o777 == manifest.binary_mode()
+            metadata.permissions().mode() & 0o777 == required_mode
                 && manifest.binary_mode() == HELPER_RELEASE_BINARY_MODE
         })
     {
@@ -2985,6 +2974,9 @@ fn validate_helper_image(
         manifest.package_version(),
         manifest.source_sha256()
     );
+    let Ok(mut validated) = HELPER_VALIDATIONS.lock() else {
+        return None;
+    };
     if validated.contains(&validation_key) {
         return Some(bytes.into());
     }
@@ -3221,9 +3213,10 @@ fn map_bridge_error(_: BridgeError) -> ProductionCodexError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_HELPER_BYTES, ProductionCodexErrorKind, bounded_helper_handshake, decode_kernel_event,
-        project_helper, read_helper_bytes, seal_helper, submission_input_digest,
-        terminate_helper_process_group, validate_helper_image, validate_sealed_helper,
+        HELPER_RELEASE_BINARY_MODE, MAX_HELPER_BYTES, ProductionCodexErrorKind,
+        bounded_helper_handshake, decode_kernel_event, project_helper, read_helper_bytes,
+        seal_helper, submission_input_digest, terminate_helper_process_group,
+        validate_helper_image, validate_sealed_helper,
     };
     use crate::helper_release::HelperReleaseManifest;
     use std::path::PathBuf;
@@ -3526,6 +3519,7 @@ mod tests {
                     validate_helper_image(
                         &helper,
                         &manifest,
+                        HELPER_RELEASE_BINARY_MODE,
                         b"exact helper handshake\n",
                         b"exact helper identity\n",
                     )
@@ -3540,6 +3534,83 @@ mod tests {
                 .all(|thread| thread.join().expect("join release probe"))
         );
         assert!(!active.exists());
+        std::fs::remove_dir_all(root).expect("remove helper fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_sealed_copies_reuse_the_exact_validated_helper_image() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Barrier};
+
+        const CONCURRENCY: usize = 44;
+        let root = test_root("concurrent-sealed-copies");
+        std::fs::create_dir_all(&root).expect("create helper fixture");
+        let helper = root.join("winwincode-kernel-helper");
+        let active = root.join("active");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nmkdir '{}' || exit 9\ntrap 'rmdir \"{}\"' EXIT\nsleep 0.05\ncase \"$1\" in\n  --winwincode-helper-handshake) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}' ;;\n  --winwincode-helper-identity) printf '%s\\n' '{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
+                active.display(),
+                active.display(),
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION"),
+                env!("WINWINCODE_HELPER_SOURCE_SHA256"),
+            ),
+        )
+        .expect("write contention-sensitive helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("make helper executable");
+        let manifest = Arc::new(
+            HelperReleaseManifest::from_test_helper(&helper).expect("build helper manifest"),
+        );
+        let handshake = format!(
+            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\"}}\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        let identity = format!(
+            "{{\"protocol\":\"winwincode-kernel-helper\",\"version\":1,\"packageVersion\":\"{}\",\"sourceSha256\":\"{}\"}}\n",
+            env!("CARGO_PKG_VERSION"),
+            env!("WINWINCODE_HELPER_SOURCE_SHA256")
+        );
+        let validated = Arc::<[u8]>::from(
+            validate_helper_image(
+                &helper,
+                &manifest,
+                HELPER_RELEASE_BINARY_MODE,
+                handshake.as_bytes(),
+                identity.as_bytes(),
+            )
+            .expect("validate the source helper once")
+            .as_ref(),
+        );
+
+        let helper = Arc::new(helper);
+        let barrier = Arc::new(Barrier::new(CONCURRENCY + 1));
+        let threads = (0..CONCURRENCY)
+            .map(|index| {
+                let helper = Arc::clone(&helper);
+                let manifest = Arc::clone(&manifest);
+                let validated = Arc::clone(&validated);
+                let barrier = Arc::clone(&barrier);
+                let data = root.join(format!("runtime-{index}"));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    seal_helper(&helper, Some(validated.as_ref()), &data, &manifest).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        assert!(
+            threads
+                .into_iter()
+                .all(|thread| thread.join().expect("join sealed helper installation"))
+        );
+        assert!(!active.exists());
+        let changed = root.join("runtime-0/helper-installation/winwincode-kernel-helper");
+        std::fs::write(&changed, b"#!/bin/sh\nexit 0\n").expect("replace one cached helper copy");
+        assert!(!validate_sealed_helper(&changed, &manifest));
         std::fs::remove_dir_all(root).expect("remove helper fixture");
     }
 
@@ -3570,6 +3641,7 @@ mod tests {
             validate_helper_image(
                 &helper,
                 &manifest,
+                HELPER_RELEASE_BINARY_MODE,
                 b"exact helper handshake\n",
                 b"exact helper identity\n",
             )
