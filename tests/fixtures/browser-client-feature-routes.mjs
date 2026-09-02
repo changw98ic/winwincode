@@ -26,6 +26,7 @@ const calls = {
 }
 let failureMode = null
 let blockedQuery = null
+const subscriptionCallbacks = []
 
 function page() {
   return { hasMore: false, nextCursor: null }
@@ -133,6 +134,7 @@ const controlPlane = {
     throw new Error(`unexpected command: ${request.command}`)
   },
   subscribe(options) {
+    subscriptionCallbacks.push(options)
     const record = {
       closed: false,
       reconnects: 0,
@@ -280,6 +282,22 @@ globalThis.runReliabilityScenario = async () => {
   await application.authSession.restore()
   await globalThis.inspectFeatureRoute('settings')
 
+  await subscriptionCallbacks.at(-1).onAuthorizationRevoked({
+    secret: 'SECRET_TOKEN',
+    path: '/private/repository',
+  })
+  await waitFor(
+    () => document.querySelector('.wwc-connection-bar')?.dataset.connectionStatus
+      === 'permission-denied',
+    'revoked WebSocket permission status',
+  )
+  const revokedStatus = connectionSnapshot()
+  document.querySelector('.wwc-connection-copy').click()
+  await Promise.resolve()
+  const revokedDiagnostic = calls.copiedDiagnostics.at(-1) ?? ''
+  application.connection.reset()
+  await application.controlPlane.restore()
+
   async function failureState(mode, expectedStatus) {
     failureMode = mode
     location.hash = `#/settings/runtime?fixture=${mode}`
@@ -336,6 +354,8 @@ globalThis.runReliabilityScenario = async () => {
     reconnected,
     reconnectCount,
     reconnecting,
+    revokedDiagnostic,
+    revokedStatus,
     safeHash: location.hash,
     version,
   }

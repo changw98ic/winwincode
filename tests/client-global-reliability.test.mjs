@@ -128,6 +128,14 @@ test('HTTP and WebSocket activity feed the same connection monitor', async () =>
   await subscriptionOptions.onAuthorizationRevoked({})
   assert.equal(monitor.state.status, 'permission-denied')
   assert.deepEqual(revocationOrder, ['feature', 'shell'])
+  assert.equal(monitor.state.code, 'PERMISSION_REVOKED')
+  const revokedDiagnostic = createSafeDiagnostic({
+    connection: monitor.state,
+    scope: null,
+    surface: 'chat',
+    generatedAt: '2026-09-02T01:01:00.000Z',
+  })
+  assert.equal(revokedDiagnostic.includes('code=PERMISSION_REVOKED'), true)
   subscriptionOptions.onError(error('version', 'SCHEMA_VERSION_MISMATCH'))
   assert.equal(monitor.state.status, 'version-mismatch')
   observed.reconnectAll()
