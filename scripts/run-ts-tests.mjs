@@ -61,6 +61,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/strongflow-role.test.mjs',
   'tests/strongflow-view-model.test.mjs',
   'tests/strongflow-workflow-integration.test.mjs',
+  'tests/ui601-keyed-rendering-validation.test.mjs',
   'tests/ui601-strongflow-event-reload.test.mjs',
   'tests/workspace-smoke.test.mjs',
 ])
