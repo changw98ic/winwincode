@@ -11,7 +11,7 @@ import { mountButton } from './components/button.js'
 import { mountEmptyState } from './components/empty-state.js'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
-import { renderStrongFlowCandidate } from './strongflow-candidate.js'
+import { mountStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
   boundedItems,
@@ -510,13 +510,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   ) as HTMLButtonElement
   let closed = false
   let diagramsNode: HTMLElement | null = null
-  let candidateNode: HTMLElement | null = null
   let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
   let lastRuntime: StrongFlowProjection['runtime'] | null = null
-  let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
-  let lastEvidence: StrongFlowProjection['evidence'] | null = null
-  let lastVerdict: StrongFlowProjection['verdict'] | null = null
-  let lastPublication: StrongFlowProjection['publication'] | null = null
   let solutionDraftKey: string | null = null
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
@@ -589,6 +584,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   content.append(deliveriesRoot, workspace)
   layout.append(status, error, content)
   options.root.replaceChildren(layout)
+
+  const candidateView = mountStrongFlowCandidate({
+    document,
+    limits,
+    onLoadFiles() { void options.model.loadCandidateFiles() },
+    onLoadMoreFiles() { void options.model.loadMoreCandidateFiles() },
+    onSelectFile(path) { void options.model.selectCandidateFile(path) },
+    onLoadMoreDiff() { void options.model.loadMoreCandidateDiff() },
+  })
+  candidateHost.append(candidateView.root)
 
   const deliveryRows = new WeakMap<HTMLLIElement, {
     readonly link: HTMLAnchorElement
@@ -904,7 +909,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(deliveriesOmitted, bounded.omitted, 'Deliveries')
   }
 
-  function renderProjection(projection: StrongFlowProjection | null, stateStatus: string): void {
+  function renderProjection(
+    projection: StrongFlowProjection | null,
+    stateStatus: string,
+    candidateFiles: StrongFlowViewModelState['candidateFiles'],
+  ): void {
     empty.hidden = projection !== null
     overview.hidden = projection === null
     tasksSection.hidden = projection === null
@@ -923,15 +932,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
       if (diagramsNode !== null) diagramsNode.remove()
-      if (candidateNode !== null) candidateNode.remove()
       diagramsNode = null
-      candidateNode = null
       lastSolutionReview = null
       lastRuntime = null
-      lastCandidate = null
-      lastEvidence = null
-      lastVerdict = null
-      lastPublication = null
+      candidateView.update({ projection: null, candidateFiles })
       return
     }
 
@@ -961,21 +965,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       lastSolutionReview = projection.solutionReview
       lastRuntime = projection.runtime
     }
-    if (
-      candidateNode === null
-      || lastCandidate !== projection.currentCandidate
-      || lastEvidence !== projection.evidence
-      || lastVerdict !== projection.verdict
-      || lastPublication !== projection.publication
-    ) {
-      candidateNode?.remove()
-      candidateNode = renderStrongFlowCandidate(document, projection, limits)
-      candidateHost.append(candidateNode)
-      lastCandidate = projection.currentCandidate
-      lastEvidence = projection.evidence
-      lastVerdict = projection.verdict
-      lastPublication = projection.publication
-    }
+    candidateView.update({ projection, candidateFiles })
   }
 
   function renderActions(state: StrongFlowViewModelState): void {
@@ -1042,7 +1032,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
     renderDeliveries(state)
-    renderProjection(state.projection, state.status)
+    renderProjection(state.projection, state.status, state.candidateFiles)
     renderActions(state)
   }
 
@@ -1069,7 +1059,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       taskCollection.close()
       deliveryCollection.close()
       diagramsNode?.remove()
-      candidateNode?.remove()
+      candidateView.close()
       options.model.close()
       options.root.replaceChildren()
     },

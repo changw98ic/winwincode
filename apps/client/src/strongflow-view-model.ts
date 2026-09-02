@@ -8,6 +8,9 @@ import {
 import type {
   Actor,
   AttentionItemId,
+  CandidateFileProjection,
+  CandidateDiffGetResultResponse,
+  CandidateFilesListResultResponse,
   CommandAcceptedResponse,
   CommandCompletedResponse,
   ControlPlaneWebSocketEventFrame,
@@ -26,6 +29,8 @@ import type {
   DeliverySubmitVerdictCompletedResponse,
   DeliveryTaskId,
   EventReadCursor,
+  FrozenCandidateSummaryProjection,
+  OpaqueCursor,
   ProductSessionId,
   QueryResultResponse,
   RepositoryScope,
@@ -48,6 +53,11 @@ const SNAPSHOT_CONSISTENCY_RETRY_DELAY_MILLIS = 50
 const MAX_TRUSTED_FACTS_COMMAND_RETRIES = 400
 const TRUSTED_FACTS_COMMAND_RETRY_DEADLINE_MILLIS = 20_000
 const TRUSTED_FACTS_COMMAND_RETRY_DELAY_MILLIS = 50
+const STRONGFLOW_DETAIL_PAGE_LIMIT = 1
+const CANDIDATE_FILE_PAGE_LIMIT = 200
+const MAX_CANDIDATE_FILE_PREVIEW_ITEMS = 2_000
+const CANDIDATE_DIFF_CHUNK_BYTES = 65_536
+const MAX_CANDIDATE_DIFF_PREVIEW_BYTES = 524_288
 
 export type StrongFlowViewStatus =
   | 'idle'
@@ -110,7 +120,45 @@ export interface StrongFlowViewModelState {
   readonly status: StrongFlowViewStatus
   readonly realtime: StrongFlowRealtimeStatus
   readonly projection: StrongFlowProjection | null
+  readonly candidateFiles: StrongFlowCandidateFilesState
   readonly interaction: StrongFlowInteractionState
+  readonly error: ControlPlaneClientError | null
+}
+
+export type StrongFlowCandidateFilesStatus =
+  | 'idle'
+  | 'loading'
+  | 'loading-more'
+  | 'ready'
+  | 'error'
+
+export interface StrongFlowCandidateFilesState {
+  readonly status: StrongFlowCandidateFilesStatus
+  readonly items: readonly CandidateFileProjection[]
+  readonly hasMore: boolean
+  readonly previewLimited: boolean
+  readonly selectedPath: string | null
+  readonly diff: StrongFlowCandidateDiffState
+  readonly error: ControlPlaneClientError | null
+}
+
+export type StrongFlowCandidateDiffStatus =
+  | 'idle'
+  | 'loading'
+  | 'ready'
+  | 'unavailable'
+  | 'error'
+
+export interface StrongFlowCandidateDiffState {
+  readonly status: StrongFlowCandidateDiffStatus
+  readonly path: string | null
+  readonly content: string
+  readonly loadedBytes: number
+  readonly totalBytes: number | null
+  readonly hasMore: boolean
+  readonly previewLimited: boolean
+  readonly fileDiffSha256: string | null
+  readonly unavailableReason: 'binary' | 'unsupported-encoding' | null
   readonly error: ControlPlaneClientError | null
 }
 
@@ -131,6 +179,8 @@ export interface StrongFlowViewModelOptions {
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
   readonly onStageBindingChange?: (binding: StrongFlowStageBinding) => void
+  readonly selectedCandidatePath?: string | null
+  readonly onCandidatePathChange?: (path: string | null) => void
 }
 
 export interface StrongFlowSolutionReviewDecisionInput {
@@ -158,6 +208,10 @@ export interface StrongFlowViewModel {
   subscribe(listener: StrongFlowViewModelListener): () => void
   start(): Promise<void>
   refresh(): Promise<void>
+  loadCandidateFiles(): Promise<void>
+  loadMoreCandidateFiles(): Promise<void>
+  selectCandidateFile(path: string): Promise<void>
+  loadMoreCandidateDiff(): Promise<void>
   decideSolutionReview(input: StrongFlowSolutionReviewDecisionInput): Promise<void>
   approveTaskBreakdown(): Promise<void>
   resolveAttention(input: StrongFlowAttentionDecisionInput): Promise<void>
@@ -244,9 +298,42 @@ function initialState(): StrongFlowViewModelState {
     status: 'idle',
     realtime: 'inactive',
     projection: null,
+    candidateFiles: emptyCandidateFilesState(),
     interaction: frozenInteraction('idle'),
     error: null,
   })
+}
+
+function emptyCandidateFilesState(): StrongFlowCandidateFilesState {
+  return Object.freeze({
+    status: 'idle',
+    items: Object.freeze([]),
+    hasMore: false,
+    previewLimited: false,
+    selectedPath: null,
+    diff: emptyCandidateDiffState(),
+    error: null,
+  })
+}
+
+function emptyCandidateDiffState(): StrongFlowCandidateDiffState {
+  return Object.freeze({
+    status: 'idle',
+    path: null,
+    content: '',
+    loadedBytes: 0,
+    totalBytes: null,
+    hasMore: false,
+    previewLimited: false,
+    fileDiffSha256: null,
+    unavailableReason: null,
+    error: null,
+  })
+}
+
+function base64Bytes(value: string): Uint8Array {
+  const decoded = atob(value)
+  return Uint8Array.from(decoded, character => character.charCodeAt(0))
 }
 
 function frozenInteraction(
@@ -257,7 +344,28 @@ function frozenInteraction(
 }
 
 function requestPage() {
-  return Object.freeze({ cursor: null, limit: 1 })
+  return Object.freeze({ cursor: null, limit: STRONGFLOW_DETAIL_PAGE_LIMIT })
+}
+
+function candidateIdentity(candidate: FrozenCandidateSummaryProjection): string {
+  return [
+    candidate.candidateRef,
+    candidate.candidateCommitId,
+    candidate.candidateTreeId,
+    candidate.deliverySpecId,
+    String(candidate.deliverySpecRevision),
+    candidate.diffSha256,
+    candidate.frozenAt,
+    candidate.producerSessionBindingId,
+    candidate.producerStageRunId,
+  ].join('\n')
+}
+
+function sameCandidate(
+  left: FrozenCandidateSummaryProjection,
+  right: FrozenCandidateSummaryProjection,
+): boolean {
+  return candidateIdentity(left) === candidateIdentity(right)
 }
 
 function clientFailure(code: string, message: string, cause?: unknown): ControlPlaneClientError {
@@ -967,6 +1075,20 @@ export function createStrongFlowViewModel(
   const listeners = new Set<StrongFlowViewModelListener>()
   const controllers = new Set<AbortController>()
   let currentState = initialState()
+  let desiredCandidatePath = options.selectedCandidatePath === undefined
+    || options.selectedCandidatePath === null
+    || options.selectedCandidatePath.length === 0
+    ? null
+    : options.selectedCandidatePath
+  if (desiredCandidatePath !== null) {
+    currentState = Object.freeze({
+      ...currentState,
+      candidateFiles: Object.freeze({
+        ...currentState.candidateFiles,
+        selectedPath: desiredCandidatePath,
+      }),
+    })
+  }
   let realtime: ControlPlaneSubscription | null = null
   let generation = 0
   let closed = false
@@ -976,6 +1098,12 @@ export function createStrongFlowViewModel(
   })
   let acceptedDeliveryRevision: number | null = null
   let supersedingGeneration: number | null = null
+  let candidateFilesCursor: OpaqueCursor | null = null
+  let loadedCandidateIdentity: string | null = null
+  let candidateFilesController: AbortController | null = null
+  let candidateDiffController: AbortController | null = null
+  let candidateDiffBytes = new Uint8Array()
+  let candidateDiffNextOffset: number | null = null
 
   function publish(state: StrongFlowViewModelState): void {
     currentState = Object.freeze(state)
@@ -984,6 +1112,353 @@ export function createStrongFlowViewModel(
 
   function patch(update: Partial<StrongFlowViewModelState>): void {
     publish({ ...currentState, ...update })
+  }
+
+  function candidateFilesPatch(
+    update: Partial<StrongFlowCandidateFilesState>,
+  ): void {
+    patch({ candidateFiles: Object.freeze({ ...currentState.candidateFiles, ...update }) })
+  }
+
+  function clearCandidateFileResources(): void {
+    candidateFilesController?.abort()
+    candidateFilesController = null
+    candidateDiffController?.abort()
+    candidateDiffController = null
+    candidateDiffBytes = new Uint8Array()
+    candidateDiffNextOffset = null
+    candidateFilesCursor = null
+    loadedCandidateIdentity = null
+  }
+
+  function clearedCandidateFilesState(): StrongFlowCandidateFilesState {
+    return Object.freeze({
+      ...emptyCandidateFilesState(),
+      selectedPath: desiredCandidatePath,
+    })
+  }
+
+  function resetCandidateFiles(): void {
+    clearCandidateFileResources()
+    patch({ candidateFiles: clearedCandidateFilesState() })
+  }
+
+  function pauseCandidateReadsForSnapshotReload(): StrongFlowCandidateFilesState {
+    candidateFilesController?.abort()
+    candidateFilesController = null
+    candidateDiffController?.abort()
+    candidateDiffController = null
+    if (currentState.candidateFiles.status === 'loading') {
+      candidateFilesCursor = null
+      loadedCandidateIdentity = null
+      candidateDiffBytes = new Uint8Array()
+      candidateDiffNextOffset = null
+      return clearedCandidateFilesState()
+    }
+    const status = currentState.candidateFiles.status === 'loading-more'
+      ? 'ready'
+      : currentState.candidateFiles.status
+    const diff = currentState.candidateFiles.diff.status !== 'loading'
+      ? currentState.candidateFiles.diff
+      : candidateDiffBytes.byteLength === 0
+        ? emptyCandidateDiffState()
+        : Object.freeze({
+            ...currentState.candidateFiles.diff,
+            status: 'ready' as const,
+            hasMore: candidateDiffNextOffset !== null,
+          })
+    return Object.freeze({
+      ...currentState.candidateFiles,
+      status,
+      diff,
+    })
+  }
+
+  function expectCandidateFilesResponse(
+    response: QueryResultResponse,
+    requestId: RequestId,
+    candidate: FrozenCandidateSummaryProjection,
+    cursor: StrongFlowReadCursor,
+  ): CandidateFilesListResultResponse {
+    if (
+      response.query !== QueryName.CandidateFilesList
+      || response.requestId !== requestId
+      || response.result.kind !== 'candidate_file_page'
+      || !sameCandidate(response.result.candidate, candidate)
+      || !sameReadCursor(response.result.readCursor, cursor)
+      || response.page.hasMore !== (response.page.nextCursor !== null)
+    ) throw clientFailure(
+      'STRONGFLOW_CANDIDATE_FILES_MISMATCH',
+      'The Candidate file list does not match the selected Candidate read cut.',
+    )
+    return response as CandidateFilesListResultResponse
+  }
+
+  async function loadCandidateFilePage(append: boolean): Promise<void> {
+    const projection = currentState.projection
+    const candidate = projection?.currentCandidate ?? null
+    if (projection === null || candidate === null) {
+      resetCandidateFiles()
+      return
+    }
+    const identity = candidateIdentity(candidate)
+    if (
+      !append
+      && loadedCandidateIdentity === identity
+      && currentState.candidateFiles.status !== 'error'
+    ) return
+    const pageCursor = append ? candidateFilesCursor : null
+    if (
+      append
+      && (pageCursor === null || currentState.candidateFiles.previewLimited)
+    ) return
+
+    candidateFilesController?.abort()
+    const active = new AbortController()
+    candidateFilesController = active
+    if (append) {
+      candidateFilesPatch({ status: 'loading-more', error: null })
+    } else {
+      candidateDiffController?.abort()
+      candidateDiffController = null
+      candidateDiffBytes = new Uint8Array()
+      candidateDiffNextOffset = null
+      loadedCandidateIdentity = identity
+      candidateFilesCursor = null
+      patch({ candidateFiles: Object.freeze({
+        ...emptyCandidateFilesState(),
+        status: 'loading',
+        selectedPath: desiredCandidatePath,
+      }) })
+    }
+    const requestId = options.nextRequestId()
+    try {
+      const response = expectCandidateFilesResponse(await options.client.query({
+        ...requestBase(),
+        requestId,
+        query: QueryName.CandidateFilesList,
+        parameters: {
+          deliveryId: options.deliveryId,
+          atCursor: projection.metadata.readCursor,
+          readPageLimit: STRONGFLOW_DETAIL_PAGE_LIMIT,
+          candidateRef: candidate.candidateRef,
+          candidateTreeId: candidate.candidateTreeId,
+          diffSha256: candidate.diffSha256,
+          statuses: [],
+          pathPrefix: null,
+        },
+        page: { cursor: pageCursor, limit: CANDIDATE_FILE_PAGE_LIMIT },
+      }, { signal: active.signal }), requestId, candidate, projection.metadata.readCursor)
+      if (
+        active.signal.aborted
+        || candidateFilesController !== active
+        || currentState.projection?.currentCandidate === null
+        || currentState.projection?.currentCandidate === undefined
+        || candidateIdentity(currentState.projection.currentCandidate) !== identity
+      ) return
+      const combinedItems = append
+        ? [...currentState.candidateFiles.items, ...response.result.items]
+        : [...response.result.items]
+      if (new Set(combinedItems.map(file => file.path)).size !== combinedItems.length) throw clientFailure(
+        'STRONGFLOW_CANDIDATE_FILES_MISMATCH',
+        'The Candidate file list contains repeated paths.',
+      )
+      const items = combinedItems.slice(0, MAX_CANDIDATE_FILE_PREVIEW_ITEMS)
+      const previewLimited = combinedItems.length > MAX_CANDIDATE_FILE_PREVIEW_ITEMS
+        || (items.length === MAX_CANDIDATE_FILE_PREVIEW_ITEMS && response.page.hasMore)
+      candidateFilesCursor = previewLimited ? null : response.page.nextCursor
+      patch({ candidateFiles: Object.freeze({
+        status: 'ready',
+        items: Object.freeze(items),
+        hasMore: response.page.hasMore && !previewLimited,
+        previewLimited,
+        selectedPath: currentState.candidateFiles.selectedPath,
+        diff: currentState.candidateFiles.diff,
+        error: null,
+      }) })
+      const selectedPath = currentState.candidateFiles.selectedPath
+      if (
+        selectedPath !== null
+        && items.some(file => file.path === selectedPath)
+        && currentState.candidateFiles.diff.path !== selectedPath
+      ) await loadCandidateDiff(false)
+    } catch (error) {
+      if (active.signal.aborted || candidateFilesController !== active) return
+      candidateFilesPatch({
+        status: 'error',
+        hasMore: false,
+        error: normalizedError(error, active.signal),
+      })
+    } finally {
+      if (candidateFilesController === active) candidateFilesController = null
+    }
+  }
+
+  function expectCandidateDiffResponse(
+    response: QueryResultResponse,
+    requestId: RequestId,
+    candidate: FrozenCandidateSummaryProjection,
+    cursor: StrongFlowReadCursor,
+    file: CandidateFileProjection,
+    offset: number,
+    length: number,
+  ): CandidateDiffGetResultResponse {
+    if (
+      response.query !== QueryName.CandidateDiffGet
+      || response.requestId !== requestId
+      || response.page.hasMore
+      || response.page.nextCursor !== null
+      || response.result.kind !== 'candidate_diff_chunk'
+      || !sameCandidate(response.result.candidate, candidate)
+      || !sameReadCursor(response.result.readCursor, cursor)
+      || response.result.path !== file.path
+      || response.result.oldPath !== file.oldPath
+      || response.result.status !== file.status
+      || response.result.binary !== file.binary
+      || response.result.contentEncoding !== file.encoding
+      || response.result.offset !== offset
+    ) throw clientFailure(
+      'STRONGFLOW_CANDIDATE_DIFF_MISMATCH',
+      'The Candidate Diff does not match the selected file and Candidate read cut.',
+    )
+    const bytes = base64Bytes(response.result.dataBase64)
+    const endOffset = offset + response.result.returnedBytes
+    if (
+      bytes.byteLength !== response.result.returnedBytes
+      || response.result.returnedBytes > length
+      || endOffset > response.result.totalBytes
+      || (response.result.nextOffset === null && endOffset !== response.result.totalBytes)
+      || (response.result.nextOffset !== null && endOffset >= response.result.totalBytes)
+      || (response.result.nextOffset !== null && response.result.returnedBytes === 0)
+      || (response.result.nextOffset !== null
+        && response.result.nextOffset !== endOffset)
+      || (offset > 0
+        && currentState.candidateFiles.diff.fileDiffSha256 !== null
+        && response.result.fileDiffSha256 !== currentState.candidateFiles.diff.fileDiffSha256)
+      || (offset > 0
+        && currentState.candidateFiles.diff.totalBytes !== null
+        && response.result.totalBytes !== currentState.candidateFiles.diff.totalBytes)
+    ) throw clientFailure(
+      'STRONGFLOW_CANDIDATE_DIFF_MISMATCH',
+      'The Candidate Diff chunk has inconsistent byte boundaries.',
+    )
+    return response as CandidateDiffGetResultResponse
+  }
+
+  async function loadCandidateDiff(append: boolean): Promise<void> {
+    const projection = currentState.projection
+    const candidate = projection?.currentCandidate ?? null
+    const selectedPath = currentState.candidateFiles.selectedPath
+    const file = currentState.candidateFiles.items.find(item => item.path === selectedPath)
+    if (projection === null || candidate === null || selectedPath === null || file === undefined) return
+    if (file.binary || file.encoding !== 'utf-8') {
+      candidateDiffController?.abort()
+      candidateDiffController = null
+      candidateDiffBytes = new Uint8Array()
+      candidateDiffNextOffset = null
+      candidateFilesPatch({ diff: Object.freeze({
+        ...emptyCandidateDiffState(),
+        status: 'unavailable',
+        path: file.path,
+        unavailableReason: file.binary ? 'binary' : 'unsupported-encoding',
+      }) })
+      return
+    }
+    const identity = candidateIdentity(candidate)
+    const offset = append ? candidateDiffNextOffset : 0
+    if (offset === null || (append && candidateDiffBytes.byteLength >= MAX_CANDIDATE_DIFF_PREVIEW_BYTES)) {
+      return
+    }
+    candidateDiffController?.abort()
+    const active = new AbortController()
+    candidateDiffController = active
+    if (!append) {
+      candidateDiffBytes = new Uint8Array()
+      candidateDiffNextOffset = null
+    }
+    candidateFilesPatch({ diff: Object.freeze({
+      ...(append ? currentState.candidateFiles.diff : emptyCandidateDiffState()),
+      status: 'loading',
+      path: file.path,
+      error: null,
+    }) })
+    const requestId = options.nextRequestId()
+    const length = Math.min(
+      CANDIDATE_DIFF_CHUNK_BYTES,
+      MAX_CANDIDATE_DIFF_PREVIEW_BYTES - offset,
+    )
+    try {
+      const response = expectCandidateDiffResponse(await options.client.query({
+        ...requestBase(),
+        requestId,
+        query: QueryName.CandidateDiffGet,
+        parameters: {
+          deliveryId: options.deliveryId,
+          atCursor: projection.metadata.readCursor,
+          readPageLimit: STRONGFLOW_DETAIL_PAGE_LIMIT,
+          candidateRef: candidate.candidateRef,
+          candidateTreeId: candidate.candidateTreeId,
+          diffSha256: candidate.diffSha256,
+          path: file.path,
+          offset,
+          length,
+        },
+        page: requestPage(),
+      }, { signal: active.signal }), requestId, candidate, projection.metadata.readCursor, file, offset, length)
+      if (
+        active.signal.aborted
+        || candidateDiffController !== active
+        || currentState.candidateFiles.selectedPath !== file.path
+        || currentState.projection?.currentCandidate === null
+        || currentState.projection?.currentCandidate === undefined
+        || candidateIdentity(currentState.projection.currentCandidate) !== identity
+      ) return
+      const chunk = base64Bytes(response.result.dataBase64)
+      const combined = new Uint8Array(candidateDiffBytes.byteLength + chunk.byteLength)
+      combined.set(candidateDiffBytes)
+      combined.set(chunk, candidateDiffBytes.byteLength)
+      candidateDiffBytes = combined
+      candidateDiffNextOffset = response.result.nextOffset
+      const limited = response.result.nextOffset !== null
+        && candidateDiffBytes.byteLength >= MAX_CANDIDATE_DIFF_PREVIEW_BYTES
+      candidateFilesPatch({ diff: Object.freeze({
+        status: 'ready',
+        path: file.path,
+        content: new TextDecoder('utf-8', { fatal: true }).decode(candidateDiffBytes, {
+          stream: response.result.nextOffset !== null,
+        }),
+        loadedBytes: candidateDiffBytes.byteLength,
+        totalBytes: response.result.totalBytes,
+        hasMore: response.result.nextOffset !== null && !limited,
+        previewLimited: limited,
+        fileDiffSha256: response.result.fileDiffSha256,
+        unavailableReason: null,
+        error: null,
+      }) })
+    } catch (error) {
+      if (active.signal.aborted || candidateDiffController !== active) return
+      candidateFilesPatch({ diff: Object.freeze({
+        ...currentState.candidateFiles.diff,
+        status: 'error',
+        hasMore: false,
+        error: normalizedError(error, active.signal),
+      }) })
+    } finally {
+      if (candidateDiffController === active) candidateDiffController = null
+    }
+  }
+
+  async function selectCandidateFile(path: string): Promise<void> {
+    const file = currentState.candidateFiles.items.find(item => item.path === path)
+    if (file === undefined) return
+    const changed = desiredCandidatePath !== file.path
+    desiredCandidatePath = file.path
+    candidateFilesPatch({
+      selectedPath: file.path,
+      diff: emptyCandidateDiffState(),
+    })
+    if (changed) options.onCandidatePathChange?.(file.path)
+    await loadCandidateDiff(false)
   }
 
   function controller(): AbortController {
@@ -1165,6 +1640,12 @@ export function createStrongFlowViewModel(
       const snapshot = await querySnapshot(active.signal, minimum)
       if (!operationIsCurrent(ownGeneration)) return null
       const projection = projectionFromSnapshot(snapshot)
+      const nextCandidateIdentity = projection.currentCandidate === null
+        ? null
+        : candidateIdentity(projection.currentCandidate)
+      const candidateChanged = loadedCandidateIdentity !== null
+        && loadedCandidateIdentity !== nextCandidateIdentity
+      if (candidateChanged) clearCandidateFileResources()
       if (!sameStageBinding(activeBinding, snapshot.binding)) {
         options.onStageBindingChange?.(snapshot.binding)
         activeBinding = snapshot.binding
@@ -1174,20 +1655,33 @@ export function createStrongFlowViewModel(
         status: 'ready',
         realtime: realtimeStatus,
         projection,
+        candidateFiles: candidateChanged
+          ? clearedCandidateFilesState()
+          : currentState.candidateFiles,
         interaction: frozenInteraction('idle'),
         error: null,
       })
+      if (
+        !candidateChanged
+        && currentState.candidateFiles.selectedPath !== null
+        && currentState.candidateFiles.diff.status === 'idle'
+        && currentState.candidateFiles.items.some(
+          file => file.path === currentState.candidateFiles.selectedPath,
+        )
+      ) void loadCandidateDiff(false)
       published = true
       return projection.metadata.readCursor.eventCursor
     } catch (error) {
       if (!operationIsCurrent(ownGeneration)) return null
       const normalized = normalizedError(error, active.signal)
+      clearCandidateFileResources()
       publish({
         status: statusForError(normalized),
         realtime: normalized.kind === 'authentication' || normalized.kind === 'authorization'
           ? 'access-revoked'
           : 'reconnecting',
         projection: null,
+        candidateFiles: clearedCandidateFilesState(),
         interaction: frozenInteraction('error', normalized),
         error: normalized,
       })
@@ -1199,10 +1693,12 @@ export function createStrongFlowViewModel(
   }
 
   function clearForReload(status: StrongFlowViewStatus): void {
+    const candidateFiles = pauseCandidateReadsForSnapshotReload()
     publish({
       status,
       realtime: realtime === null ? 'inactive' : 'reloading',
       projection: null,
+      candidateFiles,
       interaction: frozenInteraction('idle'),
       error: null,
     })
@@ -1269,10 +1765,12 @@ export function createStrongFlowViewModel(
     supersedingGeneration = null
     abortRequests()
     closeRealtime()
+    clearCandidateFileResources()
     publish({
       status: statusForError(error),
       realtime: 'access-revoked',
       projection: null,
+      candidateFiles: clearedCandidateFilesState(),
       interaction: frozenInteraction('error', error),
       error,
     })
@@ -1637,6 +2135,18 @@ export function createStrongFlowViewModel(
     async refresh() {
       await refresh()
     },
+    async loadCandidateFiles() {
+      await loadCandidateFilePage(false)
+    },
+    async loadMoreCandidateFiles() {
+      await loadCandidateFilePage(true)
+    },
+    async selectCandidateFile(path) {
+      await selectCandidateFile(path)
+    },
+    async loadMoreCandidateDiff() {
+      await loadCandidateDiff(true)
+    },
     async decideSolutionReview(input) {
       await decideSolutionReview(input)
     },
@@ -1658,10 +2168,12 @@ export function createStrongFlowViewModel(
       supersedingGeneration = null
       abortRequests()
       closeRealtime()
+      clearCandidateFileResources()
       publish({
         status: 'cancelled',
         realtime: 'inactive',
         projection: null,
+        candidateFiles: clearedCandidateFilesState(),
         interaction: frozenInteraction('error', new ControlPlaneClientError({
           kind: 'cancelled',
           code: 'REQUEST_CANCELLED',
@@ -1695,12 +2207,14 @@ export function createStrongFlowViewModel(
       closed = true
       generation += 1
       supersedingGeneration = null
+      clearCandidateFileResources()
       abortRequests()
       closeRealtime()
       publish({
         status: 'closed',
         realtime: 'closed',
         projection: null,
+        candidateFiles: emptyCandidateFilesState(),
         interaction: frozenInteraction('idle'),
         error: null,
       })
