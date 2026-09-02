@@ -23,12 +23,25 @@ import {
   type ConnectionSnapshot,
 } from './core/connection-state.js'
 import { createQueryCache } from './core/query-cache.js'
+import {
+  resolveScopeContext,
+  scopeHash,
+  scopeSelectionFromHash,
+  surfaceHash,
+  type ScopeContextResolution,
+  type ScopeRouteSelection,
+} from './core/scope-context.js'
 import { mountAuthSessionPage, type AuthSessionPage } from './auth-page.js'
 import {
   createAuthSessionViewModel,
   type AuthSessionViewModel,
 } from './auth-view-model.js'
 import type { EnterpriseApplication } from './enterprise-application.js'
+import {
+  mountScopeSelectorPage,
+  type ScopeSelectorPage,
+} from './scope-selector-page.js'
+import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
@@ -37,6 +50,7 @@ import type {
   ProductSessionId,
   RepositoryScope,
   RequestId,
+  Scope,
   StageRunId,
 } from './generated/contracts.js'
 import { QueryName } from './generated/contracts.js'
@@ -108,18 +122,13 @@ export function strongFlowRouteHash(
   productSessionId: ProductSessionId,
   stageRunId: StageRunId,
   candidatePath: string | null = null,
+  scope?: ScopeRouteSelection,
 ): string {
-  return `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
+  const hash = `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
     + `&session=${encodeURIComponent(productSessionId)}`
     + `&stageRun=${encodeURIComponent(stageRunId)}`
     + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
-}
-
-function repositoryScope(
-  session: AuthSessionViewModel['state']['session'],
-): RepositoryScope | null {
-  if (session === null) return null
-  return session.authorizedScopes.find(scope => scope.kind === 'repository') ?? null
+  return scope === undefined ? hash : scopeHash(hash, scope)
 }
 
 function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransport {
@@ -168,6 +177,7 @@ export function mountWinWinCodeClient(
   const navigation = element(document, 'nav', 'wwc-navigation')
   const authRoot = element(document, 'div', 'wwc-auth-session-root')
   const main = element(document, 'main', 'wwc-main')
+  const scopeRoot = element(document, 'div', 'wwc-scope-selector-root')
   const title = element(document, 'h1', 'wwc-surface-title')
   const description = element(document, 'p', 'wwc-surface-description')
   const readOnlyNotice = element(document, 'p', 'wwc-surface-read-only')
@@ -175,18 +185,44 @@ export function mountWinWinCodeClient(
   const links = new Map<ClientSurfaceId, HTMLAnchorElement>()
   let activeSurface = clientSurfaceFromHash(browser.location.hash)
   let activeFeature: EnterpriseApplication | MountedClientFeature | null = null
+  let scopeSelectorPage: ScopeSelectorPage | null = null
+  let currentScopeResolution: ScopeContextResolution | null = null
   let featureController: AbortController | null = null
   let renderGeneration = 0
   let currentFailure: ClientFailure | null = null
   let activeRouteReadOnly = false
+  let revokedScopeIdentity: string | null = null
   let closed = false
+
+  function selectionIdentity(selection: ScopeRouteSelection): string {
+    return [
+      selection.organizationId ?? '',
+      selection.workspaceId ?? '',
+      selection.projectId ?? '',
+      selection.repositoryId ?? '',
+    ].join('\u0000')
+  }
+
+  function selectionLeavesRevokedScope(selection: ScopeRouteSelection): boolean {
+    if (revokedScopeIdentity === null) return false
+    const revoked = revokedScopeIdentity.split('\u0000')
+    return [
+      selection.organizationId,
+      selection.workspaceId,
+      selection.projectId,
+      selection.repositoryId,
+    ].some((value, index) => value !== null && value !== revoked[index])
+  }
 
   function diagnosticScope(): unknown {
     const session = authSession.state.session
     if (session === null) return lastKnownDiagnosticScope
-    const scope = activeSurface.id === 'enterprise'
-      ? (session.authorizedScopes[0] ?? null)
-      : (repositoryScope(session) ?? session.authorizedScopes[0] ?? null)
+    const resolution = resolveScopeContext(
+      session.authorizedScopes,
+      browser.location.hash,
+      activeSurface.id === 'enterprise' ? 'scope' : 'repository',
+    )
+    const scope = resolution.status === 'selected' ? resolution.scope : null
     lastKnownDiagnosticScope = scope
     return scope
   }
@@ -245,7 +281,7 @@ export function mountWinWinCodeClient(
   function returnToSafeEntry(): void {
     currentFailure = null
     connection.reset()
-    replaceHash('#/chat')
+    replaceHash(surfaceHash('/chat', scopeSelectionFromHash(browser.location.hash)))
     render()
   }
 
@@ -343,7 +379,7 @@ export function mountWinWinCodeClient(
   }
 
   header.append(brand, navigation, authRoot)
-  main.append(title, description, readOnlyNotice, errorBoundary.root, slot)
+  main.append(scopeRoot, title, description, readOnlyNotice, errorBoundary.root, slot)
   shell.append(header, connectionBar.root, main)
   options.root.replaceChildren(shell)
   const authPage: AuthSessionPage = mountAuthSessionPage({
@@ -360,6 +396,7 @@ export function mountWinWinCodeClient(
     for (const entry of projection.surfaces) {
       const link = links.get(entry.surface.id)
       if (link === undefined) continue
+      link.href = surfaceHash(entry.surface.path, scopeSelectionFromHash(browser.location.hash))
       link.dataset.capability = entry.capability
       link.hidden = entry.capability === 'hidden'
       link.textContent = entry.capability === 'read-only'
@@ -392,7 +429,7 @@ export function mountWinWinCodeClient(
     denied.setAttribute('role', 'alert')
     denied.dataset.capability = capability.capability
     message.textContent = `${capability.surface.label} is not available to the current identity.`
-    safeEntry.href = '#/chat'
+    safeEntry.href = surfaceHash('/chat', scopeSelectionFromHash(browser.location.hash))
     safeEntry.textContent = 'Return to Chat'
     denied.append(message, safeEntry)
     slot.replaceChildren(denied)
@@ -400,11 +437,21 @@ export function mountWinWinCodeClient(
 
   onRouteAuthorizationRevoked = () => {
     if (closed) return
+    if (currentScopeResolution?.status === 'selected') {
+      revokedScopeIdentity = selectionIdentity(currentScopeResolution.selection)
+    }
     renderGeneration += 1
     featureController?.abort()
     featureController = null
     activeFeature?.close()
     activeFeature = null
+    scopeSelectorPage?.close()
+    scopeSelectorPage = null
+    currentScopeResolution = null
+    const scopeRevoked = element(document, 'p', 'wwc-scope-selector-access')
+    scopeRevoked.setAttribute('role', 'alert')
+    scopeRevoked.textContent = 'The current Scope authorization was revoked. Return to a safe entry and restore access.'
+    scopeRoot.replaceChildren(scopeRevoked)
     clearRouteFailure()
     const link = links.get(activeSurface.id)
     link?.setAttribute('data-route-access', 'denied')
@@ -426,14 +473,24 @@ export function mountWinWinCodeClient(
     readonly scope: RepositoryScope
   } | null {
     const session = authSession.state.session
-    const scope = repositoryScope(session)
+    const resolution = currentScopeResolution
+    const scope = resolution?.status === 'selected' && resolution.scope.kind === 'repository'
+      ? resolution.scope
+      : null
     if (authSession.state.status !== 'signed-in' || session === null || scope === null) {
       const unavailable = element(document, 'p', 'wwc-authenticated-context-required')
-      unavailable.setAttribute('role', 'status')
+      unavailable.setAttribute(
+        'role',
+        resolution?.status === 'denied' ? 'alert' : 'status',
+      )
       unavailable.textContent = authSession.state.status === 'restoring'
         ? 'Restoring your signed-in workspace…'
-        : authSession.state.status === 'signed-in' && session !== null
-          ? 'Your account does not have access to a repository workspace.'
+        : resolution?.status === 'denied'
+          ? 'The repository Scope in this URL is not authorized. Choose another Scope.'
+          : resolution?.status === 'selection-required'
+            ? 'Choose an authorized repository Scope to open this workspace.'
+            : authSession.state.status === 'signed-in' && session !== null
+              ? 'Your account does not have access to a repository workspace.'
           : 'Sign in to open this workspace.'
       slot.replaceChildren(unavailable)
       return null
@@ -490,7 +547,10 @@ export function mountWinWinCodeClient(
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onActiveSessionChange(nextProductSessionId) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          replaceHash(`#/chat?session=${encodeURIComponent(nextProductSessionId)}`)
+          replaceHash(scopeHash(
+            `#/chat?session=${encodeURIComponent(nextProductSessionId)}`,
+            scopeSelectionFromHash(browser.location.hash),
+          ))
         },
       })
       const deliveryCreator = createStrongFlowCreateViewModel({
@@ -501,7 +561,10 @@ export function mountWinWinCodeClient(
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onCreated(deliveryId) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          replaceHash(`#/strongflow?delivery=${encodeURIComponent(deliveryId)}`)
+          replaceHash(scopeHash(
+            `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`,
+            scopeSelectionFromHash(browser.location.hash),
+          ))
           render()
         },
       })
@@ -510,6 +573,10 @@ export function mountWinWinCodeClient(
         model,
         deliveryCreator,
         scope: context.scope,
+        settingsHref: scopeHash(
+          '#/settings',
+          scopeSelectionFromHash(browser.location.hash),
+        ),
         readOnly: activeRouteReadOnly,
         nextProductSessionId: () => contractId(
           'psn',
@@ -573,7 +640,10 @@ export function mountWinWinCodeClient(
       activeFeature = mountSettingsPage({
         root: slot,
         model,
-        localOperationsHref: '#/settings/runtime',
+        localOperationsHref: scopeHash(
+          '#/settings/runtime',
+          scopeSelectionFromHash(browser.location.hash),
+        ),
         readOnly: activeRouteReadOnly,
       })
     } catch (error) {
@@ -674,7 +744,10 @@ export function mountWinWinCodeClient(
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
           onCreated(createdDeliveryId) {
             if (closed || generation !== renderGeneration || controller.signal.aborted) return
-            replaceHash(`#/strongflow?delivery=${encodeURIComponent(createdDeliveryId)}`)
+            replaceHash(scopeHash(
+              `#/strongflow?delivery=${encodeURIComponent(createdDeliveryId)}`,
+              scopeSelectionFromHash(browser.location.hash),
+            ))
             render()
           },
         })
@@ -727,6 +800,7 @@ export function mountWinWinCodeClient(
           productSessionId,
           stage.id,
           selectedCandidatePath,
+          scopeSelectionFromHash(browser.location.hash),
         ))
       }
       const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
@@ -755,6 +829,7 @@ export function mountWinWinCodeClient(
             routeProductSessionId,
             routeStageRunId,
             path,
+            scopeSelectionFromHash(browser.location.hash),
           ))
         },
         onStageBindingChange(binding) {
@@ -766,6 +841,7 @@ export function mountWinWinCodeClient(
             binding.productSessionId,
             binding.stageRunId,
             selectedCandidatePath,
+            scopeSelectionFromHash(browser.location.hash),
           ))
         },
       })
@@ -773,6 +849,7 @@ export function mountWinWinCodeClient(
         root: slot,
         model,
         deliveries,
+        routeScope: scopeSelectionFromHash(browser.location.hash),
         readOnly: activeRouteReadOnly,
       })
     } catch (error) {
@@ -783,17 +860,25 @@ export function mountWinWinCodeClient(
 
   async function renderEnterprise(generation: number): Promise<void> {
     const session = authSession.state.session
-    if (authSession.state.status !== 'signed-in' || session === null) {
+    const resolution = currentScopeResolution
+    if (
+      authSession.state.status !== 'signed-in'
+      || session === null
+      || resolution?.status !== 'selected'
+    ) {
       const unavailable = element(document, 'p', 'wwc-enterprise-context-required')
-      unavailable.setAttribute('role', 'status')
+      unavailable.setAttribute('role', resolution?.status === 'denied' ? 'alert' : 'status')
       unavailable.textContent = authSession.state.status === 'restoring'
         ? 'Restoring enterprise identity and organization access…'
+        : resolution?.status === 'denied'
+          ? 'The enterprise Scope in this URL is not authorized. Choose another Scope.'
+          : resolution?.status === 'selection-required'
+            ? 'Choose an authorized Scope to load enterprise management.'
         : 'Sign in to load enterprise management.'
       slot.replaceChildren(unavailable)
       return
     }
-    const scope = session.authorizedScopes[0]
-    if (scope === undefined) throw new Error('Authenticated session has no authorized Scope.')
+    const scope: Scope = resolution.scope
     const loading = element(document, 'p', 'wwc-enterprise-route-loading')
     loading.setAttribute('role', 'status')
     loading.textContent = 'Loading enterprise management…'
@@ -836,6 +921,9 @@ export function mountWinWinCodeClient(
     featureController = null
     activeFeature?.close()
     activeFeature = null
+    scopeSelectorPage?.close()
+    scopeSelectorPage = null
+    currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
     for (const link of links.values()) link.removeAttribute('data-route-access')
     delete slot.dataset.routeAccess
@@ -851,14 +939,54 @@ export function mountWinWinCodeClient(
     slot.dataset.winwincodeSurface = activeSurface.id
     slot.dataset.navigationCapability = capability.capability
     slot.replaceChildren()
+    const routeAccessDenied = authSession.state.status === 'signed-in'
+      && (capability.capability === 'hidden' || capability.capability === 'disabled')
+    const session = authSession.state.session
+    if (authSession.state.status === 'signed-in' && session !== null) {
+      const resolved = resolveScopeContext(
+        session.authorizedScopes,
+        browser.location.hash,
+        activeSurface.id === 'enterprise' ? 'scope' : 'repository',
+      )
+      const resolution: ScopeContextResolution = resolved.status === 'selected'
+        && selectionIdentity(resolved.selection) === revokedScopeIdentity
+        ? Object.freeze({
+            status: 'denied',
+            reason: 'not-authorized',
+            selection: resolved.selection,
+            options: resolved.options,
+          })
+        : resolved
+      currentScopeResolution = resolution
+      const model = createScopeSelectorViewModel({
+        client: rawControlPlane,
+        actor: session.actor,
+        authorizedScopes: session.authorizedScopes,
+        selection: resolution.selection,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        onSelectionChange(nextSelection) {
+          if (closed || scopeSelectorPage === null) return
+          if (selectionLeavesRevokedScope(nextSelection)) revokedScopeIdentity = null
+          replaceHash(scopeHash(browser.location.hash, nextSelection))
+          render()
+        },
+      })
+      scopeSelectorPage = mountScopeSelectorPage({
+        root: scopeRoot,
+        model,
+        contextStatus: resolution.status,
+      })
+      if (!routeAccessDenied && resolution.status !== 'denied') void model.start()
+      scopeRoot.hidden = false
+    } else {
+      scopeRoot.hidden = true
+      scopeRoot.replaceChildren()
+    }
     for (const [id, link] of links) {
       if (id === activeSurface.id) link.setAttribute('aria-current', 'page')
       else link.removeAttribute('aria-current')
     }
-    if (
-      authSession.state.status === 'signed-in'
-      && (capability.capability === 'hidden' || capability.capability === 'disabled')
-    ) {
+    if (routeAccessDenied) {
       routeDenied(capability)
       return
     }
@@ -957,7 +1085,10 @@ export function mountWinWinCodeClient(
       if (closed) throw new Error('WinWinCode Client is closed.')
       const surface = CLIENT_SURFACES.find(candidate => candidate.id === surfaceId)
       if (surface === undefined) throw new Error(`Unknown Client surface: ${surfaceId}`)
-      browser.location.hash = surface.path
+      browser.location.hash = surfaceHash(
+        surface.path,
+        scopeSelectionFromHash(browser.location.hash),
+      )
       render()
     },
     close() {
@@ -974,9 +1105,13 @@ export function mountWinWinCodeClient(
       featureController = null
       activeFeature?.close()
       activeFeature = null
+      scopeSelectorPage?.close()
+      scopeSelectorPage = null
+      currentScopeResolution = null
       authPage.close()
       authSession.close()
       accessFailureSession = null
+      revokedScopeIdentity = null
       controlPlane.close()
       errorBoundary.close()
       connectionBar.close()

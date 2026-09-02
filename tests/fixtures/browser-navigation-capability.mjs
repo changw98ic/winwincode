@@ -124,6 +124,7 @@ globalThis.inspectNavigationCapability = async () => {
 }
 
 globalThis.openDeniedEnterpriseRoute = async () => {
+  const enterpriseQueriesBefore = queries.filter(query => query.query.startsWith('enterprise.')).length
   location.hash = '#/enterprise/resources'
   await waitFor(() => document.querySelector('.wwc-surface-route-denied') !== null,
     'Enterprise route denial')
@@ -132,7 +133,8 @@ globalThis.openDeniedEnterpriseRoute = async () => {
   safeEntry.focus()
   return {
     alertRole: denial.getAttribute('role'),
-    enterpriseQueries: queries.filter(query => query.query.startsWith('enterprise.')).length,
+    enterpriseQueries: queries.filter(query => query.query.startsWith('enterprise.')).length
+      - enterpriseQueriesBefore,
     focused: document.activeElement === safeEntry,
     safeHref: safeEntry.getAttribute('href'),
     text: denial.textContent,

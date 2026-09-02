@@ -50,6 +50,7 @@ export interface ChatPageOptions {
   readonly nextProductSessionId?: () => ProductSessionId
   readonly deliveryCreator?: ChatDeliveryCreator
   readonly scope?: RepositoryScope
+  readonly settingsHref?: string
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -361,7 +362,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   modelLabel.textContent = 'Model route'
   modelLabel.htmlFor = 'wwc-chat-model'
   modelSelect.id = 'wwc-chat-model'
-  modelSettings.href = '#/settings'
+  modelSettings.href = options.settingsHref ?? '#/settings'
   modelSettings.textContent = 'Review model routes in Settings'
   modelNotice.setAttribute('role', 'status')
   modelNotice.setAttribute('aria-live', 'polite')

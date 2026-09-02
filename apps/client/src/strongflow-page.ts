@@ -6,6 +6,7 @@ import type {
   DeliveryTaskDetailProjection,
   RepositoryScope,
 } from './generated/contracts.js'
+import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
 import { mountButton } from './components/button.js'
 import { mountDrawer } from './components/drawer.js'
 import { mountEmptyState } from './components/empty-state.js'
@@ -68,6 +69,7 @@ export interface StrongFlowPageOptions {
    * selection. Defaults to the page window; injection keeps tests hermetic.
    */
   readonly historyLocation?: StrongFlowHistoryLocation | null
+  readonly routeScope?: ScopeRouteSelection
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -1141,7 +1143,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     update(item, delivery: DeliveryProjection) {
       const row = deliveryRows.get(item)
       if (row === undefined) return
-      row.link.href = `#/strongflow?delivery=${encodeURIComponent(delivery.deliveryId)}`
+      const route = `#/strongflow?delivery=${encodeURIComponent(delivery.deliveryId)}`
+      row.link.href = options.routeScope === undefined
+        ? route
+        : scopeHash(route, options.routeScope)
       row.link.textContent = delivery.title
       row.link.dataset.deliveryId = delivery.deliveryId
       row.status.textContent = `${delivery.status} · r${String(delivery.revision)}`

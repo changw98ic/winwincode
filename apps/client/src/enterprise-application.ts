@@ -6,6 +6,7 @@ import {
   type EnterpriseManagementViewModel,
 } from './enterprise-management-view-model.js'
 import type { ControlPlaneClient } from './control-plane-client.js'
+import { scopeHash, scopeSelectionFromHash } from './core/scope-context.js'
 import type {
   Actor,
   ControlPlaneWebSocketSubscriptionId,
@@ -152,7 +153,7 @@ export async function mountEnterpriseApplication(
   pageRoot.dataset.enterpriseRoute = route.id
   for (const candidate of ENTERPRISE_ROUTES) {
     const link = element(document, 'a', 'wwc-enterprise-navigation-link')
-    link.href = `#${candidate.path}`
+    link.href = scopeHash(`#${candidate.path}`, scopeSelectionFromHash(options.hash))
     link.textContent = candidate.label
     link.title = candidate.description
     link.dataset.enterpriseRoute = candidate.id
