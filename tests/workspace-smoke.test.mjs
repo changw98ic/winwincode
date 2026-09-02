@@ -159,6 +159,11 @@ test('product release workflow passes immutable source identity to the canonical
   assert.ok(workflow.includes('path: release-artifacts/${{ matrix.target }}/'))
   assert.ok(workflow.includes('if-no-files-found: error'))
   assert.doesNotMatch(workflow, /run-native-release-gate|native-package|name: native-/u)
+  assert.ok(workflow.includes('timeout-minutes: ${{ matrix.timeout_minutes }}'))
+  assert.match(
+    workflow,
+    /target: x86_64-apple-darwin\n\s+runner: macos-15-intel\n\s+timeout_minutes: 300/u,
+  )
 })
 
 test('product release workflow binds the helper signing keys without embedding key material', () => {
@@ -192,12 +197,19 @@ test('product release workflow blocks uploads until target security verification
   assert.ok(workflow.includes('--expected-commit "${SOURCE_COMMIT}"'))
   assert.ok(workflow.includes('--evidence release-artifacts'))
   assert.ok(workflow.includes('--output release-artifact-security-report.json'))
+  assert.ok(securityStep.includes('id: security'))
+  assert.ok(securityStep.includes('continue-on-error: true'))
   const securityOffset = workflow.indexOf(securityCommand)
   const productUploadOffset = workflow.indexOf('      - name: Upload release artifacts')
   const securityUploadOffset = workflow.indexOf('name: release-security-${{ matrix.target }}')
   assert.ok(securityOffset < productUploadOffset)
   assert.ok(securityOffset < securityUploadOffset)
   assert.ok(workflow.includes('path: release-artifact-security-report.json'))
+  assert.ok(workflow.includes("if: ${{ always() && steps.security.outcome != 'skipped' }}"))
+  assert.ok(workflow.includes("if: ${{ steps.security.outcome == 'success' }}"))
+  assert.ok(workflow.includes('      - name: Enforce release artifact security'))
+  assert.ok(workflow.includes('SECURITY_OUTCOME: ${{ steps.security.outcome }}'))
+  assert.ok(workflow.includes('test "${SECURITY_OUTCOME}" = "success"'))
   assert.ok(workflow.includes('key_file="${RUNNER_TEMP}/helper-release-private-input"'))
   assert.ok(workflow.includes('umask 077'))
   assert.ok(workflow.includes('trap \'rm -f -- "$key_file"\' EXIT'))

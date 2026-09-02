@@ -56,19 +56,23 @@ jobs:
     name: ${{ matrix.target }}
     needs: verify-source
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             runner: macos-15
+            timeout_minutes: 120
           - target: x86_64-apple-darwin
             runner: macos-15-intel
+            timeout_minutes: 300
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+            timeout_minutes: 120
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
+            timeout_minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
       CI: "1"
@@ -127,6 +131,8 @@ jobs:
             --output release-artifacts
 
       - name: Verify release artifact security
+        id: security
+        continue-on-error: true
         shell: bash
         env:
           WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}
@@ -144,16 +150,27 @@ jobs:
             --output release-artifact-security-report.json \
             --sensitive-input "$key_file"
 
+      - name: Upload release artifact security report
+        if: ${{ always() && steps.security.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-security-${{ matrix.target }}
+          path: release-artifact-security-report.json
+          if-no-files-found: error
+
       - name: Upload release artifacts
+        if: ${{ steps.security.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: release-artifacts/${{ matrix.target }}/
           if-no-files-found: error
 
-      - name: Upload release artifact security report
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-security-${{ matrix.target }}
-          path: release-artifact-security-report.json
-          if-no-files-found: error
+      - name: Enforce release artifact security
+        if: ${{ always() && steps.security.outcome != 'skipped' }}
+        shell: bash
+        env:
+          SECURITY_OUTCOME: ${{ steps.security.outcome }}
+        run: |
+          set -euo pipefail
+          test "${SECURITY_OUTCOME}" = "success"

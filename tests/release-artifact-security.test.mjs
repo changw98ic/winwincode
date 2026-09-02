@@ -107,6 +107,10 @@ test('dynamic library policy accepts system libraries and rejects bundled runtim
   ), true)
   assert.equal(dynamicLibraryAllowed({ os: 'macos' }, '@rpath/libnode.dylib'), false)
   assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libc.so.6'), true)
+  assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libcrypto.so.3'), true)
+  assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libssl.so.3'), true)
+  assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libcrypto.so'), false)
+  assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libssl.so.1.1'), false)
   assert.equal(dynamicLibraryAllowed({ os: 'linux' }, 'libnode.so.120'), false)
 })
 

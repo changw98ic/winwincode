@@ -65,12 +65,14 @@ const clientExtensions = new Set([
 const linuxDynamicLibraryAllowlist = new Set([
   'libanl.so.1',
   'libc.so.6',
+  'libcrypto.so.3',
   'libdl.so.2',
   'libgcc_s.so.1',
   'libm.so.6',
   'libpthread.so.0',
   'libresolv.so.2',
   'librt.so.1',
+  'libssl.so.3',
   'libutil.so.1',
 ])
 
