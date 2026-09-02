@@ -374,6 +374,8 @@ test('UI-601: artifact DOM rebuilds only when its rendered content changes', () 
   const comments = actions.children[0].children[0]
   const candidateBefore = findByClass(root, 'wwc-strongflow-view-candidate')
   const diagramsBefore = findByClass(root, 'wwc-strongflow-diagrams')
+  const graphNodeBefore = findByClass(root, 'wwc-strongflow-graph-node')
+  const sessionBefore = findByClass(root, 'wwc-strongflow-execution-session')
   comments.value = 'draft for the current candidate'
 
   const taskOnly = projection()
@@ -387,7 +389,21 @@ test('UI-601: artifact DOM rebuilds only when its rendered content changes', () 
   runtimeChanged.runtime.sessions[0].diffSummary.sourceRef = 'runtime:diff:2'
   model.publish(state({ projection: runtimeChanged }))
   const diagramsAfterRuntime = findByClass(root, 'wwc-strongflow-diagrams')
-  assert.notEqual(diagramsAfterRuntime, diagramsBefore)
+  assert.equal(
+    diagramsAfterRuntime,
+    diagramsBefore,
+    'UI-307: runtime changes update execution in place without rebuilding the graphs',
+  )
+  assert.equal(
+    findByClass(root, 'wwc-strongflow-graph-node'),
+    graphNodeBefore,
+    'UI-307: keyed graph nodes survive unrelated runtime snapshots',
+  )
+  assert.notEqual(
+    findByClass(root, 'wwc-strongflow-execution-session'),
+    sessionBefore,
+    'changed session content still re-renders',
+  )
   assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
   assert.equal(comments.value, 'draft for the current candidate')
 

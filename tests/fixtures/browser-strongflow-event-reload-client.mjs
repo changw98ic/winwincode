@@ -170,6 +170,7 @@ globalThis.runStrongFlowEventReloadScenario = () => {
   model.publish(ready(createProjection({ candidateDigest: '4' })))
   const candidateAfterChange = document.querySelector('.wwc-strongflow-view-candidate')
   const diagramsAfterCandidate = document.querySelector('.wwc-strongflow-diagrams')
+  const executionAfterCandidate = document.querySelector('.wwc-strongflow-execution-session')
   model.publish(ready(createProjection({ candidateDigest: '4', runtimeSource: '2' })))
   return {
     afterEquivalentEvents,
@@ -181,8 +182,12 @@ globalThis.runStrongFlowEventReloadScenario = () => {
     runtimeChange: {
       candidateRetained: document.querySelector('.wwc-strongflow-view-candidate')
         === candidateAfterChange,
-      diagramsRebuilt: document.querySelector('.wwc-strongflow-diagrams')
-        !== diagramsAfterCandidate,
+      diagramsRetained: document.querySelector('.wwc-strongflow-diagrams')
+        === diagramsAfterCandidate,
+      executionRerendered: document.querySelector('.wwc-strongflow-execution-session')
+        !== executionAfterCandidate,
+      executionSourceRef: document.querySelector('.wwc-strongflow-live-diff')
+        ?.dataset.sourceRef ?? null,
     },
   }
 }

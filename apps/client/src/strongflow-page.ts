@@ -15,7 +15,7 @@ import { mountKeyedCollection, type KeyedCollectionView } from './components/key
 import { mountSplitPane } from './components/split-pane.js'
 import { mountTabs, type TabItem } from './components/tabs.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
-import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import { mountStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -677,11 +677,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
   let navigationDrawerOpen = false
   let contextDrawerOpen = false
-  let diagramsNode: HTMLElement | null = null
   let candidateNode: HTMLElement | null = null
   let contextEvidenceNode: HTMLElement | null = null
   let artifactEvidenceNode: HTMLElement | null = null
-  let diagramsFingerprint: string | null = null
   let candidateFingerprint: string | null = null
   let lastEvidenceKey: string | null = null
   let lastLayoutKey: string | null = null
@@ -774,6 +772,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   artifactPanels.get('candidate')?.append(candidateHost)
   artifactPanels.get('evidence')?.append(artifactEvidenceHost)
   artifacts.append(artifactsHeading, artifactTabs.root, ...artifactPanels.values())
+
+  const diagrams = mountStrongFlowDiagrams({ document, limits })
+  diagramsHost.append(diagrams.root)
 
   const innerSplit = mountSplitPane({
     document,
@@ -1278,15 +1279,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       updateOmitted(tasksOmitted, 0, 'tasks')
       updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
-      if (diagramsNode !== null) diagramsNode.remove()
+      diagrams.update({ projection: null, narrow: strongFlowLayoutMode(viewport.width) === 'narrow' })
       if (candidateNode !== null) candidateNode.remove()
       if (contextEvidenceNode !== null) contextEvidenceNode.remove()
       if (artifactEvidenceNode !== null) artifactEvidenceNode.remove()
-      diagramsNode = null
       candidateNode = null
       contextEvidenceNode = null
       artifactEvidenceNode = null
-      diagramsFingerprint = null
       candidateFingerprint = null
       lastEvidenceKey = null
       return
@@ -1307,18 +1306,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(stagesOmitted, boundedStages.omitted, 'stages')
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
 
+    diagrams.update({
+      projection,
+      narrow: strongFlowLayoutMode(viewport.width) === 'narrow',
+    })
     const evidenceKey = JSON.stringify(projection.evidence)
-    const nextDiagramsFingerprint = JSON.stringify([
-      projection.solutionReview?.architectureDiagram ?? null,
-      projection.solutionReview?.processDiagram ?? null,
-      projection.runtime.sessions,
-    ])
-    if (diagramsNode === null || diagramsFingerprint !== nextDiagramsFingerprint) {
-      diagramsNode?.remove()
-      diagramsNode = renderStrongFlowDiagrams(document, projection, limits)
-      diagramsHost.append(diagramsNode)
-      diagramsFingerprint = nextDiagramsFingerprint
-    }
     const nextCandidateFingerprint = JSON.stringify([
       projection.currentCandidate,
       projection.evidence,
@@ -1435,13 +1427,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       preferences.artifactsTab === 'execution' ? 'execution' : 'solution',
     )
     if (diagramPanel !== undefined) mountRegion(diagramPanel, [diagramsHost])
-    if (diagramsNode !== null) {
-      for (const child of [...diagramsNode.children] as HTMLElement[]) {
-        if (child.className === 'wwc-strongflow-view-solution') {
-          child.hidden = preferences.artifactsTab === 'execution'
-        } else if (child.className === 'wwc-strongflow-view-execution') {
-          child.hidden = preferences.artifactsTab !== 'execution'
-        }
+    for (const child of [...diagrams.root.children] as HTMLElement[]) {
+      if (child.className === 'wwc-strongflow-view-solution') {
+        child.hidden = preferences.artifactsTab === 'execution'
+      } else if (child.className === 'wwc-strongflow-view-execution') {
+        child.hidden = preferences.artifactsTab !== 'execution'
       }
     }
     if (lastLayoutKey === layoutKey) return
@@ -1641,7 +1631,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       stageCollection.close()
       taskCollection.close()
       deliveryCollection.close()
-      diagramsNode?.remove()
+      diagrams.close()
       candidateNode?.remove()
       contextEvidenceNode?.remove()
       artifactEvidenceNode?.remove()
