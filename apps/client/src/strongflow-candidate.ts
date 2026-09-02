@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { StrongFlowProjection } from './strongflow-view-model.js'
-import {
-  appendOmittedCount,
-  boundedItems,
-  strongFlowElement,
-  type StrongFlowRenderLimits,
-} from './strongflow-rendering.js'
+import { strongFlowElement } from './strongflow-rendering.js'
 
 function definition(
   document: Document,
@@ -23,7 +18,6 @@ function definition(
 export function renderStrongFlowCandidate(
   document: Document,
   projection: StrongFlowProjection,
-  limits: StrongFlowRenderLimits,
 ): HTMLElement {
   const root = strongFlowElement(document, 'section', 'wwc-strongflow-view-candidate')
   const heading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
@@ -46,24 +40,6 @@ export function renderStrongFlowCandidate(
     )
     root.append(details)
   }
-
-  const evidenceHeading = strongFlowElement(document, 'h4', 'wwc-strongflow-subheading')
-  const evidence = strongFlowElement(document, 'ul', 'wwc-strongflow-evidence')
-  const boundedEvidence = boundedItems(projection.evidence, limits.evidence)
-  evidenceHeading.textContent = 'Evidence'
-  evidence.setAttribute('aria-label', 'Delivery evidence')
-  evidence.append(...boundedEvidence.items.map(item => {
-    const row = document.createElement('li')
-    const title = document.createElement('strong')
-    const source = document.createElement('p')
-    title.textContent = `${item.type} · ${item.id}`
-    source.textContent = item.sourceRef
-    row.dataset.candidateRef = item.candidateRef
-    row.append(title, source)
-    return row
-  }))
-  root.append(evidenceHeading, evidence)
-  appendOmittedCount(document, root, boundedEvidence.omitted, 'evidence records')
 
   const verdictHeading = strongFlowElement(document, 'h4', 'wwc-strongflow-subheading')
   const verdict = strongFlowElement(document, 'section', 'wwc-strongflow-verdict')

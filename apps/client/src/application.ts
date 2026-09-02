@@ -693,7 +693,17 @@ export function mountWinWinCodeClient(
           ))
         },
       })
-      activeFeature = mountStrongFlowPage({ root: slot, model, deliveries })
+      activeFeature = mountStrongFlowPage({
+        root: slot,
+        model,
+        deliveries,
+        evidence: {
+          client: controlPlane,
+          actor: context.actor,
+          scope: context.scope,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        },
+      })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'STRONGFLOW_ROUTE_FAILURE')

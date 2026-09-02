@@ -14,6 +14,10 @@ import { mountKeyedCollection, type KeyedCollectionView } from './components/key
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
+  mountStrongFlowEvidence,
+  type StrongFlowEvidenceOptions,
+} from './strongflow-evidence.js'
+import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
   strongFlowElement,
@@ -33,6 +37,7 @@ export interface StrongFlowPageOptions {
   readonly model: StrongFlowViewModel
   readonly deliveries?: readonly DeliveryProjection[]
   readonly limits?: StrongFlowRenderLimits
+  readonly evidence: StrongFlowEvidenceOptions
 }
 
 export interface StrongFlowPage {
@@ -461,6 +466,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const attentionOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
   const diagramsHost = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams-host')
   const candidateHost = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-host')
+  const evidenceHost = strongFlowElement(document, 'div', 'wwc-strongflow-evidence-host')
+  evidenceHost.hidden = true
   const actions = strongFlowElement(document, 'section', 'wwc-strongflow-actions')
   const actionsHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const solutionActions = strongFlowElement(
@@ -514,7 +521,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
   let lastRuntime: StrongFlowProjection['runtime'] | null = null
   let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
-  let lastEvidence: StrongFlowProjection['evidence'] | null = null
   let lastVerdict: StrongFlowProjection['verdict'] | null = null
   let lastPublication: StrongFlowProjection['publication'] | null = null
   let solutionDraftKey: string | null = null
@@ -575,6 +581,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     attentionSection,
     diagramsHost,
     candidateHost,
+    evidenceHost,
   )
   actions.append(
     actionsHeading,
@@ -922,6 +929,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       updateOmitted(tasksOmitted, 0, 'tasks')
       updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
+      evidenceHost.hidden = true
       if (diagramsNode !== null) diagramsNode.remove()
       if (candidateNode !== null) candidateNode.remove()
       diagramsNode = null
@@ -929,7 +937,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       lastSolutionReview = null
       lastRuntime = null
       lastCandidate = null
-      lastEvidence = null
       lastVerdict = null
       lastPublication = null
       return
@@ -940,6 +947,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     metadata.textContent = `Delivery r${String(
       projection.metadata.revisions.delivery,
     )} · Runtime r${String(projection.metadata.revisions.runtime)} · updated ${projection.metadata.updatedAt}`
+    evidenceHost.hidden = false
     const boundedTasks = boundedItems(projection.delivery.tasks, limits.tasks)
     const boundedStages = boundedItems(projection.delivery.stages, limits.stages)
     const boundedAttention = boundedItems(projection.attention, limits.attention)
@@ -964,15 +972,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     if (
       candidateNode === null
       || lastCandidate !== projection.currentCandidate
-      || lastEvidence !== projection.evidence
       || lastVerdict !== projection.verdict
       || lastPublication !== projection.publication
     ) {
       candidateNode?.remove()
-      candidateNode = renderStrongFlowCandidate(document, projection, limits)
+      candidateNode = renderStrongFlowCandidate(document, projection)
       candidateHost.append(candidateNode)
       lastCandidate = projection.currentCandidate
-      lastEvidence = projection.evidence
       lastVerdict = projection.verdict
       lastPublication = projection.publication
     }
@@ -1047,6 +1053,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   }
 
   const unsubscribe = options.model.subscribe(render)
+  const evidenceWorkbench = mountStrongFlowEvidence({
+    ...options.evidence,
+    root: evidenceHost,
+    model: options.model,
+    limits: { evidence: limits.evidence },
+  })
   void options.model.start()
   return {
     close() {
@@ -1070,6 +1082,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       deliveryCollection.close()
       diagramsNode?.remove()
       candidateNode?.remove()
+      evidenceWorkbench.close()
       options.model.close()
       options.root.replaceChildren()
     },

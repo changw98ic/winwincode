@@ -301,9 +301,15 @@ class FakeElement {
   emit(name, values = {}) {
     for (const listener of this.listeners.get(name) ?? []) listener(values)
   }
+
+  focus() {}
+
+  blur() {}
 }
 
 class FakeDocument {
+  activeElement = null
+
   createElement(tagName) {
     return new FakeElement(this, tagName)
   }
@@ -330,17 +336,17 @@ class FakeStrongFlowViewModel {
   }
 
   calls = []
-  listener = null
+  listeners = new Set()
 
   subscribe(listener) {
-    this.listener = listener
+    this.listeners.add(listener)
     listener(this.state)
-    return () => { this.listener = null }
+    return () => { this.listeners.delete(listener) }
   }
 
   publish(next) {
     this.state = next
-    this.listener?.(next)
+    for (const listener of this.listeners) listener(next)
   }
 
   async start() { this.calls.push(['start']) }
@@ -374,6 +380,60 @@ class FakeStrongFlowCreateViewModel {
   async create(input) { this.calls.push(['create', input]) }
   cancelPending() { this.calls.push(['cancelPending']) }
   close() { this.calls.push(['close']) }
+}
+
+const pageActor = { kind: 'user', id: 'usr_00000000000000000000000001' }
+const pageScope = {
+  kind: 'repository',
+  organizationId: 'org_00000000000000000000000001',
+  workspaceId: 'wsp_00000000000000000000000001',
+  projectId: 'prj_00000000000000000000000001',
+  repositoryId: 'rep_00000000000000000000000001',
+}
+
+function pageEvidenceClient() {
+  return {
+    queries: [],
+    async query(request) {
+      this.queries.push(request)
+      if (request.query === 'evidence.get') {
+        return {
+          schemaVersion: 'winwincode/v1',
+          requestId: request.requestId,
+          query: request.query,
+          result: {
+            kind: 'evidence_detail',
+            artifactAccess: { state: 'unavailable', reason: 'no_authoritative_link' },
+            evidence: request.parameters,
+            outcome: 'succeeded',
+            readCursor: request.parameters.atCursor,
+          },
+          page: { hasMore: false, nextCursor: null },
+        }
+      }
+      throw new Error(`unexpected page evidence query: ${request.query}`)
+    },
+  }
+}
+
+function pageEvidenceDeepLink() {
+  const state = { hash: `#/strongflow?delivery=${deliveryId}` }
+  return {
+    read: () => new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1)),
+    replace(hash) { state.hash = hash },
+    state,
+  }
+}
+
+function pageEvidenceOptions(overrides = {}) {
+  return {
+    client: pageEvidenceClient(),
+    actor: pageActor,
+    scope: pageScope,
+    nextRequestId: () => 'req_00000000000000000000000001',
+    deepLink: pageEvidenceDeepLink(),
+    ...overrides,
+  }
 }
 
 const limits = {
@@ -418,11 +478,13 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
+  const evidenceOptions = pageEvidenceOptions()
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveries: many(5, deliverySummary),
     limits,
+    evidence: evidenceOptions,
   })
 
   const status = findByClass(rootElement, 'wwc-strongflow-status')
@@ -430,7 +492,8 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   const content = findByClass(rootElement, 'wwc-strongflow-content')
   const deliveryList = findByClass(rootElement, 'wwc-strongflow-delivery-list')
   const tasks = findByClass(rootElement, 'wwc-strongflow-task-list')
-  const evidence = findByClass(rootElement, 'wwc-strongflow-evidence')
+  const evidenceTabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs')
+  const evidenceList = findByClass(rootElement, 'wwc-strongflow-evidence-list')
   const diagramNodes = findAllByClass(rootElement, 'wwc-strongflow-diagram-nodes')
   const executionSessions = findAllByClass(rootElement, 'wwc-strongflow-execution-session')
   assert.equal(status.getAttribute('role'), 'status')
@@ -441,7 +504,19 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.equal(deliveryList.children.length, 2)
   assert.match(deliveryList.children[0].children[0].href, /^#\/strongflow\?delivery=/u)
   assert.equal(tasks.children.length, 2)
-  assert.equal(evidence.children.length, 2)
+  assert.equal(evidenceTabs.getAttribute('role'), 'tablist')
+  assert.deepEqual(
+    evidenceTabs.children.map(tab => tab.textContent),
+    ['Evidence', 'Tests', 'Logs'],
+  )
+  assert.equal(evidenceList.children.length, 2)
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-strongflow-omitted').some(note => (
+      /3 more evidence records/u.test(note.textContent)
+    )),
+    true,
+  )
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence'), null)
   assert.equal(diagramNodes.length, 2)
   assert.equal(diagramNodes.every(list => list.children.length === 2), true)
   assert.equal(executionSessions.length, 2)
@@ -451,6 +526,12 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.equal(findByClass(rootElement, 'wwc-strongflow-verdict').dataset.status, 'pass')
   assert.equal(findByClass(rootElement, 'wwc-strongflow-publication').dataset.status, 'pending')
   assert.equal(findAllByClass(rootElement, 'wwc-strongflow-omitted').length > 0, true)
+
+  assert.equal(evidenceOptions.client.queries.length, 0)
+  findAllByClass(rootElement, 'wwc-strongflow-evidence-row')[0].emit('click')
+  assert.equal(evidenceOptions.client.queries.length, 1)
+  assert.equal(evidenceOptions.client.queries[0].query, 'evidence.get')
+  assert.equal(evidenceOptions.client.queries[0].parameters.evidenceId, 'evidence:1')
 
   model.publish(state({
     realtime: 'reconnecting',
@@ -464,6 +545,8 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
     projection: null,
     error: error('protocol', 'Failed.'),
   }))
+  assert.equal(findAllByClass(rootElement, 'wwc-strongflow-evidence-row').length, 0)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-host').hidden, true)
   findByClass(rootElement, 'wwc-strongflow-retry').emit('click')
   assert.deepEqual(model.calls.at(-1), ['refresh'])
 
@@ -565,7 +648,12 @@ test('review controls send only current view-model decisions and disable while w
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
   const actions = findByClass(rootElement, 'wwc-strongflow-solution-actions')
   actions.children[0].children[0].value = 'Approve the exact current review.'
   findByClass(rootElement, 'wwc-strongflow-approve-solution').emit('click')
@@ -596,6 +684,7 @@ test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, a
     model,
     deliveries: many(5, deliverySummary),
     limits,
+    evidence: pageEvidenceOptions(),
   })
   const workspace = findByClass(rootElement, 'wwc-strongflow-workspace')
   const deliveryList = findByClass(rootElement, 'wwc-strongflow-delivery-list')
@@ -648,7 +737,7 @@ test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, a
   assert.equal((approve.listeners.get('click') ?? []).length, 0)
   assert.equal(comments.value, '')
   assert.equal(resolution.value, '')
-  assert.equal(model.listener, null)
+  assert.equal(model.listeners.size, 0)
 })
 
 test('verdict control stays hidden until all active StageRuns settle', () => {
@@ -657,7 +746,12 @@ test('verdict control stays hidden until all active StageRuns settle', () => {
   const current = projection()
   current.verdict = null
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
 
   assert.equal(findByClass(rootElement, 'wwc-strongflow-submit-verdict'), null)
 
