@@ -27,7 +27,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/credential-leak-gate.test.mjs',
   'tests/delivery-evidence-verdict-rework-contract.test.mjs',
   'tests/delivery-execution-job-schema.test.mjs',
-  'tests/delivery-rust-cutover-gate.test.mjs',
   'tests/delivery-submit-verdict-http-contract.test.mjs',
   'tests/domain-schema.test.mjs',
   'tests/enterprise-application.test.mjs',
@@ -45,7 +44,6 @@ const canonicalTestFiles = Object.freeze([
   'tests/readme-quickstart.test.mjs',
   'tests/release-artifact-contract.test.mjs',
   'tests/release-artifact-security.test.mjs',
-  'tests/rust-format-gate.test.mjs',
   'tests/server-durable-event-hub-contract.test.mjs',
   'tests/session-identity-contract.test.mjs',
   'tests/settings-control-plane-integration.test.mjs',
@@ -67,7 +65,7 @@ for (const path of canonicalTestFiles) {
 
 const result = spawnSync(process.execPath, [
   '--test',
-  '--test-concurrency=1',
+  '--test-concurrency=4',
   ...canonicalTestFiles,
 ], {
   cwd: root,

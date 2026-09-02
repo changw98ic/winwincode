@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  cpSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -62,7 +60,7 @@ test('fixture generation inventory includes the Rust ExecutionPort artifact', t 
   )
 })
 
-test('one canonical schema generation is deterministic and compiles for Rust and TypeScript', async t => {
+test('one canonical schema generation is deterministic and TypeScript output compiles', async t => {
   const temporaryRoot = mkdtempSync(join(tmpdir(), 'winwincode-codegen-'))
   t.after(() => rmSync(temporaryRoot, { force: true, recursive: true }))
 
@@ -125,63 +123,6 @@ test('one canonical schema generation is deterministic and compiles for Rust and
     '#/components/schemas/WidgetProjection',
   )
   assert.deepEqual(Object.keys(openapi.components.schemas).sort(), Object.keys(schemaCollection.$defs).sort())
-
-  const rustFixture = join(temporaryRoot, 'rust-fixture')
-  mkdirSync(join(rustFixture, 'src'), { recursive: true })
-  mkdirSync(join(rustFixture, 'domain', 'src'), { recursive: true })
-  cpSync(paths[0], join(rustFixture, 'src', 'generated.rs'))
-  cpSync(paths[4], join(rustFixture, 'domain', 'src', 'generated.rs'))
-  writeFileSync(join(rustFixture, 'src', 'lib.rs'), 'pub mod generated;\n')
-  writeFileSync(join(rustFixture, 'domain', 'src', 'lib.rs'), 'mod generated;\npub use generated::*;\n')
-  writeFileSync(join(rustFixture, 'domain', 'Cargo.toml'), [
-    '[package]',
-    'name = "winwincode-domain"',
-    'version = "0.0.0"',
-    'edition = "2024"',
-    'publish = false',
-    '',
-    '[dependencies]',
-    'serde = { version = "=1.0.228", features = ["derive"] }',
-    '',
-  ].join('\n'))
-  writeFileSync(join(rustFixture, 'Cargo.toml'), [
-    '[package]',
-    'name = "winwincode-contract-codegen-fixture"',
-    'version = "0.0.0"',
-    'edition = "2024"',
-    'publish = false',
-    '',
-    '[workspace]',
-    'members = ["domain"]',
-    '',
-    '[dependencies]',
-    'serde = { version = "=1.0.228", features = ["derive"] }',
-    'serde_json = "=1.0.149"',
-    'winwincode-domain = { path = "domain" }',
-    '',
-  ].join('\n'))
-  const cargo = spawnSync('cargo', [
-    'check',
-    '--offline',
-    '--manifest-path',
-    join(rustFixture, 'Cargo.toml'),
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(cargo.status, 0, commandFailure(cargo))
-  const rustfmt = spawnSync('cargo', [
-    'fmt',
-    '--all',
-    '--manifest-path',
-    join(rustFixture, 'Cargo.toml'),
-    '--',
-    '--check',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(rustfmt.status, 0, commandFailure(rustfmt))
 
   const typescriptConsumer = join(temporaryRoot, 'typescript', 'consumer.ts')
   writeFileSync(typescriptConsumer, [

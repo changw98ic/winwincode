@@ -3,6 +3,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
+import { sourceBoundaryErrors } from './source-boundary-lint.mjs'
+
 const root = resolve(import.meta.dirname, '..')
 const errors = []
 const workspacePackages = Object.freeze([
@@ -103,9 +105,11 @@ for (const target of sourceLock.project.targets) {
   }
 }
 
+errors.push(...sourceBoundaryErrors())
+
 if (errors.length > 0) {
   for (const error of errors) process.stderr.write(`${error}\n`)
   process.exit(1)
 }
 
-process.stdout.write('workspace source lint verified\n')
+process.stdout.write('workspace source and boundary lint verified\n')

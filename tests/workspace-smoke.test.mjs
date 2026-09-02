@@ -11,12 +11,24 @@ const workflow = readFileSync(workflowPath, 'utf8')
 const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
 const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
 
-test('ordinary CI owns the one canonical workspace verification', () => {
+test('ordinary CI runs one exact-SHA aggregate over three independent lanes', () => {
   assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
   assert.match(mainlineWorkflow, /^  push:$/mu)
+  assert.match(mainlineWorkflow, /^    branches:\n      - main$/mu)
   assert.match(mainlineWorkflow, /^  pull_request:$/mu)
-  assert.match(mainlineWorkflow, /^      - name: Verify the exact commit once$/mu)
-  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify$/gmu)].length, 1)
+  assert.match(mainlineWorkflow, /^  source:$/mu)
+  assert.match(mainlineWorkflow, /^  typescript:$/mu)
+  assert.match(mainlineWorkflow, /^  rust:$/mu)
+  assert.match(mainlineWorkflow, /^  verify:$/mu)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:source$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:typescript$/gmu)].length, 1)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify:rust$/gmu)].length, 1)
+  assert.doesNotMatch(mainlineWorkflow, /corepack pnpm verify$/mu)
+  assert.ok(mainlineWorkflow.includes('github.event.pull_request.head.sha || github.sha'))
+  assert.match(mainlineWorkflow, /^    name: Canonical workspace verification$/mu)
+  for (const lane of ['source', 'typescript', 'rust']) {
+    assert.match(mainlineWorkflow, new RegExp(`^      - ${lane}$`, 'mu'))
+  }
   assert.doesNotMatch(
     mainlineWorkflow,
     /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX|secrets\./u,

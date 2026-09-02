@@ -25,7 +25,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm verify
 ```
 
-`pnpm verify` 在当前 checkout 中依次执行一次格式、lint、phase 负向门、全 workspace TypeScript/Rust tests、构建、产品清单和 direct API。普通 CI 的 `actions/checkout` 是唯一干净 commit 边界；frozen install 在调用这个入口前完成，后续验证都在该 checkout 原地完成。
+`pnpm verify` 在当前 checkout 中依次执行源码格式与边界、TypeScript 构建与测试，以及 Rust 构建、Clippy、全 workspace 测试、产品检查和 direct API。TypeScript 和 Rust 产品在各自检查中只构建一次。普通 CI 对同一提交并行执行这三组检查，再汇总成一个 `Canonical workspace verification` 结果；pull request 与默认分支 push 不会为同一源提交重复执行等价全量任务。
 
 候选必须保持干净；源码、manifest、lock、协议、测试、脚本、文档或通知变化后，旧 artifact 全部失效。
 
