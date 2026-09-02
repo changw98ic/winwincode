@@ -8,9 +8,12 @@ import type {
   RepositoryScope,
 } from './generated/contracts.js'
 import { mountButton } from './components/button.js'
+import { mountDrawer } from './components/drawer.js'
 import { mountEmptyState } from './components/empty-state.js'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
+import { mountSplitPane } from './components/split-pane.js'
+import { mountTabs, type TabItem } from './components/tabs.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
@@ -27,12 +30,28 @@ import type {
   StrongFlowViewModelState,
 } from './strongflow-view-model.js'
 import { canSubmitStrongFlowVerdict } from './strongflow-view-model.js'
+import {
+  normalizeStrongFlowLayoutPreferences,
+  STRONGFLOW_ARTIFACTS_TABS,
+  strongFlowLayoutPreferencesFromStorage,
+  strongFlowLayoutPreferencesToStorage,
+  type StrongFlowArtifactsTab,
+  type StrongFlowLayoutPreferences,
+} from './strongflow-layout-preferences.js'
+
+export const STRONGFLOW_NARROW_VIEWPORT_WIDTH = 800
 
 export interface StrongFlowPageOptions {
   readonly root: HTMLElement
   readonly model: StrongFlowViewModel
   readonly deliveries?: readonly DeliveryProjection[]
   readonly limits?: StrongFlowRenderLimits
+  readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
+  readonly viewport?: StrongFlowLayoutViewport
+}
+
+export interface StrongFlowLayoutViewport {
+  readonly width: number
 }
 
 export interface StrongFlowPage {
@@ -55,6 +74,10 @@ export interface StrongFlowPagePresentation {
   readonly busy: boolean
   readonly retryVisible: boolean
   readonly reconnectVisible: boolean
+}
+
+export function strongFlowLayoutMode(width: number): 'wide' | 'narrow' {
+  return width < STRONGFLOW_NARROW_VIEWPORT_WIDTH ? 'narrow' : 'wide'
 }
 
 export function strongFlowPagePresentation(
@@ -417,10 +440,157 @@ export function mountStrongFlowCreatePage(
   }
 }
 
+const ARTIFACT_TAB_LABELS: Readonly<Record<StrongFlowArtifactsTab, string>> = Object.freeze({
+  solution: 'Solution',
+  execution: 'Execution',
+  candidate: 'Candidate',
+  evidence: 'Evidence',
+})
+
+function renderEvidencePanel(
+  document: Document,
+  projection: StrongFlowProjection,
+  limits: StrongFlowRenderLimits,
+): HTMLElement {
+  const section = strongFlowElement(document, 'section', 'wwc-strongflow-view-evidence')
+  const heading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  const evidence = strongFlowElement(document, 'ul', 'wwc-strongflow-evidence')
+  const bounded = boundedItems(projection.evidence, limits.evidence)
+  heading.textContent = 'Evidence'
+  evidence.setAttribute('aria-label', 'Delivery evidence')
+  evidence.append(...bounded.items.map(item => {
+    const row = document.createElement('li')
+    const title = document.createElement('strong')
+    const source = document.createElement('p')
+    title.textContent = `${item.type} · ${item.id}`
+    source.textContent = item.sourceRef
+    row.dataset.candidateRef = item.candidateRef
+    row.append(title, source)
+    return row
+  }))
+  section.append(heading, evidence)
+  const omitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  omitted.hidden = bounded.omitted === 0
+  omitted.textContent = `${String(bounded.omitted)} more evidence records not shown.`
+  section.append(omitted)
+  return section
+}
+
+interface StrongFlowResizeHandle {
+  readonly root: HTMLElement
+  update(value: number): void
+  close(): void
+}
+
+function mountStrongFlowResizeHandle(
+  document: Document,
+  options: {
+    readonly className: string
+    readonly label: string
+    readonly controls: string
+    readonly direction: 1 | -1
+    readonly value: () => number
+    readonly workspaceWidth: () => number
+    readonly onChange: (value: number) => void
+  },
+): StrongFlowResizeHandle {
+  const root = strongFlowElement(document, 'div', options.className)
+  let open = true
+  let dragging = false
+  let pointerId: number | null = null
+  let startX = 0
+  let startValue = 0
+  let startWorkspaceWidth = 0
+
+  root.tabIndex = 0
+  root.setAttribute('role', 'separator')
+  root.setAttribute('aria-label', options.label)
+  root.setAttribute('aria-orientation', 'vertical')
+  root.setAttribute('aria-controls', options.controls)
+  root.setAttribute('aria-valuemin', '18')
+  root.setAttribute('aria-valuemax', '45')
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const step = event.shiftKey ? 5 : 2
+    options.onChange(options.value() + (event.key === 'ArrowRight' ? step : -step))
+  }
+  const stopDragging = (event: PointerEvent) => {
+    if (!dragging || pointerId !== event.pointerId) return
+    dragging = false
+    root.releasePointerCapture?.(event.pointerId)
+    pointerId = null
+  }
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) return
+    const width = options.workspaceWidth()
+    if (!Number.isFinite(width) || width <= 0) return
+    event.preventDefault()
+    dragging = true
+    pointerId = event.pointerId
+    startX = event.clientX
+    startValue = options.value()
+    startWorkspaceWidth = width
+    root.setPointerCapture?.(event.pointerId)
+  }
+  const onPointerMove = (event: PointerEvent) => {
+    if (!dragging || pointerId !== event.pointerId) return
+    event.preventDefault()
+    const delta = ((event.clientX - startX) / startWorkspaceWidth) * 100
+    options.onChange(startValue + (options.direction * delta))
+  }
+
+  root.addEventListener('keydown', onKeyDown)
+  root.addEventListener('pointerdown', onPointerDown)
+  root.addEventListener('pointermove', onPointerMove)
+  root.addEventListener('pointerup', stopDragging)
+  root.addEventListener('pointercancel', stopDragging)
+
+  return {
+    root,
+    update(value) {
+      if (!open) return
+      root.setAttribute('aria-valuenow', String(value))
+      root.setAttribute('aria-valuetext', `${String(value)} percent`)
+    },
+    close() {
+      if (!open) return
+      open = false
+      root.removeEventListener('keydown', onKeyDown)
+      root.removeEventListener('pointerdown', onPointerDown)
+      root.removeEventListener('pointermove', onPointerMove)
+      root.removeEventListener('pointerup', stopDragging)
+      root.removeEventListener('pointercancel', stopDragging)
+      root.remove?.()
+    },
+  }
+}
+
+function safeWindowStorage(
+  browserWindow: (Window & typeof globalThis) | null,
+): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null {
+  try {
+    return browserWindow?.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
 /** Mount the advanced StrongFlow workspace against its Control Plane view-model. */
 export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowPage {
   const document = options.root.ownerDocument
   const limits = options.limits ?? DEFAULT_STRONGFLOW_RENDER_LIMITS
+  const browserWindow = document.defaultView
+    ?? (typeof window === 'undefined' ? null : window)
+  const storage = options.storage !== undefined
+    ? options.storage
+    : safeWindowStorage(browserWindow)
+  const viewport = options.viewport ?? {
+    get width() {
+      return browserWindow?.innerWidth ?? STRONGFLOW_NARROW_VIEWPORT_WIDTH
+    },
+  }
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
   const error = strongFlowElement(document, 'div', 'wwc-strongflow-error')
@@ -432,6 +602,32 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'wwc-strongflow-reconnect',
   ) as HTMLButtonElement
   const content = strongFlowElement(document, 'div', 'wwc-strongflow-content')
+  const workspace = strongFlowElement(document, 'main', 'wwc-strongflow-workspace')
+  const desktopControls = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-workspace-controls',
+  )
+  const narrowBar = strongFlowElement(document, 'div', 'wwc-strongflow-narrow-bar')
+  const navigation = strongFlowElement(document, 'nav', 'wwc-strongflow-navigation')
+  const mainRegion = strongFlowElement(document, 'section', 'wwc-strongflow-main-region')
+  const context = strongFlowElement(document, 'aside', 'wwc-strongflow-context')
+  const artifacts = strongFlowElement(document, 'section', 'wwc-strongflow-artifacts')
+  const artifactsHeading = strongFlowElement(
+    document,
+    'h3',
+    'wwc-strongflow-section-heading',
+  )
+  const navigationDrawerContent = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-navigation-drawer-content',
+  )
+  const contextDrawerContent = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-context-drawer-content',
+  )
   const deliveriesRoot = strongFlowElement(document, 'aside', 'wwc-strongflow-deliveries')
   const deliveriesHeading = strongFlowElement(
     document,
@@ -440,7 +636,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   )
   const deliveries = strongFlowElement(document, 'ul', 'wwc-strongflow-delivery-list')
   const deliveriesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
-  const workspace = strongFlowElement(document, 'main', 'wwc-strongflow-workspace')
   const details = strongFlowElement(document, 'div', 'wwc-strongflow-details')
   const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
   const overview = strongFlowElement(document, 'section', 'wwc-strongflow-overview')
@@ -459,8 +654,18 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
   const attentionOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const contextEvidenceHost = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-context-evidence-host',
+  )
   const diagramsHost = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams-host')
   const candidateHost = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-host')
+  const artifactEvidenceHost = strongFlowElement(
+    document,
+    'div',
+    'wwc-strongflow-artifact-evidence-host',
+  )
   const actions = strongFlowElement(document, 'section', 'wwc-strongflow-actions')
   const actionsHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const solutionActions = strongFlowElement(
@@ -509,8 +714,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'wwc-strongflow-advance-delivery',
   ) as HTMLButtonElement
   let closed = false
+  let preferences = strongFlowLayoutPreferencesFromStorage(storage)
+  let navigationDrawerOpen = false
+  let contextDrawerOpen = false
   let diagramsNode: HTMLElement | null = null
   let candidateNode: HTMLElement | null = null
+  let contextEvidenceNode: HTMLElement | null = null
+  let artifactEvidenceNode: HTMLElement | null = null
   let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
   let lastRuntime: StrongFlowProjection['runtime'] | null = null
   let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
@@ -525,6 +735,17 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     if (node.textContent !== text) node.textContent = text
   }
 
+  function persist(next: StrongFlowLayoutPreferences): void {
+    preferences = normalizeStrongFlowLayoutPreferences(next)
+    strongFlowLayoutPreferencesToStorage(storage, preferences)
+    render(options.model.state)
+  }
+
+  function selectArtifactTab(id: string): void {
+    if (!STRONGFLOW_ARTIFACTS_TABS.includes(id as StrongFlowArtifactsTab)) return
+    persist({ ...preferences, artifactsTab: id as StrongFlowArtifactsTab })
+  }
+
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   error.setAttribute('role', 'alert')
@@ -533,6 +754,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   retry.textContent = 'Retry snapshot'
   reconnect.type = 'button'
   reconnect.textContent = 'Reconnect events'
+  workspace.setAttribute('aria-label', 'StrongFlow workbench')
+  navigation.id = 'wwc-strongflow-navigation'
+  navigation.setAttribute('aria-label', 'Delivery and Task navigation')
+  mainRegion.id = 'wwc-strongflow-main-region'
+  mainRegion.setAttribute('aria-label', 'Delivery main content')
+  context.id = 'wwc-strongflow-context'
+  context.setAttribute('aria-label', 'Attention and Evidence context')
+  artifacts.id = 'wwc-strongflow-artifacts'
+  artifacts.setAttribute('aria-label', 'Delivery artifacts')
+  artifactsHeading.textContent = 'Delivery artifacts'
   deliveriesHeading.textContent = 'Deliveries'
   tasksHeading.textContent = 'Tasks'
   stagesHeading.textContent = 'Stages'
@@ -554,6 +785,156 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   submitVerdict.textContent = 'Compute current verdict'
   advanceDelivery.type = 'button'
   advanceDelivery.textContent = 'Approve final Delivery'
+
+  const tabItems: readonly TabItem[] = STRONGFLOW_ARTIFACTS_TABS.map(tab => ({
+    id: tab,
+    label: ARTIFACT_TAB_LABELS[tab],
+    panelId: `wwc-strongflow-artifact-panel-${tab}`,
+  }))
+  const artifactTabs = mountTabs({
+    document,
+    props: {
+      id: 'wwc-strongflow-artifact-tab',
+      label: 'Delivery artifacts',
+      tabs: tabItems,
+      selectedId: preferences.artifactsTab,
+      className: 'wwc-strongflow-artifact-tabs',
+      onSelect: selectArtifactTab,
+    },
+  })
+  const artifactPanels = new Map<StrongFlowArtifactsTab, HTMLElement>()
+  for (const tab of STRONGFLOW_ARTIFACTS_TABS) {
+    const panel = strongFlowElement(document, 'section', 'wwc-strongflow-artifact-panel')
+    panel.id = `wwc-strongflow-artifact-panel-${tab}`
+    panel.dataset.artifactTab = tab
+    panel.setAttribute('role', 'tabpanel')
+    panel.setAttribute('aria-labelledby', `wwc-strongflow-artifact-tab-${tab}`)
+    artifactPanels.set(tab, panel)
+  }
+  artifactPanels.get('solution')?.append(diagramsHost)
+  artifactPanels.get('candidate')?.append(candidateHost)
+  artifactPanels.get('evidence')?.append(artifactEvidenceHost)
+  artifacts.append(artifactsHeading, artifactTabs.root, ...artifactPanels.values())
+
+  const innerSplit = mountSplitPane({
+    document,
+    props: {
+      primary: mainRegion,
+      primaryLabel: 'Delivery main content',
+      secondary: context,
+      secondaryLabel: 'Attention and Evidence context',
+      className: 'wwc-strongflow-main-context-split',
+    },
+  })
+  const outerSplit = mountSplitPane({
+    document,
+    props: {
+      primary: navigation,
+      primaryLabel: 'Delivery and Task navigation',
+      secondary: innerSplit.root,
+      secondaryLabel: 'Delivery review workspace',
+      className: 'wwc-strongflow-navigation-split',
+    },
+  })
+  const collapseNavigation = mountButton({
+    document,
+    props: {
+      className: 'wwc-strongflow-collapse-navigation',
+      label: 'Collapse navigation pane',
+      accessibleName: 'Collapse navigation pane',
+      variant: 'ghost',
+      onActivate: () => {
+        persist({
+          ...preferences,
+          navigationCollapsed: !preferences.navigationCollapsed,
+        })
+      },
+    },
+  })
+  const collapseContext = mountButton({
+    document,
+    props: {
+      className: 'wwc-strongflow-collapse-context',
+      label: 'Collapse context pane',
+      accessibleName: 'Collapse context pane',
+      variant: 'ghost',
+      onActivate: () => {
+        persist({ ...preferences, contextCollapsed: !preferences.contextCollapsed })
+      },
+    },
+  })
+  const openNavigation = mountButton({
+    document,
+    props: {
+      className: 'wwc-strongflow-open-navigation',
+      label: 'Deliveries and tasks',
+      accessibleName: 'Open Delivery and Task navigation',
+      onActivate: () => {
+        navigationDrawerOpen = !navigationDrawerOpen
+        render(options.model.state)
+      },
+    },
+  })
+  const openContext = mountButton({
+    document,
+    props: {
+      className: 'wwc-strongflow-open-context',
+      label: 'Attention and Evidence',
+      accessibleName: 'Open Attention and Evidence context',
+      onActivate: () => {
+        contextDrawerOpen = !contextDrawerOpen
+        render(options.model.state)
+      },
+    },
+  })
+  const navigationDrawer = mountDrawer({
+    document,
+    props: {
+      id: 'wwc-strongflow-navigation-drawer',
+      title: 'Delivery and Task navigation',
+      open: false,
+      content: navigationDrawerContent,
+      closeLabel: 'Close Delivery and Task navigation',
+      className: 'wwc-strongflow-navigation-drawer',
+      onClose: () => {
+        navigationDrawerOpen = false
+        render(options.model.state)
+      },
+    },
+  })
+  const contextDrawer = mountDrawer({
+    document,
+    props: {
+      id: 'wwc-strongflow-context-drawer',
+      title: 'Attention and Evidence',
+      open: false,
+      content: contextDrawerContent,
+      closeLabel: 'Close Attention and Evidence context',
+      className: 'wwc-strongflow-context-drawer',
+      onClose: () => {
+        contextDrawerOpen = false
+        render(options.model.state)
+      },
+    },
+  })
+  const navigationResize = mountStrongFlowResizeHandle(document, {
+    className: 'wwc-strongflow-resize-navigation',
+    label: 'Resize navigation width',
+    controls: navigation.id,
+    direction: 1,
+    value: () => preferences.navigationWidth,
+    workspaceWidth: () => workspace.getBoundingClientRect?.().width ?? 0,
+    onChange: value => { persist({ ...preferences, navigationWidth: value }) },
+  })
+  const contextResize = mountStrongFlowResizeHandle(document, {
+    className: 'wwc-strongflow-resize-context',
+    label: 'Resize context pane width',
+    controls: context.id,
+    direction: -1,
+    value: () => preferences.contextWidth,
+    workspaceWidth: () => workspace.getBoundingClientRect?.().width ?? 0,
+    onChange: value => { persist({ ...preferences, contextWidth: value }) },
+  })
   solutionActions.append(
     commentsLabel,
     changesLabel,
@@ -567,15 +948,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   tasksSection.append(tasksHeading, tasks, tasksOmitted)
   stagesSection.append(stagesHeading, stages, stagesOmitted)
   attentionSection.append(attentionHeading, attention, attentionOmitted)
-  details.append(
-    empty,
-    overview,
-    tasksSection,
-    stagesSection,
-    attentionSection,
-    diagramsHost,
-    candidateHost,
-  )
+  details.append(empty, overview)
   actions.append(
     actionsHeading,
     solutionActions,
@@ -585,8 +958,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     actionsOmitted,
     advanceDelivery,
   )
-  workspace.append(details, actions)
-  content.append(deliveriesRoot, workspace)
+  navigation.append(deliveriesRoot, tasksSection, stagesSection)
+  mainRegion.append(details, actions)
+  context.append(attentionSection, contextEvidenceHost)
+  outerSplit.root.replaceChildren(
+    outerSplit.primary,
+    navigationResize.root,
+    outerSplit.secondary,
+  )
+  innerSplit.root.replaceChildren(
+    innerSplit.primary,
+    contextResize.root,
+    innerSplit.secondary,
+  )
+  desktopControls.append(collapseNavigation.root, collapseContext.root)
+  narrowBar.append(openNavigation.root, openContext.root)
+  workspace.append(desktopControls, narrowBar, outerSplit.root, artifacts)
+  content.append(workspace, navigationDrawer.root, contextDrawer.root)
   layout.append(status, error, content)
   options.root.replaceChildren(layout)
 
@@ -924,8 +1312,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       updateOmitted(attentionOmitted, 0, 'Attention records')
       if (diagramsNode !== null) diagramsNode.remove()
       if (candidateNode !== null) candidateNode.remove()
+      if (contextEvidenceNode !== null) contextEvidenceNode.remove()
+      if (artifactEvidenceNode !== null) artifactEvidenceNode.remove()
       diagramsNode = null
       candidateNode = null
+      contextEvidenceNode = null
+      artifactEvidenceNode = null
       lastSolutionReview = null
       lastRuntime = null
       lastCandidate = null
@@ -961,10 +1353,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       lastSolutionReview = projection.solutionReview
       lastRuntime = projection.runtime
     }
+    const evidenceChanged = lastEvidence !== projection.evidence
     if (
       candidateNode === null
       || lastCandidate !== projection.currentCandidate
-      || lastEvidence !== projection.evidence
+      || evidenceChanged
       || lastVerdict !== projection.verdict
       || lastPublication !== projection.publication
     ) {
@@ -972,10 +1365,18 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       candidateNode = renderStrongFlowCandidate(document, projection, limits)
       candidateHost.append(candidateNode)
       lastCandidate = projection.currentCandidate
-      lastEvidence = projection.evidence
       lastVerdict = projection.verdict
       lastPublication = projection.publication
     }
+    if (contextEvidenceNode === null || artifactEvidenceNode === null || evidenceChanged) {
+      contextEvidenceNode?.remove()
+      artifactEvidenceNode?.remove()
+      contextEvidenceNode = renderEvidencePanel(document, projection, limits)
+      artifactEvidenceNode = renderEvidencePanel(document, projection, limits)
+      contextEvidenceHost.append(contextEvidenceNode)
+      artifactEvidenceHost.append(artifactEvidenceNode)
+    }
+    lastEvidence = projection.evidence
   }
 
   function renderActions(state: StrongFlowViewModelState): void {
@@ -1032,6 +1433,181 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(actionsOmitted, openAttention.omitted, 'Attention actions')
   }
 
+  function mountRegion(target: HTMLElement, nodes: readonly HTMLElement[]): void {
+    if (
+      target.children.length === nodes.length
+      && nodes.every((node, index) => target.children[index] === node)
+    ) return
+    target.replaceChildren(...nodes)
+  }
+
+  function renderLayout(mode: 'wide' | 'narrow'): void {
+    const narrow = mode === 'narrow'
+    workspace.dataset.viewport = mode
+    workspace.dataset.navigationWidth = String(preferences.navigationWidth)
+    workspace.dataset.contextWidth = String(preferences.contextWidth)
+    workspace.dataset.navigationCollapsed = String(preferences.navigationCollapsed)
+    workspace.dataset.contextCollapsed = String(preferences.contextCollapsed)
+    workspace.setAttribute('data-viewport', mode)
+    workspace.setAttribute('data-navigation-width', String(preferences.navigationWidth))
+    workspace.setAttribute('data-context-width', String(preferences.contextWidth))
+    workspace.setAttribute(
+      'data-navigation-collapsed',
+      String(preferences.navigationCollapsed),
+    )
+    workspace.setAttribute(
+      'data-context-collapsed',
+      String(preferences.contextCollapsed),
+    )
+
+    mountRegion(
+      narrow ? navigationDrawerContent : navigation,
+      [deliveriesRoot, tasksSection, stagesSection],
+    )
+    mountRegion(
+      narrow ? contextDrawerContent : context,
+      [attentionSection, contextEvidenceHost],
+    )
+
+    desktopControls.hidden = narrow
+    narrowBar.hidden = !narrow
+    outerSplit.primary.hidden = narrow || preferences.navigationCollapsed
+    navigationResize.root.hidden = narrow || preferences.navigationCollapsed
+    contextResize.root.hidden = narrow || preferences.contextCollapsed
+    innerSplit.update({
+      primary: mainRegion,
+      primaryLabel: 'Delivery main content',
+      secondary: context,
+      secondaryLabel: 'Attention and Evidence context',
+      secondaryHidden: narrow || preferences.contextCollapsed,
+      className: 'wwc-strongflow-main-context-split',
+    })
+    outerSplit.update({
+      primary: navigation,
+      primaryLabel: 'Delivery and Task navigation',
+      secondary: innerSplit.root,
+      secondaryLabel: 'Delivery review workspace',
+      className: 'wwc-strongflow-navigation-split',
+    })
+    outerSplit.root.dataset.primaryHidden = String(
+      narrow || preferences.navigationCollapsed,
+    )
+    innerSplit.root.dataset.secondaryHidden = String(
+      narrow || preferences.contextCollapsed,
+    )
+    navigationResize.update(preferences.navigationWidth)
+    contextResize.update(preferences.contextWidth)
+
+    const navigationExpanded = !preferences.navigationCollapsed
+    collapseNavigation.update({
+      className: 'wwc-strongflow-collapse-navigation',
+      label: navigationExpanded ? 'Collapse navigation pane' : 'Expand navigation pane',
+      accessibleName: navigationExpanded
+        ? 'Collapse navigation pane'
+        : 'Expand navigation pane',
+      variant: 'ghost',
+      onActivate: () => {
+        persist({
+          ...preferences,
+          navigationCollapsed: !preferences.navigationCollapsed,
+        })
+      },
+    })
+    collapseNavigation.root.setAttribute('aria-controls', navigation.id)
+    collapseNavigation.root.setAttribute('aria-expanded', String(navigationExpanded))
+    const contextExpanded = !preferences.contextCollapsed
+    collapseContext.update({
+      className: 'wwc-strongflow-collapse-context',
+      label: contextExpanded ? 'Collapse context pane' : 'Expand context pane',
+      accessibleName: contextExpanded ? 'Collapse context pane' : 'Expand context pane',
+      variant: 'ghost',
+      onActivate: () => {
+        persist({ ...preferences, contextCollapsed: !preferences.contextCollapsed })
+      },
+    })
+    collapseContext.root.setAttribute('aria-controls', context.id)
+    collapseContext.root.setAttribute('aria-expanded', String(contextExpanded))
+
+    artifactTabs.update({
+      id: 'wwc-strongflow-artifact-tab',
+      label: 'Delivery artifacts',
+      tabs: tabItems,
+      selectedId: preferences.artifactsTab,
+      className: 'wwc-strongflow-artifact-tabs',
+      onSelect: selectArtifactTab,
+    })
+    for (const tab of STRONGFLOW_ARTIFACTS_TABS) {
+      const tabButton = artifactTabs.tab(tab)
+      tabButton.className = 'wwc-strongflow-artifact-tab'
+      tabButton.dataset.artifactTab = tab
+      const panel = artifactPanels.get(tab)
+      if (panel !== undefined) panel.hidden = tab !== preferences.artifactsTab
+    }
+    const diagramPanel = artifactPanels.get(
+      preferences.artifactsTab === 'execution' ? 'execution' : 'solution',
+    )
+    if (diagramPanel !== undefined) mountRegion(diagramPanel, [diagramsHost])
+    if (diagramsNode !== null) {
+      for (const child of [...diagramsNode.children] as HTMLElement[]) {
+        if (child.className === 'wwc-strongflow-view-solution') {
+          child.hidden = preferences.artifactsTab === 'execution'
+        } else if (child.className === 'wwc-strongflow-view-execution') {
+          child.hidden = preferences.artifactsTab !== 'execution'
+        }
+      }
+    }
+
+    openNavigation.update({
+      className: 'wwc-strongflow-open-navigation',
+      label: 'Deliveries and tasks',
+      accessibleName: 'Open Delivery and Task navigation',
+      onActivate: () => {
+        navigationDrawerOpen = !navigationDrawerOpen
+        render(options.model.state)
+      },
+    })
+    openNavigation.root.setAttribute('aria-controls', navigationDrawer.root.id)
+    openNavigation.root.setAttribute(
+      'aria-expanded',
+      String(narrow && navigationDrawerOpen),
+    )
+    openContext.update({
+      className: 'wwc-strongflow-open-context',
+      label: 'Attention and Evidence',
+      accessibleName: 'Open Attention and Evidence context',
+      onActivate: () => {
+        contextDrawerOpen = !contextDrawerOpen
+        render(options.model.state)
+      },
+    })
+    openContext.root.setAttribute('aria-controls', contextDrawer.root.id)
+    openContext.root.setAttribute('aria-expanded', String(narrow && contextDrawerOpen))
+    navigationDrawer.update({
+      id: 'wwc-strongflow-navigation-drawer',
+      title: 'Delivery and Task navigation',
+      open: narrow && navigationDrawerOpen,
+      content: navigationDrawerContent,
+      closeLabel: 'Close Delivery and Task navigation',
+      className: 'wwc-strongflow-navigation-drawer',
+      onClose: () => {
+        navigationDrawerOpen = false
+        render(options.model.state)
+      },
+    })
+    contextDrawer.update({
+      id: 'wwc-strongflow-context-drawer',
+      title: 'Attention and Evidence',
+      open: narrow && contextDrawerOpen,
+      content: contextDrawerContent,
+      closeLabel: 'Close Attention and Evidence context',
+      className: 'wwc-strongflow-context-drawer',
+      onClose: () => {
+        contextDrawerOpen = false
+        render(options.model.state)
+      },
+    })
+  }
+
   function render(state: StrongFlowViewModelState): void {
     if (closed) return
     const presentation = strongFlowPagePresentation(state)
@@ -1044,8 +1620,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     renderDeliveries(state)
     renderProjection(state.projection, state.status)
     renderActions(state)
+    renderLayout(strongFlowLayoutMode(viewport.width))
   }
 
+  const onWindowResize = () => { render(options.model.state) }
+  browserWindow?.addEventListener('resize', onWindowResize)
   const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
@@ -1053,6 +1632,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       if (closed) return
       closed = true
       unsubscribe()
+      browserWindow?.removeEventListener('resize', onWindowResize)
       retry.removeEventListener('click', onRetry)
       reconnect.removeEventListener('click', onReconnect)
       approveSolution.removeEventListener('click', onApproveSolution)
@@ -1070,6 +1650,19 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       deliveryCollection.close()
       diagramsNode?.remove()
       candidateNode?.remove()
+      contextEvidenceNode?.remove()
+      artifactEvidenceNode?.remove()
+      navigationResize.close()
+      contextResize.close()
+      navigationDrawer.close()
+      contextDrawer.close()
+      openNavigation.close()
+      openContext.close()
+      collapseNavigation.close()
+      collapseContext.close()
+      artifactTabs.close()
+      outerSplit.close()
+      innerSplit.close()
       options.model.close()
       options.root.replaceChildren()
     },
