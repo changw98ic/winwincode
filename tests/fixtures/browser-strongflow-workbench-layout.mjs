@@ -124,11 +124,17 @@ class BrowserStrongFlowModel {
   cancelPending() {}
   reconnect() {}
   close() {}
+
+  publish(next) {
+    this.state = next
+    this.listener?.(next)
+  }
 }
 
+const model = new BrowserStrongFlowModel()
 const mounted = mountStrongFlowPage({
   root,
-  model: new BrowserStrongFlowModel(),
+  model,
   deliveries: [{
     schemaVersion: 'winwincode/v1',
     deliveryId,
@@ -185,6 +191,26 @@ function layoutSnapshot() {
   }
 }
 
+function focusSnapshot() {
+  const active = document.activeElement
+  let region = null
+  if (active instanceof Element) {
+    if (active.closest('.wwc-strongflow-navigation') !== null) region = 'navigation'
+    else if (active.classList.contains('wwc-strongflow-resize-navigation')) region = 'navigation'
+    else if (active.closest('.wwc-strongflow-main-region') !== null) region = 'main'
+    else if (active.classList.contains('wwc-strongflow-resize-context')) region = 'context'
+    else if (active.closest('.wwc-strongflow-context') !== null) region = 'context'
+    else if (active.closest('.wwc-strongflow-artifacts') !== null) region = 'artifacts'
+  }
+  return {
+    className: active?.className ?? null,
+    focusVisible: active?.matches(':focus-visible') ?? false,
+    region,
+    role: active?.getAttribute('role') ?? null,
+    tag: active?.tagName ?? null,
+  }
+}
+
 function waitForViewport(mode) {
   return new Promise((resolvePromise, reject) => {
     const deadline = Date.now() + 5_000
@@ -208,6 +234,10 @@ globalThis.runStrongFlowWideLayoutScenario = () => {
   const innerSplit = document.querySelector('.wwc-strongflow-main-context-split')
   const before = {
     layout: layoutSnapshot(),
+    landmarks: {
+      mainCount: document.querySelectorAll('main').length,
+      workspaceTag: document.querySelector('.wwc-strongflow-workspace').tagName,
+    },
     media: {
       innerWidth,
       max64: matchMedia('(max-width: 64rem)').matches,
@@ -253,7 +283,79 @@ globalThis.runStrongFlowWideLayoutScenario = () => {
   }
 }
 
+globalThis.runStrongFlowLifecycleScenario = () => {
+  const comments = document.querySelector('.wwc-strongflow-solution-actions textarea')
+  const attentionDraft = document.querySelector('.wwc-strongflow-attention-actions textarea')
+  const taskRow = document.querySelector('.wwc-strongflow-task-list li')
+  const candidate = document.querySelector('.wwc-strongflow-view-candidate')
+  const diagrams = document.querySelector('.wwc-strongflow-diagrams')
+  const selectedTab = document.querySelector(
+    '.wwc-strongflow-artifact-tab[aria-selected="true"]',
+  )
+  comments.value = 'Keep this review draft'
+  attentionDraft.value = 'Keep this Attention draft'
+  comments.focus()
+  comments.setSelectionRange(5, 11)
+  window.scrollTo(0, document.documentElement.scrollHeight)
+  const pageScroll = scrollY
+
+  for (let index = 0; index < 200; index += 1) {
+    model.publish({
+      ...structuredClone(model.state),
+      status: index % 2 === 0 ? 'refreshing' : 'ready',
+    })
+  }
+
+  return {
+    attentionDraft: attentionDraft.value,
+    attentionIdentity: document.querySelector(
+      '.wwc-strongflow-attention-actions textarea',
+    ) === attentionDraft,
+    candidateIdentity: document.querySelector('.wwc-strongflow-view-candidate') === candidate,
+    commentsDraft: comments.value,
+    commentsFocus: document.activeElement === comments,
+    commentsIdentity: document.querySelector(
+      '.wwc-strongflow-solution-actions textarea',
+    ) === comments,
+    commentsSelection: [comments.selectionStart, comments.selectionEnd],
+    diagramsIdentity: document.querySelector('.wwc-strongflow-diagrams') === diagrams,
+    pageScroll: [pageScroll, scrollY],
+    selectedTabIdentity: document.querySelector(
+      '.wwc-strongflow-artifact-tab[aria-selected="true"]',
+    ) === selectedTab,
+    taskIdentity: document.querySelector('.wwc-strongflow-task-list li') === taskRow,
+  }
+}
+
+globalThis.startStrongFlowTabSequence = () => {
+  document.querySelector('.wwc-strongflow-collapse-navigation').focus()
+  return focusSnapshot()
+}
+
+globalThis.strongFlowFocusSnapshot = () => focusSnapshot()
+
 globalThis.runStrongFlowRestoredLayoutScenario = () => layoutSnapshot()
+
+globalThis.runStrongFlowBreakpointScenario = async () => {
+  await waitForViewport('narrow')
+  return {
+    layout: layoutSnapshot(),
+    media: {
+      innerWidth,
+      max64: matchMedia('(max-width: 64rem)').matches,
+    },
+    navigationInDrawer: document.querySelector(
+      '.wwc-strongflow-navigation-drawer .wwc-strongflow-delivery-list',
+    ) !== null,
+    contextInDrawer: document.querySelector(
+      '.wwc-strongflow-context-drawer .wwc-strongflow-attention-list',
+    ) !== null,
+    resizeHandlesHidden: [
+      document.querySelector('.wwc-strongflow-resize-navigation').hidden,
+      document.querySelector('.wwc-strongflow-resize-context').hidden,
+    ],
+  }
+}
 
 globalThis.runStrongFlowNarrowLayoutScenario = async () => {
   await waitForViewport('narrow')
