@@ -9,6 +9,7 @@
 node_modules/
 dist/
 .cache/
+.codegraph/
 *.tgz
 
 # Rust

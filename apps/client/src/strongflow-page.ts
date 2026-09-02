@@ -3,7 +3,6 @@
 import type {
   DeliveryAttentionProjection,
   DeliveryProjection,
-  DeliveryStageProjection,
   DeliveryTaskDetailProjection,
   RepositoryScope,
 } from './generated/contracts.js'
@@ -16,6 +15,13 @@ import { mountSplitPane } from './components/split-pane.js'
 import { mountTabs, type TabItem } from './components/tabs.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import {
+  mountStrongFlowHistoryNavigation,
+  mountStrongFlowRunDetail,
+  strongFlowHistoryHashWithSelection,
+  strongFlowHistorySelectionFromHash,
+  type StrongFlowHistoryLocation,
+} from './strongflow-history.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -48,6 +54,11 @@ export interface StrongFlowPageOptions {
   readonly limits?: StrongFlowRenderLimits
   readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
   readonly viewport?: StrongFlowLayoutViewport
+  /**
+   * Browser history seam for the presentation-only Task/StageRun history
+   * selection. Defaults to the page window; injection keeps tests hermetic.
+   */
+  readonly historyLocation?: StrongFlowHistoryLocation | null
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -551,6 +562,20 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       return browserWindow?.innerWidth ?? STRONGFLOW_NARROW_VIEWPORT_WIDTH + 1
     },
   }
+  const historyLocation = options.historyLocation !== undefined
+    ? options.historyLocation
+    : browserWindow === null
+      ? null
+      : {
+          hash: () => browserWindow.location.hash,
+          replaceHash(next: string) {
+            browserWindow.history.replaceState(
+              null,
+              '',
+              `${browserWindow.location.pathname}${browserWindow.location.search}${next}`,
+            )
+          },
+        }
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
   const error = strongFlowElement(document, 'div', 'wwc-strongflow-error')
@@ -606,10 +631,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const tasksHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const tasks = strongFlowElement(document, 'ul', 'wwc-strongflow-task-list')
   const tasksOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const tasksEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-tasks-empty')
   const stagesSection = strongFlowElement(document, 'section', 'wwc-strongflow-stages')
   const stagesHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const stages = strongFlowElement(document, 'ol', 'wwc-strongflow-stage-list')
   const stagesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const stagesEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-stages-empty')
+  const historyHost = strongFlowElement(document, 'div', 'wwc-strongflow-history-host')
   const attentionSection = strongFlowElement(document, 'section', 'wwc-strongflow-attention')
   const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
@@ -904,8 +932,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   error.append(errorText, retry, reconnect)
   deliveriesRoot.append(deliveriesHeading, deliveries, deliveriesOmitted)
   overview.append(heading, goal, metadata)
-  tasksSection.append(tasksHeading, tasks, tasksOmitted)
-  stagesSection.append(stagesHeading, stages, stagesOmitted)
+  tasksSection.append(tasksHeading, tasks, tasksEmpty, tasksOmitted)
+  stagesSection.append(stagesHeading, stages, stagesEmpty, stagesOmitted)
   attentionSection.append(attentionHeading, attention, attentionOmitted)
   details.append(empty, overview)
   actions.append(
@@ -918,7 +946,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     advanceDelivery,
   )
   navigation.append(deliveriesRoot, tasksSection, stagesSection)
-  mainRegion.append(details, actions)
+  mainRegion.append(details, historyHost, actions)
   context.append(attentionSection, contextEvidenceHost)
   outerSplit.root.replaceChildren(
     outerSplit.primary,
@@ -968,38 +996,25 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     remove(item) { deliveryRows.delete(item) },
   })
 
-  const taskRows = new WeakMap<HTMLLIElement, {
-    readonly title: HTMLElement
-    readonly status: HTMLElement
-  }>()
-  const taskCollection = mountKeyedCollection({
-    parent: tasks,
-    key: (task: DeliveryTaskDetailProjection) => task.id,
-    create() {
-      const item = document.createElement('li')
-      const title = document.createElement('strong')
-      const taskStatus = document.createElement('span')
-      item.append(title, taskStatus)
-      taskRows.set(item, { title, status: taskStatus })
-      return item
-    },
-    update(item, task: DeliveryTaskDetailProjection) {
-      const row = taskRows.get(item)
-      if (row === undefined) return
-      item.dataset.status = task.status
-      row.title.textContent = task.title
-      row.status.textContent = task.status
-    },
-    remove(item) { taskRows.delete(item) },
-  })
-
-  const stageCollection = mountKeyedCollection({
-    parent: stages,
-    key: (stage: DeliveryStageProjection) => stage.id,
-    create: () => document.createElement('li'),
-    update(item, stage: DeliveryStageProjection) {
-      item.dataset.status = stage.status
-      item.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
+  const runDetail = mountStrongFlowRunDetail({ document, limits })
+  historyHost.append(runDetail.root)
+  const historyNavigation = mountStrongFlowHistoryNavigation({
+    document,
+    tasksParent: tasks,
+    stagesParent: stages,
+    tasksOmitted,
+    stagesOmitted,
+    tasksEmpty,
+    stagesEmpty,
+    limits,
+    initialSelection: strongFlowHistorySelectionFromHash(historyLocation?.hash() ?? ''),
+    onSelect(selection) {
+      if (historyLocation !== null) {
+        historyLocation.replaceHash(
+          strongFlowHistoryHashWithSelection(historyLocation.hash(), selection),
+        )
+      }
+      render(options.model.state)
     },
   })
 
@@ -1272,11 +1287,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
         ? 'Loading the exact Delivery snapshot…'
         : 'Select a Delivery to open StrongFlow.'
-      taskCollection.update([])
-      stageCollection.update([])
+      historyNavigation.update(null)
+      runDetail.update(null, { taskId: null, stageRunId: null })
       attentionCollection.update([])
-      updateOmitted(tasksOmitted, 0, 'tasks')
-      updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
       if (diagramsNode !== null) diagramsNode.remove()
       if (candidateNode !== null) candidateNode.remove()
@@ -1297,14 +1310,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     metadata.textContent = `Delivery r${String(
       projection.metadata.revisions.delivery,
     )} · Runtime r${String(projection.metadata.revisions.runtime)} · updated ${projection.metadata.updatedAt}`
-    const boundedTasks = boundedItems(projection.delivery.tasks, limits.tasks)
-    const boundedStages = boundedItems(projection.delivery.stages, limits.stages)
+    historyNavigation.update(projection)
+    runDetail.update(projection, historyNavigation.selection())
     const boundedAttention = boundedItems(projection.attention, limits.attention)
-    taskCollection.update(boundedTasks.items)
-    stageCollection.update(boundedStages.items)
     attentionCollection.update(boundedAttention.items)
-    updateOmitted(tasksOmitted, boundedTasks.omitted, 'tasks')
-    updateOmitted(stagesOmitted, boundedStages.omitted, 'stages')
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
 
     const evidenceKey = JSON.stringify(projection.evidence)
@@ -1638,8 +1647,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       changes.value = ''
       attentionActionCollection.close()
       attentionCollection.close()
-      stageCollection.close()
-      taskCollection.close()
+      historyNavigation.close()
+      runDetail.close()
       deliveryCollection.close()
       diagramsNode?.remove()
       candidateNode?.remove()
