@@ -11,6 +11,7 @@ import { mountButton } from './components/button.js'
 import { mountEmptyState } from './components/empty-state.js'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
+import { createEditableDraft, type EditableDraft } from './editable-draft.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
@@ -369,6 +370,7 @@ export function mountStrongFlowCreatePage(
 /** Mount the advanced StrongFlow workspace against its Control Plane view-model. */
 export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowPage {
   const document = options.root.ownerDocument
+  const pageDraftScope = options.model.draftScope ?? 'mounted-strongflow-scope'
   const limits = options.limits ?? DEFAULT_STRONGFLOW_RENDER_LIMITS
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
@@ -421,6 +423,22 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const comments = document.createElement('textarea')
   const changesLabel = document.createElement('label')
   const changes = document.createElement('textarea')
+  const reviewConflict = strongFlowElement(document, 'div', 'wwc-strongflow-review-conflict')
+  const reviewConflictText = strongFlowElement(
+    document,
+    'p',
+    'wwc-strongflow-review-conflict-text',
+  )
+  const keepReviewDraft = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-review-keep-draft',
+  ) as HTMLButtonElement
+  const useServerReview = strongFlowElement(
+    document,
+    'button',
+    'wwc-strongflow-review-use-server',
+  ) as HTMLButtonElement
   const approveSolution = strongFlowElement(
     document,
     'button',
@@ -463,7 +481,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let diagramsFingerprint: string | null = null
   let candidateFingerprint: string | null = null
   let activeDeliveryId: string | null = null
-  let solutionDraftKey: string | null = null
+  type ReviewDraftValues = {
+    readonly comments: string
+    readonly requestedChanges: string
+  }
+  const reviewDraft = createEditableDraft<ReviewDraftValues>({ revisionSensitive: true })
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -488,6 +510,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   commentsLabel.append(comments)
   changesLabel.textContent = 'Requested changes, one per line'
   changesLabel.append(changes)
+  reviewConflict.setAttribute('role', 'alert')
+  reviewConflict.hidden = true
+  keepReviewDraft.type = 'button'
+  keepReviewDraft.textContent = 'Keep my draft'
+  useServerReview.type = 'button'
+  useServerReview.textContent = 'Use current server review'
+  reviewConflict.append(reviewConflictText, keepReviewDraft, useServerReview)
   approveSolution.type = 'button'
   approveSolution.textContent = 'Approve solution'
   requestChanges.type = 'button'
@@ -503,6 +532,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   solutionActions.append(
     commentsLabel,
     changesLabel,
+    reviewConflict,
     approveSolution,
     requestChanges,
     rejectSolution,
@@ -616,6 +646,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   interface AttentionActionItem {
     readonly record: DeliveryAttentionProjection
     readonly busy: boolean
+    readonly interactionSettled: boolean
+    readonly interactionCancelled: boolean
+    readonly deliveryId: string
+    readonly deliveryRevision: number
+    readonly candidateDigest: string
     readonly tasks: readonly DeliveryTaskDetailProjection[]
     readonly nodes: readonly ReviewNode[]
     readonly candidateAvailable: boolean
@@ -631,6 +666,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     readonly resolve: HTMLButtonElement
     readonly dismiss: HTMLButtonElement
     readonly rework: HTMLButtonElement
+    readonly conflict: HTMLElement
+    readonly conflictText: HTMLElement
+    readonly keepDraft: HTMLButtonElement
+    readonly useServer: HTMLButtonElement
+    readonly draft: EditableDraft<AttentionDraftValues>
     readonly taskOptions: KeyedCollectionView<
       DeliveryTaskDetailProjection,
       string,
@@ -640,6 +680,18 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     readonly onResolve: () => void
     readonly onDismiss: () => void
     readonly onRework: () => void
+    readonly onResolutionInput: () => void
+    readonly onTaskChange: () => void
+    readonly onNodeChange: () => void
+    readonly onInstructionsInput: () => void
+    readonly onKeepDraft: () => void
+    readonly onUseServer: () => void
+  }
+  type AttentionDraftValues = {
+    readonly resolution: string
+    readonly taskId: string
+    readonly nodeId: string
+    readonly instructions: string
   }
   const attentionActionRows = new WeakMap<HTMLElement, AttentionActionRow>()
   const attentionActionCollection = mountKeyedCollection({
@@ -672,6 +724,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         'button',
         'wwc-strongflow-rework',
       ) as HTMLButtonElement
+      const conflict = strongFlowElement(document, 'div', 'wwc-strongflow-attention-conflict')
+      const conflictText = strongFlowElement(
+        document,
+        'p',
+        'wwc-strongflow-attention-conflict-text',
+      )
+      const keepDraft = strongFlowElement(
+        document,
+        'button',
+        'wwc-strongflow-attention-keep-draft',
+      ) as HTMLButtonElement
+      const useServer = strongFlowElement(
+        document,
+        'button',
+        'wwc-strongflow-attention-use-server',
+      ) as HTMLButtonElement
+      const draft = createEditableDraft<AttentionDraftValues>({ revisionSensitive: true })
       resolutionLabel.textContent = 'Decision note'
       resolutionLabel.append(resolution)
       resolve.type = 'button'
@@ -686,6 +755,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       instructionsLabel.append(instructions)
       rework.type = 'button'
       rework.textContent = 'Approve bounded rework'
+      conflict.setAttribute('role', 'alert')
+      conflict.hidden = true
+      keepDraft.type = 'button'
+      keepDraft.textContent = 'Keep my draft'
+      useServer.type = 'button'
+      useServer.textContent = 'Use current server target'
+      conflict.append(conflictText, keepDraft, useServer)
       const taskOptions = mountKeyedCollection<
         DeliveryTaskDetailProjection,
         string,
@@ -711,17 +787,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       const decide = (decision: 'resolve' | 'dismiss', remediation: boolean) => {
         const row = attentionActionRows.get(group)
         if (row === undefined) return
+        row.draft.edit('resolution', row.resolution.value)
+        row.draft.edit('taskId', row.task.value)
+        row.draft.edit('nodeId', row.node.value)
+        row.draft.edit('instructions', row.instructions.value)
+        const submission = row.draft.beginSubmission()
+        if (submission === null) return
         void options.model.resolveAttention({
           attentionItemId: row.current.record.id,
           decision,
-          resolution: row.resolution.value,
+          resolution: submission.values.resolution,
           remediation: remediation
             ? {
-                deliveryTaskId: row.task.value.length === 0
+                deliveryTaskId: submission.values.taskId.length === 0
                   ? null
-                  : row.task.value as DeliveryTaskDetailProjection['id'],
-                nodeId: row.node.value,
-                instructions: row.instructions.value,
+                  : submission.values.taskId as DeliveryTaskDetailProjection['id'],
+                nodeId: submission.values.nodeId,
+                instructions: submission.values.instructions,
               }
             : null,
         })
@@ -729,11 +811,29 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       const onResolve = () => { decide('resolve', false) }
       const onDismiss = () => { decide('dismiss', false) }
       const onRework = () => { decide('resolve', true) }
+      const onResolutionInput = () => { draft.edit('resolution', resolution.value) }
+      const onTaskChange = () => { draft.edit('taskId', task.value) }
+      const onNodeChange = () => { draft.edit('nodeId', node.value) }
+      const onInstructionsInput = () => { draft.edit('instructions', instructions.value) }
+      const onKeepDraft = () => {
+        draft.resolveConflicts('keep-draft')
+        renderActions(options.model.state)
+      }
+      const onUseServer = () => {
+        draft.resolveConflicts('use-server')
+        renderActions(options.model.state)
+      }
       resolve.addEventListener('click', onResolve)
       dismiss.addEventListener('click', onDismiss)
       rework.addEventListener('click', onRework)
+      resolution.addEventListener('input', onResolutionInput)
+      task.addEventListener('change', onTaskChange)
+      node.addEventListener('change', onNodeChange)
+      instructions.addEventListener('input', onInstructionsInput)
+      keepDraft.addEventListener('click', onKeepDraft)
+      useServer.addEventListener('click', onUseServer)
       reworkFields.append(taskLabel, nodeLabel, instructionsLabel, rework)
-      group.append(title, resolutionLabel, resolve, dismiss, reworkFields)
+      group.append(title, resolutionLabel, conflict, resolve, dismiss, reworkFields)
       attentionActionRows.set(group, {
         current: item,
         title,
@@ -745,11 +845,22 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         resolve,
         dismiss,
         rework,
+        conflict,
+        conflictText,
+        keepDraft,
+        useServer,
+        draft,
         taskOptions,
         nodeOptions,
         onResolve,
         onDismiss,
         onRework,
+        onResolutionInput,
+        onTaskChange,
+        onNodeChange,
+        onInstructionsInput,
+        onKeepDraft,
+        onUseServer,
       })
       return group
     },
@@ -757,17 +868,56 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       const row = attentionActionRows.get(group)
       if (row === undefined) return
       row.current = item
+      if (row.draft.state.scope !== null && row.draft.state.submission === null) {
+        row.draft.edit('resolution', row.resolution.value)
+        row.draft.edit('taskId', row.task.value)
+        row.draft.edit('nodeId', row.node.value)
+        row.draft.edit('instructions', row.instructions.value)
+      }
+      if (item.interactionSettled && row.draft.state.submission !== null) {
+        row.draft.finishSubmission(item.interactionCancelled ? 'cancelled' : 'failure')
+      }
+      row.draft.synchronize({
+        scope: `${pageDraftScope}:${item.deliveryId}:${item.record.id}:${item.candidateDigest}`,
+        revision: item.deliveryRevision,
+        values: {
+          resolution: '',
+          taskId: item.tasks[0]?.id ?? '',
+          nodeId: item.nodes[0]?.id ?? '',
+          instructions: '',
+        },
+      })
       row.title.textContent = item.record.title
       group.dataset.attentionItemId = item.record.id
-      row.resolve.disabled = item.busy
-      row.dismiss.disabled = item.busy
-      row.rework.disabled = item.busy
+      const decisionDisabled = item.busy || row.draft.state.revisionConflict
+      row.resolve.disabled = decisionDisabled
+      row.dismiss.disabled = decisionDisabled
+      row.rework.disabled = decisionDisabled
       const reworkVisible = item.record.type === 'verification_blocked'
         && item.candidateAvailable
         && item.nodes.length > 0
       row.reworkFields.hidden = !reworkVisible
       row.taskOptions.update(reworkVisible ? item.tasks : [])
       row.nodeOptions.update(reworkVisible ? item.nodes : [])
+      const draftValues = row.draft.state.values
+      if (row.resolution.value !== draftValues.resolution) row.resolution.value = draftValues.resolution
+      if (row.task.value !== draftValues.taskId) row.task.value = draftValues.taskId
+      if (row.node.value !== draftValues.nodeId) row.node.value = draftValues.nodeId
+      if (row.instructions.value !== draftValues.instructions) {
+        row.instructions.value = draftValues.instructions
+      }
+      row.resolution.disabled = item.busy
+      row.task.disabled = item.busy
+      row.node.disabled = item.busy
+      row.instructions.disabled = item.busy
+      row.conflict.hidden = !row.draft.state.revisionConflict
+      row.conflictText.textContent = row.draft.state.revisionConflict
+        ? `This Attention draft started at Delivery revision ${String(
+            row.draft.state.baseRevision,
+          )}; the server is now at revision ${String(row.draft.state.serverRevision)}.`
+        : ''
+      row.keepDraft.disabled = item.busy
+      row.useServer.disabled = item.busy
     },
     remove(group) {
       const row = attentionActionRows.get(group)
@@ -777,30 +927,49 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       row.resolve.removeEventListener('click', row.onResolve)
       row.dismiss.removeEventListener('click', row.onDismiss)
       row.rework.removeEventListener('click', row.onRework)
+      row.resolution.removeEventListener('input', row.onResolutionInput)
+      row.task.removeEventListener('change', row.onTaskChange)
+      row.node.removeEventListener('change', row.onNodeChange)
+      row.instructions.removeEventListener('input', row.onInstructionsInput)
+      row.keepDraft.removeEventListener('click', row.onKeepDraft)
+      row.useServer.removeEventListener('click', row.onUseServer)
       row.taskOptions.close()
       row.nodeOptions.close()
+      row.draft.reset()
       attentionActionRows.delete(group)
     },
   })
 
   const onApproveSolution = () => {
+    reviewDraft.edit('comments', comments.value)
+    reviewDraft.edit('requestedChanges', changes.value)
+    const submission = reviewDraft.beginSubmission()
+    if (submission === null) return
     void options.model.decideSolutionReview({
       action: 'approve',
-      comments: comments.value,
+      comments: submission.values.comments,
       requestedChanges: [],
     })
   }
   const onRequestChanges = () => {
+    reviewDraft.edit('comments', comments.value)
+    reviewDraft.edit('requestedChanges', changes.value)
+    const submission = reviewDraft.beginSubmission()
+    if (submission === null) return
     void options.model.decideSolutionReview({
       action: 'request_changes',
-      comments: comments.value,
-      requestedChanges: changes.value.split(/\r?\n/u),
+      comments: submission.values.comments,
+      requestedChanges: submission.values.requestedChanges.split(/\r?\n/u),
     })
   }
   const onRejectSolution = () => {
+    reviewDraft.edit('comments', comments.value)
+    reviewDraft.edit('requestedChanges', changes.value)
+    const submission = reviewDraft.beginSubmission()
+    if (submission === null) return
     void options.model.decideSolutionReview({
       action: 'reject',
-      comments: comments.value,
+      comments: submission.values.comments,
       requestedChanges: [],
     })
   }
@@ -809,6 +978,18 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const onAdvanceDelivery = () => { void options.model.advanceDelivery() }
   const onRetry = () => { void options.model.refresh() }
   const onReconnect = () => { options.model.reconnect() }
+  const onReviewCommentsInput = () => { reviewDraft.edit('comments', comments.value) }
+  const onReviewChangesInput = () => {
+    reviewDraft.edit('requestedChanges', changes.value)
+  }
+  const onKeepReviewDraft = () => {
+    reviewDraft.resolveConflicts('keep-draft')
+    renderActions(options.model.state)
+  }
+  const onUseServerReview = () => {
+    reviewDraft.resolveConflicts('use-server')
+    renderActions(options.model.state)
+  }
   approveSolution.addEventListener('click', onApproveSolution)
   requestChanges.addEventListener('click', onRequestChanges)
   rejectSolution.addEventListener('click', onRejectSolution)
@@ -817,6 +998,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   advanceDelivery.addEventListener('click', onAdvanceDelivery)
   retry.addEventListener('click', onRetry)
   reconnect.addEventListener('click', onReconnect)
+  comments.addEventListener('input', onReviewCommentsInput)
+  changes.addEventListener('input', onReviewChangesInput)
+  keepReviewDraft.addEventListener('click', onKeepReviewDraft)
+  useServerReview.addEventListener('click', onUseServerReview)
 
   function renderDeliveries(state: StrongFlowViewModelState): void {
     const active = state.projection?.delivery ?? null
@@ -929,18 +1114,49 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     actions.setAttribute('aria-busy', String(busy))
     const review = projection?.solutionReview ?? null
     const pendingReview = review?.reviewStatus === 'pending'
-    const nextDraftKey = pendingReview
-      ? projection?.currentCandidate?.diffSha256 ?? projection?.delivery.deliveryId ?? null
-      : null
-    if (solutionDraftKey !== nextDraftKey) {
-      comments.value = ''
-      changes.value = ''
-      solutionDraftKey = nextDraftKey
+    if (reviewDraft.state.scope !== null && reviewDraft.state.submission === null) {
+      reviewDraft.edit('comments', comments.value)
+      reviewDraft.edit('requestedChanges', changes.value)
     }
+    if (
+      (interaction.status === 'error' || interaction.status === 'idle')
+      && reviewDraft.state.submission !== null
+    ) {
+      reviewDraft.finishSubmission(
+        interaction.error?.kind === 'cancelled' ? 'cancelled' : 'failure',
+      )
+    }
+    reviewDraft.synchronize(pendingReview && projection !== null
+      ? {
+          scope: `${pageDraftScope}:${projection.delivery.deliveryId}:${String(
+            review?.attentionItemId ?? '',
+          )}:${projection.currentCandidate?.diffSha256 ?? ''}`,
+          revision: projection.metadata.revisions.delivery,
+          values: { comments: '', requestedChanges: '' },
+        }
+      : null)
+    const reviewValues = reviewDraft.state.values
+    if (comments.value !== (reviewValues.comments ?? '')) {
+      comments.value = reviewValues.comments ?? ''
+    }
+    if (changes.value !== (reviewValues.requestedChanges ?? '')) {
+      changes.value = reviewValues.requestedChanges ?? ''
+    }
+    reviewConflict.hidden = !reviewDraft.state.revisionConflict
+    reviewConflictText.textContent = reviewDraft.state.revisionConflict
+      ? `This review draft started at Delivery revision ${String(
+          reviewDraft.state.baseRevision,
+        )}; the server is now at revision ${String(reviewDraft.state.serverRevision)}.`
+      : ''
     solutionActions.hidden = !pendingReview
-    approveSolution.disabled = busy
-    requestChanges.disabled = busy
-    rejectSolution.disabled = busy
+    const reviewDisabled = busy || reviewDraft.state.revisionConflict
+    comments.disabled = busy
+    changes.disabled = busy
+    approveSolution.disabled = reviewDisabled
+    requestChanges.disabled = reviewDisabled
+    rejectSolution.disabled = reviewDisabled
+    keepReviewDraft.disabled = busy
+    useServerReview.disabled = busy
     approveTasks.hidden = review?.reviewStatus !== 'approved'
       || (projection?.delivery.tasks.length ?? 0) > 0
     approveTasks.disabled = busy
@@ -969,6 +1185,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     attentionActionCollection.update(openAttention.items.map(record => ({
       record,
       busy,
+      interactionSettled: interaction.status === 'error' || interaction.status === 'idle',
+      interactionCancelled: interaction.error?.kind === 'cancelled',
+      deliveryId: projection?.delivery.deliveryId ?? '',
+      deliveryRevision: projection?.metadata.revisions.delivery ?? 0,
+      candidateDigest: projection?.currentCandidate?.diffSha256 ?? '',
       tasks: reviewTasks,
       nodes,
       candidateAvailable: projection?.currentCandidate !== null,
@@ -999,6 +1220,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       unsubscribe()
       retry.removeEventListener('click', onRetry)
       reconnect.removeEventListener('click', onReconnect)
+      comments.removeEventListener('input', onReviewCommentsInput)
+      changes.removeEventListener('input', onReviewChangesInput)
+      keepReviewDraft.removeEventListener('click', onKeepReviewDraft)
+      useServerReview.removeEventListener('click', onUseServerReview)
       approveSolution.removeEventListener('click', onApproveSolution)
       requestChanges.removeEventListener('click', onRequestChanges)
       rejectSolution.removeEventListener('click', onRejectSolution)
@@ -1007,6 +1232,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       advanceDelivery.removeEventListener('click', onAdvanceDelivery)
       comments.value = ''
       changes.value = ''
+      reviewDraft.reset()
       attentionActionCollection.close()
       attentionCollection.close()
       stageCollection.close()
