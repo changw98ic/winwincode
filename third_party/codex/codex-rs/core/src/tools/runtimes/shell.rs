@@ -157,6 +157,15 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         &req.turn_environment
     }
 
+    fn action_gate_payload(&self, req: &ShellRequest) -> Option<crate::ToolCallGatePayload> {
+        let (program, args) = req.command.split_first()?;
+        Some(crate::ToolCallGatePayload::Shell {
+            program: program.clone(),
+            args: args.to_vec(),
+            working_directory: req.cwd.to_string_lossy().into_owned(),
+        })
+    }
+
     fn network_approval_spec(
         &self,
         req: &ShellRequest,

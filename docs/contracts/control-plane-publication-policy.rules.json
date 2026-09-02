@@ -1,0 +1,155 @@
+{
+  "schemaVersion": "winwincode.control-plane-publication-policy-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.3.5",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "documentation": "docs/contracts/control-plane-publication-policy.md",
+  "implementationCompletionSource": "rust-black-box-tests-and-beads",
+  "authorityChain": [
+    "generated-publication-publish-command",
+    "authenticated-requester-and-exact-repository-scope",
+    "current-sealed-publication-authorization-and-policy-evidence",
+    "deterministic-repository-publication-policy",
+    "immutable-policy-decision-audit",
+    "durable-publication-intent",
+    "policy-guarded-provider-resume"
+  ],
+  "policy": {
+    "ownerCrate": "winwincode-publication",
+    "policyType": "RepositoryPublicationPolicy",
+    "scope": [
+      "organizationId",
+      "workspaceId",
+      "projectId",
+      "repositoryId"
+    ],
+    "requesterKinds": [
+      "user",
+      "service_account",
+      "system"
+    ],
+    "permissions": [
+      "allow",
+      "deny"
+    ],
+    "evidence": [
+      "publicationSetSha256",
+      "repositoryScopeSha256",
+      "independentVerification",
+      "artifactExportable",
+      "observedAtMillis"
+    ],
+    "repositoryScopeDigest": "sha256-of-canonical-repository-policy-scope",
+    "rulePriority": [
+      "publication.requester.denied",
+      "publication.approver.denied",
+      "publication.repository.write-denied",
+      "publication.artifact.export-denied",
+      "publication.requester.not-allowed",
+      "publication.approver.not-allowed",
+      "publication.verification.required",
+      "publication.artifact.not-exportable",
+      "publication.approval.expired",
+      "publication.allowed"
+    ],
+    "explicitDenyOverridesAllow": true,
+    "policyDigestDeterministic": true,
+    "staleOrForeignFactsAllowed": false,
+    "callerPolicyTextRetained": false
+  },
+  "decisionAudit": {
+    "requiredPort": "PublicationPolicyAudit",
+    "adapter": "ControlPlanePolicyAudit-to-AuditStore",
+    "actionCategory": "policy",
+    "stateDigest": "policySha256",
+    "results": {
+      "allow": "policy.allowed",
+      "deny": "policy.denied"
+    },
+    "retainedDecisionFields": [
+      "effect",
+      "ruleId",
+      "policySha256",
+      "requester",
+      "scope",
+      "requestId",
+      "origin",
+      "deliveryId",
+      "publicationId",
+      "occurredAtMillis",
+      "decisionSha256"
+    ],
+    "rawPolicyTextAllowed": false,
+    "auditFailure": "fail-closed-before-intent-or-provider"
+  },
+  "commandBoundary": {
+    "command": "publication.publish",
+    "generatedRustType": "PublicationPublishCommand",
+    "generatedPayloadFields": [
+      "publicationId",
+      "deliveryId",
+      "candidateDigest",
+      "target"
+    ],
+    "publishReceiptReplay": "before-current-policy-facts-and-audit",
+    "recoveryResume": "typed-rust-application-seam",
+    "httpResumeAdded": false,
+    "auditQueryAdded": false
+  },
+  "publicErrors": {
+    "denied": {
+      "code": "PERMISSION_DENIED",
+      "retryable": false,
+      "detailFields": [
+        "ruleId",
+        "repositoryId",
+        "publicationId"
+      ]
+    },
+    "auditUnavailable": {
+      "code": "SERVICE_UNAVAILABLE",
+      "retryable": true,
+      "detailFields": []
+    }
+  },
+  "providerBoundary": {
+    "providerPort": "PublicationPort",
+    "githubAdapterRole": "provider-lookup-and-apply-only",
+    "workerRole": "call-control-plane-resume-only",
+    "productionCoordinatorConstructors": [
+      "crates/winwincode-control-plane/src/publication_policy.rs"
+    ],
+    "testSupportConstructor": "crates/winwincode-publication/src/test_support.rs",
+    "providerMayPersistIntent": false,
+    "providerMaySkipPolicyAudit": false
+  },
+  "rustGate": {
+    "package": "winwincode-control-plane",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "winwincode-control-plane",
+      "--features",
+      "test-support",
+      "--test",
+      "publication_policy",
+      "--locked",
+      "--",
+      "--test-threads=1"
+    ],
+    "requiredTests": [
+      "allowed_publication_records_the_exact_policy_rule_before_persisting_intent",
+      "explicit_requester_deny_wins_and_records_the_rule_without_intent_or_provider_call",
+      "repository_verification_artifact_and_approval_denials_are_exact_and_side_effect_free",
+      "missing_audit_store_fails_closed_but_exact_receipt_replay_needs_no_current_policy_or_audit",
+      "resume_records_current_policy_before_any_provider_lookup_or_state_transition"
+    ]
+  },
+  "compatibility": {
+    "legacyRepositoryPolicyRetained": false,
+    "secondPublicationEffectPathRetained": false,
+    "providerPolicyBypassAllowed": false,
+    "unauditedFallbackAllowed": false
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "type": "transport.backpressure.v1",
+  "subscriptionId": "sub_event_hub_backpressure",
+  "pendingEventCount": 257,
+  "ackRequiredThrough": {
+    "scope": {
+      "kind": "repository",
+      "organizationId": "org_01J00000000000000000000000",
+      "workspaceId": "wsp_01J00000000000000000000000",
+      "projectId": "prj_01J00000000000000000000000",
+      "repositoryId": "rep_01J00000000000000000000000"
+    },
+    "stream": {
+      "kind": "delivery",
+      "deliveryId": "dlv_01J00000000000000000000000"
+    },
+    "sequence": 256,
+    "eventId": "evt_event_hub_00000000000000000256"
+  },
+  "disconnectAt": "2026-08-27T01:00:30.000Z",
+  "closeCode": 4408
+}

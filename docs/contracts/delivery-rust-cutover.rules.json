@@ -1,0 +1,175 @@
+{
+  "schemaVersion": "winwincode.delivery-rust-cutover-gate.v2",
+  "issueId": "winwincode-9c4.16.6.6.5",
+  "status": "implemented-enforced",
+  "documentation": "docs/contracts/delivery-rust-cutover.md",
+  "coverage": {
+    "mode": "git-file-inventory+rg-direct-read-fallback",
+    "symbolGraphComplete": false,
+    "reason": "The contract records repository-relative files and structural checks; it does not substitute for the source dependency graph."
+  },
+  "canonicalBackend": {
+    "owner": "winwincode-control-plane",
+    "runnerEntry": "crates/winwincode-control-plane/tests/delivery_strongflow_differential_runner.rs",
+    "runnerSupport": "crates/winwincode-control-plane/tests/support/differential_runner.rs",
+    "scenarioCount": 10,
+    "typedMutationEntries": [
+      "ControlPlane::commit_delivery_command",
+      "ControlPlane::commit_delivery_execution",
+      "ControlPlane::commit_delivery_session_binding",
+      "ControlPlane::commit_delivery_terminal_outcome",
+      "ControlPlane::commit_delivery_task_breakdown",
+      "ControlPlane::commit_delivery_verdict"
+    ],
+    "typedQueryEntry": "StrongFlowProjectionQueryPort",
+    "storage": "SqliteStorage",
+    "atomicPersistenceMembers": [
+      "product_state",
+      "aggregate_journal_records",
+      "command_receipts",
+      "outbox_events"
+    ],
+    "directSeedPolicy": "one-test-only-strict-snapshot-seed-for-the-task-dag-scenario",
+    "genericDeliveryMutationAllowed": false
+  },
+  "migration": {
+    "planSchemaVersion": "winwincode.delivery-strongflow-rust-plan.v2",
+    "mappingVersion": "winwincode.delivery-strongflow-canonical.v1",
+    "planAuthority": "node-authored-closed-plan-only",
+    "inputPolicy": "canonical-fixture-only",
+    "runtimeFallbackAllowed": false,
+    "expected": {
+      "path": "tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json",
+      "sha256": "246451128fbc0526b5f9c23377f63a2dca54921f58b6140cad7b0f3cf22a0aa7"
+    },
+    "checkpoints": [
+      {
+        "id": "success-closed-loop",
+        "revision": 21
+      },
+      {
+        "id": "request-id-replay",
+        "revision": 1
+      },
+      {
+        "id": "revision-conflict",
+        "revision": 2
+      },
+      {
+        "id": "corruption-recovery",
+        "revision": 1
+      },
+      {
+        "id": "task-dag",
+        "revision": 2
+      },
+      {
+        "id": "candidate-invalidation",
+        "revision": 31
+      },
+      {
+        "id": "attention",
+        "revision": 8
+      },
+      {
+        "id": "inconclusive",
+        "revision": 19
+      },
+      {
+        "id": "infra-error",
+        "revision": 19
+      },
+      {
+        "id": "rework",
+        "revision": 31
+      }
+    ]
+  },
+  "dependencyBoundaries": {
+    "controlPlane": {
+      "manifest": "crates/winwincode-control-plane/Cargo.toml",
+      "allowedProductionDependencies": [
+        "winwincode-api",
+        "winwincode-audit",
+        "winwincode-delivery",
+        "winwincode-domain",
+        "winwincode-execution-port",
+        "winwincode-publication",
+        "winwincode-repository-context",
+        "winwincode-session",
+        "winwincode-storage"
+      ]
+    },
+    "server": {
+      "manifest": "crates/winwincode-server/Cargo.toml",
+      "allowedProductionDependencies": [
+        "winwincode-api",
+        "winwincode-control-plane",
+        "winwincode-codex",
+        "winwincode-domain",
+        "winwincode-execution-port",
+        "winwincode-local",
+        "winwincode-storage",
+        "winwincode-worker"
+      ]
+    },
+    "worker": {
+      "manifest": "crates/winwincode-worker/Cargo.toml",
+      "allowedProductionDependencies": [
+        "winwincode-codex",
+        "winwincode-domain",
+        "winwincode-execution-port"
+      ]
+    },
+    "local": {
+      "manifest": "crates/winwincode-local/Cargo.toml",
+      "allowedProductionDependencies": [
+        "winwincode-control-plane",
+        "winwincode-observability",
+        "winwincode-worker"
+      ]
+    },
+    "helper": {
+      "manifest": "crates/helper/Cargo.toml",
+      "allowedProductionDependencies": []
+    }
+  },
+  "releaseBoundary": {
+    "cutoverComplete": true,
+    "newBackendCallersAllowed": false,
+    "clientRoot": "apps/client",
+    "clientFacade": "apps/client/src/control-plane-client.ts",
+    "generatedNetworkOwner": "apps/client/src/generated/control-plane-client.ts",
+    "serverRoot": "crates/winwincode-server",
+    "controlPlaneRoot": "crates/winwincode-control-plane",
+    "workerRoot": "crates/winwincode-worker",
+    "localRoot": "crates/winwincode-local",
+    "helperRoot": "crates/helper",
+    "productWriter": "winwincode-control-plane",
+    "executionWriter": "winwincode-worker",
+    "executionSeam": "winwincode-execution-port",
+    "directClientNetworkAllowed": false,
+    "directWorkerProductWritesAllowed": false
+  },
+  "cleanup": {
+    "gate": "scripts/phase-6-6-negative-gate.mjs",
+    "command": "corepack pnpm verify:phase-6.6",
+    "expectedOutput": "phase-6.6.6 negative gate GREEN",
+    "isolation": "fresh-process-and-empty-TMPDIR-after-each-iteration",
+    "exercisedRecoveryScenarios": [
+      "corruption-recovery",
+      "request-id-replay",
+      "cancel-replay",
+      "attempt-retry"
+    ]
+  },
+  "verification": {
+    "cutoverCommand": "corepack pnpm verify:phase-6.6",
+    "sourceCommand": "corepack pnpm verify:source",
+    "contractCommand": "corepack pnpm contracts:check",
+    "formatCommand": "corepack pnpm format:check",
+    "gateTest": "tests/delivery-rust-cutover-gate.test.mjs",
+    "apiCoverageTest": "tests/control-plane-api-coverage.test.mjs",
+    "dependencyTest": "tests/control-plane-worker-dependency-contract.test.mjs"
+  }
+}

@@ -2,36 +2,79 @@
 members = [
   "crates/helper",
   "crates/kernel",
-  "crates/native",
+  "crates/winwincode-api",
+  "crates/winwincode-audit",
+  "crates/winwincode-backup",
+  "crates/winwincode-cli",
+  "crates/winwincode-delivery",
+  "crates/winwincode-drill",
+  "crates/winwincode-control-plane",
+  "crates/winwincode-codex",
+  "crates/winwincode-domain",
+  "crates/winwincode-execution-port",
+  "crates/winwincode-evidence-export",
+  "crates/winwincode-integration",
+  "crates/winwincode-local",
+  "crates/winwincode-observability",
+  "crates/winwincode-object-store",
+  "crates/winwincode-publication",
+  "crates/winwincode-postgres",
+  "crates/winwincode-repository-context",
+  "crates/winwincode-server",
+  "crates/winwincode-session",
+  "crates/winwincode-storage",
+  "crates/winwincode-test-assets",
+  "crates/winwincode-worker",
 ]
-exclude = ["third_party/codex/codex-rs"]
+exclude = [
+  "third_party/codex/codex-rs",
+  "upstream/vendor/i18n-embed-fl-0.9.4",
+]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/changw98ic/winwincode"
 
 [workspace.dependencies]
-anyhow = "=1.0.103"
+axum = { version = "=0.8.8", features = ["json", "ws"] }
+axum-server = { version = "=0.8.0", features = ["tls-rustls"] }
+base64 = "=0.22.1"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 codex-core-api = { path = "third_party/codex/codex-rs/core-api" }
 codex-api = { path = "third_party/codex/codex-rs/codex-api" }
 codex-arg0 = { path = "third_party/codex/codex-rs/arg0" }
 codex-protocol = { path = "third_party/codex/codex-rs/protocol" }
 codex-model-provider-info = { path = "third_party/codex/codex-rs/model-provider-info" }
 futures = "=0.3.31"
-napi = { version = "=3.12.1", features = ["napi9", "serde-json", "tokio_rt", "web_stream"] }
-napi-build = "=2.4.1"
-napi-derive = "=3.6.3"
+getrandom = "=0.3.4"
+http = "=1.4.0"
+httpdate = "=1.0.3"
+# 0.40.x requires libsqlite3-sys 0.38.x, which cannot coexist with the Codex/sqlx
+# closure's libsqlite3-sys 0.37.x because both crates link the same native library.
+rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled"] }
+rcgen = "=0.14.7"
+rustls = "=0.23.36"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+time = { version = "=0.3.47", features = ["formatting"] }
 tokio = { version = "=1.52.3", features = ["rt-multi-thread", "sync", "time"] }
+tokio-rustls = "=0.26.4"
+uuid = { version = "=1.20.0", features = ["v7"] }
+winwincode-api = { path = "crates/winwincode-api" }
+winwincode-audit = { path = "crates/winwincode-audit" }
+winwincode-backup = { path = "crates/winwincode-backup" }
+winwincode-domain = { path = "crates/winwincode-domain" }
+winwincode-execution-port = { path = "crates/winwincode-execution-port" }
+winwincode-publication = { path = "crates/winwincode-publication" }
+winwincode-session = { path = "crates/winwincode-session" }
+winwincode-storage = { path = "crates/winwincode-storage" }
 
 [workspace.lints.rust]
-# napi-rs marks its generated registration shims with `allow(unsafe_code)`.
-# `deny` still rejects handwritten unsafe code while permitting those generated shims.
 unsafe_code = "deny"
 unused_qualifications = "warn"
 
@@ -46,7 +89,14 @@ codegen-units = 1
 lto = "thin"
 strip = "symbols"
 
+# The production adapter bounds the authenticated helper image at 64 MiB.
+# Strip the development helper so local composition uses the same bounded
+# release-shaped executable rather than an oversized debug image.
+[profile.dev.package.winwincode-kernel-helper]
+strip = "symbols"
+
 [patch.crates-io]
+i18n-embed-fl = { path = "upstream/vendor/i18n-embed-fl-0.9.4" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
 

@@ -1,0 +1,299 @@
+{
+  "schemaId": "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
+  "sampleSetVersion": 1,
+  "cases": [
+    {
+      "name": "command.local.valid",
+      "definition": "CommandEnvelope",
+      "category": "valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "command": "session.create",
+        "actor": {
+          "kind": "system",
+          "id": "sys_00000000000000000000000000"
+        },
+        "scope": {
+          "kind": "repository",
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "requestId": "req_01J00000000000000000000000",
+        "expectedRevision": 0,
+        "payload": {}
+      }
+    },
+    {
+      "name": "delivery-projection.valid-with-no-active-run",
+      "definition": "DeliveryProjection",
+      "category": "valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "deliveryId": "dlv_01J00000000000000000000000",
+        "revision": 18,
+        "ownership": {
+          "organizationId": "org_01J00000000000000000000000",
+          "workspaceId": "wsp_01J00000000000000000000000",
+          "projectId": "prj_01J00000000000000000000000",
+          "repositoryId": "rep_01J00000000000000000000000"
+        },
+        "title": "Freeze the delivery contract",
+        "status": "executing",
+        "taskCounts": {
+          "total": 4,
+          "pending": 1,
+          "active": 1,
+          "blocked": 0,
+          "verifying": 1,
+          "completed": 1,
+          "failed": 0
+        },
+        "activeStageRunId": null,
+        "openAttentionCount": 0,
+        "updatedAt": "2026-08-24T09:10:11.123Z"
+      }
+    },
+    {
+      "name": "terminal-error.valid",
+      "definition": "ErrorEnvelope",
+      "category": "valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "REVISION_CONFLICT",
+          "message": "The delivery changed before this command was applied.",
+          "retryable": false,
+          "details": {
+            "expectedRevision": 18,
+            "actualRevision": 19
+          }
+        }
+      }
+    },
+    {
+      "name": "retryable-error.valid",
+      "definition": "ErrorEnvelope",
+      "category": "valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "SERVICE_UNAVAILABLE",
+          "message": "No healthy worker is currently available.",
+          "retryable": true,
+          "details": {}
+        }
+      }
+    },
+    {
+      "name": "command.missing-actor",
+      "definition": "CommandEnvelope",
+      "category": "missing",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "command": "session.create",
+        "scope": {
+          "kind": "repository",
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "requestId": "req_01J00000000000000000000000",
+        "expectedRevision": 0,
+        "payload": {}
+      }
+    },
+    {
+      "name": "command.null-expected-revision",
+      "definition": "CommandEnvelope",
+      "category": "null",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "command": "session.create",
+        "actor": {
+          "kind": "system",
+          "id": "sys_00000000000000000000000000"
+        },
+        "scope": {
+          "kind": "repository",
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "requestId": "req_01J00000000000000000000000",
+        "expectedRevision": null,
+        "payload": {}
+      }
+    },
+    {
+      "name": "command.unknown-enum",
+      "definition": "CommandEnvelope",
+      "category": "enum",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "command": "delivery.delete",
+        "actor": {
+          "kind": "system",
+          "id": "sys_00000000000000000000000000"
+        },
+        "scope": {
+          "kind": "repository",
+          "organizationId": "org_00000000000000000000000000",
+          "workspaceId": "wsp_00000000000000000000000000",
+          "projectId": "prj_00000000000000000000000000",
+          "repositoryId": "rep_00000000000000000000000000"
+        },
+        "requestId": "req_01J00000000000000000000000",
+        "expectedRevision": 0,
+        "payload": {}
+      }
+    },
+    {
+      "name": "delivery-projection.unsupported-version",
+      "definition": "DeliveryProjection",
+      "category": "version",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v2",
+        "deliveryId": "dlv_01J00000000000000000000000",
+        "revision": 18,
+        "ownership": {
+          "organizationId": "org_01J00000000000000000000000",
+          "workspaceId": "wsp_01J00000000000000000000000",
+          "projectId": "prj_01J00000000000000000000000",
+          "repositoryId": "rep_01J00000000000000000000000"
+        },
+        "title": "Freeze the delivery contract",
+        "status": "executing",
+        "taskCounts": {
+          "total": 4,
+          "pending": 1,
+          "active": 1,
+          "blocked": 0,
+          "verifying": 1,
+          "completed": 1,
+          "failed": 0
+        },
+        "activeStageRunId": null,
+        "openAttentionCount": 0,
+        "updatedAt": "2026-08-24T09:10:11.123Z"
+      }
+    },
+    {
+      "name": "delivery-projection.missing-organization",
+      "definition": "DeliveryProjection",
+      "category": "missing",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "deliveryId": "dlv_01J00000000000000000000000",
+        "revision": 18,
+        "ownership": {
+          "workspaceId": "wsp_01J00000000000000000000000",
+          "projectId": "prj_01J00000000000000000000000",
+          "repositoryId": "rep_01J00000000000000000000000"
+        },
+        "title": "Freeze the delivery contract",
+        "status": "executing",
+        "taskCounts": {
+          "total": 4,
+          "pending": 1,
+          "active": 1,
+          "blocked": 0,
+          "verifying": 1,
+          "completed": 1,
+          "failed": 0
+        },
+        "activeStageRunId": null,
+        "openAttentionCount": 0,
+        "updatedAt": "2026-08-24T09:10:11.123Z"
+      }
+    },
+    {
+      "name": "error.null-details",
+      "definition": "ErrorEnvelope",
+      "category": "null",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "REVISION_CONFLICT",
+          "message": "The delivery changed before this command was applied.",
+          "retryable": false,
+          "details": null
+        }
+      }
+    },
+    {
+      "name": "error.retryability-mismatch",
+      "definition": "ErrorEnvelope",
+      "category": "error_semantics",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "SERVICE_UNAVAILABLE",
+          "message": "No healthy worker is currently available.",
+          "retryable": false,
+          "details": {}
+        }
+      }
+    },
+    {
+      "name": "error.secret-bearing-detail",
+      "definition": "ErrorEnvelope",
+      "category": "secret",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "INTERNAL_ERROR",
+          "message": "Provider request failed.",
+          "retryable": false,
+          "details": {
+            "apiKey": "must-not-cross-the-boundary"
+          }
+        }
+      }
+    },
+    {
+      "name": "error.nested-secret-bearing-detail",
+      "definition": "ErrorEnvelope",
+      "category": "secret",
+      "valid": false,
+      "value": {
+        "schemaVersion": "winwincode/v1",
+        "requestId": "req_01J00000000000000000000000",
+        "error": {
+          "code": "INTERNAL_ERROR",
+          "message": "Provider request failed.",
+          "retryable": false,
+          "details": {
+            "provider": {
+              "diagnostics": [
+                {
+                  "apiKey": "must-not-cross-the-boundary"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

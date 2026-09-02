@@ -1,0 +1,20 @@
+[package]
+name = "winwincode-postgres"
+description = "PostgreSQL transaction and migration adapter for WinWinCode storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+sha2.workspace = true
+winwincode-audit.workspace = true
+winwincode-backup.workspace = true
+winwincode-domain.workspace = true
+winwincode-storage.workspace = true
+
+[lints]
+workspace = true

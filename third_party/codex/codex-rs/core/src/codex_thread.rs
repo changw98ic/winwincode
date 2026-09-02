@@ -30,6 +30,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -59,6 +60,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use rmcp::model::ReadResourceRequestParams;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -68,6 +70,96 @@ use tokio_util::sync::CancellationToken;
 use codex_rollout::state_db::StateDbHandle;
 
 static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
+
+/// Durable state of one exact regular turn reconstructed from rollout facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DurableTurnInspection {
+    Absent,
+    InProgress,
+    Completed(DurableTurnTerminal),
+    Failed(DurableTurnTerminal),
+}
+
+/// Terminal facts retained by Codex Core for one exact regular turn.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DurableTurnTerminal {
+    pub turn_id: String,
+    pub last_agent_message: Option<String>,
+    pub token_usage: Option<TokenUsageInfo>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub time_to_first_token_ms: Option<i64>,
+}
+
+impl std::fmt::Debug for DurableTurnTerminal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableTurnTerminal")
+            .field("turn_id", &self.turn_id)
+            .field("has_last_agent_message", &self.last_agent_message.is_some())
+            .field("token_usage", &self.token_usage)
+            .field("started_at", &self.started_at)
+            .field("completed_at", &self.completed_at)
+            .field("duration_ms", &self.duration_ms)
+            .field("time_to_first_token_ms", &self.time_to_first_token_ms)
+            .finish()
+    }
+}
+
+fn inspect_durable_turn_items(items: &[RolloutItem], turn_id: &str) -> DurableTurnInspection {
+    let mut seen = false;
+    let mut token_usage = None;
+    for item in items {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == turn_id => {
+                seen = true;
+                token_usage = None;
+            }
+            RolloutItem::ResponseItem(envelope) if envelope.turn_id() == Some(turn_id) => {
+                seen = true;
+            }
+            RolloutItem::EventMsg(EventMsg::TokenCount(event)) if seen => {
+                token_usage = event.info.clone();
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) if event.turn_id == turn_id => {
+                let terminal = DurableTurnTerminal {
+                    turn_id: event.turn_id.clone(),
+                    last_agent_message: event.last_agent_message.clone(),
+                    token_usage,
+                    started_at: event.started_at,
+                    completed_at: event.completed_at,
+                    duration_ms: event.duration_ms,
+                    time_to_first_token_ms: event.time_to_first_token_ms,
+                };
+                return if event.error.is_some() {
+                    DurableTurnInspection::Failed(terminal)
+                } else {
+                    DurableTurnInspection::Completed(terminal)
+                };
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event))
+                if event.turn_id.as_deref() == Some(turn_id) =>
+            {
+                return DurableTurnInspection::Failed(DurableTurnTerminal {
+                    turn_id: turn_id.to_string(),
+                    last_agent_message: None,
+                    token_usage,
+                    started_at: event.started_at,
+                    completed_at: event.completed_at,
+                    duration_ms: event.duration_ms,
+                    time_to_first_token_ms: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    if seen {
+        DurableTurnInspection::InProgress
+    } else {
+        DurableTurnInspection::Absent
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
@@ -289,6 +381,54 @@ impl CodexThread {
                 unreachable!("start-if-idle submission cannot steer")
             }
         }
+    }
+
+    /// Starts one turn under a host-reserved durable identity only when idle.
+    pub async fn start_turn_with_id_if_idle(
+        &self,
+        request: TurnInputRequest,
+        turn_id: String,
+    ) -> CodexResult<StartIfIdleSubmission> {
+        self.session
+            .services
+            .agent_control
+            .ensure_execution_capacity_for_turn_start(self)
+            .await?;
+        match self
+            .io
+            .submit_turn_input_with_id(request, TurnInputMode::StartIfIdle, turn_id)
+            .await?
+        {
+            TurnInputSubmission::Started { turn_id } => {
+                Ok(StartIfIdleSubmission::Started { turn_id })
+            }
+            TurnInputSubmission::NotSubmitted { reason } => {
+                Ok(StartIfIdleSubmission::NotSubmitted { reason })
+            }
+            TurnInputSubmission::Steered { .. } => {
+                unreachable!("idle-only submission cannot steer")
+            }
+        }
+    }
+
+    /// Reconstructs the exact durable state of one turn from persisted rollout facts.
+    pub fn inspect_durable_turn<'a>(
+        &'a self,
+        turn_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = CodexResult<DurableTurnInspection>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // A brand-new thread intentionally defers rollout creation until its
+            // first input. Exact host reconciliation reserves the turn identity
+            // before that input, so materialize the empty rollout first. Real
+            // storage or decode failures still surface from `load_history`.
+            self.ensure_rollout_materialized().await;
+            let history = self
+                .load_history(/*include_archived*/ false)
+                .await
+                .map_err(|error| codex_protocol::error::CodexErr::Fatal(error.to_string()))?;
+            Ok(inspect_durable_turn_items(&history.items, turn_id))
+        })
     }
 
     /// Resumes an interrupted regular turn only when the thread is idle.

@@ -1,0 +1,58 @@
+[
+  {
+    "sequence": 1,
+    "alert_id": "alr_79GF72GGJTEJQJSHEK3EWATE0C",
+    "rule_id": "http-latency",
+    "severity": "warning",
+    "status": "firing",
+    "generation": 1,
+    "trace": {
+      "trace_id": "af4e95ed33259a9353f41dfedda548c5",
+      "span_id": "971de6753788b957"
+    },
+    "observation_id": "obs_00000000000000000000000100",
+    "occurred_at_unix_millis": 120100
+  },
+  {
+    "sequence": 2,
+    "alert_id": "alr_1X9DP2AR1WK9HQ773YXC6J46K2",
+    "rule_id": "provider-error",
+    "severity": "critical",
+    "status": "firing",
+    "generation": 1,
+    "trace": {
+      "trace_id": "a9c1f09c7423e1584de823adfae020d5",
+      "span_id": "fc3fc28e9b21f37a"
+    },
+    "observation_id": "obs_00000000000000000000000101",
+    "occurred_at_unix_millis": 120101
+  },
+  {
+    "sequence": 3,
+    "alert_id": "alr_0NZJSS20E5MNS0V2Q0P46JYQ12",
+    "rule_id": "queue-capacity",
+    "severity": "warning",
+    "status": "firing",
+    "generation": 1,
+    "trace": {
+      "trace_id": "7ab2d10db1d9a68a56c9cfb0befd8180",
+      "span_id": "51cd1a6b13bdf7eb"
+    },
+    "observation_id": "obs_00000000000000000000000102",
+    "occurred_at_unix_millis": 120102
+  },
+  {
+    "sequence": 4,
+    "alert_id": "alr_518VAPYH1TZ8JGTQ93DW1K7CJN",
+    "rule_id": "worker-recovery",
+    "severity": "critical",
+    "status": "firing",
+    "generation": 1,
+    "trace": {
+      "trace_id": "af4e95ed33259a9353f41dfedda548c5",
+      "span_id": "f84e12d20633b029"
+    },
+    "observation_id": "obs_00000000000000000000000103",
+    "occurred_at_unix_millis": 120103
+  }
+]

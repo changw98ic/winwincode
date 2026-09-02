@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/fixtures/v1/domain.schema.json",
+  "title": "Contract code generation fixture domain",
+  "$defs": {
+    "ErrorCode": {
+      "description": "Stable machine-readable failure code.",
+      "type": "string",
+      "enum": [
+        "conflict",
+        "invalid_request",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "EmptyParameters": {
+      "description": "A closed object with no fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "OrganizationId": {
+      "description": "Organization identity.",
+      "type": "string",
+      "pattern": "^org_[a-z0-9]+$"
+    },
+    "RequestId": {
+      "description": "Idempotency identity for one command.",
+      "type": "string",
+      "pattern": "^req_[a-z0-9]+$"
+    },
+    "RecursiveJsonObject": {
+      "description": "A recursive object map used to exercise generated type recursion.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RecursiveJsonValue"
+      }
+    },
+    "RecursiveJsonValue": {
+      "description": "A recursive JSON value used to exercise arrays and object maps.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecursiveJsonValue"
+          }
+        },
+        {
+          "$ref": "#/$defs/RecursiveJsonObject"
+        }
+      ]
+    },
+    "ReviewProjection": {
+      "description": "A closed object-level oneOf with a required nullable field.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewerId"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved"
+          ]
+        },
+        "reviewerId": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "pending"
+            },
+            "reviewerId": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "approved"
+            },
+            "reviewerId": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "Revision": {
+      "description": "Expected canonical state revision.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "SchemaVersion": {
+      "description": "Fixture wire schema version.",
+      "type": "string",
+      "const": "winwincode/v1"
+    },
+    "WidgetProjection": {
+      "description": "Read-only data shown by the fixture client.\nIt exercises multiline generated documentation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "labels",
+        "organizationId",
+        "revision",
+        "schemaVersion"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "organizationId": {
+          "$ref": "#/$defs/OrganizationId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "note"
+            ]
+          },
+          "then": {
+            "minProperties": 1
+          }
+        }
+      ]
+    }
+  }
+}

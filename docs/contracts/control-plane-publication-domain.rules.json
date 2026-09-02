@@ -1,0 +1,168 @@
+{
+  "schemaVersion": "winwincode.control-plane-publication-domain-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.3.2",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "documentation": "docs/contracts/control-plane-publication-domain.md",
+  "implementationCompletionSource": "rust-black-box-tests-and-beads",
+  "authorityChain": [
+    "current-delivered-delivery",
+    "current-frozen-candidate-and-artifact",
+    "current-passing-verdict",
+    "resolved-exact-human-publication-approval",
+    "immutable-publication-target",
+    "durable-publication-intent",
+    "ordered-provider-operations",
+    "secret-safe-publication-result"
+  ],
+  "command": {
+    "publishFields": [
+      "publicationId",
+      "deliveryId",
+      "candidateDigest",
+      "target"
+    ],
+    "callerSuppliedVerdictAllowed": false,
+    "callerSuppliedApprovalAllowed": false,
+    "callerSuppliedArtifactAllowed": false,
+    "callerSuppliedProviderOperationAllowed": false
+  },
+  "authorization": {
+    "owner": "Control Plane current-fact join plus winwincode-publication sealed authorization",
+    "requiredCurrentFacts": [
+      "deliveredDeliveryRevision",
+      "deliverySpecIdentity",
+      "frozenCandidateAndDiff",
+      "candidateArtifactIdentityAndDigest",
+      "passingVerdict",
+      "resolvedHumanApprovalAndReviewSet",
+      "sourceIssue",
+      "publicationTarget",
+      "repositoryScope"
+    ],
+    "targetDigestShape": "Delivery GitHubPullRequestTargetRef schema v3",
+    "approvalActor": "canonical-user-id-only",
+    "publicationSetSha256Source": "durable-publication-authorization",
+    "callerJsonCanConstruct": false,
+    "staleOrIncompleteAllowed": false,
+    "mismatchPolicy": "fail-closed-before-intent-or-provider-call"
+  },
+  "domain": {
+    "ownerCrate": "winwincode-publication",
+    "coordinator": "PublicationCoordinator",
+    "ledger": "PublicationLedger",
+    "providerPort": "PublicationPort",
+    "resultFact": "PublicationResultFact",
+    "controlPlaneProjectionFactCopiesAllowed": false
+  },
+  "ledger": {
+    "storageAuthority": "ProductStateStorage",
+    "atomicMembers": [
+      "publicationState",
+      "aggregateJournalRecord",
+      "scopedCommandReceipt",
+      "internalOutboxEvent"
+    ],
+    "intentBeforeProviderCall": true,
+    "exactReplayReadsCurrentStateOrJournal": false,
+    "changedRequestIdentity": "request-conflict",
+    "differentRequestSamePublication": "already-exists",
+    "concurrentExactPublish": "one-intent-all-callers-converge",
+    "journalIntegrity": "validate-manifest-every-record-and-exact-tail"
+  },
+  "provider": {
+    "operationSchemaVersion": 1,
+    "operationProtocol": "winwincode.github-provider-operation.v1",
+    "operationOrder": [
+      "branch",
+      "pull-request",
+      "issue-comment",
+      "commit-status"
+    ],
+    "lookupBeforeApply": true,
+    "stableIdentity": [
+      "operationKey",
+      "requestSha256",
+      "closedPayload"
+    ],
+    "unknownResult": "durable-and-recoverable",
+    "rejectedResult": "terminal-failed",
+    "successCanBeDowngraded": false,
+    "credentialsInOperationOrResult": false,
+    "pullRequestResourceIdentity": [
+      "kind",
+      "repository",
+      "number"
+    ]
+  },
+  "cancel": {
+    "receiptFirst": true,
+    "requiresExactRevision": true,
+    "stopsFutureProviderCalls": true,
+    "changesDeliveryVerdict": false,
+    "changesCandidateOrArtifact": false
+  },
+  "adapterBoundary": {
+    "githubHttpAdapterStatus": "implemented-enforced-phase-3.3",
+    "credentialAdapterStatus": "implemented-enforced-phase-3.3",
+    "adapterRules": "docs/contracts/control-plane-github-publication-adapter.rules.json",
+    "fakePortPurpose": "black-box-domain-and-recovery-proof",
+    "fakePortClaimedProductionComplete": false
+  },
+  "rustGate": {
+    "publication": {
+      "package": "winwincode-publication",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-publication",
+        "--features",
+        "test-support",
+        "--test",
+        "publication_coordinator",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "cancel_after_partial_remote_progress_changes_only_the_publication_and_replays_exactly",
+        "concurrent_exact_publish_requests_create_one_intent_and_one_remote_effect_set",
+        "current_read_rejects_a_valid_looking_state_that_no_longer_matches_the_durable_intent",
+        "current_read_rejects_step_metadata_that_claims_progress_without_a_step_transition",
+        "delivery_target_digest_and_human_actor_seal_one_current_publication_authority",
+        "exact_approved_publication_persists_intent_then_converges_without_duplicate_writes",
+        "exact_publish_replay_returns_the_receipt_before_reading_corrupt_current_facts",
+        "rejected_remote_step_fails_without_calling_later_operations",
+        "request_identity_conflict_and_duplicate_publication_are_distinct_and_write_nothing",
+        "stale_candidate_command_is_rejected_before_intent_or_provider_activity",
+        "unknown_remote_result_is_reconciled_after_restart_without_repeating_the_write"
+      ]
+    },
+    "controlPlane": {
+      "package": "winwincode-control-plane",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-control-plane",
+        "--all-features",
+        "--locked",
+        "publication",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "strongflow_projection::application::tests::publication_authorization_accepts_the_exact_delivery_target_digest",
+        "strongflow_projection::application::tests::publication_approval_requires_one_exact_human_actor_and_time",
+        "current_publication_requires_delivery_candidate_verdict_approval_and_target"
+      ]
+    }
+  },
+  "compatibility": {
+    "secondPublicationFactTypesRetainedInControlPlane": false,
+    "callerReportedPublicationAuthorityRetained": false,
+    "legacyProviderOperationPathRetained": false,
+    "githubHttpAdapterClaimedComplete": true
+  }
+}

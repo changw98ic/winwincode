@@ -1,0 +1,9 @@
+{
+  "credentialReferenceId": "crd_00000000000000000000000001",
+  "secretState": "available",
+  "error": {
+    "code": "CREDENTIAL_STORE_UNAVAILABLE",
+    "message": "Credential secret store is unavailable"
+  },
+  "diagnostic": "Authorization: Bearer [REDACTED]"
+}

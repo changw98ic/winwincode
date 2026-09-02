@@ -1,0 +1,3127 @@
+{
+  "schemaVersion": "winwincode.delivery-strongflow-rust-differential-rules.v1",
+  "issueId": "winwincode-9c4.16.2.6.5",
+  "status": "contract-frozen-trigger-aware",
+  "oracle": {
+    "path": "tests/fixtures/oracles/delivery-strongflow-typescript.v1.json",
+    "sha256": "fdd19cfca89c6baf7d0337e8eb13ecbaf803834d89f1c03eb2abd21a881916f9",
+    "schemaVersion": "winwincode.delivery-strongflow-differential-oracle.v1",
+    "source": "typescript-strongflow-public-invoker",
+    "exactTopLevelKeys": [
+      "runnerContract",
+      "scenarios",
+      "schemaVersion",
+      "source"
+    ],
+    "exactScenarioKeys": [
+      "assertions",
+      "commands",
+      "id",
+      "observation"
+    ],
+    "exactObservationKeys": [
+      "events",
+      "projection",
+      "snapshot",
+      "store",
+      "verdict"
+    ]
+  },
+  "runner": {
+    "activation": "any-trigger-path",
+    "triggerPaths": [
+      "crates/winwincode-control-plane/tests/delivery_strongflow_differential_runner.rs",
+      "crates/winwincode-control-plane/tests/support/differential_runner.rs"
+    ],
+    "requiredPaths": [
+      "crates/winwincode-control-plane/tests/delivery_strongflow_differential_runner.rs",
+      "crates/winwincode-control-plane/tests/support/differential_runner.rs"
+    ],
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "winwincode-control-plane",
+      "--features",
+      "test-support",
+      "--test",
+      "delivery_strongflow_differential_runner"
+    ],
+    "inputEnvironment": "WINWINCODE_DELIVERY_DIFFERENTIAL_INPUT",
+    "outputEnvironment": "WINWINCODE_DELIVERY_DIFFERENTIAL_OUTPUT",
+    "inputSchemaVersion": "winwincode.delivery-strongflow-differential-plan.v2",
+    "outputPolicy": "raw-un_normalized-json-file",
+    "absentPolicy": "validate-oracle-plan-migration-map-and-comparator-without-running-cargo",
+    "activePolicy": "run-real-cargo-target-require-canonical-expected-and-compare-entire-result"
+  },
+  "executionPlan": {
+    "exactTopLevelKeys": [
+      "bindings",
+      "oracleSchemaVersion",
+      "scenarios",
+      "schemaVersion"
+    ],
+    "exactScenarioKeys": [
+      "commands",
+      "id",
+      "terminalOutcomeStatusBySourceCommandIndex"
+    ],
+    "strongFlowCommandKeys": [
+      "kind",
+      "request"
+    ],
+    "fixtureCommandKeys": [
+      "input",
+      "kind"
+    ],
+    "forbiddenExpectedKeys": [
+      "assertions",
+      "observation",
+      "response"
+    ],
+    "expectedStateInputPolicy": "Only fixture.store.seed-snapshot.input.snapshot may carry seeded Delivery state. terminalOutcomeStatusBySourceCommandIndex is the sole additional closed migration provenance derived from a legacy completed response; it is not expected product state. No raw command response, assertion, final observation, journal record, manifest, receipt, outbox, or final snapshot enters the runner plan."
+  },
+  "canonicalMigration": {
+    "mappingVersion": "winwincode.delivery-strongflow-legacy-to-canonical.v1",
+    "schemaAuthority": {
+      "commandQueryResponse": "schema/winwincode/v1/control-plane-http.schema.json",
+      "domainAndError": "schema/winwincode/v1/domain.schema.json",
+      "generatedRust": "crates/winwincode-api/src/generated.rs",
+      "deliverySnapshot": "crates/winwincode-delivery/src/domain/mod.rs",
+      "sessionBinding": "crates/winwincode-delivery/src/domain/session_binding.rs",
+      "deliveryJournal": "crates/winwincode-delivery/src/store.rs",
+      "transactionState": "crates/winwincode-storage/src/lib.rs",
+      "executionPortMessage": "schema/winwincode/v1/execution-port.schema.json"
+    },
+    "migrationOwner": "test-only typed canonical fixture builder; never a production compatibility DTO",
+    "sourceFieldPolicy": "closed-union-reject-unknown-command-error-projection-runtime-and-store-branches",
+    "commandMappings": [
+      {
+        "legacy": "createDelivery",
+        "canonicalTargets": [
+          "delivery.create",
+          "fixture.solution-review.validate"
+        ]
+      },
+      {
+        "legacy": "updateDeliverySpec",
+        "canonicalTargets": [
+          "delivery.update_spec"
+        ]
+      },
+      {
+        "legacy": "startStage",
+        "canonicalTargets": [
+          "delivery.advance"
+        ]
+      },
+      {
+        "legacy": "bindSession",
+        "canonicalTargets": [
+          "execution-port.message:session.binding"
+        ]
+      },
+      {
+        "legacy": "resolveAttention",
+        "canonicalTargets": [
+          "delivery.resolve_attention"
+        ]
+      },
+      {
+        "legacy": "submitVerdict",
+        "canonicalTargets": [
+          "execution-port.message:job.outcome",
+          "delivery.submit_verdict"
+        ]
+      },
+      {
+        "legacy": "getDeliveryProjection",
+        "canonicalTargets": [
+          "delivery.get",
+          "runtime.projection.get"
+        ]
+      },
+      {
+        "legacy": "fixture.execution-source.replace",
+        "canonicalTargets": [
+          "fixture.runtime-source.replace"
+        ]
+      },
+      {
+        "legacy": "fixture.service.restart",
+        "canonicalTargets": [
+          "fixture.service.restart"
+        ]
+      },
+      {
+        "legacy": "fixture.store.corrupt-record",
+        "canonicalTargets": [
+          "fixture.store.corrupt-record"
+        ]
+      },
+      {
+        "legacy": "fixture.store.restore-record",
+        "canonicalTargets": [
+          "fixture.store.restore-record"
+        ]
+      },
+      {
+        "legacy": "fixture.store.seed-snapshot",
+        "canonicalTargets": [
+          "fixture.store.seed-snapshot"
+        ]
+      }
+    ],
+    "errorMappings": [
+      {
+        "legacyOperation": "updateDeliverySpec",
+        "legacyCode": "REVISION_CONFLICT",
+        "canonicalCode": "REVISION_CONFLICT"
+      },
+      {
+        "legacyOperation": "startStage",
+        "legacyCode": "WRONG_DELIVERY_STATE",
+        "canonicalCode": "WRONG_STATE"
+      },
+      {
+        "legacyOperation": "submitVerdict",
+        "legacyCode": "INVALID_REQUEST",
+        "canonicalCode": "CANDIDATE_STALE"
+      },
+      {
+        "legacyOperation": "getDeliveryProjection",
+        "legacyCode": "STORE_FAILURE",
+        "canonicalCode": "SERVICE_UNAVAILABLE",
+        "authority": "crates/winwincode-control-plane/src/strongflow_projection/application.rs",
+        "exactEnvelopePolicy": "message, retryable, details, and currentRevision come from the typed public mapper and are frozen byte-for-byte in canonical expected"
+      },
+      {
+        "legacyOperation": "createDelivery",
+        "legacyCode": "DELIVERY_CONFLICT",
+        "canonicalCode": "WRONG_STATE",
+        "httpStatus": 409,
+        "retryable": false,
+        "condition": "different requestId, same existing deliveryId",
+        "exactEnvelopePolicy": "message, details, and currentRevision come from the typed public mapper and are frozen byte-for-byte in canonical expected"
+      },
+      {
+        "legacyOperation": "createDelivery",
+        "legacyCode": "INVALID_REQUEST",
+        "canonicalCode": "INVALID_REQUEST"
+      },
+      {
+        "legacyOperation": "bindSession",
+        "legacyCode": "INVALID_REQUEST",
+        "canonicalCode": "INVALID_REQUEST"
+      }
+    ],
+    "bindSessionPolicy": "A legacy bindSession for a Codex stage becomes one strict generated SessionBindingMessage trace entry. A successful Human plan-review or delivery-review bind is provenance on its one delivery.advance and creates no SessionBindingMessage. A foreign bind becomes a strict message sent to the real typed seam and returns its canonical zero-write error.",
+    "projectionPolicy": "Every legacy getDeliveryProjection first becomes delivery.get. A runtime.projection.get follow-up exists only when that completed DeliveryDetailProjection has a complete Codex SessionBinding selected by runtimeProjectionFollowup; otherwise observation.projection.runtime is null.",
+    "sessionPolicy": "Legacy dshSessionId/codexSessionId is not renamed. The versioned migration derives every field of each Codex SessionBindingMessage. One accepted message performs accept_worker_session then report_codex_thread as two production commits, each advancing revision once. Human review has no execution binding; a foreign message returns the exact typed zero-write error.",
+    "storePolicy": "All canonical state, journal digests, receipts, outbox events, and cursors are rebuilt by typed Rust serialization/transactions. Legacy digests are never copied after snapshot migration.",
+    "taskPromotionInsertion": {
+      "appliesToScenarioIds": [
+        "success-closed-loop",
+        "candidate-invalidation",
+        "attention",
+        "inconclusive",
+        "infra-error",
+        "rework"
+      ],
+      "afterLegacySourceCommandIndex": 10,
+      "afterCanonicalCommand": "delivery.resolve_attention",
+      "insertedCanonicalCommand": "delivery.approve_task_breakdown",
+      "authority": "old plan-review v2 is converted through the sealed current solution-review v1 fixture and current review_set_digest; the inserted payload is exactly {deliveryId,reviewSetSha256}",
+      "taskIdentityAlgorithm": "canonical bytes = UTF-8(\"winwincode.solution-review-default-task.v1\\0\" + deliveryId + \"\\0\" + specId + \"\\0\" + decimal specRevision); digest = SHA-256(canonical bytes); value = first 16 digest bytes interpreted as big-endian u128; suffix = value encoded as exactly 26 Crockford Base32 characters; taskId = \"dtk_\" + suffix",
+      "proposal": {
+        "titleSource": "current DeliverySpec.title",
+        "goalSource": "current DeliverySpec.goal",
+        "acceptanceCriterionIds": "all criteria in current DeliverySpec order",
+        "blockedByTaskIds": [],
+        "owner": null,
+        "status": "pending"
+      },
+      "createPolicy": "delivery.create tasks is always empty; task graph is promoted only after sealed review",
+      "recomputePolicy": "The inserted command changes revision, events, task status, snapshot, projections, receipts, outbox, and the entire journal digest chain; the typed builder recomputes every value.",
+      "failurePolicy": "missing current review authority, deterministic preparedAt, reviewSetSha256, required criterion, or deterministic default task rejects migration",
+      "reviewDigestPolicy": "Task identity does not use an old review digest. The sealed fixture inserts the deterministic default task into the complete current v1 review context, uses deterministic preparedAt and all other current review fields, then calls the internal review_set_digest; the decision and approve_task_breakdown payload bind that new digest.",
+      "taskIdentityAlphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    },
+    "sessionBindingMessages": {
+      "kind": "execution-port.message",
+      "requestType": "SessionBindingMessage",
+      "requestAuthority": "schema/winwincode/v1/execution-port.schema.json#/$defs/SessionBindingMessage",
+      "identityMappingVersion": "winwincode.delivery-strongflow-session-binding-identities.v1",
+      "successfulMessageCommitSequence": [
+        "accept_worker_session",
+        "report_codex_thread"
+      ],
+      "revisionIncrementPerSuccessfulMessage": 2,
+      "failedMessageWrites": 0,
+      "successfulLegacyBindCountByScenario": {
+        "success-closed-loop": 4,
+        "request-id-replay": 0,
+        "revision-conflict": 0,
+        "corruption-recovery": 0,
+        "task-dag": 0,
+        "candidate-invalidation": 7,
+        "attention": 1,
+        "inconclusive": 4,
+        "infra-error": 4,
+        "rework": 7
+      },
+      "finalCheckpointByScenario": {
+        "success-closed-loop": {
+          "revision": 21,
+          "stageRunCount": 6,
+          "sessionBindingCount": 4,
+          "taskCount": 1
+        },
+        "attention": {
+          "revision": 8,
+          "stageRunCount": 2,
+          "sessionBindingCount": 1,
+          "taskCount": 1
+        },
+        "inconclusive": {
+          "revision": 19,
+          "stageRunCount": 5,
+          "sessionBindingCount": 4,
+          "taskCount": 1
+        },
+        "infra-error": {
+          "revision": 19,
+          "stageRunCount": 5,
+          "sessionBindingCount": 4,
+          "taskCount": 1
+        },
+        "candidate-invalidation": {
+          "revision": 31,
+          "stageRunCount": 8,
+          "sessionBindingCount": 7,
+          "taskCount": 1
+        },
+        "rework": {
+          "revision": 31,
+          "stageRunCount": 8,
+          "sessionBindingCount": 7,
+          "taskCount": 1
+        },
+        "task-dag": {
+          "revision": 2,
+          "stageRunCount": 1,
+          "sessionBindingCount": 1,
+          "taskCount": 2
+        }
+      },
+      "revisionMapPolicy": "Every migrated expectedRevision and response revision uses the sequential canonical result after the preceding message two-commit outcome; legacy revision numbers are provenance only.",
+      "taskDagInsertion": "none: the seeded task-dag transcript has no bindSession; delivery.advance creates one pending binding and final revision is 2 with workerSessionId/codexThreadId null",
+      "sourcePolicy": "Codex successful bindSession only; successful Human review bind is folded into delivery.advance provenance; foreign failed bind is still a strict zero-write message"
+    },
+    "runtimeProjectionFollowup": {
+      "sourceOperation": "getDeliveryProjection",
+      "deliveryQueryTarget": "delivery.get",
+      "runtimeQueryTarget": "runtime.projection.get",
+      "selectionSource": "delivery.get.response.result.stages",
+      "selectionRule": "last-complete-codex-stage-in-delivery-projection-order",
+      "completeBindingRequirements": {
+        "actorType": "codex",
+        "sessionBinding": "non-null",
+        "workerSessionId": "non-null",
+        "codexThreadId": "non-null"
+      },
+      "requestValueSources": {
+        "atCursor": "delivery.get.response.result.readCursor",
+        "deliveryId": "delivery.get.response.result.deliveryId",
+        "productSessionId": "selectedStage.sessionBinding.productSessionId",
+        "stageRunId": "selectedStage.id"
+      },
+      "queryScenarioIds": [
+        "success-closed-loop",
+        "candidate-invalidation",
+        "attention",
+        "inconclusive",
+        "infra-error",
+        "rework"
+      ],
+      "noQueryScenarioIds": [
+        "request-id-replay",
+        "revision-conflict",
+        "corruption-recovery",
+        "task-dag"
+      ],
+      "runtimeResponseSessionCount": 1,
+      "observationPresentSource": "runtime.projection.get.response.result",
+      "observationAbsentValue": null,
+      "failedDeliveryGetPolicy": "no runtime query",
+      "pendingBindingPolicy": "not eligible",
+      "noFallbackIdentities": true
+    },
+    "terminalOutcomeMessages": {
+      "kind": "execution-port.message",
+      "requestType": "JobOutcomeMessage",
+      "requestAuthority": "schema/winwincode/v1/execution-port.schema.json#/$defs/JobOutcomeMessage",
+      "sourceOperation": "submitVerdict",
+      "sourceFactSelection": "For each distinct current final verifier SessionBinding and ExecutionJob, select exactly one terminal turn.completed Worker provenance fact from the legacy submitVerdict runtimeEvents; derive the generated outcome status from the completed legacy submit response carrying that exact fact; repeated submissions carrying that exact fact reuse its accepted durable outcome.",
+      "deduplicationPolicy": "The exact tuple of verifier legacy sessionId, terminal event cursor.sequence, and occurredAtMillis is emitted once before its first delivery.submit_verdict; a later request carrying the same tuple adds no second job.outcome message.",
+      "sourceCommandIndexesByScenario": {
+        "success-closed-loop": [
+          17
+        ],
+        "request-id-replay": [],
+        "revision-conflict": [],
+        "corruption-recovery": [],
+        "task-dag": [],
+        "candidate-invalidation": [
+          17,
+          25
+        ],
+        "attention": [],
+        "inconclusive": [
+          17
+        ],
+        "infra-error": [
+          17
+        ],
+        "rework": [
+          17,
+          25
+        ]
+      },
+      "outcomeStatusByScenario": {
+        "success-closed-loop": "succeeded",
+        "request-id-replay": null,
+        "revision-conflict": null,
+        "corruption-recovery": null,
+        "task-dag": null,
+        "candidate-invalidation": "succeeded",
+        "attention": null,
+        "inconclusive": "succeeded",
+        "infra-error": "infrastructure_error",
+        "rework": "succeeded"
+      },
+      "requestValueSources": {
+        "lease": "exact current verifier ExecutionJob active lease",
+        "workerSessionId": "exact current verifier SessionBinding.workerSessionId",
+        "codexThreadId": "exact current verifier SessionBinding.codexThreadId",
+        "finishedAt": "selected terminal turn.completed occurredAtMillis encoded as an exact UTC Instant",
+        "lastEventSequence": "selected terminal turn.completed cursor.sequence",
+        "status": "exact status derived from the completed legacy submit response current verifier StageRun and Verdict",
+        "summary": "selected terminal turn.completed data.last_agent_message",
+        "artifacts": "empty array because the legacy terminal fact has no ExecutionPort ArtifactReference",
+        "sentAt": "same exact Instant as outcome.finishedAt",
+        "messageId": "deterministic terminal-outcome identity mapping v1"
+      },
+      "successfulMessageCommitSequence": [
+        "apply_terminal_outcome"
+      ],
+      "revisionIncrementPerSuccessfulMessage": 1,
+      "revisionMapPolicy": "The accepted outcome is an independent durable step. Every later expectedRevision, response revision, event, receipt, outbox item, projection cursor, and journal digest uses the resulting canonical revision."
+    },
+    "legacyTaskIdMigration": {
+      "namespace": "winwincode.oracle-task-id-migration.v1\u0000",
+      "digest": "SHA-256",
+      "digestBytes": 16,
+      "encoding": "big-endian-u128-crockford-base32-26",
+      "alphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+      "canonicalPrefix": "dtk_",
+      "preserveCanonicalTaskIds": true,
+      "passOrder": [
+        "map-task-ids",
+        "map-dependencies"
+      ],
+      "owner": null,
+      "preservedFields": [
+        "order",
+        "title",
+        "goal",
+        "acceptanceCriterionIds"
+      ],
+      "knownVectors": [
+        {
+          "canonicalTaskId": "dtk_59X1F156B8YGG0P7G1K9KR5KB1",
+          "deliveryId": "dlv_5QNEEJDDVR7MC02RM22SXW5TMJ",
+          "legacyTaskId": "oracle-task-prerequisite"
+        },
+        {
+          "canonicalTaskId": "dtk_7HT0EYAWGG4MD098E2F2Z5XNTW",
+          "deliveryId": "dlv_5QNEEJDDVR7MC02RM22SXW5TMJ",
+          "legacyTaskId": "oracle-task-dependent"
+        }
+      ],
+      "invalidCycleValidation": {
+        "sourceCommandIndex": 2,
+        "target": "fixture.solution-review.validate",
+        "invalidProposalKind": "dependency-cycle",
+        "specSource": "legacy source command 2 payload.spec",
+        "resolver": "prepare_solution_review_fixture",
+        "errorCode": "INVALID_REQUEST",
+        "mainScenarioStoreWrites": 0,
+        "proposalBuilder": "invalid_task_proposals_fixture(DependencyCycle)",
+        "setup": "isolated canonical planning handoff built from the source spec"
+      }
+    }
+  },
+  "canonicalExpected": {
+    "path": "tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json",
+    "schemaVersion": "winwincode.delivery-strongflow-rust-expected.v1",
+    "requiredWhenRunnerTriggered": true,
+    "forbiddenBeforeTypedMigration": false,
+    "exactTopLevelKeys": [
+      "migration",
+      "result",
+      "schemaVersion"
+    ],
+    "exactMigrationKeys": [
+      "mappingVersion",
+      "sourceOracleSchemaVersion",
+      "sourceOracleSha256"
+    ],
+    "exactScenarioKeys": [
+      "commands",
+      "id",
+      "observation"
+    ],
+    "exactCommandKeys": [
+      "kind",
+      "request",
+      "response",
+      "sourceCommandIndexes"
+    ],
+    "commandKinds": [
+      "control-plane.command",
+      "control-plane.query",
+      "execution-port.message",
+      "fixture.command"
+    ],
+    "exactObservationKeys": [
+      "events",
+      "projection",
+      "snapshot",
+      "store",
+      "verdict"
+    ],
+    "assertionsPolicy": "Legacy assertions are metadata. The gate validates each declared canonical assertion against migrated expected facts, but assertions never enter runner output.",
+    "resultSchemaVersion": "winwincode.delivery-strongflow-rust-differential-result.v1",
+    "exactResultKeys": [
+      "oracleSchemaVersion",
+      "scenarios",
+      "schemaVersion"
+    ],
+    "exactProjectionKeys": [
+      "delivery",
+      "runtime"
+    ],
+    "exactStoreKeys": [
+      "journal",
+      "outbox",
+      "receipts",
+      "state"
+    ],
+    "exactStoreJournalKeys": [
+      "manifest",
+      "records",
+      "snapshot"
+    ],
+    "requestContracts": {
+      "control-plane.command": {
+        "exactKeys": [
+          "actor",
+          "command",
+          "expectedRevision",
+          "payload",
+          "requestId",
+          "schemaVersion",
+          "scope"
+        ],
+        "payloadExactKeysByTarget": {
+          "delivery.create": [
+            "deliveryId",
+            "spec",
+            "tasks"
+          ],
+          "delivery.update_spec": [
+            "deliveryId",
+            "spec"
+          ],
+          "delivery.approve_task_breakdown": [
+            "deliveryId",
+            "reviewSetSha256"
+          ],
+          "delivery.advance": [
+            "deliveryId"
+          ],
+          "delivery.resolve_attention": [
+            "attentionItemId",
+            "decision",
+            "deliveryId",
+            "remediation",
+            "resolution"
+          ],
+          "delivery.submit_verdict": [
+            "candidateDigest",
+            "deliveryId"
+          ]
+        },
+        "createTasks": "exactly-empty"
+      },
+      "control-plane.query": {
+        "exactKeys": [
+          "actor",
+          "page",
+          "parameters",
+          "query",
+          "requestId",
+          "schemaVersion",
+          "scope"
+        ],
+        "pageExactKeys": [
+          "cursor",
+          "limit"
+        ],
+        "parameterKeysByTarget": {
+          "delivery.get": {
+            "required": [
+              "deliveryId"
+            ],
+            "optional": [
+              "atCursor"
+            ]
+          },
+          "runtime.projection.get": {
+            "required": [
+              "atCursor",
+              "deliveryId",
+              "kind",
+              "productSessionId",
+              "stageRunId"
+            ],
+            "optional": [],
+            "kind": "delivery-stage"
+          }
+        }
+      },
+      "fixture.command": {
+        "exactKeys": [
+          "input",
+          "kind"
+        ],
+        "targets": [
+          "fixture.runtime-source.replace",
+          "fixture.service.restart",
+          "fixture.store.seed-snapshot",
+          "fixture.store.corrupt-record",
+          "fixture.store.restore-record",
+          "fixture.solution-review.validate"
+        ],
+        "inputExactKeysByTarget": {
+          "fixture.runtime-source.replace": [
+            "candidate",
+            "runtimeEvents"
+          ],
+          "fixture.service.restart": [
+            "clock"
+          ],
+          "fixture.store.seed-snapshot": [
+            "snapshot"
+          ],
+          "fixture.store.corrupt-record": [
+            "mutation",
+            "sequence"
+          ],
+          "fixture.store.restore-record": [
+            "sequence"
+          ],
+          "fixture.solution-review.validate": [
+            "invalidProposalKind",
+            "spec"
+          ]
+        },
+        "inputConstantsByTarget": {
+          "fixture.solution-review.validate": {
+            "invalidProposalKind": "dependency-cycle"
+          }
+        }
+      },
+      "execution-port.message": {
+        "leaseExactKeys": [
+          "attempt",
+          "expiresAt",
+          "fencingToken",
+          "issuedAt",
+          "jobId",
+          "leaseId",
+          "workerId",
+          "workerInstanceId"
+        ],
+        "sessionIdentityExactKeys": [
+          "codexThreadId",
+          "productSessionId",
+          "stageRunId",
+          "workerSessionId"
+        ],
+        "sessionBindingSourceIdentityExactKeys": [
+          "kind",
+          "leaseId",
+          "workerId",
+          "workerInstanceId",
+          "workerSessionId"
+        ],
+        "exactKeysByTarget": {
+          "session.binding": [
+            "attempt",
+            "boundAt",
+            "codexThreadId",
+            "fencingToken",
+            "kind",
+            "lease",
+            "leaseId",
+            "messageId",
+            "productSessionId",
+            "schemaVersion",
+            "sentAt",
+            "sessionIdentity",
+            "sourceIdentity",
+            "stageRunId",
+            "workerId",
+            "workerSessionId"
+          ],
+          "job.outcome": [
+            "kind",
+            "lease",
+            "messageId",
+            "outcome",
+            "schemaVersion",
+            "sentAt",
+            "sessionIdentity",
+            "workerSessionId"
+          ]
+        },
+        "outcomeExactKeysByTarget": {
+          "job.outcome": [
+            "artifacts",
+            "codexThreadId",
+            "finishedAt",
+            "lastEventSequence",
+            "status",
+            "summary"
+          ]
+        },
+        "outcomeStatusesByTarget": {
+          "job.outcome": [
+            "infrastructure_error",
+            "succeeded"
+          ]
+        },
+        "artifactExactKeys": [
+          "artifactId",
+          "digest"
+        ]
+      }
+    },
+    "responseContracts": {
+      "controlPlaneCompletedExactKeys": [
+        "command",
+        "currentRevision",
+        "outcome",
+        "previousRevision",
+        "requestId",
+        "result",
+        "schemaVersion"
+      ],
+      "controlPlaneQueryExactKeys": [
+        "page",
+        "query",
+        "requestId",
+        "result",
+        "schemaVersion"
+      ],
+      "queryPageExactKeys": [
+        "hasMore",
+        "nextCursor"
+      ],
+      "errorEnvelopeExactKeys": [
+        "error",
+        "requestId",
+        "schemaVersion"
+      ],
+      "errorExactKeys": [
+        "code",
+        "details",
+        "message",
+        "retryable"
+      ],
+      "errorCodes": [
+        "INVALID_REQUEST",
+        "AUTHENTICATION_REQUIRED",
+        "PERMISSION_DENIED",
+        "RESOURCE_NOT_FOUND",
+        "IDEMPOTENCY_CONFLICT",
+        "REVISION_CONFLICT",
+        "READ_CURSOR_EXPIRED",
+        "CANDIDATE_STALE",
+        "WRONG_STATE",
+        "RATE_LIMITED",
+        "SERVICE_UNAVAILABLE",
+        "TRUSTED_FACTS_UNAVAILABLE",
+        "INTERNAL_ERROR"
+      ],
+      "fixtureSuccessExactKeys": [
+        "outcome",
+        "result"
+      ],
+      "fixtureResultExactKeysByTarget": {
+        "fixture.runtime-source.replace": [
+          "candidatePresent",
+          "runtimeEventCount"
+        ],
+        "fixture.service.restart": [
+          "durableStoreReopened"
+        ],
+        "fixture.store.seed-snapshot": [
+          "currentRevision",
+          "deliveryId"
+        ],
+        "fixture.store.corrupt-record": [
+          "sequence"
+        ],
+        "fixture.store.restore-record": [
+          "sequence"
+        ]
+      },
+      "retryableErrorCodes": [
+        "RATE_LIMITED",
+        "READ_CURSOR_EXPIRED",
+        "SERVICE_UNAVAILABLE",
+        "TRUSTED_FACTS_UNAVAILABLE"
+      ],
+      "executionPortMessageCompletedExactKeys": [
+        "commits",
+        "currentRevision",
+        "messageId",
+        "outcome",
+        "previousRevision"
+      ],
+      "executionPortMessageRejectedExactKeys": [
+        "currentRevision",
+        "error",
+        "messageId",
+        "outcome"
+      ],
+      "executionPortCommitExactKeys": [
+        "currentRevision",
+        "operation",
+        "previousRevision",
+        "receipt"
+      ],
+      "runtimeProjectionGetResultExactKeys": [
+        "deliveryId",
+        "eventCursor",
+        "kind",
+        "lastProjectionSequence",
+        "productSessionId",
+        "readCursor",
+        "rebuiltAt",
+        "revision",
+        "sessions",
+        "stageRunId"
+      ],
+      "runtimeProjectionGetSessionsExactLength": 1,
+      "runtimeProjectionSessionExactKeys": [
+        "activities",
+        "agentEdges",
+        "agents",
+        "asOfSequence",
+        "attempt",
+        "codexThreadId",
+        "deliveryTaskId",
+        "diffSummary",
+        "executionJobId",
+        "fencingToken",
+        "leaseId",
+        "plan",
+        "productSessionId",
+        "recovery",
+        "sessionBindingId",
+        "stageRunId",
+        "usage",
+        "workerSessionId"
+      ],
+      "executionPortCommitOperationsByTarget": {
+        "session.binding": [
+          "accept_worker_session",
+          "report_codex_thread"
+        ],
+        "job.outcome": [
+          "apply_terminal_outcome"
+        ]
+      },
+      "fixtureRejectedExactKeys": [
+        "error",
+        "outcome"
+      ],
+      "fixtureRejectedTargets": [
+        "fixture.solution-review.validate"
+      ]
+    },
+    "exactStoreStateKeys": [
+      "revision",
+      "snapshot",
+      "streamId"
+    ],
+    "exactStoreManifestKeys": [
+      "createdAtMillis",
+      "deliveryId",
+      "firstRecordDigest",
+      "schemaVersion"
+    ],
+    "exactStoreRecordKeys": [
+      "deliveryId",
+      "digest",
+      "operation",
+      "previousDigest",
+      "requestDigest",
+      "requestId",
+      "schemaVersion",
+      "sequence",
+      "snapshot"
+    ],
+    "exactStoreReceiptKeys": [
+      "actorKey",
+      "events",
+      "idempotentReplay",
+      "requestId",
+      "revision",
+      "scopeKey",
+      "streamId"
+    ],
+    "exactStoreReceiptEventKeys": [
+      "eventId",
+      "payload",
+      "projectionCursor",
+      "sequence",
+      "topic"
+    ],
+    "persistedReceiptIdempotentReplay": false,
+    "exactStoreOutboxKeys": [
+      "eventId",
+      "payload",
+      "projectionCursor",
+      "published",
+      "sequence",
+      "topic"
+    ],
+    "runtimeProjectionObservation": {
+      "exactKeys": [
+        "delivery",
+        "runtime"
+      ],
+      "runtimePresentSource": "last successful runtime.projection.get response.result",
+      "runtimeAbsentValue": null
+    }
+  },
+  "normalization": {
+    "allowedBindings": [
+      {
+        "name": "ORACLE_ROOT",
+        "placeholder": "<ORACLE_ROOT>",
+        "mode": "literal-substring"
+      },
+      {
+        "name": "NODE_EXECUTABLE",
+        "placeholder": "<NODE_EXECUTABLE>",
+        "mode": "literal-substring"
+      },
+      {
+        "name": "AUTH_PROOF",
+        "placeholder": "<AUTH_PROOF>",
+        "mode": "exact-string"
+      }
+    ],
+    "fixtureRandomIdentities": [],
+    "rawRunnerPlaceholders": "forbidden",
+    "objectKeyOrder": "semantic-unordered",
+    "arrayOrder": "exact",
+    "exactProductFacts": [
+      "timestamps",
+      "requestIds",
+      "revision",
+      "errorCode",
+      "errorMessage",
+      "errorDetails",
+      "eventOrder",
+      "eventSequence",
+      "candidate",
+      "evidence",
+      "verdict",
+      "snapshot",
+      "projection",
+      "journalDigestChain",
+      "receipts",
+      "outbox",
+      "cursor",
+      "fixtureIdentity"
+    ]
+  },
+  "comparison": {
+    "mode": "entire-canonical-json-value-after-allowed-binding-substitution",
+    "objectTraversal": "unicode-code-point-key-order",
+    "arrayTraversal": "ascending-index",
+    "differencePath": "RFC-6901-JSON-Pointer",
+    "firstDifference": "deepest-actionable-leaf-in-deterministic-depth-first-traversal",
+    "missingOrExtraField": "difference-at-field-pointer",
+    "noSummaryComparison": true,
+    "noTestNameEvidence": true
+  },
+  "scenarios": [
+    {
+      "order": 0,
+      "id": "success-closed-loop",
+      "intent": "Canonical Delivery reaches delivered with an exact passing candidate, evidence, verdict, review, and durable chain.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:startStage",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            8,
+            9
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.approve_task_breakdown",
+          "migrationInsertion": "approved-task-graph",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            11
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            13
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            14
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            15
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            16
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            18,
+            19
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            20
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            21
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            22
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            22
+          ],
+          "target": "runtime.projection.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "finalRevision": 17,
+        "finalStatus": "delivered",
+        "verdict": "pass"
+      },
+      "canonicalAssertions": {
+        "finalRevision": 21,
+        "finalStatus": "delivered",
+        "sessionBindingCount": 4,
+        "stageRunCount": 6,
+        "taskCount": 1,
+        "verdict": "pass"
+      },
+      "canonicalFinalRevision": 21
+    },
+    {
+      "order": 1,
+      "id": "request-id-replay",
+      "intent": "The same scoped request replays the original completed result without appending another durable change.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "durableRecordCount": 1,
+        "replayedSnapshotEqual": true
+      },
+      "canonicalAssertions": {
+        "durableRecordCount": 1,
+        "replayedSnapshotEqual": true,
+        "finalRevision": 1
+      },
+      "canonicalFinalRevision": 1
+    },
+    {
+      "order": 2,
+      "id": "revision-conflict",
+      "intent": "A stale expected revision returns the exact canonical conflict and leaves state unchanged.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "currentRevision": 2,
+        "errorCode": "REVISION_CONFLICT",
+        "snapshotUnchanged": true
+      },
+      "canonicalAssertions": {
+        "currentRevision": "$capture-exact",
+        "errorCode": "REVISION_CONFLICT",
+        "snapshotUnchanged": true,
+        "finalRevision": 2
+      },
+      "canonicalFinalRevision": 2
+    },
+    {
+      "order": 3,
+      "id": "corruption-recovery",
+      "intent": "A damaged journal fails closed; restoring exact bytes and restarting reconstructs the same state.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "fixture.store.corrupt-record",
+        "strongflow.request:getDeliveryProjection",
+        "fixture.store.restore-record",
+        "fixture.service.restart",
+        "strongflow.request:getDeliveryProjection",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "fixture.store.corrupt-record",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "fixture.store.restore-record",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "fixture.service.restart",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "corruptedReadError": "STORE_FAILURE",
+        "restoredSnapshotEqual": true
+      },
+      "canonicalAssertions": {
+        "corruptedReadError": "SERVICE_UNAVAILABLE",
+        "restoredSnapshotEqual": true,
+        "finalRevision": 1
+      },
+      "canonicalFinalRevision": 1
+    },
+    {
+      "order": 4,
+      "id": "task-dag",
+      "intent": "Blocked tasks cannot advance and a cyclic sealed task breakdown is rejected without persistence.",
+      "sourceCommandSignatures": [
+        "fixture.store.seed-snapshot",
+        "strongflow.request:startStage",
+        "strongflow.request:createDelivery",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "fixture.store.seed-snapshot",
+          "revisionEffect": {
+            "seed": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "fixture.solution-review.validate",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "blockedTaskError": "WRONG_DELIVERY_STATE",
+        "cycleError": "INVALID_REQUEST",
+        "durableTaskOrder": [
+          "oracle-task-prerequisite",
+          "oracle-task-dependent"
+        ]
+      },
+      "canonicalAssertions": {
+        "advancedTaskId": "dtk_59X1F156B8YGG0P7G1K9KR5KB1",
+        "cycleError": "INVALID_REQUEST",
+        "cycleRejectedWithoutWrite": true,
+        "durableTaskOrder": [
+          "dtk_59X1F156B8YGG0P7G1K9KR5KB1",
+          "dtk_7HT0EYAWGG4MD098E2F2Z5XNTW"
+        ],
+        "finalRevision": 2,
+        "stageRunCount": 1,
+        "sessionBindingCount": 1,
+        "taskCount": 2
+      },
+      "canonicalFinalRevision": 2
+    },
+    {
+      "order": 5,
+      "id": "candidate-invalidation",
+      "intent": "A replaced candidate makes the prior candidate digest stale while the current candidate can be judged.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:startStage",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "strongflow.request:submitVerdict",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            8,
+            9
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.approve_task_breakdown",
+          "migrationInsertion": "approved-task-graph",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            11
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            13
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            14
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            15
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            16
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            18
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            19
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            20
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            21
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            22
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            23
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            24
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            25
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            25
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            26
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            27
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            28
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            28
+          ],
+          "target": "runtime.projection.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "candidateChanged": true,
+        "staleCandidateError": "INVALID_REQUEST"
+      },
+      "canonicalAssertions": {
+        "candidateChanged": true,
+        "finalRevision": 31,
+        "sessionBindingCount": 7,
+        "stageRunCount": 8,
+        "staleCandidateError": "CANDIDATE_STALE",
+        "taskCount": 1
+      },
+      "canonicalFinalRevision": 31
+    },
+    {
+      "order": 6,
+      "id": "attention",
+      "intent": "A current human decision resolves one blocking Attention item and advances only the authorized transition.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:startStage",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            8,
+            9
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.approve_task_breakdown",
+          "migrationInsertion": "approved-task-graph",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            11
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "runtime.projection.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "attentionItemStatus": "resolved",
+        "openAttentionStatus": "needs-attention",
+        "resolvedStatus": "executing"
+      },
+      "canonicalAssertions": {
+        "attentionItemStatus": "resolved",
+        "finalRevision": 8,
+        "openAttentionStatus": "needs-attention",
+        "resolvedStatus": "executing",
+        "sessionBindingCount": 1,
+        "stageRunCount": 2,
+        "taskCount": 1
+      },
+      "canonicalFinalRevision": 8
+    },
+    {
+      "order": 7,
+      "id": "inconclusive",
+      "intent": "Incomplete direct verification produces an inconclusive verdict and blocking Attention.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:startStage",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            8,
+            9
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.approve_task_breakdown",
+          "migrationInsertion": "approved-task-graph",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            11
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            13
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            14
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            15
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            16
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            18
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            19
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            19
+          ],
+          "target": "runtime.projection.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "attentionTypes": [
+          "verification_blocked"
+        ],
+        "verdictStatus": "inconclusive"
+      },
+      "canonicalAssertions": {
+        "attentionTypes": [
+          "verification_blocked"
+        ],
+        "finalRevision": 19,
+        "sessionBindingCount": 4,
+        "stageRunCount": 5,
+        "taskCount": 1,
+        "verdictStatus": "inconclusive"
+      },
+      "canonicalFinalRevision": 19
+    },
+    {
+      "order": 8,
+      "id": "infra-error",
+      "intent": "Runtime environment failure produces infra_error and blocking Attention.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:startStage",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            8,
+            9
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.approve_task_breakdown",
+          "migrationInsertion": "approved-task-graph",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            11
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            13
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            14
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            15
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            16
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            18
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            19
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            19
+          ],
+          "target": "runtime.projection.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "attentionTypes": [
+          "verification_blocked"
+        ],
+        "verdictStatus": "infra_error"
+      },
+      "canonicalAssertions": {
+        "attentionTypes": [
+          "verification_blocked"
+        ],
+        "finalRevision": 19,
+        "sessionBindingCount": 4,
+        "stageRunCount": 5,
+        "taskCount": 1,
+        "verdictStatus": "infra_error"
+      },
+      "canonicalFinalRevision": 19
+    },
+    {
+      "order": 9,
+      "id": "rework",
+      "intent": "A failed candidate enters bounded rework; the replacement candidate invalidates prior evidence and can pass.",
+      "sourceCommandSignatures": [
+        "strongflow.request:createDelivery",
+        "strongflow.request:createDelivery",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:updateDeliverySpec",
+        "strongflow.request:startStage",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "strongflow.request:resolveAttention",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:startStage",
+        "strongflow.request:bindSession",
+        "strongflow.request:submitVerdict",
+        "fixture.execution-source.replace",
+        "strongflow.request:getDeliveryProjection"
+      ],
+      "canonicalGroups": [
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            0
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            1
+          ],
+          "target": "delivery.create",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            2
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            3
+          ],
+          "target": "delivery.update_spec",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            4
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            5
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            6
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            7
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            8,
+            9
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            10
+          ],
+          "target": "delivery.approve_task_breakdown",
+          "migrationInsertion": "approved-task-graph",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            11
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            12
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            13
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            14
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            15
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            16
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            17
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            18
+          ],
+          "target": "delivery.resolve_attention",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            19
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            20
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            21
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            22
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            23
+          ],
+          "target": "delivery.advance",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            24
+          ],
+          "target": "session.binding",
+          "revisionEffect": {
+            "delta": 2
+          }
+        },
+        {
+          "kind": "execution-port.message",
+          "sourceCommandIndexes": [
+            25
+          ],
+          "target": "job.outcome",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "control-plane.command",
+          "sourceCommandIndexes": [
+            25
+          ],
+          "target": "delivery.submit_verdict",
+          "revisionEffect": {
+            "delta": 1
+          }
+        },
+        {
+          "kind": "fixture.command",
+          "sourceCommandIndexes": [
+            26
+          ],
+          "target": "fixture.runtime-source.replace",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            27
+          ],
+          "target": "delivery.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        },
+        {
+          "kind": "control-plane.query",
+          "sourceCommandIndexes": [
+            27
+          ],
+          "target": "runtime.projection.get",
+          "revisionEffect": {
+            "delta": 0
+          }
+        }
+      ],
+      "observationKeys": [
+        "events",
+        "projection",
+        "snapshot",
+        "store",
+        "verdict"
+      ],
+      "legacyAssertions": {
+        "candidateChanged": true,
+        "enteredRework": true,
+        "verdicts": [
+          "fail",
+          "pass"
+        ]
+      },
+      "canonicalAssertions": {
+        "candidateChanged": true,
+        "enteredRework": true,
+        "finalRevision": 31,
+        "sessionBindingCount": 7,
+        "stageRunCount": 8,
+        "taskCount": 1,
+        "verdicts": [
+          "fail",
+          "pass"
+        ]
+      },
+      "canonicalFinalRevision": 31
+    }
+  ]
+}

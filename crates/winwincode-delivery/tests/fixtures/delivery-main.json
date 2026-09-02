@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 3,
+  "id": "dlv_01J00000000000000000000000",
+  "revision": 7,
+  "status": "ready-to-deliver",
+  "spec": {
+    "schemaVersion": 3,
+    "id": "delivery-spec-v1",
+    "deliveryId": "dlv_01J00000000000000000000000",
+    "revision": 1,
+    "title": "Implement invitation flow",
+    "goal": "Users can invite a teammate and verify the result.",
+    "scope": [
+      "Invitation data and API"
+    ],
+    "outOfScope": [
+      "Organization billing"
+    ],
+    "constraints": [
+      "Keep the existing authentication boundary"
+    ],
+    "acceptanceCriteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-required",
+        "description": "A valid invitation can be accepted exactly once.",
+        "verificationMethod": "Run the invitation integration test.",
+        "required": true
+      },
+      {
+        "schemaVersion": 3,
+        "id": "criterion-optional",
+        "description": "The empty state remains readable at narrow widths.",
+        "verificationMethod": null,
+        "required": false
+      }
+    ],
+    "sourceRef": null,
+    "publicationTarget": null,
+    "repository": {
+      "schemaVersion": 3,
+      "kind": "local-git",
+      "locator": "/workspace/repository"
+    },
+    "baseRevision": "0123456789012345678901234567890123456789",
+    "maxReworkAttempts": 2,
+    "createdAtMillis": 1800000000000
+  },
+  "tasks": [
+    {
+      "schemaVersion": 3,
+      "id": "delivery-task-api",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "title": "Invitation API",
+      "goal": "Deliver the independently verifiable invitation endpoint.",
+      "acceptanceCriterionIds": [
+        "criterion-required"
+      ],
+      "blockedByTaskIds": [],
+      "owner": "backend-owner",
+      "status": "completed"
+    }
+  ],
+  "stageRuns": [
+    {
+      "schemaVersion": 3,
+      "id": "stage-verification-1",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliveryTaskId": "delivery-task-api",
+      "stage": "verifying",
+      "actorType": "codex",
+      "role": "verifier",
+      "status": "succeeded",
+      "attempt": 1,
+      "startedAtMillis": 1800000000010,
+      "finishedAtMillis": 1800000000020
+    }
+  ],
+  "sessionBindings": [
+    {
+      "schemaVersion": 3,
+      "id": "binding-verifier-1",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliveryTaskId": "delivery-task-api",
+      "stageRunId": "stage-verification-1",
+      "productSessionId": "product-session-verifier",
+      "executionJobId": "execution-job-verifier",
+      "workerSessionId": "worker-session-verifier",
+      "codexThreadId": "codex-thread-verifier",
+      "boundAtMillis": 1800000000011,
+      "workerId": "wrk_01J00000000000000000000000",
+      "workerInstanceId": "wki_01J00000000000000000000000",
+      "leaseId": "lse_01J00000000000000000000000",
+      "attempt": 1,
+      "fencingToken": "7",
+      "sourceProvenance": {
+        "kind": "execution-port",
+        "reference": "msg_01J00000000000000000000000"
+      }
+    }
+  ],
+  "attentionItems": [],
+  "evidence": [
+    {
+      "schemaVersion": 3,
+      "id": "evidence-test-1",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliverySpecId": "delivery-spec-v1",
+      "deliverySpecRevision": 1,
+      "stageRunId": "stage-verification-1",
+      "sessionBindingId": "binding-verifier-1",
+      "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "test",
+      "sourceRef": "runtime-event:codex-session-verifier/42",
+      "createdAtMillis": 1800000000019
+    }
+  ],
+  "verdict": {
+    "schemaVersion": 3,
+    "id": "delivery-verdict-1",
+    "deliveryId": "dlv_01J00000000000000000000000",
+    "deliverySpecId": "delivery-spec-v1",
+    "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "pass",
+    "criteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-result-required",
+        "deliveryId": "dlv_01J00000000000000000000000",
+        "deliverySpecId": "delivery-spec-v1",
+        "criterionId": "criterion-required",
+        "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "verdict": "pass",
+        "evidenceRefs": [
+          "evidence-test-1"
+        ],
+        "explanation": "The direct integration test passed.",
+        "evaluatedAtMillis": 1800000000021
+      },
+      {
+        "schemaVersion": 3,
+        "id": "criterion-result-optional",
+        "deliveryId": "dlv_01J00000000000000000000000",
+        "deliverySpecId": "delivery-spec-v1",
+        "criterionId": "criterion-optional",
+        "candidateRef": "git-tree:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "verdict": "inconclusive",
+        "evidenceRefs": [],
+        "explanation": "No required visual probe was defined.",
+        "evaluatedAtMillis": 1800000000021
+      }
+    ],
+    "unresolvedFindings": [],
+    "producedAtMillis": 1800000000022
+  },
+  "createdAtMillis": 1800000000000,
+  "updatedAtMillis": 1800000000023
+}

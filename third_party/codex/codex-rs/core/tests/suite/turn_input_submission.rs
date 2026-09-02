@@ -1,3 +1,4 @@
+use codex_core::DurableTurnInspection;
 use codex_core::NotSubmittedReason;
 use codex_core::RecoverTurnRequest;
 use codex_core::StartIfIdleSubmission;
@@ -43,6 +44,157 @@ async fn submit_user_message(
     text: &str,
 ) -> codex_protocol::error::Result<TurnInputSubmission> {
     codex.start_or_steer_turn(user_message_request(text)).await
+}
+
+fn started_turn_id(submission: TurnInputSubmission) -> String {
+    let TurnInputSubmission::Started { turn_id } = submission else {
+        panic!("expected the test turn to start");
+    };
+    turn_id
+}
+
+#[tokio::test]
+async fn durable_turn_inspection_reports_absent() {
+    let absent_server = responses::start_mock_server().await;
+    let absent = test_codex()
+        .build_with_auto_env(&absent_server)
+        .await
+        .expect("build absent durable-turn session");
+    assert_eq!(
+        absent
+            .codex
+            .inspect_durable_turn("turn-that-was-never-submitted")
+            .await
+            .expect("inspect absent turn"),
+        DurableTurnInspection::Absent
+    );
+}
+
+#[tokio::test]
+async fn durable_turn_inspection_reports_in_progress() {
+    let (release_response, response_gate) = oneshot::channel();
+    let (in_progress_server, _completions) = start_streaming_sse_server(vec![vec![
+        StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![ev_response_created("resp-in-progress")]),
+        },
+        StreamingSseChunk {
+            gate: Some(response_gate),
+            body: responses::sse(vec![ev_completed("resp-in-progress")]),
+        },
+    ]])
+    .await;
+    let in_progress = test_codex()
+        .build_with_streaming_server(&in_progress_server)
+        .await
+        .expect("build in-progress durable-turn session");
+    let in_progress_turn = started_turn_id(
+        submit_user_message(&in_progress.codex, "keep this turn open")
+            .await
+            .expect("submit in-progress turn"),
+    );
+    wait_for_event(&in_progress.codex, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    assert_eq!(
+        in_progress
+            .codex
+            .inspect_durable_turn(&in_progress_turn)
+            .await
+            .expect("inspect in-progress turn"),
+        DurableTurnInspection::InProgress
+    );
+    release_response
+        .send(())
+        .expect("in-progress response gate should remain open");
+    wait_for_event(&in_progress.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn durable_turn_inspection_recovers_completed_terminal_and_usage() {
+    let completed_server = responses::start_mock_server().await;
+    responses::mount_sse_once(
+        &completed_server,
+        responses::sse(vec![
+            ev_response_created("resp-completed"),
+            responses::ev_assistant_message("message-completed", "durable final answer"),
+            responses::ev_completed_with_tokens("resp-completed", 17),
+        ]),
+    )
+    .await;
+    let completed = test_codex()
+        .build_with_auto_env(&completed_server)
+        .await
+        .expect("build completed durable-turn session");
+    let completed_turn = started_turn_id(
+        submit_user_message(&completed.codex, "finish this turn")
+            .await
+            .expect("submit completed turn"),
+    );
+    wait_for_event(&completed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let DurableTurnInspection::Completed(completion) = completed
+        .codex
+        .inspect_durable_turn(&completed_turn)
+        .await
+        .expect("inspect completed turn")
+    else {
+        panic!("expected completed durable turn");
+    };
+    assert_eq!(completion.turn_id, completed_turn);
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some("durable final answer")
+    );
+    assert_eq!(
+        completion
+            .token_usage
+            .as_ref()
+            .map(|usage| usage.last_token_usage.total_tokens),
+        Some(17)
+    );
+}
+
+#[tokio::test]
+async fn durable_turn_inspection_reports_failed() {
+    let failed_server = responses::start_mock_server().await;
+    responses::mount_response_once(
+        &failed_server,
+        responses::sse_response(responses::sse_failed(
+            "resp-failed",
+            "fixture_failure",
+            "fixture failure",
+        )),
+    )
+    .await;
+    let failed = test_codex()
+        .build_with_auto_env(&failed_server)
+        .await
+        .expect("build failed durable-turn session");
+    let failed_turn = started_turn_id(
+        submit_user_message(&failed.codex, "fail this turn")
+            .await
+            .expect("submit failed turn"),
+    );
+    wait_for_event(&failed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let DurableTurnInspection::Failed(failure) = failed
+        .codex
+        .inspect_durable_turn(&failed_turn)
+        .await
+        .expect("inspect failed turn")
+    else {
+        panic!("expected failed durable turn");
+    };
+    assert_eq!(failure.turn_id, failed_turn);
 }
 
 #[tokio::test]

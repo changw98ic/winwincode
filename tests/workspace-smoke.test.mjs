@@ -1,126 +1,222 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { describeHost } from '../apps/host/dist/index.js'
-import {
-  UnsupportedPlatformError,
-  nativePackageName,
-  resolveReleaseTarget,
-} from '../packages/native/dist/index.js'
+import { selectSuccessfulMainlineRun } from '../scripts/verify-mainline-release-source.mjs'
 
 const root = resolve(import.meta.dirname, '..')
+const workflowPath = resolve(root, '.github/workflows/native-release.yml')
+const workflow = readFileSync(workflowPath, 'utf8')
+const mainlineWorkflowPath = resolve(root, '.github/workflows/mainline.yml')
+const mainlineWorkflow = readFileSync(mainlineWorkflowPath, 'utf8')
 
-test('maps every first-release host to its Rust target', () => {
-  assert.equal(resolveReleaseTarget('darwin', 'arm64'), 'aarch64-apple-darwin')
-  assert.equal(resolveReleaseTarget('darwin', 'x64'), 'x86_64-apple-darwin')
-  assert.equal(resolveReleaseTarget('linux', 'arm64'), 'aarch64-unknown-linux-gnu')
-  assert.equal(resolveReleaseTarget('linux', 'x64'), 'x86_64-unknown-linux-gnu')
-})
-
-test('rejects an unsupported platform with an actionable message', () => {
-  assert.throws(
-    () => resolveReleaseTarget('win32', 'x64'),
-    error => error instanceof UnsupportedPlatformError
-      && error.message.includes('macOS and Linux')
-      && error.message.includes('win32/x64'),
+test('ordinary CI owns the one canonical workspace verification', () => {
+  assert.match(mainlineWorkflow, /^name: Mainline verification$/mu)
+  assert.match(mainlineWorkflow, /^  push:$/mu)
+  assert.match(mainlineWorkflow, /^  pull_request:$/mu)
+  assert.match(mainlineWorkflow, /^      - name: Verify the exact commit once$/mu)
+  assert.equal([...mainlineWorkflow.matchAll(/corepack pnpm verify$/gmu)].length, 1)
+  assert.doesNotMatch(
+    mainlineWorkflow,
+    /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX|secrets\./u,
   )
+  assert.ok(mainlineWorkflow.includes('binutils bubblewrap pkg-config libcap-dev'))
+  assert.ok(mainlineWorkflow.includes('kernel.apparmor_restrict_unprivileged_userns=0'))
+  assert.ok(mainlineWorkflow.includes(
+    'bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net',
+  ))
 })
 
-test('keeps DSH chat as default and StrongFlow as advanced surface', () => {
-  const host = describeHost('linux', 'x64')
-  assert.equal(host.defaultSurface.id, 'chat')
-  assert.deepEqual(host.surfaces.map(surface => surface.id), ['chat', 'strongflow'])
-  assert.equal(host.surfaces[1]?.default, false)
-})
-
-test('maps every Rust target to one deterministic optional package', () => {
-  assert.deepEqual(
-    [
-      'aarch64-apple-darwin',
-      'x86_64-apple-darwin',
-      'aarch64-unknown-linux-gnu',
-      'x86_64-unknown-linux-gnu',
-    ].map(target => [target, nativePackageName(target)]),
-    [
-      ['aarch64-apple-darwin', '@winwincode/native-darwin-arm64'],
-      ['x86_64-apple-darwin', '@winwincode/native-darwin-x64'],
-      ['aarch64-unknown-linux-gnu', '@winwincode/native-linux-arm64'],
-      ['x86_64-unknown-linux-gnu', '@winwincode/native-linux-x64'],
-    ],
-  )
-})
-
-test('native release workflow covers exactly the four claimed hosts', () => {
-  const workflow = readFileSync(
-    resolve(root, '.github/workflows/native-release.yml'),
-    'utf8',
-  )
-  const matrix = [...workflow.matchAll(
-    /- target: ([^\n]+)\n\s+runner: ([^\n]+)/gu,
-  )].map(match => [match[1], match[2]])
-  assert.deepEqual(matrix, [
-    ['aarch64-apple-darwin', 'macos-15'],
-    ['x86_64-apple-darwin', 'macos-15-intel'],
+test('product release verifies one successful exact-commit mainline run before the four-target matrix', () => {
+  assert.match(workflow, /^name: Product release matrix$/mu)
+  assert.match(workflow, /^  workflow_dispatch:$/mu)
+  assert.match(workflow, /^      source_commit:$/mu)
+  assert.match(workflow, /^        required: true$/mu)
+  assert.doesNotMatch(workflow, /^  (?:pull_request|push):$/mu)
+  assert.doesNotMatch(workflow, /corepack pnpm verify(?:\s|$)/u)
+  assert.match(workflow, /^  actions: read$/mu)
+  assert.match(workflow, /^  verify-source:$/mu)
+  assert.ok(workflow.includes('test "${SELECTED_REF}" = "refs/heads/${DEFAULT_BRANCH}"'))
+  assert.ok(workflow.includes('ref: ${{ github.event.repository.default_branch }}'))
+  assert.ok(workflow.includes('node scripts/verify-mainline-release-source.mjs'))
+  assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
+  assert.ok(workflow.includes('--default-branch "${DEFAULT_BRANCH}"'))
+  assert.match(workflow, /^    needs: verify-source$/mu)
+  assert.ok(workflow.includes('SOURCE_COMMIT: ${{ needs.verify-source.outputs.source_commit }}'))
+  assert.ok(workflow.includes('ref: ${{ env.SOURCE_COMMIT }}'))
+  const targetMatrix = [
     ['aarch64-unknown-linux-gnu', 'ubuntu-24.04-arm'],
     ['x86_64-unknown-linux-gnu', 'ubuntu-24.04'],
-  ])
-  assert.equal(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '24.19.0')
-  for (const command of [
-    'corepack pnpm build:native --release --target ${{ matrix.target }}',
-    'node scripts/verify-native-package.mjs --target ${{ matrix.target }} --require-release',
-    'node scripts/verify-native-install.mjs --target ${{ matrix.target }} --require-release',
-    'node scripts/pack-native-release.mjs --target ${{ matrix.target }} --output release-artifacts',
-  ]) {
-    assert.ok(workflow.includes(command), `native release workflow is missing ${command}`)
+    ['aarch64-apple-darwin', 'macos-15'],
+    ['x86_64-apple-darwin', 'macos-15-intel'],
+  ]
+  assert.deepEqual(
+    [...workflow.matchAll(/^          - target: (.+)$/gmu)].map(match => match[1]).toSorted(),
+    targetMatrix.map(([target]) => target).toSorted(),
+  )
+  for (const [target, runner] of targetMatrix) {
+    assert.match(
+      workflow,
+      new RegExp(`- target: ${target}\\n            runner: ${runner}`, 'u'),
+      `native release workflow is missing ${target} on ${runner}`,
+    )
   }
+  assert.notEqual(readFileSync(resolve(root, '.node-version'), 'utf8').trim(), '')
+  assert.ok(workflow.includes('node-version-file: .node-version'))
+  assert.ok(workflow.includes('rustup toolchain install 1.95.0'))
+  assert.ok(workflow.includes('rustup target add "${{ matrix.target }}" --toolchain 1.95.0'))
   assert.doesNotMatch(workflow, /windows|win32|msvc/iu)
+  const releaseRunner = readFileSync(resolve(root, 'scripts/run-release-artifact-gate.mjs'), 'utf8')
+  assert.doesNotMatch(releaseRunner, /pnpm', 'verify|pnpm verify/u)
 })
 
-test('CLI package smoke exposes version and scaffold descriptor', () => {
-  const version = spawnSync(process.execPath, ['apps/host/dist/cli.js', '--version'], {
-    cwd: root,
-    encoding: 'utf8',
+test('mainline source verifier accepts only the default-branch exact-SHA successful push', () => {
+  const defaultBranch = 'main'
+  const repository = 'winwincode/project'
+  const sourceCommit = '1'.repeat(40)
+  const valid = {
+    id: 42,
+    html_url: 'https://github.example/runs/42',
+    head_sha: sourceCommit,
+    event: 'push',
+    status: 'completed',
+    conclusion: 'success',
+    path: '.github/workflows/mainline.yml',
+    head_repository: { full_name: repository },
+    head_branch: defaultBranch,
+  }
+  assert.deepEqual(selectSuccessfulMainlineRun({
+    defaultBranch,
+    repository,
+    sourceCommit,
+    runs: [valid],
+  }), {
+    defaultBranch,
+    runId: 42,
+    runUrl: 'https://github.example/runs/42',
+    sourceCommit,
   })
-  assert.equal(version.status, 0, version.stderr)
-  assert.equal(version.stdout.trim(), '0.0.0-dev.0')
-
-  const descriptor = spawnSync(process.execPath, ['apps/host/dist/cli.js', '--print-scaffold'], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(descriptor.status, 0, descriptor.stderr)
-  const parsed = JSON.parse(descriptor.stdout)
-  assert.equal(parsed.defaultSurface.id, 'chat')
-  assert.equal(parsed.components.length, 3)
+  assert.throws(
+    () => selectSuccessfulMainlineRun({
+      defaultBranch,
+      repository,
+      sourceCommit: 'HEAD',
+      runs: [valid],
+    }),
+    /40 lowercase hexadecimal/u,
+  )
+  for (const changed of [
+    { event: 'pull_request' },
+    { head_repository: { full_name: 'foreign/project' } },
+    { conclusion: 'failure' },
+    { head_sha: '2'.repeat(40) },
+    { head_branch: 'feature/strongflow-foundation' },
+  ]) {
+    assert.throws(
+      () => selectSuccessfulMainlineRun({
+        defaultBranch,
+        repository,
+        sourceCommit,
+        runs: [{ ...valid, ...changed }],
+      }),
+      /found 0/u,
+    )
+  }
+  assert.throws(
+    () => selectSuccessfulMainlineRun({
+      defaultBranch,
+      repository,
+      sourceCommit,
+      runs: [valid, valid],
+    }),
+    /found 2/u,
+  )
+  assert.throws(
+    () => selectSuccessfulMainlineRun({
+      defaultBranch: '../main',
+      repository,
+      sourceCommit,
+      runs: [valid],
+    }),
+    /default branch identity is invalid/u,
+  )
 })
 
-test('preinstall guard fails clearly on unsupported hosts', () => {
-  const result = spawnSync(process.execPath, [
-    'scripts/check-runtime.mjs',
-    '--platform',
-    'win32',
-    '--arch',
-    'x64',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /Unsupported platform win32\/x64/u)
+test('product release workflow passes immutable source identity to the canonical gate', () => {
+  assert.ok(existsSync(resolve(root, 'scripts/run-release-artifact-gate.mjs')))
+  assert.ok(workflow.includes('node scripts/run-release-artifact-gate.mjs'))
+  assert.ok(workflow.includes('--source-commit "${SOURCE_COMMIT}"'))
+  assert.ok(workflow.includes('--source-date-epoch "$(git show -s --format=%ct "${SOURCE_COMMIT}")"'))
+  assert.doesNotMatch(workflow, /GITHUB_SHA/u)
+  assert.ok(workflow.includes('--output release-artifacts'))
+  const productUploadStep = workflow.match(
+    /      - name: Upload release artifacts\n[\s\S]*?(?=\n      - name:)/u,
+  )?.[0]
+  assert.notEqual(productUploadStep, undefined)
+  assert.ok(productUploadStep.includes('name: ${{ matrix.target }}'))
+  assert.doesNotMatch(workflow, /name: release-\$\{\{ matrix\.target \}\}/u)
+  assert.ok(workflow.includes('path: release-artifacts/${{ matrix.target }}/'))
+  assert.ok(workflow.includes('if-no-files-found: error'))
+  assert.doesNotMatch(workflow, /run-native-release-gate|native-package|name: native-/u)
 })
 
-test('preinstall guard fails clearly outside Node 24', () => {
-  const result = spawnSync(process.execPath, [
-    'scripts/check-runtime.mjs',
-    '--node-version',
-    '22.19.0',
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /requires Node\.js 24\.x/u)
+test('product release workflow binds the helper signing keys without embedding key material', () => {
+  const releaseStep = workflow.match(
+    /      - name: Build product release artifacts and write evidence\n[\s\S]*?(?=\n      - name:)/u,
+  )?.[0]
+  assert.notEqual(releaseStep, undefined)
+  assert.ok(releaseStep.includes(
+    'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}',
+  ))
+  assert.ok(releaseStep.includes(
+    'WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX: ${{ vars.WINWINCODE_HELPER_RELEASE_PUBLIC_KEY_HEX }}',
+  ))
+  assert.doesNotMatch(
+    releaseStep,
+    /WINWINCODE_HELPER_RELEASE_(?:PRIVATE|PUBLIC)_KEY_HEX:\s*["']?[0-9a-f]{64}["']?/u,
+  )
+})
+
+test('product release workflow blocks uploads until target security verification passes', () => {
+  const securityCommand = 'node scripts/verify-release-artifact-security.mjs'
+  const securityStep = workflow.match(
+    /      - name: Verify release artifact security\n[\s\S]*?(?=\n      - name:)/u,
+  )?.[0]
+  assert.notEqual(securityStep, undefined)
+  assert.ok(securityStep.includes(
+    'WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX }}',
+  ))
+  assert.ok(workflow.includes(securityCommand))
+  assert.ok(workflow.includes('--target "${{ matrix.target }}"'))
+  assert.ok(workflow.includes('--expected-commit "${SOURCE_COMMIT}"'))
+  assert.ok(workflow.includes('--evidence release-artifacts'))
+  assert.ok(workflow.includes('--output release-artifact-security-report.json'))
+  const securityOffset = workflow.indexOf(securityCommand)
+  const productUploadOffset = workflow.indexOf('      - name: Upload release artifacts')
+  const securityUploadOffset = workflow.indexOf('name: release-security-${{ matrix.target }}')
+  assert.ok(securityOffset < productUploadOffset)
+  assert.ok(securityOffset < securityUploadOffset)
+  assert.ok(workflow.includes('path: release-artifact-security-report.json'))
+  assert.ok(workflow.includes('key_file="${RUNNER_TEMP}/helper-release-private-input"'))
+  assert.ok(workflow.includes('umask 077'))
+  assert.ok(workflow.includes('trap \'rm -f -- "$key_file"\' EXIT'))
+  assert.ok(workflow.includes(
+    'printf \'%s\' "${WINWINCODE_HELPER_RELEASE_PRIVATE_KEY_HEX}" > "$key_file"',
+  ))
+  assert.ok(workflow.includes('--sensitive-input "$key_file"'))
+  assert.doesNotMatch(
+    workflow,
+    /--output\s+["']?release-artifacts[/\\]release-artifact-security/u,
+  )
+})
+
+test('release download instructions recreate the exact aggregate evidence roots', () => {
+  const releasing = readFileSync(resolve(root, 'docs/releasing.md'), 'utf8')
+  assert.ok(releasing.includes('gh run download "$RUN_ID" --name "$TARGET" --dir "release-artifacts/$TARGET"'))
+  assert.ok(releasing.includes(
+    'gh run download "$RUN_ID" --name "release-security-$TARGET" --dir "release-security-reports/$TARGET"',
+  ))
+  assert.ok(releasing.includes('release-artifacts/` 的一级目录因此精确为四个 Rust target'))
+  assert.ok(releasing.includes('release-security-reports/` 与产品 evidence root 分离'))
 })

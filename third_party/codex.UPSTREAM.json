@@ -10,6 +10,7 @@
   "patchesApplied": [
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
     "upstream/patches/codex/0002-inject-model-stream-transport.patch",
-    "upstream/patches/codex/0003-export-config-builder.patch"
+    "upstream/patches/codex/0003-export-config-builder.patch",
+    "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch"
   ]
 }

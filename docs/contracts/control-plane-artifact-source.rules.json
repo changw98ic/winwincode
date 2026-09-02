@@ -1,0 +1,212 @@
+{
+  "schemaVersion": "winwincode.control-plane-artifact-source-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.3.1",
+  "decision": "docs/decisions/0028-control-plane-worker-migration.md",
+  "documentation": "docs/contracts/control-plane-artifact-source.md",
+  "implementationCompletionSource": "rust-black-box-tests-and-beads",
+  "authorityChain": [
+    "generated-artifact-message",
+    "durable-execution-job-and-repository-scope",
+    "sealed-session-binding-authority",
+    "artifact-store-metadata-and-object-bytes",
+    "opaque-rebuilt-git-source",
+    "settled-successful-worker-outcome",
+    "frozen-delivery-candidate"
+  ],
+  "artifact": {
+    "metadataOwner": "winwincode-storage.ArtifactStore",
+    "metadataAdapter": "sqlite",
+    "objectPort": "ArtifactObjectStore",
+    "localAdapter": "LocalArtifactObjectStore",
+    "contractAdapter": "FakeArtifactObjectStore",
+    "enterpriseAdapterStatus": "future-adapter",
+    "contentAddress": "sha256",
+    "callerObjectPathAllowed": false,
+    "callerObjectKeyAllowed": false,
+    "openIdentity": [
+      "repositoryScope",
+      "messageId",
+      "requestId",
+      "artifactId",
+      "descriptor",
+      "executionJobProvenance",
+      "retention",
+      "createdAt"
+    ],
+    "chunkIdentity": [
+      "repositoryScope",
+      "messageId",
+      "artifactId",
+      "executionJobProvenance",
+      "sentAt",
+      "sequence",
+      "contentType",
+      "payloadDigest",
+      "decodedBytes",
+      "isFinal"
+    ],
+    "exactReplay": "duplicate",
+    "changedIdentityReuse": "message-conflict",
+    "sequenceGap": "replay-from-highest-contiguous-sequence",
+    "digestMismatch": "ARTIFACT_DIGEST_MISMATCH",
+    "readAuthority": [
+      "repositoryScope",
+      "artifactId",
+      "digest",
+      "executionJobProvenance"
+    ],
+    "corruptionCheckBeforeReturn": [
+      "object-present",
+      "exact-size",
+      "exact-sha256"
+    ],
+    "deletion": {
+      "incompleteAllowed": false,
+      "indefiniteRetentionAllowed": false,
+      "beforeRetentionDeadlineAllowed": false,
+      "artifactIdReusableAfterDelete": false,
+      "sharedContentDeletedBeforeLastLiveReference": false
+    }
+  },
+  "executionAuthority": {
+    "required": [
+      "durableExecutionJob",
+      "exactRepositoryScope",
+      "activeDeliveryStageRun",
+      "completeSessionBinding",
+      "workerSession",
+      "leaseId",
+      "attempt",
+      "fencingToken",
+      "workerId",
+      "workerInstanceId",
+      "issuedAt",
+      "expiresAt"
+    ],
+    "expiredLease": "rejected_expired_lease",
+    "staleFencingToken": "rejected_stale_fencing_token",
+    "replacedWorkerInstance": "rejected_worker_instance",
+    "rejectedMessageWritesMetadataOrBytes": false
+  },
+  "gitSource": {
+    "manifestSchemaVersion": 1,
+    "manifestExactFields": [
+      "schemaVersion",
+      "candidateCommitId"
+    ],
+    "manifestAdditionalProperties": false,
+    "manifestCanonicalBytesRequired": true,
+    "controlledRepositoryRootRequired": true,
+    "inheritedGitEnvironmentAllowed": false,
+    "replaceRefsAllowed": false,
+    "externalDiffAllowed": false,
+    "textConvAllowed": false,
+    "candidateMustDescendFromBase": true,
+    "rebuiltFacts": [
+      "baseCommitId",
+      "baseTreeId",
+      "candidateCommitId",
+      "candidateTreeId",
+      "diffSha256",
+      "changedPaths",
+      "pathObjectIds",
+      "changedHunkSha256"
+    ],
+    "resultType": "ValidatedGitSourceArtifact",
+    "publicConstructorAllowed": false,
+    "deserializeAllowed": false
+  },
+  "candidate": {
+    "owner": "winwincode-delivery",
+    "entry": "freeze_delivery_candidate_from_source",
+    "callerReportedGitIdentityAllowed": false,
+    "requiredExactJoins": [
+      "deliveryRepositoryAndBaseRevision",
+      "artifactIdAndDigestNamedByTerminalOutcome",
+      "executionJob",
+      "attempt",
+      "leaseAndFencingToken",
+      "workerAndWorkerInstance",
+      "workerSessionAndCodexThread",
+      "stageRun",
+      "finishedAt",
+      "lastEventSequence"
+    ]
+  },
+  "rustGate": {
+    "storage": {
+      "package": "winwincode-storage",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-storage",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "artifact_chunks_require_the_exact_open_provenance_and_message_body",
+        "artifact_reads_require_exact_scope_digest_and_execution_provenance",
+        "catalog_corruption_is_detected_before_metadata_or_bytes_are_returned",
+        "completed_artifact_is_content_addressed_with_local_and_fake_object_adapters",
+        "concurrent_exact_chunk_messages_converge_to_one_commit_and_one_duplicate",
+        "concurrent_new_content_reference_is_serialized_with_physical_deletion",
+        "local_metadata_and_content_survive_restart_without_exposing_object_paths",
+        "object_corruption_is_detected_before_bytes_are_returned",
+        "retention_and_shared_content_prevent_early_or_cross_artifact_deletion",
+        "local_git_resolver_ignores_inherited_repository_environment",
+        "local_git_resolver_ignores_repository_replace_refs",
+        "local_git_resolver_rebuilds_identity_from_exact_candidate_artifact",
+        "local_git_resolver_rejects_a_noncanonical_candidate_manifest"
+      ]
+    },
+    "controlPlane": {
+      "package": "winwincode-control-plane",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-control-plane",
+        "--features",
+        "test-support",
+        "--test",
+        "session_binding_transaction",
+        "artifact",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_outcome",
+        "generated_artifact_messages_use_the_exact_durable_job_and_binding_authority"
+      ]
+    },
+    "delivery": {
+      "package": "winwincode-delivery",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "winwincode-delivery",
+        "--features",
+        "test-support",
+        "--test",
+        "candidate_source",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "requiredTests": [
+        "delivery_freezes_only_the_rebuilt_source_named_by_the_successful_worker_outcome"
+      ]
+    }
+  },
+  "compatibility": {
+    "callerReportedGitIdentityPathRetained": false,
+    "secondArtifactStorePathRetained": false,
+    "enterpriseObjectStorageClaimedComplete": false,
+    "githubPublicationClaimedComplete": false
+  }
+}

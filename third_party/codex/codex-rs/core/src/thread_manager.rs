@@ -356,6 +356,7 @@ pub(crate) struct ThreadManagerState {
     installation_id: String,
     analytics_events_client: Option<AnalyticsEventsClient>,
     model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
+    tool_call_gate: Option<Arc<dyn crate::ToolCallGate>>,
     // Captures submitted ops for testing purpose when test mode is enabled.
     ops_log: Option<SharedCapturedOps>,
 }
@@ -485,6 +486,7 @@ impl ThreadManager {
                 installation_id,
                 analytics_events_client,
                 model_stream_transport: None,
+                tool_call_gate: None,
                 ops_log: should_use_test_thread_manager_behavior()
                     .then(|| Arc::new(std::sync::Mutex::new(Vec::new()))),
             }),
@@ -510,6 +512,15 @@ impl ThreadManager {
             unreachable!("model stream transport must be set before thread manager is shared");
         };
         state.model_stream_transport = Some(transport);
+        self
+    }
+
+    /// Inject a host-owned admission boundary before every root or descendant tool handler.
+    pub fn with_tool_call_gate(mut self, gate: Arc<dyn crate::ToolCallGate>) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!("tool call gate must be set before thread manager is shared");
+        };
+        state.tool_call_gate = Some(gate);
         self
     }
 
@@ -644,6 +655,7 @@ impl ThreadManager {
                 installation_id,
                 analytics_events_client: None,
                 model_stream_transport: None,
+                tool_call_gate: None,
                 ops_log: should_use_test_thread_manager_behavior()
                     .then(|| Arc::new(std::sync::Mutex::new(Vec::new()))),
             }),
@@ -1796,10 +1808,13 @@ impl ThreadManagerState {
             metrics_service_name,
             parent_trace,
             environments,
-            thread_extension_init,
+            mut thread_extension_init,
             client_mcp_extensions,
             reserved_thread_id,
         } = options;
+        if let Some(gate) = self.tool_call_gate.as_ref() {
+            thread_extension_init.insert(crate::ToolCallGateAttachment::new(Arc::clone(gate)));
+        }
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(

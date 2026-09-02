@@ -1,0 +1,262 @@
+{
+  "schemaVersion": "winwincode.provider-dsh-rust-differential-fixture.v1",
+  "scenarios": [
+    {
+      "id": "catalog-routing",
+      "input": {
+        "routes": [
+          {
+            "model": "deepseek-chat",
+            "provider": "deepseek"
+          },
+          {
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic"
+          }
+        ]
+      },
+      "expectedFacts": [
+        "each selected provider and model reaches exactly one adapter",
+        "catalog projections contain references and capabilities but no secret material",
+        "unknown or disabled catalog entries fail before provider I/O"
+      ]
+    },
+    {
+      "id": "request-translation",
+      "input": {
+        "instructions": "Use the available tools when needed.",
+        "model": "claude-sonnet-4-6",
+        "parallelToolCalls": true,
+        "provider": "anthropic",
+        "reasoningEffort": "high",
+        "toolChoice": "auto"
+      },
+      "expectedFacts": [
+        "model, instructions, and reasoning effort reach the provider request",
+        "auto tool choice is enforced before provider I/O and retains provider auto-selection semantics",
+        "unsupported request capabilities fail before provider I/O",
+        "provider credentials are transmitted only in the provider authorization boundary"
+      ]
+    },
+    {
+      "id": "reasoning-and-parallel-tools",
+      "input": {
+        "reasoning": "Inspect both paths together.",
+        "toolCalls": [
+          {
+            "arguments": "{\"path\":\"first\"}",
+            "id": "call-1",
+            "name": "inspect"
+          },
+          {
+            "arguments": "{\"path\":\"second\"}",
+            "id": "call-2",
+            "name": "inspect"
+          }
+        ]
+      },
+      "expectedFacts": [
+        "reasoning remains ordered before both parallel tool calls",
+        "parallel tool call IDs, names, and arguments remain distinct",
+        "provider chunk boundaries do not change canonical output"
+      ]
+    },
+    {
+      "id": "namespaced-parallel-tools",
+      "input": {
+        "tools": [
+          {
+            "type": "namespace",
+            "name": "workspace",
+            "tools": [
+              {
+                "type": "function",
+                "name": "search"
+              }
+            ]
+          },
+          {
+            "type": "namespace",
+            "name": "account",
+            "tools": [
+              {
+                "type": "custom",
+                "name": "search"
+              }
+            ]
+          }
+        ],
+        "parallelToolCalls": [
+          {
+            "arguments": "{\"path\":\"README.md\"}",
+            "callId": "call-workspace",
+            "kind": "function",
+            "name": "search",
+            "namespace": "workspace"
+          },
+          {
+            "arguments": "query",
+            "callId": "call-account",
+            "kind": "custom",
+            "name": "search",
+            "namespace": "account"
+          }
+        ],
+        "invalidIdentities": [
+          {
+            "name": "",
+            "reason": "empty name"
+          },
+          {
+            "name": "bad/name",
+            "reason": "illegal name character"
+          },
+          {
+            "nameLength": 129,
+            "reason": "overlong name"
+          },
+          {
+            "namespace": "",
+            "reason": "empty namespace"
+          },
+          {
+            "namespace": "bad/namespace",
+            "reason": "illegal namespace character"
+          },
+          {
+            "namespaceLength": 65,
+            "reason": "overlong namespace"
+          }
+        ]
+      },
+      "expectedFacts": [
+        "canonical tool identity serializes kind, name, and optional namespace with exact 128 and 64 character bounds",
+        "parallel function and custom calls preserve namespace, name, call ID, arguments, and provider event order",
+        "empty, illegal, non-ASCII, and overlong identity components fail before provider I/O",
+        "provider-only flattened aliases are never parsed back into canonical tool identity"
+      ]
+    },
+    {
+      "id": "stream-success",
+      "input": {
+        "reasoningDeltas": [
+          "checked"
+        ],
+        "textDeltas": [
+          "hel",
+          "lo"
+        ],
+        "usage": {
+          "cacheReadTokens": 3,
+          "cacheWriteTokens": 2,
+          "inputTokens": 10,
+          "outputTokens": 4,
+          "reasoningTokens": 1
+        }
+      },
+      "expectedFacts": [
+        "the canonical text is hello and reasoning summary is checked",
+        "usage totals are input 15, output 4, reasoning 1, total 19",
+        "stop is one successful terminal outcome with endTurn true"
+      ]
+    },
+    {
+      "id": "typed-errors",
+      "input": {
+        "failures": [
+          {
+            "code": "AUTH",
+            "status": 401
+          },
+          {
+            "code": "QUOTA"
+          },
+          {
+            "code": "RATE_LIMIT",
+            "retryAfterMillis": 750,
+            "status": 429
+          },
+          {
+            "code": "INVALID_REQUEST",
+            "status": 400
+          },
+          {
+            "code": "SERVER",
+            "status": 503
+          },
+          {
+            "code": "TIMEOUT",
+            "status": 504
+          },
+          {
+            "code": "TRANSPORT"
+          },
+          {
+            "code": "CONTEXT_WINDOW_EXCEEDED"
+          },
+          {
+            "canonicalCode": "PROVIDER_STREAM_FAILED",
+            "code": "PI_AI_ERROR"
+          },
+          {
+            "code": "EMPTY_RESPONSE"
+          }
+        ]
+      },
+      "expectedFacts": [
+        "all ten DSH error categories remain distinct or have one approved canonical name",
+        "a zero-content stop becomes EMPTY_RESPONSE instead of success",
+        "status and positive retry delay survive translation",
+        "arbitrary provider diagnostics and raw request identity do not survive translation"
+      ]
+    },
+    {
+      "id": "cancel-and-disconnect",
+      "input": {
+        "cancelFinishOrderings": [
+          "cancel-before-finish",
+          "finish-before-cancel"
+        ],
+        "restartAfterDisconnect": true,
+        "terminalCodes": [
+          "CANCELLED",
+          "STREAM_CLOSED"
+        ]
+      },
+      "expectedFacts": [
+        "cancellation has one CANCELLED terminal outcome",
+        "disconnect without a provider terminal has one STREAM_CLOSED outcome",
+        "terminal replay cannot emit a second stream terminal"
+      ]
+    },
+    {
+      "id": "hot-update",
+      "input": {
+        "initialModelIds": [
+          "model-alpha",
+          "model-beta"
+        ],
+        "updatedModelIds": [
+          "model-alpha",
+          "model-gamma"
+        ]
+      },
+      "expectedFacts": [
+        "the next request observes the updated provider configuration",
+        "removed models become explicitly disabled",
+        "catalog revision and invalidation advance exactly once per accepted update"
+      ]
+    },
+    {
+      "id": "credential-failure",
+      "input": {
+        "secretMarker": "TOKEN-provider-differential-secret"
+      },
+      "expectedFacts": [
+        "credential-bearing request configuration fails before provider dispatch",
+        "revoked credential references fail before secret-store access",
+        "secret material is absent from messages, projections, events, persistence, and debug output"
+      ]
+    }
+  ]
+}

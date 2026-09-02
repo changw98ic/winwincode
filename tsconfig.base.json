@@ -19,15 +19,6 @@
     "paths": {
       "@winwincode/contracts": [
         "./packages/contracts/src/index.ts"
-      ],
-      "@winwincode/dsh-profile": [
-        "./packages/dsh-profile/src/index.ts"
-      ],
-      "@winwincode/native": [
-        "./packages/native/src/index.ts"
-      ],
-      "@winwincode/strongflow": [
-        "./packages/strongflow/src/index.ts"
       ]
     },
     "resolveJsonModule": true,

@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 3,
+  "id": "dlv_01J00000000000000000000000",
+  "revision": 1,
+  "status": "executing",
+  "spec": {
+    "schemaVersion": 3,
+    "id": "delivery-spec-v1",
+    "deliveryId": "dlv_01J00000000000000000000000",
+    "revision": 1,
+    "title": "Implement invitation flow",
+    "goal": "Users can invite a teammate and verify the result.",
+    "scope": [
+      "Invitation data and API"
+    ],
+    "outOfScope": [
+      "Organization billing"
+    ],
+    "constraints": [
+      "Keep the existing authentication boundary"
+    ],
+    "acceptanceCriteria": [
+      {
+        "schemaVersion": 3,
+        "id": "criterion-required",
+        "description": "A valid invitation can be accepted exactly once.",
+        "verificationMethod": "Run the invitation integration test.",
+        "required": true
+      },
+      {
+        "schemaVersion": 3,
+        "id": "criterion-optional",
+        "description": "The empty state remains readable at narrow widths.",
+        "verificationMethod": null,
+        "required": false
+      }
+    ],
+    "sourceRef": null,
+    "publicationTarget": null,
+    "repository": {
+      "schemaVersion": 3,
+      "kind": "local-git",
+      "locator": "/workspace/repository"
+    },
+    "baseRevision": "0123456789012345678901234567890123456789",
+    "maxReworkAttempts": 2,
+    "createdAtMillis": 1800000000000
+  },
+  "tasks": [],
+  "stageRuns": [
+    {
+      "schemaVersion": 3,
+      "id": "stage:planning",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliveryTaskId": null,
+      "stage": "planning",
+      "actorType": "codex",
+      "role": "planner",
+      "status": "succeeded",
+      "attempt": 1,
+      "startedAtMillis": 1800000000010,
+      "finishedAtMillis": 1800000000020
+    },
+    {
+      "schemaVersion": 3,
+      "id": "stage:plan-review",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliveryTaskId": null,
+      "stage": "plan-review",
+      "actorType": "human",
+      "role": "reviewer",
+      "status": "succeeded",
+      "attempt": 1,
+      "startedAtMillis": 1800000000021,
+      "finishedAtMillis": 1800000000030
+    }
+  ],
+  "sessionBindings": [
+    {
+      "schemaVersion": 3,
+      "id": "binding:planning",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliveryTaskId": null,
+      "stageRunId": "stage:planning",
+      "productSessionId": "product:planning",
+      "executionJobId": "job:planning",
+      "workerSessionId": "worker-session:planning",
+      "codexThreadId": "codex-thread:planning",
+      "boundAtMillis": 1800000000011,
+      "workerId": "wrk_01J00000000000000000000001",
+      "workerInstanceId": "wki_01J00000000000000000000001",
+      "leaseId": "lse_01J00000000000000000000001",
+      "attempt": 1,
+      "fencingToken": "8",
+      "sourceProvenance": {
+        "kind": "execution-port",
+        "reference": "msg_01J00000000000000000000001"
+      }
+    }
+  ],
+  "attentionItems": [
+    {
+      "schemaVersion": 3,
+      "id": "attention:plan-review",
+      "deliveryId": "dlv_01J00000000000000000000000",
+      "deliverySpecId": "delivery-spec-v1",
+      "stageRunId": "stage:plan-review",
+      "type": "decision_required",
+      "title": "Review delivery solution",
+      "context": "{\"schemaVersion\":1,\"protocol\":\"winwincode.solution-review-context.v1\",\"deliveryId\":\"dlv_01J00000000000000000000000\",\"deliverySpecId\":\"delivery-spec-v1\",\"deliverySpecRevision\":1,\"planningStageRunId\":\"stage:planning\",\"planningSessionBindingId\":\"binding:planning\",\"reviewStageRunId\":\"stage:plan-review\",\"attentionItemId\":\"attention:plan-review\",\"solution\":{\"id\":\"solution:invitation\",\"summary\":\"Implement one controlled invitation flow.\",\"approach\":[\"Define the API.\",\"Verify every criterion.\"],\"components\":[{\"id\":\"component:web\",\"label\":\"Web\",\"responsibility\":\"Renders invitation state.\",\"kind\":\"component\",\"trustBoundary\":\"browser\",\"unresolved\":false,\"repositoryPathPrefixes\":[\"apps/client\"]},{\"id\":\"component:api\",\"label\":\"API\",\"responsibility\":\"Accepts invitations exactly once.\",\"kind\":\"component\",\"trustBoundary\":\"control-plane\",\"unresolved\":false,\"repositoryPathPrefixes\":[\"crates/api\"]}],\"connections\":[{\"id\":\"connection:web-api\",\"from\":\"component:web\",\"to\":\"component:api\",\"label\":\"HTTP\"}]},\"architectureDiagram\":{\"id\":\"diagram:architecture\",\"kind\":\"system-architecture\",\"title\":\"diagram:architecture title\",\"nodes\":[{\"id\":\"node:control-plane\",\"label\":\"Control Plane\",\"description\":\"Owns delivery decisions.\",\"kind\":\"delivery-control\",\"trustBoundary\":\"control-plane\",\"unresolved\":false},{\"id\":\"node:worker\",\"label\":\"Worker\",\"description\":\"Executes approved work.\",\"kind\":\"execution\",\"trustBoundary\":\"worker\",\"unresolved\":false}],\"edges\":[{\"id\":\"edge:dispatch\",\"from\":\"node:control-plane\",\"to\":\"node:worker\",\"label\":\"dispatches\"}]},\"processDiagram\":{\"id\":\"diagram:process\",\"kind\":\"process-flow\",\"title\":\"diagram:process title\",\"nodes\":[{\"id\":\"node:control-plane\",\"label\":\"Control Plane\",\"description\":\"Owns delivery decisions.\",\"kind\":\"delivery-control\",\"trustBoundary\":\"control-plane\",\"unresolved\":false},{\"id\":\"node:worker\",\"label\":\"Worker\",\"description\":\"Executes approved work.\",\"kind\":\"execution\",\"trustBoundary\":\"worker\",\"unresolved\":false}],\"edges\":[{\"id\":\"edge:dispatch\",\"from\":\"node:control-plane\",\"to\":\"node:worker\",\"label\":\"dispatches\"}]},\"risks\":[\"Invitation replay.\"],\"unresolvedItems\":[\"Confirm expiration policy.\"],\"taskProposals\":[{\"id\":\"task:invitation\",\"title\":\"Implement invitation flow\",\"goal\":\"Deliver every current acceptance criterion.\",\"acceptanceCriterionIds\":[\"criterion-required\",\"criterion-optional\"],\"blockedByTaskIds\":[]}],\"preparedAt\":1800000000019,\"reviewSetSha256\":\"67ba86fac36a5275bef299120fc9d701cb9c1637f2019351e5b9b8ad7c1c4134\"}",
+      "options": [],
+      "assignedTo": "alice",
+      "blocking": true,
+      "status": "resolved",
+      "resolution": "{\"schemaVersion\":1,\"protocol\":\"winwincode.solution-review-decision.v1\",\"deliveryId\":\"dlv_01J00000000000000000000000\",\"deliverySpecId\":\"delivery-spec-v1\",\"deliverySpecRevision\":1,\"reviewStageRunId\":\"stage:plan-review\",\"attentionItemId\":\"attention:plan-review\",\"reviewSetSha256\":\"67ba86fac36a5275bef299120fc9d701cb9c1637f2019351e5b9b8ad7c1c4134\",\"action\":\"approve\",\"comments\":\"Approved after review.\",\"requestedChanges\":null}",
+      "resolvedBy": "alice",
+      "createdAtMillis": 1800000000019,
+      "resolvedAtMillis": 1800000000030
+    }
+  ],
+  "evidence": [],
+  "verdict": null,
+  "createdAtMillis": 1800000000000,
+  "updatedAtMillis": 1800000000031
+}

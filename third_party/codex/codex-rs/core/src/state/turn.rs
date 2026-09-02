@@ -90,6 +90,10 @@ pub(crate) struct TurnState {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
+    // A response can arrive during recovery before the resumed turn has
+    // recreated its in-memory waiter. Keep it on the turn so the next
+    // request_user_input call can consume it instead of dropping it.
+    pending_user_input_responses: HashMap<String, RequestUserInputResponse>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
     mcp_tool_approval_metadata: HashMap<String, (Option<McpInvocation>, McpToolApprovalMetadata)>,
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
@@ -128,6 +132,7 @@ impl TurnState {
         self.pending_approvals.clear();
         self.pending_request_permissions.clear();
         self.pending_user_input.clear();
+        self.pending_user_input_responses.clear();
         self.pending_elicitations.clear();
         self.mcp_tool_approval_metadata.clear();
         self.pending_dynamic_tools.clear();
@@ -162,6 +167,21 @@ impl TurnState {
         key: &str,
     ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
         self.pending_user_input.remove(key)
+    }
+
+    pub(crate) fn insert_pending_user_input_response(
+        &mut self,
+        key: String,
+        response: RequestUserInputResponse,
+    ) -> Option<RequestUserInputResponse> {
+        self.pending_user_input_responses.insert(key, response)
+    }
+
+    pub(crate) fn take_pending_user_input_response(
+        &mut self,
+        key: &str,
+    ) -> Option<RequestUserInputResponse> {
+        self.pending_user_input_responses.remove(key)
     }
 
     pub(crate) fn insert_pending_elicitation(

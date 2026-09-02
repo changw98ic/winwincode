@@ -1,0 +1,37 @@
+[package]
+name = "winwincode-delivery"
+description = "Canonical Delivery domain and append-only journal for the WinWinCode Control Plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# Exposes raw Scheduler/Worker fixture builders only to Rust integration tests.
+# Production Control Plane dependencies do not enable this feature.
+test-support = []
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+winwincode-domain.workspace = true
+winwincode-storage = { version = "0.1.0-alpha.1", path = "../winwincode-storage" }
+
+[[test]]
+name = "stage_task_lifecycle"
+required-features = ["test-support"]
+
+[[test]]
+name = "candidate_source"
+required-features = ["test-support"]
+
+[lints]
+workspace = true
+
+[[test]]
+name = "production_verdict_authority"
+required-features = ["test-support"]

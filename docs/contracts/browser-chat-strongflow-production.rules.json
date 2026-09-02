@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "winwincode.browser-chat-strongflow-production.v2",
+  "browser": "Chrome DevTools Protocol over a real headless Chrome or Chromium process",
+  "client": "apps/client production-built modules and production CSS served from a standalone HTTPS origin with one browser-gate entry module",
+  "server": "winwincode-server production binary served from a separate HTTPS origin",
+  "assertions": [
+    "the default Client surface is Chat and mounts the canonical Chat page",
+    "Chat creates one ProductSession and refreshes from its real Control Plane event stream",
+    "Chat reaches Completed with a non-empty completed assistant message produced by the local Worker and provider path",
+    "the Chat terminal projection survives a deep-link navigation and a full browser reload byte-for-byte",
+    "StrongFlow starts from the canonical clarifying Delivery revision and uses its generated StageRun binding",
+    "StrongFlow waits for scheduler updates and clicks only the visible production solution, task, verdict, Attention, and final Delivery controls",
+    "every clicked StrongFlow control is followed by a higher Delivery revision rendered from the real event subscription",
+    "StrongFlow reaches delivered with a frozen candidate, a passing verdict, completed tasks, no open Attention, and planner, executor, reviewer, and verifier stages",
+    "the delivered StrongFlow deep link survives a full browser reload with the same revision and authenticated session",
+    "Chat and StrongFlow open real WebSocket subscriptions only to the configured Control Plane origin",
+    "all browser traffic is confined to the standalone Client origin and configured Control Plane origin",
+    "no Host or DSH backend request is issued",
+    "the bootstrap proof is absent from URL, DOM, browser storage, cookie visibility, console, network URLs, and Server output",
+    "initial and terminal Chat and StrongFlow screenshots plus one bounded normalized trace are written under test-results/browser-chat-strongflow-production"
+  ],
+  "forbiddenRequestPathPatterns": [
+    "(?:/dsh(?:/|$))",
+    "(?:/host(?:/|$))"
+  ],
+  "artifacts": [
+    "test-results/browser-chat-strongflow-production/chat-initial.png",
+    "test-results/browser-chat-strongflow-production/chat-terminal.png",
+    "test-results/browser-chat-strongflow-production/strongflow-initial.png",
+    "test-results/browser-chat-strongflow-production/strongflow-terminal.png",
+    "test-results/browser-chat-strongflow-production/trace.json"
+  ]
+}

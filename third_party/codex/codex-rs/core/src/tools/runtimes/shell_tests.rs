@@ -16,7 +16,7 @@ async fn approval_key_uses_path_uri_and_includes_environment_id() {
     let cwd = AbsolutePathBuf::try_from(std::env::current_dir().expect("read current dir"))
         .expect("current dir is absolute");
     let mut request = ShellRequest {
-        command: vec!["echo".to_string(), "hello".to_string()],
+        command: vec!["pnpm".to_string(), "add".to_string(), "exact".to_string()],
         turn_environment: TurnEnvironment::new(
             TurnEnvironmentSelection {
                 environment_id: "remote".to_string(),
@@ -57,6 +57,14 @@ async fn approval_key_uses_path_uri_and_includes_environment_id() {
         },
     };
     let runtime = ShellRuntime::for_shell_command(ShellRuntimeBackend::ShellCommandClassic);
+    assert_eq!(
+        runtime.action_gate_payload(&request),
+        Some(crate::ToolCallGatePayload::Shell {
+            program: "pnpm".to_string(),
+            args: vec!["add".to_string(), "exact".to_string()],
+            working_directory: cwd.to_string_lossy().into_owned(),
+        })
+    );
     let original_key = runtime
         .approval_action(&request, "call-1")
         .expect("build approval action")

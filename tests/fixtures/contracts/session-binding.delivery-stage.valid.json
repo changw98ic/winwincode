@@ -1,0 +1,38 @@
+{
+  "kind": "session.binding",
+  "schemaVersion": "winwincode/v1",
+  "messageId": "xmsg_0000000000000000000000000D",
+  "sentAt": "2026-08-24T12:00:00.000Z",
+  "lease": {
+    "leaseId": "lse_00000000000000000000000004",
+    "jobId": "job_00000000000000000000000003",
+    "workerId": "wrk_00000000000000000000000001",
+    "workerInstanceId": "wki_00000000000000000000000002",
+    "attempt": 1,
+    "fencingToken": "42",
+    "issuedAt": "2026-08-24T12:00:00.000Z",
+    "expiresAt": "2026-08-24T12:10:00.000Z"
+  },
+  "productSessionId": "psn_00000000000000000000000006",
+  "workerSessionId": "wsn_00000000000000000000000005",
+  "codexThreadId": "cdx_0000000000000000000000000G",
+  "boundAt": "2026-08-24T12:00:00.000Z",
+  "sessionIdentity": {
+    "productSessionId": "psn_00000000000000000000000006",
+    "workerSessionId": "wsn_00000000000000000000000005",
+    "codexThreadId": "cdx_0000000000000000000000000G",
+    "stageRunId": "run_00000000000000000000000009"
+  },
+  "stageRunId": "run_00000000000000000000000009",
+  "workerId": "wrk_00000000000000000000000001",
+  "sourceIdentity": {
+    "kind": "execution-worker",
+    "workerId": "wrk_00000000000000000000000001",
+    "workerSessionId": "wsn_00000000000000000000000005",
+    "leaseId": "lse_00000000000000000000000004",
+    "workerInstanceId": "wki_00000000000000000000000002"
+  },
+  "leaseId": "lse_00000000000000000000000004",
+  "attempt": 1,
+  "fencingToken": "42"
+}

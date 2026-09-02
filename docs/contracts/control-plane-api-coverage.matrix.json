@@ -1,0 +1,979 @@
+{
+  "schemaVersion": 1,
+  "decision": "ADR-0028",
+  "purpose": "Machine-checkable coverage from the single apps/client presentation and Rust Server/Control Plane/Worker/Local path to the public HTTP, WebSocket, and ExecutionPort branches.",
+  "sources": {
+    "migrationInventory": "docs/decisions/0028-control-plane-worker-migration.inventory.json",
+    "http": "schema/winwincode/v1/control-plane-http.schema.json",
+    "websocket": "schema/winwincode/v1/control-plane-events.schema.json",
+    "executionPort": "schema/winwincode/v1/execution-port.schema.json"
+  },
+  "finalSharedDefinitionNames": {
+    "executionPortModelRoute": "ModelGatewayRoute"
+  },
+  "contracts": {
+    "httpCommands": [
+      "session.create",
+      "chat.submit",
+      "input.respond",
+      "session.cancel",
+      "session.close",
+      "delivery.create",
+      "delivery.update_spec",
+      "delivery.approve_task_breakdown",
+      "delivery.advance",
+      "delivery.resolve_attention",
+      "delivery.submit_verdict",
+      "settings.update",
+      "credential.reference.create",
+      "credential.reference.rotate",
+      "credential.reference.revoke",
+      "credential.reference.delete",
+      "approval.decide",
+      "worker.drain",
+      "worker.enable",
+      "publication.publish",
+      "publication.cancel",
+      "enterprise.organization.update",
+      "enterprise.membership.update",
+      "enterprise.team.update",
+      "enterprise.role.update",
+      "enterprise.project_repository.update",
+      "enterprise.policy.update",
+      "enterprise.fleet.update",
+      "enterprise.integration.update",
+      "enterprise.identity.update",
+      "collaboration.notification.ack",
+      "collaboration.presence.update"
+    ],
+    "httpQueries": [
+      "session.list",
+      "session.get",
+      "session.messages.list",
+      "session.interactions.list",
+      "runtime.projection.get",
+      "delivery.list",
+      "delivery.get",
+      "settings.get",
+      "credential.reference.list",
+      "credential.reference.get",
+      "approval.list",
+      "approval.get",
+      "worker.list",
+      "worker.get",
+      "publication.list",
+      "publication.get",
+      "enterprise.organization.list",
+      "enterprise.membership.list",
+      "enterprise.team.list",
+      "enterprise.role.list",
+      "enterprise.project.list",
+      "enterprise.policy.list",
+      "enterprise.fleet.list",
+      "enterprise.usage.list",
+      "enterprise.audit.list",
+      "enterprise.integration.list",
+      "enterprise.identity.list",
+      "collaboration.activity.list",
+      "collaboration.notification.list",
+      "collaboration.presence.list"
+    ],
+    "websocketEvents": [
+      "product-session.changed.v1",
+      "product-session.message.appended.v1",
+      "runtime-projection.invalidated.v1",
+      "approval.changed.v1",
+      "chat-interactions.invalidated.v1",
+      "attention.changed.v1",
+      "delivery.changed.v1",
+      "delivery-task.changed.v1",
+      "presence.changed.v1",
+      "worker-health.changed.v1",
+      "activity.recorded.v1",
+      "enterprise-organization.invalidated.v1",
+      "enterprise-membership.invalidated.v1",
+      "enterprise-team.invalidated.v1",
+      "enterprise-role.invalidated.v1",
+      "enterprise-project.invalidated.v1",
+      "enterprise-policy.invalidated.v1",
+      "enterprise-fleet.invalidated.v1",
+      "enterprise-usage.invalidated.v1",
+      "enterprise-audit.invalidated.v1",
+      "enterprise-integration.invalidated.v1"
+    ],
+    "executionPortMessages": [
+      "worker.register",
+      "worker.registration_result",
+      "worker.capabilities",
+      "worker.heartbeat",
+      "worker.heartbeat_ack",
+      "job.dispatch",
+      "job.dispatch_result",
+      "session.binding",
+      "lease.renew",
+      "runtime.event",
+      "runtime.ack",
+      "runtime.replay_request",
+      "artifact.open",
+      "artifact.chunk",
+      "artifact.ack",
+      "model.open",
+      "model.chunk",
+      "model.ack",
+      "input.request",
+      "input.response",
+      "approval.request",
+      "approval.decision",
+      "job.cancel",
+      "job.cancel_ack",
+      "job.outcome",
+      "job.outcome_ack",
+      "action.enforcement_request",
+      "action.enforcement_receipt"
+    ]
+  },
+  "callerCoverage": [
+    {
+      "callerId": "client-chat-surface",
+      "kind": "presentation",
+      "sourcePaths": [
+        "apps/client/src/application.ts",
+        "apps/client/src/chat-page.ts",
+        "apps/client/src/chat-view-model.ts"
+      ],
+      "flowIds": [
+        "client-transport",
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval"
+      ]
+    },
+    {
+      "callerId": "client-delivery-surface",
+      "kind": "presentation",
+      "sourcePaths": [
+        "apps/client/src/strongflow-page.ts",
+        "apps/client/src/strongflow-view-model.ts",
+        "apps/client/src/control-plane-client.ts"
+      ],
+      "flowIds": [
+        "client-transport",
+        "delivery-strongflow",
+        "candidate-artifacts",
+        "publication",
+        "collaboration-presence"
+      ]
+    },
+    {
+      "callerId": "server-process",
+      "kind": "composition",
+      "sourcePaths": [
+        "crates/winwincode-server/src/main.rs",
+        "crates/winwincode-server/src/server.rs",
+        "crates/winwincode-server/src/dispatcher.rs"
+      ],
+      "flowIds": [
+        "server-startup",
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "provider-and-credential-gateway",
+        "publication"
+      ]
+    },
+    {
+      "callerId": "local-process",
+      "kind": "composition",
+      "sourcePaths": [
+        "crates/winwincode-local/src/lib.rs"
+      ],
+      "flowIds": [
+        "local-worker-startup",
+        "chat-session-lifecycle",
+        "execution-approval"
+      ]
+    },
+    {
+      "callerId": "rust-integration-tests",
+      "kind": "test",
+      "sourcePaths": [
+        "crates/winwincode-control-plane/tests/session_identity_vertical.rs",
+        "crates/winwincode-worker/tests/production_vertical.rs"
+      ],
+      "flowIds": [
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval",
+        "delivery-strongflow",
+        "provider-and-credential-gateway",
+        "candidate-artifacts",
+        "publication",
+        "collaboration-presence"
+      ]
+    },
+    {
+      "callerId": "release-gates",
+      "kind": "release",
+      "sourcePaths": [
+        "tests/api-production-vertical-runner.test.mjs",
+        "tests/release-artifact-contract.test.mjs",
+        "scripts/run-api-production-vertical.mjs",
+        "scripts/run-release-artifact-gate.mjs",
+        "scripts/verify-release-artifacts.mjs"
+      ],
+      "flowIds": [
+        "server-startup",
+        "local-worker-startup",
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "provider-and-credential-gateway",
+        "candidate-artifacts",
+        "publication"
+      ]
+    }
+  ],
+  "surfaceCoverage": [
+    {
+      "surfaceId": "canonical-schema",
+      "observableContracts": [
+        "versioned identifiers enums commands queries events and errors"
+      ],
+      "flowIds": [
+        "server-startup",
+        "client-transport",
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "provider-and-credential-gateway",
+        "publication"
+      ]
+    },
+    {
+      "surfaceId": "client-generated-contracts",
+      "observableContracts": [
+        "generated HTTP and WebSocket types and transport client"
+      ],
+      "flowIds": [
+        "client-transport",
+        "chat-session-lifecycle",
+        "delivery-strongflow"
+      ]
+    },
+    {
+      "surfaceId": "api-types",
+      "observableContracts": [
+        "generated Rust HTTP and WebSocket transport types"
+      ],
+      "flowIds": [
+        "server-startup",
+        "client-transport",
+        "chat-session-lifecycle",
+        "delivery-strongflow"
+      ]
+    },
+    {
+      "surfaceId": "domain-types",
+      "observableContracts": [
+        "generated identifiers and value objects"
+      ],
+      "flowIds": [
+        "server-startup",
+        "delivery-strongflow",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "execution-port",
+      "observableContracts": [
+        "versioned execution frames and replay identity"
+      ],
+      "flowIds": [
+        "local-worker-startup",
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "storage",
+      "observableContracts": [
+        "atomic state receipt outbox and replay persistence"
+      ],
+      "flowIds": [
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "candidate-artifacts",
+        "publication"
+      ]
+    },
+    {
+      "surfaceId": "repository-context",
+      "observableContracts": [
+        "commit-bound read-only repository facts and explicit index capability"
+      ],
+      "flowIds": [
+        "delivery-strongflow",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "delivery-domain",
+      "observableContracts": [
+        "Delivery state stage transitions candidate evidence and verdict"
+      ],
+      "flowIds": [
+        "delivery-strongflow",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "audit",
+      "observableContracts": [
+        "tamper-evident audit chain retention and export"
+      ],
+      "flowIds": [
+        "publication",
+        "collaboration-presence"
+      ]
+    },
+    {
+      "surfaceId": "publication",
+      "observableContracts": [
+        "approval-bound publication receipts and durable external effects"
+      ],
+      "flowIds": [
+        "publication",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "observability",
+      "observableContracts": [
+        "secret-safe runtime trace facts"
+      ],
+      "flowIds": [
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "publication"
+      ]
+    },
+    {
+      "surfaceId": "session-binding",
+      "observableContracts": [
+        "ProductSession lifecycle and exact execution identity binding"
+      ],
+      "flowIds": [
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval",
+        "delivery-strongflow"
+      ]
+    },
+    {
+      "surfaceId": "codex-kernel",
+      "observableContracts": [
+        "Codex thread turn tool sandbox model stream and helper authentication"
+      ],
+      "flowIds": [
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval",
+        "provider-and-credential-gateway",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "execution-worker",
+      "observableContracts": [
+        "job lease fencing workspace artifact outcome and ordered runtime frames"
+      ],
+      "flowIds": [
+        "local-worker-startup",
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval",
+        "candidate-artifacts"
+      ]
+    },
+    {
+      "surfaceId": "control-plane-application",
+      "observableContracts": [
+        "single product-state authority command receipt event projection and cancellation"
+      ],
+      "flowIds": [
+        "server-startup",
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "provider-and-credential-gateway",
+        "publication",
+        "collaboration-presence"
+      ]
+    },
+    {
+      "surfaceId": "provider-gateway",
+      "observableContracts": [
+        "credential references model routing quotas redacted errors and stream settlement"
+      ],
+      "flowIds": [
+        "provider-and-credential-gateway",
+        "interactive-input",
+        "execution-approval"
+      ]
+    },
+    {
+      "surfaceId": "client-application",
+      "observableContracts": [
+        "Chat StrongFlow settings approval and enterprise presentation through one serverUrl"
+      ],
+      "flowIds": [
+        "client-transport",
+        "chat-session-lifecycle",
+        "interactive-input",
+        "execution-approval",
+        "delivery-strongflow",
+        "candidate-artifacts",
+        "publication",
+        "collaboration-presence"
+      ]
+    },
+    {
+      "surfaceId": "server-network-boundary",
+      "observableContracts": [
+        "one authenticated HTTP WebSocket health and event origin"
+      ],
+      "flowIds": [
+        "server-startup",
+        "chat-session-lifecycle",
+        "delivery-strongflow",
+        "provider-and-credential-gateway",
+        "publication"
+      ]
+    },
+    {
+      "surfaceId": "local-composition",
+      "observableContracts": [
+        "single-process Control Plane and Worker lifecycle with typed frames"
+      ],
+      "flowIds": [
+        "local-worker-startup",
+        "chat-session-lifecycle",
+        "execution-approval"
+      ]
+    },
+    {
+      "surfaceId": "kernel-helper",
+      "observableContracts": [
+        "authenticated helper handshake identity and bounded executable"
+      ],
+      "flowIds": [
+        "local-worker-startup",
+        "chat-session-lifecycle",
+        "provider-and-credential-gateway"
+      ]
+    },
+    {
+      "surfaceId": "shared-typescript-contracts",
+      "flowIds": [
+        "delivery-strongflow",
+        "client-transport"
+      ],
+      "observableContracts": [
+        "shared TypeScript delivery and presentation contracts with no network authority"
+      ]
+    },
+    {
+      "surfaceId": "strongflow-contracts",
+      "flowIds": [
+        "delivery-strongflow",
+        "candidate-artifacts",
+        "publication"
+      ],
+      "observableContracts": [
+        "delivery domain and projection contracts with no Host DSH native or network authority"
+      ]
+    },
+    {
+      "surfaceId": "enterprise-backup",
+      "flowIds": [
+        "enterprise-management",
+        "candidate-artifacts"
+      ],
+      "observableContracts": [
+        "tenant-scoped digest-bound backup restore and governed deletion facts"
+      ]
+    },
+    {
+      "surfaceId": "local-cli",
+      "flowIds": [
+        "server-startup",
+        "candidate-artifacts"
+      ],
+      "observableContracts": [
+        "one canonical repository setup attachment and diagnostics command"
+      ]
+    },
+    {
+      "surfaceId": "recovery-drill",
+      "flowIds": [
+        "enterprise-management",
+        "local-worker-startup"
+      ],
+      "observableContracts": [
+        "deterministic upgrade recovery RPO and RTO evidence"
+      ]
+    },
+    {
+      "surfaceId": "evidence-export",
+      "flowIds": [
+        "candidate-artifacts",
+        "publication"
+      ],
+      "observableContracts": [
+        "byte-stable secret-safe offline delivery evidence packages"
+      ]
+    },
+    {
+      "surfaceId": "enterprise-integration",
+      "flowIds": [
+        "enterprise-management",
+        "publication",
+        "collaboration-presence"
+      ],
+      "observableContracts": [
+        "tenant-scoped connector webhook and durable outbound delivery facts"
+      ]
+    },
+    {
+      "surfaceId": "enterprise-object-store",
+      "flowIds": [
+        "enterprise-management",
+        "candidate-artifacts"
+      ],
+      "observableContracts": [
+        "verified encrypted artifact object storage receipts"
+      ]
+    },
+    {
+      "surfaceId": "enterprise-postgres",
+      "flowIds": [
+        "enterprise-management",
+        "chat-session-lifecycle",
+        "publication"
+      ],
+      "observableContracts": [
+        "tenant-scoped migration transaction outbox and backup protocol facts"
+      ]
+    },
+    {
+      "surfaceId": "test-asset-analysis",
+      "flowIds": [
+        "candidate-artifacts",
+        "delivery-strongflow"
+      ],
+      "observableContracts": [
+        "deterministic read-only candidate test asset findings"
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "server-startup",
+      "currentObservableOperations": [
+        "validate server configuration before listening",
+        "serve health and generated HTTP/WebSocket requests"
+      ],
+      "targetObservableOperations": [
+        "bind one authenticated Server origin to the Control Plane authority"
+      ],
+      "httpCommands": [
+        "session.create"
+      ],
+      "httpQueries": [
+        "session.get"
+      ],
+      "websocketEvents": [
+        "presence.changed.v1"
+      ],
+      "executionPortMessages": [
+        "worker.register"
+      ]
+    },
+    {
+      "id": "client-transport",
+      "currentObservableOperations": [
+        "derive HTTP and WebSocket endpoints from one serverUrl",
+        "send generated commands queries and subscriptions"
+      ],
+      "targetObservableOperations": [
+        "keep all browser network access in the generated client"
+      ],
+      "httpCommands": [
+        "session.create"
+      ],
+      "httpQueries": [
+        "session.get"
+      ],
+      "websocketEvents": [
+        "presence.changed.v1"
+      ],
+      "executionPortMessages": []
+    },
+    {
+      "id": "local-worker-startup",
+      "currentObservableOperations": [
+        "start and stop the local Server process",
+        "register one embedded or remote Worker and observe health",
+        "select a schedulable Worker by capability and capacity"
+      ],
+      "httpCommands": [
+        "worker.drain",
+        "worker.enable"
+      ],
+      "httpQueries": [
+        "worker.list",
+        "worker.get"
+      ],
+      "websocketEvents": [
+        "worker-health.changed.v1",
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "worker.register",
+        "worker.registration_result",
+        "worker.capabilities",
+        "worker.heartbeat",
+        "worker.heartbeat_ack",
+        "lease.renew"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "chat-session-lifecycle",
+      "currentObservableOperations": [
+        "create, resume, list, inspect, cancel, and close a ProductSession",
+        "submit a Chat turn and receive persisted user and assistant messages",
+        "dispatch default Chat without creating a hidden Delivery or StageRun",
+        "rebuild Chat and runtime projections after restart or WebSocket reset"
+      ],
+      "httpCommands": [
+        "session.create",
+        "chat.submit",
+        "session.cancel",
+        "session.close"
+      ],
+      "httpQueries": [
+        "session.list",
+        "session.get",
+        "session.messages.list",
+        "session.interactions.list",
+        "runtime.projection.get"
+      ],
+      "websocketEvents": [
+        "product-session.changed.v1",
+        "product-session.message.appended.v1",
+        "chat-interactions.invalidated.v1",
+        "runtime-projection.invalidated.v1",
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "job.dispatch",
+        "job.dispatch_result",
+        "session.binding",
+        "runtime.event",
+        "runtime.ack",
+        "runtime.replay_request",
+        "job.cancel",
+        "job.cancel_ack",
+        "job.outcome",
+        "job.outcome_ack"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "interactive-input",
+      "currentObservableOperations": [
+        "publish one bounded input request to the ProductSession",
+        "validate actor, revision, ProductSession, WorkerSession, Job, and request binding",
+        "send only a typed input value to the active fenced Worker attempt"
+      ],
+      "httpCommands": [
+        "input.respond"
+      ],
+      "httpQueries": [
+        "session.get",
+        "runtime.projection.get"
+      ],
+      "websocketEvents": [
+        "runtime-projection.invalidated.v1",
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "input.request",
+        "input.response"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "execution-approval",
+      "currentObservableOperations": [
+        "surface an execution approval separately from business Attention",
+        "record an actor decision and send it to the exact WorkerSession and Lease"
+      ],
+      "httpCommands": [
+        "approval.decide"
+      ],
+      "httpQueries": [
+        "approval.list",
+        "approval.get"
+      ],
+      "websocketEvents": [
+        "approval.changed.v1",
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "approval.request",
+        "approval.decision"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "delivery-strongflow",
+      "currentObservableOperations": [
+        "create and update a DeliverySpec with revision and request identity",
+        "display the current pending or settled solution review without raw Attention protocol data",
+        "approve the exact sealed review digest and promote its ordered task proposals without caller-authored tasks",
+        "read Delivery and runtime at one server-issued StrongFlow cursor and advance the one legal next stage",
+        "resolve business Attention with bounded remediation",
+        "request server-computed verdicts for one candidate stale-check digest and rebuild the Delivery view"
+      ],
+      "httpCommands": [
+        "delivery.create",
+        "delivery.update_spec",
+        "delivery.approve_task_breakdown",
+        "delivery.advance",
+        "delivery.resolve_attention",
+        "delivery.submit_verdict"
+      ],
+      "httpQueries": [
+        "delivery.list",
+        "delivery.get",
+        "runtime.projection.get"
+      ],
+      "websocketEvents": [
+        "delivery.changed.v1",
+        "delivery-task.changed.v1",
+        "attention.changed.v1",
+        "runtime-projection.invalidated.v1",
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "job.dispatch",
+        "job.dispatch_result",
+        "session.binding",
+        "runtime.event",
+        "runtime.ack",
+        "runtime.replay_request",
+        "job.outcome",
+        "job.outcome_ack"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "provider-and-credential-gateway",
+      "currentObservableOperations": [
+        "configure a Provider-neutral model route using a credential reference",
+        "resolve the long-lived credential only inside the Control Plane",
+        "stream encoded model data and stable redacted failures without sending a secret to Worker"
+      ],
+      "httpCommands": [
+        "settings.update",
+        "credential.reference.create",
+        "credential.reference.rotate",
+        "credential.reference.revoke",
+        "credential.reference.delete"
+      ],
+      "httpQueries": [
+        "settings.get",
+        "credential.reference.list",
+        "credential.reference.get"
+      ],
+      "websocketEvents": [
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "model.open",
+        "model.chunk",
+        "model.ack"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "candidate-artifacts",
+      "currentObservableOperations": [
+        "open and stream immutable candidate, diff, report, and evidence artifacts",
+        "acknowledge only contiguous artifact chunks under the current Lease"
+      ],
+      "httpCommands": [],
+      "httpQueries": [
+        "delivery.get",
+        "runtime.projection.get"
+      ],
+      "websocketEvents": [
+        "runtime-projection.invalidated.v1",
+        "activity.recorded.v1"
+      ],
+      "executionPortMessages": [
+        "artifact.open",
+        "artifact.chunk",
+        "artifact.ack"
+      ],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "publication",
+      "currentObservableOperations": [
+        "publish only the approved candidate and verdict to the selected external target",
+        "cancel, reconcile, list, and inspect durable publication intent"
+      ],
+      "httpCommands": [
+        "publication.publish",
+        "publication.cancel"
+      ],
+      "httpQueries": [
+        "publication.list",
+        "publication.get"
+      ],
+      "websocketEvents": [
+        "activity.recorded.v1",
+        "delivery.changed.v1"
+      ],
+      "executionPortMessages": [],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "collaboration-presence",
+      "currentObservableOperations": [
+        "observe scoped presence without making Presence a business authority"
+      ],
+      "httpCommands": [],
+      "httpQueries": [
+        "session.get",
+        "delivery.get"
+      ],
+      "websocketEvents": [
+        "presence.changed.v1"
+      ],
+      "executionPortMessages": [],
+      "targetObservableOperations": []
+    },
+    {
+      "id": "enterprise-management",
+      "currentObservableOperations": [
+        "list eight bounded enterprise management projections at one revision",
+        "change organization, membership, repository, policy, fleet, and integration state with optimistic revision checks",
+        "reload only the invalidated enterprise management projection"
+      ],
+      "httpCommands": [
+        "enterprise.organization.update",
+        "enterprise.membership.update",
+        "enterprise.project_repository.update",
+        "enterprise.policy.update",
+        "enterprise.fleet.update",
+        "enterprise.integration.update",
+        "enterprise.team.update",
+        "enterprise.role.update",
+        "enterprise.identity.update",
+        "collaboration.notification.ack",
+        "collaboration.presence.update"
+      ],
+      "httpQueries": [
+        "enterprise.organization.list",
+        "enterprise.membership.list",
+        "enterprise.project.list",
+        "enterprise.policy.list",
+        "enterprise.fleet.list",
+        "enterprise.usage.list",
+        "enterprise.audit.list",
+        "enterprise.integration.list",
+        "enterprise.team.list",
+        "enterprise.role.list",
+        "enterprise.identity.list",
+        "collaboration.activity.list",
+        "collaboration.notification.list",
+        "collaboration.presence.list"
+      ],
+      "websocketEvents": [
+        "enterprise-organization.invalidated.v1",
+        "enterprise-membership.invalidated.v1",
+        "enterprise-project.invalidated.v1",
+        "enterprise-policy.invalidated.v1",
+        "enterprise-fleet.invalidated.v1",
+        "enterprise-usage.invalidated.v1",
+        "enterprise-audit.invalidated.v1",
+        "enterprise-integration.invalidated.v1",
+        "enterprise-team.invalidated.v1",
+        "enterprise-role.invalidated.v1"
+      ],
+      "executionPortMessages": [
+        "action.enforcement_request",
+        "action.enforcement_receipt"
+      ],
+      "targetObservableOperations": []
+    }
+  ],
+  "authorityBoundaries": {
+    "businessWrites": "http-command-only",
+    "websocket": "persisted-projection-and-transport-control-only",
+    "execution": "execution-port-only",
+    "executionAuthority": "codex-core",
+    "allowedCodexReferences": [
+      "codexThreadId"
+    ],
+    "forbiddenPublicProperties": [
+      "accessToken",
+      "agentGraph",
+      "apiKey",
+      "codexPlan",
+      "database",
+      "databaseRow",
+      "deliveryPatch",
+      "deliveryVerdict",
+      "providerCredential",
+      "rawProviderRequest",
+      "rawProviderResponse",
+      "secret",
+      "secretMaterial",
+      "socketPath",
+      "sql",
+      "table",
+      "toolPayload",
+      "turn"
+    ],
+    "credentialRule": "Web and Worker exchange credential references or Provider-neutral routes; only the Control Plane resolves long-lived credential material."
+  },
+  "auditFindings": [
+    {
+      "id": "default-chat-execution-scope",
+      "status": "closed-by-contract",
+      "finding": "The original ExecutionScope required DeliveryId and StageRunId, so default Chat could not dispatch without inventing a hidden Delivery.",
+      "resolution": "ExecutionScope is a strict union of product-session and delivery-stage scopes."
+    },
+    {
+      "id": "projection-recovery-read-path",
+      "status": "closed-by-contract",
+      "finding": "session.get and delivery.get metadata could not rebuild Chat or StrongFlow runtime views after restart or WebSocket reset.",
+      "resolution": "session.messages.list and runtime.projection.get provide secret-safe rebuild inputs."
+    },
+    {
+      "id": "persisted-chat-message-event",
+      "status": "closed-by-contract",
+      "finding": "The WebSocket union had no public Chat message event and runtime summaries were not a replacement for user and assistant message projection.",
+      "resolution": "product-session.message.appended.v1 carries only canonical ChatMessageProjection."
+    },
+    {
+      "id": "interactive-input-command",
+      "status": "closed-by-contract",
+      "finding": "ExecutionPort input.response had no browser business command with enough identity to validate the active request.",
+      "resolution": "input.respond binds actor, revision, ProductSession, WorkerSession, Job, and input request before Control Plane emits input.response."
+    }
+  ]
+}

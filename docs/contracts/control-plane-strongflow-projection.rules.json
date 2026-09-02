@@ -1,0 +1,440 @@
+{
+  "schemaVersion": "winwincode.control-plane-strongflow-projection-rules.v1",
+  "issueId": "winwincode-9c4.16.2.5.6",
+  "preflightIssueId": "winwincode-9c4.16.2.5.6.1",
+  "purpose": "Freeze the Rust Control Plane composition boundary for one current, bounded StrongFlow Delivery/runtime/publication read before an HTTP or WebSocket adapter is enabled.",
+  "owner": "winwincode-control-plane",
+  "trigger": "crates/winwincode-control-plane/src/strongflow_projection.rs",
+  "apiContract": {
+    "sourceOfTruth": "schema/winwincode/v1/control-plane-http.schema.json",
+    "compatibility": "breaking-canonical-revision",
+    "migration": "regenerate-rust-and-typescript-together-no-alias",
+    "consumers": [
+      "rust-control-plane",
+      "typescript-generated-client",
+      "strongflow-web",
+      "installed-cli"
+    ]
+  },
+  "composition": {
+    "deliveryInput": "winwincode-delivery-internal-projection",
+    "output": "winwincode-api-generated-dto",
+    "rawDomainEntityOutput": "forbidden",
+    "rawTransportFactInput": "forbidden"
+  },
+  "readCut": {
+    "deliveryQuery": "delivery.get",
+    "runtimeQuery": "runtime.projection.get",
+    "requiredCoordinates": [
+      "deliveryId",
+      "deliveryRevision",
+      "runtimeProjectionCursor",
+      "publicationRevision"
+    ],
+    "cursorPolicy": "delivery.get returns an opaque server-issued projection cursor. runtime.projection.get reuses that cursor and never independently selects a later Delivery, runtime, or publication fact.",
+    "mismatchPolicy": "reject-and-reload",
+    "limitPolicy": "server-bounded-no-unbounded-ledger-read",
+    "replayPolicy": "The same authorized scope, durable journal tail, runtime cursor, publication revision, and page limit produce the same generated DTO ordering and content."
+  },
+  "publication": {
+    "requiredCurrentFacts": [
+      "delivery",
+      "deliverySpecRevision",
+      "candidate",
+      "passingVerdict",
+      "humanApproval",
+      "publicationTarget"
+    ],
+    "mismatchPolicy": "omit-nothing-and-fail-closed",
+    "visibilityPolicy": "A publication summary is visible only when one trusted publication intent or result names the exact current fact set and the same bounded read cut. Missing authority is not represented as an empty successful publication list."
+  },
+  "productionGate": {
+    "missingTrustedAdapterPolicy": "trusted-facts-unavailable",
+    "runtimeOwner": "ExecutionPort ingestion and append-only runtime ledger adapter",
+    "publicationOwner": "winwincode-publication intent and provider reconciliation adapter",
+    "httpPolicy": "The HTTP adapter may call only the Control Plane query port with generated query DTOs.",
+    "websocketPolicy": "The WebSocket adapter emits generated read-only invalidations or deltas only after the referenced projection cursor is durably committed."
+  },
+  "implementationGate": {
+    "libraryPath": "crates/winwincode-control-plane/src/lib.rs",
+    "controlPlaneRequiredDependencies": [
+      "winwincode-api",
+      "winwincode-delivery",
+      "winwincode-storage",
+      "winwincode-publication"
+    ],
+    "deliveryForbiddenDependencies": [
+      "winwincode-api",
+      "winwincode-control-plane"
+    ],
+    "transportAdapters": [
+      {
+        "kind": "http",
+        "path": "crates/winwincode-control-plane/src/http.rs",
+        "requiredGeneratedTypes": [
+          "QueryRequest",
+          "QueryResultResponse"
+        ],
+        "forbiddenTypes": [
+          "ProductStateStorage",
+          "StateChange",
+          "StoredState",
+          "RuntimeEventMessage",
+          "ExecutionPortMessage"
+        ]
+      },
+      {
+        "kind": "websocket",
+        "path": "crates/winwincode-control-plane/src/websocket.rs",
+        "requiredGeneratedTypes": [
+          "ControlPlaneWebSocketEventFrame",
+          "ControlPlaneWebSocketServerFrame"
+        ],
+        "forbiddenTypes": [
+          "ProductStateStorage",
+          "StateChange",
+          "StoredState",
+          "RuntimeEventMessage",
+          "ExecutionPortMessage"
+        ]
+      }
+    ],
+    "publicSeam": {
+      "exports": [
+        {
+          "kind": "trait",
+          "name": "StrongFlowProjectionQueryPort"
+        },
+        {
+          "kind": "enum",
+          "name": "StrongFlowProjectionError"
+        }
+      ],
+      "methods": [
+        "delivery_get",
+        "runtime_projection_get"
+      ],
+      "generatedTypes": [
+        "DeliveryGetQuery",
+        "RuntimeProjectionGetQuery",
+        "QueryResultResponse"
+      ],
+      "implementationOwner": "ControlPlane",
+      "rawConstructorPolicy": "No public unchecked, raw snapshot, Worker message, HTTP value, or WebSocket frame constructor."
+    },
+    "forbiddenRawInputTypes": [
+      "serde_json::Value",
+      "Delivery",
+      "DeliverySnapshot",
+      "RuntimeEventMessage",
+      "ExecutionPortMessage",
+      "JobOutcomeMessage",
+      "ControlPlaneWebSocketClientFrame",
+      "ControlPlaneWebSocketEventPayload",
+      "PublicationPublishPayload",
+      "AcceptedRuntimeSourceFact",
+      "ValidatedGitSnapshotFact",
+      "VerifiedTerminalOutcome"
+    ],
+    "forbiddenPublicFields": [
+      "apiKey",
+      "api_key",
+      "authorization",
+      "credential",
+      "providerRequest",
+      "provider_request",
+      "providerResponse",
+      "provider_response",
+      "rawRuntimeLog",
+      "raw_runtime_log",
+      "stdout",
+      "stderr",
+      "toolPayload",
+      "tool_payload",
+      "unifiedDiff",
+      "unified_diff",
+      "changedFiles",
+      "changed_files",
+      "filePath",
+      "file_path",
+      "hunk",
+      "hunkContent",
+      "hunk_content"
+    ],
+    "blackBoxTest": {
+      "path": "crates/winwincode-control-plane/tests/strongflow_projection.rs",
+      "command": "cargo test -p winwincode-control-plane --test strongflow_projection --locked -- --test-threads=1",
+      "requiredSourceFragments": [
+        "StrongFlowProjectionQueryPort::delivery_get",
+        "StrongFlowProjectionQueryPort::runtime_projection_get",
+        "winwincode_api::generated",
+        "QueryResultResponse",
+        "expect_err(",
+        "assert_eq!("
+      ],
+      "requiredTestNames": [
+        "bounded_projection_replay_is_deterministic",
+        "current_publication_requires_delivery_candidate_verdict_approval_and_target",
+        "delivery_and_runtime_get_share_one_bounded_snapshot_cursor",
+        "delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto",
+        "missing_trusted_publication_adapter_keeps_production_query_closed",
+        "missing_trusted_runtime_adapter_keeps_production_query_closed",
+        "public_projection_excludes_logs_credentials_payloads_and_live_diff_details",
+        "raw_http_worker_and_websocket_facts_cannot_construct_projection",
+        "stale_foreign_or_raced_projection_read_fails_closed",
+        "websocket_projection_events_use_only_committed_cursors"
+      ]
+    },
+    "status": "active"
+  },
+  "rules": [
+    {
+      "id": "composition.delivery_projection_owned_by_delivery",
+      "statement": "The Control Plane consumes an internal immutable projection produced by winwincode-delivery; it does not inspect or duplicate a mutable Delivery entity to rebuild business meaning.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "docs/contracts/strongflow-projection.md"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto"
+      }
+    },
+    {
+      "id": "composition.generated_api_dto_only",
+      "statement": "The public query port accepts generated query types and returns QueryResultResponse; handwritten transport DTOs and raw domain entities never cross this boundary.",
+      "refs": [
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "docs/decisions/0028-control-plane-worker-migration.md"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto"
+      }
+    },
+    {
+      "id": "dependency.delivery_never_imports_api",
+      "statement": "winwincode-control-plane depends on winwincode-delivery and winwincode-api, while winwincode-delivery has no dependency on either API or Control Plane crates.",
+      "refs": [
+        "crates/winwincode-control-plane/Cargo.toml",
+        "crates/winwincode-delivery/Cargo.toml",
+        "docs/decisions/0028-control-plane-worker-target-graph.json"
+      ],
+      "verification": {
+        "kind": "static",
+        "gate": "cargo-metadata-dependency-direction"
+      }
+    },
+    {
+      "id": "read.delivery_runtime_share_bounded_cursor",
+      "statement": "delivery.get and runtime.projection.get use one server-issued bounded read cut; the runtime query cannot silently advance beyond the Delivery and publication revisions visible in delivery.get.",
+      "refs": [
+        "docs/contracts/strongflow-projection.md",
+        "docs/contracts/control-plane-storage-lifecycle.md"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "delivery_and_runtime_get_share_one_bounded_snapshot_cursor"
+      }
+    },
+    {
+      "id": "read.replay_is_bounded_and_deterministic",
+      "statement": "Every projection read has a server limit and stable ordering; replaying the same cursor never scans or returns an unbounded runtime ledger and produces the same DTO.",
+      "refs": [
+        "docs/contracts/strongflow-projection.md",
+        "schema/winwincode/v1/control-plane-http.schema.json"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "bounded_projection_replay_is_deterministic"
+      }
+    },
+    {
+      "id": "publication.current_approved_passing_set_only",
+      "statement": "A publication summary appears only for the exact current Delivery, Spec revision, frozen candidate, passing Verdict, resolved human publication approval, and target in the same read cut.",
+      "refs": [
+        "docs/decisions/0023-canonical-delivery-ownership.md",
+        "packages/strongflow/src/github-publication.ts",
+        "crates/winwincode-control-plane/src/publication_preparation.rs"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "current_publication_requires_delivery_candidate_verdict_approval_and_target"
+      }
+    },
+    {
+      "id": "freshness.stale_foreign_or_raced_fails_closed",
+      "statement": "A foreign Delivery, Spec, SessionBinding, candidate, Verdict, approval, target, cursor, or later concurrent revision rejects the complete projection instead of returning a mixed partial result.",
+      "refs": [
+        "docs/contracts/strongflow-projection.md",
+        "docs/contracts/delivery-evidence-verdict-rework.md"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "stale_foreign_or_raced_projection_read_fails_closed"
+      }
+    },
+    {
+      "id": "gate.runtime_adapter_required",
+      "statement": "Production runtime projection remains unavailable until a trusted append-only runtime ledger adapter can prove exact binding, ordering, lease, attempt, fence, and cursor facts.",
+      "refs": [
+        "docs/contracts/delivery-evidence-verdict-rework.md",
+        "schema/winwincode/v1/execution-port.schema.json"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "missing_trusted_runtime_adapter_keeps_production_query_closed"
+      }
+    },
+    {
+      "id": "gate.publication_adapter_required",
+      "statement": "Production publication projection remains unavailable until the Publication owner supplies a trusted current intent/result joined to the exact approved fact set.",
+      "refs": [
+        "docs/decisions/0028-control-plane-worker-migration.md",
+        "docs/decisions/0028-control-plane-worker-target-graph.json"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "missing_trusted_publication_adapter_keeps_production_query_closed"
+      }
+    },
+    {
+      "id": "boundary.raw_transport_facts_cannot_construct",
+      "statement": "HTTP values, WebSocket frames, ExecutionPort messages, Worker outcomes, and caller-supplied JSON cannot construct Delivery, runtime, publication, or sealed projection facts.",
+      "refs": [
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "schema/winwincode/v1/control-plane-events.schema.json",
+        "schema/winwincode/v1/execution-port.schema.json"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "raw_http_worker_and_websocket_facts_cannot_construct_projection"
+      }
+    },
+    {
+      "id": "boundary.websocket_uses_committed_cursor_only",
+      "statement": "WebSocket emits only read-only generated projection notifications or deltas that name an already committed cursor; gaps and resets require a fresh bounded HTTP snapshot.",
+      "refs": [
+        "docs/contracts/control-plane-websocket.md",
+        "docs/contracts/strongflow-projection.md"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "websocket_projection_events_use_only_committed_cursors"
+      }
+    },
+    {
+      "id": "security.public_projection_is_redacted",
+      "statement": "Public projection DTOs exclude credentials, authorization material, raw logs, stdout, stderr, provider payloads, full tool payloads, live paths, hunks, and unified Diff content.",
+      "refs": [
+        "docs/contracts/strongflow-projection.md",
+        "docs/contracts/control-plane-api-coverage.md"
+      ],
+      "verification": {
+        "kind": "black-box",
+        "testName": "public_projection_excludes_logs_credentials_payloads_and_live_diff_details"
+      }
+    }
+  ],
+  "implementationOrder": [
+    {
+      "id": "delivery-projection",
+      "owner": "winwincode-delivery",
+      "outcome": "Immutable Delivery projections are implemented without importing winwincode-api.",
+      "status": "implemented"
+    },
+    {
+      "id": "runtime-ledger-projection",
+      "owner": "Control Plane runtime ledger adapter",
+      "outcome": "The trusted bounded read port and sealed replay contract are implemented; the production append-only runtime-ledger adapter belongs to Phase 4.",
+      "status": "boundary-implemented-production-adapter-phase-4"
+    },
+    {
+      "id": "generated-api-cursor",
+      "owner": "canonical schema and code generation",
+      "outcome": "Canonical schema/codegen emits the StrongFlow detail DTO and opaque read-cursor fields for Rust and TypeScript together.",
+      "status": "implemented"
+    },
+    {
+      "id": "publication-authority",
+      "owner": "winwincode-publication",
+      "outcome": "The winwincode-publication domain, durable intent ledger, provider port, trusted fact types, and production GitHub HTTP/credential-reference adapter are implemented under one recovery path.",
+      "status": "implemented"
+    },
+    {
+      "id": "control-plane-composition",
+      "owner": "winwincode-control-plane",
+      "outcome": "StrongFlowProjectionQueryPort maps trusted internal projections to generated QueryResultResponse values under one read cut.",
+      "status": "implemented"
+    },
+    {
+      "id": "http-websocket-adapters",
+      "owner": "Control Plane transport adapters",
+      "outcome": "Production HTTP/WebSocket adapters will route generated queries and committed cursor notifications without raw product or Worker facts.",
+      "status": "planned"
+    }
+  ],
+  "status": "implemented-enforced",
+  "closedPreflightRisks": [
+    {
+      "id": "delivery-runtime-torn-read",
+      "status": "closed",
+      "preflightRisk": "delivery.get and runtime.projection.get are separate generated query shapes and do not yet share a server-issued projection cursor.",
+      "closureEvidence": "StrongFlowReadCursor seals the exact Delivery, runtime-ledger, publication, event-stream, scope, actor, and page-limit coordinates; both generated queries replay that same cut.",
+      "refs": [
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "docs/contracts/strongflow-projection.md"
+      ]
+    },
+    {
+      "id": "generic-state-loader-escape",
+      "status": "closed",
+      "preflightRisk": "ControlPlane::load_state accepts an arbitrary stream string and returns opaque stored bytes.",
+      "closureEvidence": "StrongFlowProjectionQueryPort is the only typed projection seam, and the transport source gate rejects ProductStateStorage, StateChange, StoredState, commit, and load_state use.",
+      "refs": [
+        "crates/winwincode-control-plane/src/lib.rs"
+      ]
+    },
+    {
+      "id": "runtime-ledger-authority-missing",
+      "status": "closed",
+      "preflightRisk": "Generated RuntimeProjection DTOs exist, but the Rust Control Plane has no accepted append-only runtime ledger read port or cursor authority.",
+      "closureEvidence": "TrustedRuntimeProjectionAdapter accepts only sealed exact reads; no installed adapter returns TRUSTED_FACTS_UNAVAILABLE rather than projecting raw Worker input.",
+      "refs": [
+        "crates/winwincode-api/src/generated.rs",
+        "docs/contracts/delivery-evidence-verdict-rework.md"
+      ]
+    },
+    {
+      "id": "publication-summary-underbound",
+      "status": "closed",
+      "preflightRisk": "The generated PublicationProjection contains Delivery ID, publication ID, revision, state, and time but not candidate, Verdict, approval, or target identities.",
+      "closureEvidence": "PublicationFactBinding and the generated projection require the current Delivery, Spec, candidate, passing Verdict, human approval, target, and publication revision in one cut.",
+      "refs": [
+        "crates/winwincode-api/src/generated.rs",
+        "packages/strongflow/src/github-publication.ts",
+        "crates/winwincode-control-plane/src/publication_preparation.rs"
+      ]
+    },
+    {
+      "id": "transport-storage-bypass",
+      "status": "closed",
+      "preflightRisk": "ControlPlane re-exports ProductStateStorage and exposes generic StateChange, commit, and load_state seams for lifecycle and migration work.",
+      "closureEvidence": "HTTP/WebSocket adapter gates require generated query/event types and reject direct storage and raw Worker/ExecutionPort fact imports.",
+      "refs": [
+        "crates/winwincode-control-plane/src/lib.rs",
+        "crates/winwincode-storage/src/lib.rs"
+      ]
+    },
+    {
+      "id": "websocket-cursor-not-durable",
+      "status": "closed",
+      "preflightRisk": "The durable outbox has a global sequence, topic, and payload but does not yet own the public WebSocket scope, stream, and stream-local sequence cursor.",
+      "closureEvidence": "Storage now commits scope-local ProjectionEventStream identity, stream sequence, event id, and outbox payload atomically and replays only issued cursors.",
+      "refs": [
+        "crates/winwincode-storage/src/lib.rs",
+        "docs/contracts/control-plane-websocket.md"
+      ]
+    }
+  ]
+}

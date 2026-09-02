@@ -1,0 +1,48 @@
+[package]
+name = "winwincode-server"
+description = "Standalone HTTP and WebSocket host for the WinWinCode Control Plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+axum.workspace = true
+axum-server.workspace = true
+base64.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+http.workspace = true
+httpdate.workspace = true
+rusqlite.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "signal"] }
+winwincode-api.workspace = true
+winwincode-control-plane = { path = "../winwincode-control-plane" }
+winwincode-codex = { path = "../winwincode-codex" }
+winwincode-domain.workspace = true
+winwincode-execution-port.workspace = true
+winwincode-local = { path = "../winwincode-local" }
+winwincode-storage.workspace = true
+winwincode-worker = { path = "../winwincode-worker" }
+
+[dev-dependencies]
+rcgen.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "signal"] }
+tokio-rustls.workspace = true
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+winwincode-session.workspace = true
+
+[[bin]]
+name = "winwincode-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true

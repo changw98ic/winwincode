@@ -193,3 +193,46 @@ async fn request_user_input_holds_an_elicitation_until_response() {
     request.await.expect("request user input task");
     wait_until_released(&mut pause_state).await;
 }
+
+#[tokio::test]
+async fn request_user_input_response_waits_for_restarted_turn_waiter() {
+    let (session, turn_context, events) = make_session_and_context_with_rx().await;
+    let response = RequestUserInputResponse {
+        answers: HashMap::new(),
+    };
+
+    // The Worker can replay the durable response before the replacement
+    // Session has installed an ActiveTurn. The response must remain available
+    // for the exact request_user_input call created by that resumed turn.
+    session
+        .notify_user_input_response(&turn_context.sub_id, response.clone())
+        .await;
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+
+    let request = tokio::spawn({
+        let session = session.clone();
+        let turn_context = turn_context.clone();
+        async move {
+            session
+                .request_user_input(
+                    turn_context.as_ref(),
+                    "call-restarted".to_owned(),
+                    RequestUserInputArgs {
+                        questions: Vec::new(),
+                        is_blocking: true,
+                        auto_resolution_ms: None,
+                    },
+                )
+                .await
+        }
+    });
+
+    events
+        .recv()
+        .await
+        .expect("restarted request user input event");
+    assert_eq!(
+        request.await.expect("restarted request task"),
+        Some(response)
+    );
+}

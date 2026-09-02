@@ -1,0 +1,410 @@
+{
+  "cases": [
+    {
+      "name": "runtime event without lease",
+      "message": {
+        "kind": "runtime.event",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000009",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "event": {
+          "eventId": "xevt_0000000000000000000000000B",
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:00:00.000Z",
+          "category": "lifecycle",
+          "summary": "Worker session started."
+        }
+      }
+    },
+    {
+      "name": "artifact chunk without a lease object",
+      "message": {
+        "kind": "artifact.chunk",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000D",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": null,
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "artifactId": "art_0000000000000000000000000C",
+        "sequence": 1,
+        "payload": {
+          "contentType": "application/json",
+          "dataBase64": "e30=",
+          "payloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "isFinal": true
+      }
+    },
+    {
+      "name": "Worker outcome attempts a canonical Delivery verdict write",
+      "message": {
+        "kind": "job.outcome",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000R",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "outcome": {
+          "status": "succeeded",
+          "summary": "Execution completed.",
+          "finishedAt": "2026-08-24T12:00:00.000Z",
+          "lastEventSequence": 1,
+          "usage": {
+            "runtimeMillis": 17,
+            "tokens": 23,
+            "costMicrounits": 29
+          },
+          "codexThreadId": "cdx_0000000000000000000000000G",
+          "artifacts": [
+            {
+              "artifactId": "art_0000000000000000000000000C",
+              "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            }
+          ]
+        },
+        "deliveryVerdict": "pass"
+      }
+    },
+    {
+      "name": "model request carries a long-lived provider credential",
+      "message": {
+        "kind": "model.open",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000F",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "requestId": "req_00000000000000000000000007",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "modelExchangeId": "mdl_0000000000000000000000000D",
+        "route": {
+          "route": "workspace-default",
+          "capability": "reasoning"
+        },
+        "request": {
+          "contentType": "application/json",
+          "dataBase64": "e30=",
+          "payloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "providerCredential": "TOKEN"
+      }
+    },
+    {
+      "name": "runtime event sequence starts at zero",
+      "message": {
+        "kind": "runtime.event",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000009",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "event": {
+          "eventId": "xevt_0000000000000000000000000B",
+          "sequence": 0,
+          "occurredAt": "2026-08-24T12:00:00.000Z",
+          "category": "lifecycle",
+          "summary": "Worker session started."
+        }
+      }
+    },
+    {
+      "name": "lease uses a non-positive fencing token",
+      "message": {
+        "kind": "job.dispatch_result",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000007",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "requestId": "req_00000000000000000000000003",
+        "jobId": "job_00000000000000000000000003",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "0",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "payloadDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "status": "accepted",
+        "workerSessionId": "wsn_00000000000000000000000005"
+      }
+    },
+    {
+      "name": "gap acknowledgement omits replayFromSequence",
+      "message": {
+        "kind": "runtime.ack",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000A",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "status": "gap",
+        "ackSequence": 1
+      }
+    },
+    {
+      "name": "restarted Worker registration omits its boot identity",
+      "message": {
+        "kind": "worker.register",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000001",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "requestId": "req_00000000000000000000000001",
+        "workerId": "wrk_00000000000000000000000001",
+        "startedAt": "2026-08-24T12:00:00.000Z",
+        "capabilities": {
+          "platform": "aarch64-apple-darwin",
+          "maxConcurrentJobs": 4,
+          "features": [
+            "artifact_stream",
+            "approval",
+            "git",
+            "interactive_input",
+            "model_proxy",
+            "sandbox",
+            "shell"
+          ],
+          "capabilityDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    {
+      "name": "dispatch exposes a database row",
+      "message": {
+        "kind": "job.dispatch",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000006",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "requestId": "req_00000000000000000000000003",
+        "job": {
+          "jobId": "job_00000000000000000000000003",
+          "attempt": 1,
+          "payloadDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "scope": {
+            "productSessionId": "psn_00000000000000000000000006",
+            "deliveryId": "dlv_00000000000000000000000007",
+            "deliveryTaskId": "dtk_00000000000000000000000008",
+            "stageRunId": "run_00000000000000000000000009"
+          },
+          "workspace": {
+            "repositoryId": "rep_0000000000000000000000000A",
+            "checkoutRevision": "0123456789abcdef",
+            "writeMode": "candidate"
+          },
+          "executionProfile": "executor",
+          "goal": "Implement the approved candidate change.",
+          "limits": {
+            "deadlineAt": "2026-08-24T12:10:00.000Z",
+            "maxRuntimeSeconds": 600,
+            "maxArtifactBytes": 10485760
+          }
+        },
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "databaseRow": {
+          "id": 1
+        }
+      }
+    },
+    {
+      "name": "artifact stream uses an unknown transport field",
+      "message": {
+        "kind": "artifact.open",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000C",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "requestId": "req_00000000000000000000000006",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "artifact": {
+          "artifactId": "art_0000000000000000000000000C",
+          "kind": "diff",
+          "mediaType": "text/x-diff",
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "sizeBytes": 2,
+          "fileName": "candidate.diff"
+        },
+        "socketPath": "/tmp/private.sock"
+      }
+    },
+    {
+      "name": "provided input response uses null instead of a typed value",
+      "message": {
+        "kind": "input.response",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000K",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "inputRequestId": "inp_0000000000000000000000000E",
+        "status": "provided",
+        "value": null,
+        "respondedAt": "2026-08-24T12:00:00.000Z"
+      }
+    },
+    {
+      "name": "cancelled input response retains a typed value",
+      "message": {
+        "kind": "input.response",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000K",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "inputRequestId": "inp_0000000000000000000000000E",
+        "status": "cancelled",
+        "value": {
+          "mode": "single_choice",
+          "value": "candidate"
+        },
+        "respondedAt": "2026-08-24T12:00:00.000Z"
+      }
+    },
+    {
+      "name": "runtime-event-without-accepted-codex-thread-binding",
+      "message": {
+        "kind": "runtime.event",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_00000000000000000000000009",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "event": {
+          "eventId": "xevt_0000000000000000000000000B",
+          "sequence": 1,
+          "occurredAt": "2026-08-24T12:00:00.000Z",
+          "category": "lifecycle",
+          "summary": "Worker session started."
+        }
+      }
+    },
+    {
+      "name": "session-binding-without-codex-thread",
+      "message": {
+        "kind": "session.binding",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000T",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "boundAt": "2026-08-24T12:00:00.000Z"
+      }
+    },
+    {
+      "name": "session-binding-with-undeclared-runtime-log",
+      "message": {
+        "kind": "session.binding",
+        "schemaVersion": "winwincode/v1",
+        "messageId": "xmsg_0000000000000000000000000T",
+        "sentAt": "2026-08-24T12:00:00.000Z",
+        "lease": {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "workerId": "wrk_00000000000000000000000001",
+          "workerInstanceId": "wki_00000000000000000000000002",
+          "attempt": 1,
+          "fencingToken": "42",
+          "issuedAt": "2026-08-24T12:00:00.000Z",
+          "expiresAt": "2026-08-24T12:10:00.000Z"
+        },
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "boundAt": "2026-08-24T12:00:00.000Z",
+        "rawRuntimeLog": "secret output"
+      }
+    }
+  ]
+}

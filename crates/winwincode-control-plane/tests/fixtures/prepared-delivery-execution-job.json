@@ -1,0 +1,61 @@
+{
+  "attempt": 1,
+  "executionProfile": "executor",
+  "goal": "Implement the approved candidate change.",
+  "jobId": "job_00000000000000000000000006",
+  "limits": {
+    "deadlineAt": "2026-08-25T12:00:00.000Z",
+    "maxArtifactBytes": 10000000,
+    "maxRuntimeSeconds": 3600
+  },
+  "payloadDigest": "sha256:ee85247a694daf33a350b3acb06b84a328c49db6d8688da6d751cab4c567bd9a",
+  "scope": {
+    "deliveryId": "dlv_00000000000000000000000006",
+    "deliveryTaskId": "dtk_00000000000000000000000006",
+    "kind": "delivery-stage",
+    "productSessionId": "psn_00000000000000000000000006",
+    "stageRunId": "run_00000000000000000000000006"
+  },
+  "stageInput": {
+    "acceptanceCriteria": [
+      {
+        "criterionId": "criterion-required",
+        "description": "A valid invitation can be accepted exactly once.",
+        "required": true,
+        "verificationMethod": "Run the invitation integration test."
+      },
+      {
+        "criterionId": "criterion-optional",
+        "description": "The empty state remains readable at narrow widths.",
+        "required": false
+      }
+    ],
+    "constraints": [
+      "Keep the existing authentication boundary"
+    ],
+    "deliverySpecId": "delivery-spec-v1",
+    "deliverySpecRevision": 1,
+    "goal": "Users can invite a teammate and verify the result.",
+    "outOfScope": [
+      "Organization billing"
+    ],
+    "schemaVersion": "winwincode/v1",
+    "scope": [
+      "Invitation data and API"
+    ],
+    "task": {
+      "acceptanceCriterionIds": [
+        "criterion-required"
+      ],
+      "goal": "Implement the approved candidate change.",
+      "taskId": "dtk_00000000000000000000000006",
+      "title": "Implement the approved task"
+    },
+    "title": "Implement invitation flow"
+  },
+  "workspace": {
+    "checkoutRevision": "0123456789abcdef",
+    "repositoryId": "rep_00000000000000000000000006",
+    "writeMode": "candidate"
+  }
+}

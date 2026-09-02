@@ -1,0 +1,845 @@
+{
+  "messages": [
+    {
+      "kind": "worker.register",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000001",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000001",
+      "workerId": "wrk_00000000000000000000000001",
+      "workerInstanceId": "wki_00000000000000000000000002",
+      "startedAt": "2026-08-24T12:00:00.000Z",
+      "capabilities": {
+        "platform": "aarch64-apple-darwin",
+        "maxConcurrentJobs": 4,
+        "features": [
+          "artifact_stream",
+          "approval",
+          "git",
+          "interactive_input",
+          "model_proxy",
+          "sandbox",
+          "shell"
+        ],
+        "capabilityDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "kind": "worker.registration_result",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000002",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000001",
+      "workerId": "wrk_00000000000000000000000001",
+      "workerInstanceId": "wki_00000000000000000000000002",
+      "status": "accepted",
+      "leaseRecovery": "no_active_leases",
+      "heartbeatIntervalMs": 10000,
+      "serverTime": "2026-08-24T12:00:00.000Z"
+    },
+    {
+      "kind": "worker.capabilities",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000003",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000002",
+      "workerId": "wrk_00000000000000000000000001",
+      "workerInstanceId": "wki_00000000000000000000000002",
+      "observedAt": "2026-08-24T12:00:00.000Z",
+      "capabilities": {
+        "platform": "aarch64-apple-darwin",
+        "maxConcurrentJobs": 4,
+        "features": [
+          "artifact_stream",
+          "approval",
+          "git",
+          "interactive_input",
+          "model_proxy",
+          "sandbox",
+          "shell"
+        ],
+        "capabilityDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "kind": "worker.heartbeat",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000004",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "workerId": "wrk_00000000000000000000000001",
+      "workerInstanceId": "wki_00000000000000000000000002",
+      "heartbeatSequence": 1,
+      "observedAt": "2026-08-24T12:00:00.000Z",
+      "capacity": {
+        "runningJobs": 1,
+        "availableSlots": 3
+      },
+      "activeLeases": [
+        {
+          "leaseId": "lse_00000000000000000000000004",
+          "jobId": "job_00000000000000000000000003",
+          "attempt": 1,
+          "fencingToken": "42",
+          "expiresAt": "2026-08-24T12:10:00.000Z",
+          "lastEventSequence": 1
+        }
+      ]
+    },
+    {
+      "kind": "worker.heartbeat_ack",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000005",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "workerId": "wrk_00000000000000000000000001",
+      "workerInstanceId": "wki_00000000000000000000000002",
+      "heartbeatSequence": 1,
+      "status": "accepted",
+      "serverTime": "2026-08-24T12:00:00.000Z",
+      "nextHeartbeatWithinMs": 10000
+    },
+    {
+      "kind": "job.dispatch",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000006",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000003",
+      "job": {
+        "jobId": "job_00000000000000000000000003",
+        "attempt": 1,
+        "payloadDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "scope": {
+          "kind": "delivery-stage",
+          "productSessionId": "psn_00000000000000000000000006",
+          "deliveryId": "dlv_00000000000000000000000007",
+          "deliveryTaskId": "dtk_00000000000000000000000008",
+          "stageRunId": "run_00000000000000000000000009"
+        },
+        "workspace": {
+          "repositoryId": "rep_0000000000000000000000000A",
+          "checkoutRevision": "0123456789abcdef",
+          "writeMode": "candidate"
+        },
+        "executionProfile": "executor",
+        "goal": "Implement the approved candidate change.",
+        "stageInput": {
+          "schemaVersion": "winwincode/v1",
+          "deliverySpecId": "delivery-spec-fixture",
+          "deliverySpecRevision": 1,
+          "title": "Implement the approved candidate",
+          "goal": "Ship the exact approved candidate change.",
+          "scope": [
+            "Candidate source tree"
+          ],
+          "outOfScope": [],
+          "constraints": [],
+          "acceptanceCriteria": [
+            {
+              "criterionId": "criterion-fixture",
+              "description": "The approved candidate change passes its exact test.",
+              "verificationMethod": "Run the exact candidate test.",
+              "required": true
+            }
+          ],
+          "task": {
+            "taskId": "dtk_00000000000000000000000008",
+            "title": "Implement the candidate",
+            "goal": "Implement the approved candidate change.",
+            "acceptanceCriterionIds": [
+              "criterion-fixture"
+            ]
+          }
+        },
+        "limits": {
+          "deadlineAt": "2026-08-24T12:10:00.000Z",
+          "maxRuntimeSeconds": 600,
+          "maxArtifactBytes": 10485760
+        }
+      },
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "replacementAuthority": null
+    },
+    {
+      "kind": "job.dispatch_result",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000007",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000003",
+      "jobId": "job_00000000000000000000000003",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "payloadDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "status": "accepted",
+      "workerSessionId": "wsn_00000000000000000000000005"
+    },
+    {
+      "kind": "session.binding",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000T",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "productSessionId": "psn_00000000000000000000000006",
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "codexThreadId": "cdx_0000000000000000000000000G",
+      "boundAt": "2026-08-24T12:00:00.000Z",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      },
+      "stageRunId": "run_00000000000000000000000009",
+      "workerId": "wrk_00000000000000000000000001",
+      "sourceIdentity": {
+        "kind": "execution-worker",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "leaseId": "lse_00000000000000000000000004",
+        "workerInstanceId": "wki_00000000000000000000000002"
+      },
+      "leaseId": "lse_00000000000000000000000004",
+      "attempt": 1,
+      "fencingToken": "42"
+    },
+    {
+      "kind": "lease.renew",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000008",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000004",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "priorExpiresAt": "2026-08-24T12:05:00.000Z"
+    },
+    {
+      "kind": "runtime.event",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_00000000000000000000000009",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "event": {
+        "eventId": "xevt_0000000000000000000000000B",
+        "sequence": 1,
+        "occurredAt": "2026-08-24T12:00:00.000Z",
+        "category": "lifecycle",
+        "summary": "Worker session started."
+      },
+      "codexThreadId": "cdx_0000000000000000000000000G",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "runtime.ack",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000A",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "status": "accepted",
+      "ackSequence": 1,
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "runtime.replay_request",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000B",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000005",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "afterSequence": 1,
+      "maxEvents": 1000,
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "artifact.open",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000C",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000006",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "artifact": {
+        "artifactId": "art_0000000000000000000000000C",
+        "kind": "diff",
+        "mediaType": "text/x-diff",
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "sizeBytes": 2,
+        "fileName": "candidate.diff"
+      },
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "artifact.chunk",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000D",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "artifactId": "art_0000000000000000000000000C",
+      "sequence": 1,
+      "payload": {
+        "contentType": "application/json",
+        "dataBase64": "e30=",
+        "payloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "isFinal": true,
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "artifact.ack",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000E",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "artifactId": "art_0000000000000000000000000C",
+      "status": "accepted",
+      "ackSequence": 1,
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "model.open",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000F",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000007",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "modelExchangeId": "mdl_0000000000000000000000000D",
+      "route": {
+        "route": "workspace-default",
+        "capability": "reasoning"
+      },
+      "request": {
+        "contentType": "application/json",
+        "dataBase64": "e30=",
+        "payloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "model.chunk",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000G",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "modelExchangeId": "mdl_0000000000000000000000000D",
+      "sequence": 1,
+      "payload": {
+        "contentType": "application/json",
+        "dataBase64": "e30=",
+        "payloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "isFinal": false,
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "model.ack",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000H",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "modelExchangeId": "mdl_0000000000000000000000000D",
+      "status": "accepted",
+      "ackSequence": 1,
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "input.request",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000J",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000008",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "inputRequestId": "inp_0000000000000000000000000E",
+      "mode": "single_choice",
+      "prompt": "Select the target.",
+      "choices": [
+        {
+          "value": "candidate",
+          "label": "Candidate workspace"
+        }
+      ],
+      "allowEmpty": false,
+      "expiresAt": "2026-08-24T12:10:00.000Z",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "input.response",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000K",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "inputRequestId": "inp_0000000000000000000000000E",
+      "status": "provided",
+      "value": {
+        "mode": "single_choice",
+        "value": "candidate"
+      },
+      "respondedAt": "2026-08-24T12:00:00.000Z",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "approval.request",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000M",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_00000000000000000000000009",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "approvalId": "apr_0000000000000000000000000F",
+      "action": {
+        "category": "shell",
+        "summary": "Run the approved test command."
+      },
+      "expiresAt": "2026-08-24T12:10:00.000Z",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "approval.decision",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000N",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "approvalId": "apr_0000000000000000000000000F",
+      "decision": "approved",
+      "scope": "once",
+      "decidedAt": "2026-08-24T12:00:00.000Z",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "job.cancel",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000P",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_0000000000000000000000000A",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "reason": "user_requested",
+      "requestedAt": "2026-08-24T12:00:00.000Z",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "job.cancel_ack",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000Q",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_0000000000000000000000000A",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "status": "accepted",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "action.enforcement_request",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000T",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_0000000000000000000000000T",
+      "jobId": "job_00000000000000000000000003",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      },
+      "policyKind": "tool",
+      "resource": "action:shell:cwd:.",
+      "subjectSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matchedConditionSha256": [
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ]
+    },
+    {
+      "kind": "action.enforcement_receipt",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000V",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "requestId": "req_0000000000000000000000000T",
+      "jobId": "job_00000000000000000000000003",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      },
+      "scope": {
+        "kind": "repository",
+        "organizationId": "org_00000000000000000000000001",
+        "workspaceId": "wsp_00000000000000000000000002",
+        "projectId": "prj_00000000000000000000000003",
+        "repositoryId": "rep_00000000000000000000000004"
+      },
+      "actor": {
+        "kind": "user",
+        "id": "usr_00000000000000000000000005"
+      },
+      "policyKind": "tool",
+      "resource": "action:shell:cwd:.",
+      "subjectSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matchedConditionSha256": [
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "decision": "permit",
+      "policyMode": "enforce",
+      "policyVersion": {
+        "policyId": "pol_00000000000000000000000006",
+        "version": 1,
+        "versionDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "effectiveDefinitionSha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "evaluationSha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "evaluatedAt": "2026-08-24T12:00:00.000Z",
+      "receiptSignature": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "kind": "job.outcome",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000R",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "outcome": {
+        "status": "succeeded",
+        "summary": "Execution completed.",
+        "finishedAt": "2026-08-24T12:00:00.000Z",
+        "lastEventSequence": 1,
+        "usage": {
+          "runtimeMillis": 17,
+          "tokens": 23,
+          "costMicrounits": 29
+        },
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "artifacts": [
+          {
+            "artifactId": "art_0000000000000000000000000C",
+            "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    },
+    {
+      "kind": "job.outcome_ack",
+      "schemaVersion": "winwincode/v1",
+      "messageId": "xmsg_0000000000000000000000000S",
+      "sentAt": "2026-08-24T12:00:00.000Z",
+      "lease": {
+        "leaseId": "lse_00000000000000000000000004",
+        "jobId": "job_00000000000000000000000003",
+        "workerId": "wrk_00000000000000000000000001",
+        "workerInstanceId": "wki_00000000000000000000000002",
+        "attempt": 1,
+        "fencingToken": "42",
+        "issuedAt": "2026-08-24T12:00:00.000Z",
+        "expiresAt": "2026-08-24T12:10:00.000Z"
+      },
+      "workerSessionId": "wsn_00000000000000000000000005",
+      "status": "accepted",
+      "sessionIdentity": {
+        "productSessionId": "psn_00000000000000000000000006",
+        "workerSessionId": "wsn_00000000000000000000000005",
+        "codexThreadId": "cdx_0000000000000000000000000G",
+        "stageRunId": "run_00000000000000000000000009"
+      }
+    }
+  ],
+  "executionScopes": [
+    {
+      "kind": "product-session",
+      "productSessionId": "psn_00000000000000000000000006"
+    },
+    {
+      "kind": "delivery-stage",
+      "productSessionId": "psn_00000000000000000000000006",
+      "deliveryId": "dlv_00000000000000000000000007",
+      "deliveryTaskId": "dtk_00000000000000000000000008",
+      "stageRunId": "run_00000000000000000000000009"
+    }
+  ]
+}

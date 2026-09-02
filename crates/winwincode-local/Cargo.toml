@@ -1,0 +1,22 @@
+[package]
+name = "winwincode-local"
+description = "Single-process WinWinCode Control Plane and Execution Worker launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+winwincode-control-plane = { path = "../winwincode-control-plane" }
+winwincode-observability = { path = "../winwincode-observability" }
+winwincode-worker = { path = "../winwincode-worker" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

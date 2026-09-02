@@ -3,12 +3,18 @@
   "compilerOptions": {
     "declaration": false,
     "declarationMap": false,
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2023"
+    ],
     "noEmit": true,
     "rootDir": ".",
     "sourceMap": false
   },
   "include": [
-    "apps/*/src/**/*.ts",
-    "packages/*/src/**/*.ts"
+    "apps/client/src/**/*.ts",
+    "packages/contracts/src/**/*.ts",
+    "packages/strongflow/src/**/*.ts"
   ]
 }

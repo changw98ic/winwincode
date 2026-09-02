@@ -16,6 +16,7 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::executor_windows_sandbox_level;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_apply_patch::ApplyPatchAction;
+use codex_apply_patch::ApplyPatchFileChange;
 use codex_apply_patch::ApplyPatchOptions;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_protocol::error::CodexErr;
@@ -153,6 +154,37 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRuntime {
     fn turn_environment<'a>(&self, req: &'a ApplyPatchRequest) -> &'a TurnEnvironment {
         &req.turn_environment
+    }
+
+    fn action_gate_payload(&self, req: &ApplyPatchRequest) -> Option<crate::ToolCallGatePayload> {
+        let mut changes = req
+            .action
+            .changes()
+            .iter()
+            .map(|(path, change)| {
+                let (operation, move_path) = match change {
+                    ApplyPatchFileChange::Add { .. } => {
+                        (crate::ToolCallGateFileOperation::Create, None)
+                    }
+                    ApplyPatchFileChange::Delete { .. } => {
+                        (crate::ToolCallGateFileOperation::Delete, None)
+                    }
+                    ApplyPatchFileChange::Update { move_path, .. } => (
+                        crate::ToolCallGateFileOperation::Write,
+                        move_path
+                            .as_ref()
+                            .map(|path| path.to_path_buf().to_string_lossy().into_owned()),
+                    ),
+                };
+                crate::ToolCallGateFileChange {
+                    operation,
+                    path: path.to_path_buf().to_string_lossy().into_owned(),
+                    move_path,
+                }
+            })
+            .collect::<Vec<_>>();
+        changes.sort_by(|left, right| left.path.cmp(&right.path));
+        Some(crate::ToolCallGatePayload::Files { changes })
     }
 
     fn uses_executor_managed_process_sandbox(&self, req: &ApplyPatchRequest) -> bool {

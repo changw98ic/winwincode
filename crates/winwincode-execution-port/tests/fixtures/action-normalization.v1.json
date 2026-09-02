@@ -1,0 +1,648 @@
+{
+  "schemaVersion": "winwincode.action-normalization.v1",
+  "cases": [
+    {
+      "name": "file production write",
+      "intent": {
+        "object": "production_code",
+        "operation": "modify",
+        "intent": "implement",
+        "scope": "local",
+        "targets": [
+          "crates/kernel/src/lib.rs"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "medium"
+      },
+      "request": {
+        "source": "file",
+        "operation": "write",
+        "paths": [
+          "crates/kernel/src/lib.rs"
+        ],
+        "analysis": {
+          "testOwner": null,
+          "assertionEffect": "unchanged",
+          "dependencyEffect": "none",
+          "publicApiChange": false,
+          "migrationChange": false
+        }
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "production_code",
+          "operation": "modify",
+          "intent": "implement",
+          "scope": "local",
+          "targets": [
+            "crates/kernel/src/lib.rs"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "medium"
+        },
+        "observed": {
+          "source": "file",
+          "objects": [
+            "production_code"
+          ],
+          "operation": "modify",
+          "scope": "local",
+          "targets": [
+            "crates/kernel/src/lib.rs"
+          ],
+          "facts": [
+            "file_path"
+          ],
+          "minimumRisk": "medium"
+        },
+        "comparison": {
+          "matches": true,
+          "mismatches": []
+        }
+      }
+    },
+    {
+      "name": "protected test weakening mismatches production intent",
+      "intent": {
+        "object": "production_code",
+        "operation": "modify",
+        "intent": "implement",
+        "scope": "local",
+        "targets": [
+          "*"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "low"
+      },
+      "request": {
+        "source": "file",
+        "operation": "write",
+        "paths": [
+          "crates/kernel/tests/behavior.rs"
+        ],
+        "analysis": {
+          "testOwner": "protected_adversarial",
+          "assertionEffect": "weakened",
+          "dependencyEffect": "none",
+          "publicApiChange": false,
+          "migrationChange": false
+        }
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "production_code",
+          "operation": "modify",
+          "intent": "implement",
+          "scope": "local",
+          "targets": [
+            "*"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "low"
+        },
+        "observed": {
+          "source": "file",
+          "objects": [
+            "test"
+          ],
+          "operation": "modify",
+          "scope": "local",
+          "targets": [
+            "crates/kernel/tests/behavior.rs"
+          ],
+          "facts": [
+            "file_path",
+            "test_path",
+            "protected_test",
+            "assertion_weakened"
+          ],
+          "minimumRisk": "critical"
+        },
+        "comparison": {
+          "matches": false,
+          "mismatches": [
+            {
+              "kind": "object",
+              "declared": "production_code",
+              "observed": "test",
+              "explanation": "observed test action is outside declared production_code object"
+            },
+            {
+              "kind": "risk",
+              "declared": "low",
+              "observed": "critical",
+              "explanation": "observed facts require at least critical risk, above declared low risk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "dependency manifest addition",
+      "intent": {
+        "object": "dependency",
+        "operation": "modify",
+        "intent": "implement",
+        "scope": "repository",
+        "targets": [
+          "package.json"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "high"
+      },
+      "request": {
+        "source": "file",
+        "operation": "write",
+        "paths": [
+          "package.json"
+        ],
+        "analysis": {
+          "testOwner": null,
+          "assertionEffect": "unchanged",
+          "dependencyEffect": "added",
+          "publicApiChange": false,
+          "migrationChange": false
+        }
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "dependency",
+          "operation": "modify",
+          "intent": "implement",
+          "scope": "repository",
+          "targets": [
+            "package.json"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "high"
+        },
+        "observed": {
+          "source": "file",
+          "objects": [
+            "dependency"
+          ],
+          "operation": "modify",
+          "scope": "repository",
+          "targets": [
+            "package.json"
+          ],
+          "facts": [
+            "file_path",
+            "dependency_manifest",
+            "dependency_added"
+          ],
+          "minimumRisk": "high"
+        },
+        "comparison": {
+          "matches": true,
+          "mismatches": []
+        }
+      }
+    },
+    {
+      "name": "git push",
+      "intent": {
+        "object": "production_code",
+        "operation": "deploy",
+        "intent": "implement",
+        "scope": "repository",
+        "targets": [
+          ".",
+          "git-ref:refs/heads/main"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "high"
+      },
+      "request": {
+        "source": "git",
+        "operation": "push",
+        "repositoryPath": ".",
+        "refs": [
+          "refs/heads/main"
+        ]
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "production_code",
+          "operation": "deploy",
+          "intent": "implement",
+          "scope": "repository",
+          "targets": [
+            ".",
+            "git-ref:refs/heads/main"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "high"
+        },
+        "observed": {
+          "source": "git",
+          "objects": [
+            "production_code"
+          ],
+          "operation": "deploy",
+          "scope": "repository",
+          "targets": [
+            ".",
+            "git-ref:refs/heads/main"
+          ],
+          "facts": [
+            "git_repository",
+            "git_remote_write"
+          ],
+          "minimumRisk": "high"
+        },
+        "comparison": {
+          "matches": true,
+          "mismatches": []
+        }
+      }
+    },
+    {
+      "name": "shell test execution",
+      "intent": {
+        "object": "test",
+        "operation": "execute",
+        "intent": "implement",
+        "scope": "repository",
+        "targets": [
+          "cwd:.",
+          "argv:[\"cargo\",\"test\"]"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "low"
+      },
+      "request": {
+        "source": "shell",
+        "program": "cargo",
+        "args": [
+          "test"
+        ],
+        "workingDirectory": "."
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "test",
+          "operation": "execute",
+          "intent": "implement",
+          "scope": "repository",
+          "targets": [
+            "cwd:.",
+            "argv:[\"cargo\",\"test\"]"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "low"
+        },
+        "observed": {
+          "source": "shell",
+          "objects": [
+            "test"
+          ],
+          "operation": "execute",
+          "scope": "repository",
+          "targets": [
+            "cwd:.",
+            "argv:[\"cargo\",\"test\"]"
+          ],
+          "facts": [
+            "test_path",
+            "shell_command"
+          ],
+          "minimumRisk": "low"
+        },
+        "comparison": {
+          "matches": true,
+          "mismatches": []
+        }
+      }
+    },
+    {
+      "name": "network write mismatches read intent",
+      "intent": {
+        "object": "external_resource",
+        "operation": "execute",
+        "intent": "implement",
+        "scope": "external",
+        "targets": [
+          "POST https://api.example.test/v1/items"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "low"
+      },
+      "request": {
+        "source": "network",
+        "method": "post",
+        "url": "HTTPS://API.EXAMPLE.TEST:443/v1/items?token=secret"
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "external_resource",
+          "operation": "execute",
+          "intent": "implement",
+          "scope": "external",
+          "targets": [
+            "POST https://api.example.test/v1/items"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "low"
+        },
+        "observed": {
+          "source": "network",
+          "objects": [
+            "external_resource"
+          ],
+          "operation": "create",
+          "scope": "external",
+          "targets": [
+            "POST https://api.example.test/v1/items"
+          ],
+          "facts": [
+            "network_write"
+          ],
+          "minimumRisk": "high"
+        },
+        "comparison": {
+          "matches": false,
+          "mismatches": [
+            {
+              "kind": "operation",
+              "declared": "execute",
+              "observed": "create",
+              "explanation": "observed create operation differs from declared execute operation"
+            },
+            {
+              "kind": "risk",
+              "declared": "low",
+              "observed": "high",
+              "explanation": "observed facts require at least high risk, above declared low risk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mcp update",
+      "intent": {
+        "object": "external_resource",
+        "operation": "modify",
+        "intent": "implement",
+        "scope": "external",
+        "targets": [
+          "mcp://fixture.server/update_record"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "medium"
+      },
+      "request": {
+        "source": "mcp",
+        "server": "Fixture.Server",
+        "tool": "Update_Record",
+        "arguments": {
+          "recordId": "record-1",
+          "value": 2
+        }
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "external_resource",
+          "operation": "modify",
+          "intent": "implement",
+          "scope": "external",
+          "targets": [
+            "mcp://fixture.server/update_record"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "medium"
+        },
+        "observed": {
+          "source": "mcp",
+          "objects": [
+            "external_resource"
+          ],
+          "operation": "modify",
+          "scope": "external",
+          "targets": [
+            "mcp://fixture.server/update_record"
+          ],
+          "facts": [
+            "mcp_capability"
+          ],
+          "minimumRisk": "medium"
+        },
+        "comparison": {
+          "matches": true,
+          "mismatches": []
+        }
+      }
+    },
+    {
+      "name": "mixed config and schema files",
+      "intent": {
+        "object": "config",
+        "operation": "modify",
+        "intent": "implement",
+        "scope": "cross_module",
+        "targets": [
+          "configs",
+          "schema"
+        ],
+        "requirementRefs": [
+          "REQ-1"
+        ],
+        "planRefs": [
+          "PLAN-1"
+        ],
+        "expectedEffect": "apply the requested change",
+        "scopeDelta": null,
+        "rollback": "restore the prior candidate",
+        "executorRisk": "medium"
+      },
+      "request": {
+        "source": "file",
+        "operation": "write",
+        "paths": [
+          "schema/api.schema.json",
+          "configs/runtime.yaml"
+        ],
+        "analysis": {
+          "testOwner": null,
+          "assertionEffect": "unchanged",
+          "dependencyEffect": "none",
+          "publicApiChange": false,
+          "migrationChange": false
+        }
+      },
+      "expected": {
+        "schemaVersion": "winwincode.action-normalization.v1",
+        "intent": {
+          "object": "config",
+          "operation": "modify",
+          "intent": "implement",
+          "scope": "cross_module",
+          "targets": [
+            "configs",
+            "schema"
+          ],
+          "requirementRefs": [
+            "REQ-1"
+          ],
+          "planRefs": [
+            "PLAN-1"
+          ],
+          "expectedEffect": "apply the requested change",
+          "scopeDelta": null,
+          "rollback": "restore the prior candidate",
+          "executorRisk": "medium"
+        },
+        "observed": {
+          "source": "file",
+          "objects": [
+            "config",
+            "schema"
+          ],
+          "operation": "modify",
+          "scope": "cross_module",
+          "targets": [
+            "configs/runtime.yaml",
+            "schema/api.schema.json"
+          ],
+          "facts": [
+            "file_path",
+            "config_path",
+            "schema_path"
+          ],
+          "minimumRisk": "medium"
+        },
+        "comparison": {
+          "matches": false,
+          "mismatches": [
+            {
+              "kind": "object",
+              "declared": "config",
+              "observed": "schema",
+              "explanation": "observed schema action is outside declared config object"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

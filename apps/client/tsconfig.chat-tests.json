@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2023"
+    ],
+    "noEmit": false,
+    "outDir": "../../.cache/chat-view-model-tests",
+    "rootDir": "src",
+    "sourceMap": false,
+    "tsBuildInfoFile": "../../.cache/tsbuild/chat-view-model-tests.tsbuildinfo"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

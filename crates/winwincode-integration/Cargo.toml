@@ -1,0 +1,32 @@
+[package]
+name = "winwincode-integration"
+description = "Tenant-scoped connector authority and durable webhook delivery framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+hmac = "=0.12.1"
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time = { workspace = true, features = ["parsing"] }
+ureq = { version = "=3.1.4", default-features = false, features = ["rustls", "json"] }
+winwincode-audit.workspace = true
+winwincode-domain.workspace = true
+winwincode-publication.workspace = true
+
+[dev-dependencies]
+jsonwebtoken = { version = "=10.3.0", features = ["aws_lc_rs"] }
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+rustls.workspace = true
+winwincode-api.workspace = true
+winwincode-storage.workspace = true
+
+[lints]
+workspace = true

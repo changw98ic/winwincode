@@ -28,7 +28,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use codex_api::AgentIdentityTelemetry;
@@ -111,6 +110,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
@@ -176,7 +176,7 @@ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
 ///
 /// The host receives the already-normalized Responses payload plus stable Codex identities. It
 /// does not receive HTTP headers, authentication state, or provider credentials.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStreamRequest {
     pub request_id: String,
@@ -185,6 +185,20 @@ pub struct ModelStreamRequest {
     pub thread_id: String,
     pub turn_id: Option<String>,
     pub request: ResponsesApiRequest,
+}
+
+impl std::fmt::Debug for ModelStreamRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelStreamRequest")
+            .field("request_id", &self.request_id)
+            .field("provider", &self.provider)
+            .field("session_id", &self.session_id)
+            .field("thread_id", &self.thread_id)
+            .field("turn_id", &self.turn_id)
+            .field("request", &"<private>")
+            .finish()
+    }
 }
 
 /// Optional host-owned transport for streaming model inference without an HTTP compatibility
@@ -245,7 +259,6 @@ struct ModelClientState {
     cached_websocket_session: StdMutex<WebsocketSession>,
     model_stream_transport: Option<Arc<dyn ModelStreamTransport>>,
     model_stream_provider_id: String,
-    model_stream_request_sequence: AtomicU64,
 }
 
 /// Resolved API client setup for a single request attempt.
@@ -500,7 +513,6 @@ impl ModelClient {
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
                 model_stream_transport: None,
                 model_stream_provider_id,
-                model_stream_request_sequence: AtomicU64::new(0),
             }),
             agent_identity_policy,
             prompt_cache_key_override: None,
@@ -1931,14 +1943,21 @@ impl ModelClientSession {
         let request_session_telemetry = session_telemetry_for_request(session_telemetry, &request);
         let inference_trace_attempt = inference_trace.start_attempt();
         inference_trace_attempt.record_started(&request);
-        let sequence = self
-            .client
-            .state
-            .model_stream_request_sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
+        // `request_id` is the durable Core model-call identity.  It is a
+        // deterministic UUID derived from the semantic request and stable
+        // turn/session identities; transport-only client metadata is omitted.
+        // A retry after a process restart therefore reopens the same Worker
+        // exchange, while two different in-flight requests receive different
+        // identities without relying on an in-memory counter.
+        let request_id = stable_model_call_id(
+            &self.client.state.thread_id,
+            &responses_metadata.session_id,
+            responses_metadata.turn_id.as_deref(),
+            &self.client.state.model_stream_provider_id,
+            &request,
+        );
         let transport_request = ModelStreamRequest {
-            request_id: format!("{}:{sequence}", self.client.state.thread_id),
+            request_id,
             provider: self.client.state.model_stream_provider_id.clone(),
             session_id: responses_metadata.session_id.clone(),
             thread_id: responses_metadata.thread_id.clone(),
@@ -2312,6 +2331,42 @@ impl PendingUnauthorizedRetry {
             recovery_phase: Some(recovery.phase),
         }
     }
+}
+
+fn stable_model_call_id(
+    thread_id: &ThreadId,
+    session_id: &str,
+    turn_id: Option<&str>,
+    provider: &str,
+    request: &ResponsesApiRequest,
+) -> String {
+    let mut semantic_request = request.clone();
+    // Core metadata contains timestamps, parent routing, and other transport
+    // projections.  It is carried in the envelope for authority checks but
+    // must not change the identity of an otherwise identical provider call.
+    semantic_request.client_metadata = None;
+    let request_bytes = serde_json::to_vec(&semantic_request)
+        .unwrap_or_else(|_| b"<invalid-semantic-model-request>".to_vec());
+    let mut identity = Vec::with_capacity(
+        thread_id.to_string().len()
+            + session_id.len()
+            + turn_id.map_or(0, str::len)
+            + provider.len()
+            + request_bytes.len()
+            + 64,
+    );
+    append_model_identity_part(&mut identity, thread_id.to_string().as_bytes());
+    append_model_identity_part(&mut identity, session_id.as_bytes());
+    append_model_identity_part(&mut identity, turn_id.unwrap_or_default().as_bytes());
+    append_model_identity_part(&mut identity, provider.as_bytes());
+    append_model_identity_part(&mut identity, &request_bytes);
+    let call_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, &identity);
+    format!("{}:{}", thread_id, call_id.simple())
+}
+
+fn append_model_identity_part(identity: &mut Vec<u8>, part: &[u8]) {
+    identity.extend_from_slice(&(part.len() as u64).to_be_bytes());
+    identity.extend_from_slice(part);
 }
 
 #[derive(Clone, Debug, Default)]

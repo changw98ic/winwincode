@@ -1,0 +1,19 @@
+[package]
+name = "winwincode-test-assets"
+description = "Deterministic test-asset manipulation analysis for WinWinCode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml", "README.md"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+winwincode-delivery = { path = "../winwincode-delivery" }
+
+[lints]
+workspace = true

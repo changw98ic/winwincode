@@ -1282,6 +1282,13 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
             req
         }
 
+        fn action_gate_payload(
+            &self,
+            _req: &TurnEnvironment,
+        ) -> Option<crate::ToolCallGatePayload> {
+            None
+        }
+
         async fn run(
             &mut self,
             _req: &TurnEnvironment,
@@ -6000,6 +6007,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        pending_user_input_responses: Mutex::new(HashMap::new()),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -8211,6 +8219,7 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        pending_user_input_responses: Mutex::new(HashMap::new()),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),

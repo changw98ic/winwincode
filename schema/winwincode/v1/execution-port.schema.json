@@ -1,0 +1,3119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json",
+  "title": "WinWinCode ExecutionPort v1",
+  "description": "Transport-neutral contract between the Rust Control Plane and Rust Execution Worker.",
+  "$ref": "#/$defs/ExecutionPortMessage",
+  "x-winwincode-transports": {
+    "adapters": [
+      "local",
+      "remote"
+    ],
+    "semanticParityRequired": true,
+    "transportConfigurationOutsideContract": true
+  },
+  "x-winwincode-semantics": {
+    "duplicateDispatch": {
+      "condition": "same_request_job_attempt_fence_and_payload_digest",
+      "result": "duplicate",
+      "effect": "reuse_worker_session_without_second_execution"
+    },
+    "eventReplay": {
+      "condition": "same_event_id_sequence_and_payload_digest",
+      "result": "duplicate",
+      "effect": "ack_without_second_persist_or_projection"
+    },
+    "outOfOrderEvent": {
+      "condition": "sequence_after_highest_contiguous_plus_one",
+      "result": "gap",
+      "effect": "keep_ack_and_request_replay_from_next_sequence"
+    },
+    "reconnectResume": {
+      "condition": "worker_reconnects_with_active_lease",
+      "result": "replay_required",
+      "effect": "replay_original_events_after_ack_sequence_in_order"
+    },
+    "expiredLease": {
+      "condition": "worker_write_after_expires_at",
+      "result": "rejected_expired_lease",
+      "effect": "persist_nothing"
+    },
+    "workerRestart": {
+      "condition": "worker_instance_id_changes",
+      "result": "reacquire_required",
+      "effect": "reject_prior_instance_writes_until_new_lease"
+    },
+    "staleFencingToken": {
+      "condition": "fencing_token_below_current_job_token",
+      "result": "rejected_stale_fencing_token",
+      "effect": "persist_nothing"
+    },
+    "transportParity": {
+      "condition": "local_or_remote_adapter",
+      "result": "same_messages_and_outcomes",
+      "effect": "transport_details_remain_outside_contract"
+    },
+    "workerAuthority": {
+      "condition": "worker_message",
+      "result": "runtime_fact_or_lease_scoped_artifact_only",
+      "effect": "canonical_product_state_remains_control_plane_owned"
+    },
+    "sessionBinding": {
+      "authority": "accepted_session.binding",
+      "exactIdentity": [
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "stageRunId",
+        "executionJobId",
+        "attempt",
+        "workerId",
+        "leaseId",
+        "fencingToken",
+        "sourceIdentity"
+      ],
+      "duplicate": "same_identity_is_idempotent_changed_identity_is_conflict",
+      "runtimeBeforeBinding": "reject_before_persist_and_projection",
+      "runtimeThreadMismatch": "reject_before_persist_and_projection",
+      "sessionIdentityBlock": "sessionIdentity",
+      "sourceIdentity": "SessionBindingSourceIdentity"
+    }
+  },
+  "$defs": {
+    "ExecutionMessageId": {
+      "type": "string",
+      "pattern": "^xmsg_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Unique identity of one ExecutionPort message envelope."
+    },
+    "ExecutionEventId": {
+      "type": "string",
+      "pattern": "^xevt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Stable identity retained when a runtime event is replayed."
+    },
+    "ArtifactId": {
+      "type": "string",
+      "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one lease-scoped execution artifact."
+    },
+    "ModelExchangeId": {
+      "type": "string",
+      "pattern": "^mdl_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one provider-neutral model stream exchange."
+    },
+    "FencingToken": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Monotonically increasing decimal token encoded as a string to preserve 64-bit precision."
+    },
+    "ExecutionSequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "ExecutionAckSequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "ExecutionPortErrorCode": {
+      "type": "string",
+      "enum": [
+        "PROTOCOL_VERSION_UNSUPPORTED",
+        "WORKER_NOT_REGISTERED",
+        "CAPABILITY_MISMATCH",
+        "JOB_DISPATCH_CONFLICT",
+        "LEASE_EXPIRED",
+        "STALE_FENCING_TOKEN",
+        "WORKER_INSTANCE_CHANGED",
+        "SEQUENCE_GAP",
+        "MESSAGE_CONFLICT",
+        "ARTIFACT_DIGEST_MISMATCH",
+        "MODEL_STREAM_FAILED",
+        "INPUT_CLOSED",
+        "APPROVAL_DENIED",
+        "CANCELLED",
+        "EXECUTION_FAILED",
+        "INFRASTRUCTURE_ERROR"
+      ]
+    },
+    "ExecutionPortError": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ExecutionPortErrorCode"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "ExecutionLeaseStamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "issuedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "leaseId",
+        "jobId",
+        "workerId",
+        "workerInstanceId",
+        "attempt",
+        "fencingToken",
+        "issuedAt",
+        "expiresAt"
+      ]
+    },
+    "ExecutionJobReplacementAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receiptId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "receiptDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "logicalJobDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "scope": {
+          "$ref": "#/$defs/ExecutionScope"
+        },
+        "predecessorLease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "predecessorSessionIdentity": {
+          "description": "The exact slot-bound predecessor WorkerSession and CodexThread. Null means no predecessor slot-bound runtime exists; the predecessor dispatch may have been accepted, but null authorizes neither dirty-workspace reuse nor continuation of an old runtime or Artifact stream.",
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "successorLease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "receiptId",
+        "receiptDigest",
+        "logicalJobDigest",
+        "scope",
+        "predecessorLease",
+        "predecessorSessionIdentity",
+        "successorLease",
+        "createdAt"
+      ],
+      "description": "Control Plane seal for one exact predecessor-to-successor Job replacement. The predecessor lease and optional bound session also authorize exact continuation of an already durable Artifact stream; they never authorize a new stream."
+    },
+    "WorkerCapabilityFeature": {
+      "type": "string",
+      "enum": [
+        "artifact_stream",
+        "approval",
+        "git",
+        "interactive_input",
+        "mcp",
+        "model_proxy",
+        "sandbox",
+        "shell"
+      ]
+    },
+    "WorkerCapabilitySet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "platform": {
+          "type": "string",
+          "enum": [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu"
+          ]
+        },
+        "maxConcurrentJobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkerCapabilityFeature"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "capabilityDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "platform",
+        "maxConcurrentJobs",
+        "features",
+        "capabilityDigest"
+      ]
+    },
+    "WorkerCapacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runningJobs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "availableSlots": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        }
+      },
+      "required": [
+        "runningJobs",
+        "availableSlots"
+      ]
+    },
+    "ActiveLeaseSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lastEventSequence": {
+          "$ref": "#/$defs/ExecutionAckSequence"
+        }
+      },
+      "required": [
+        "leaseId",
+        "jobId",
+        "attempt",
+        "fencingToken",
+        "expiresAt",
+        "lastEventSequence"
+      ]
+    },
+    "ProductSessionExecutionScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "product-session"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        }
+      },
+      "required": [
+        "kind",
+        "productSessionId"
+      ]
+    },
+    "DeliveryStageExecutionScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "delivery-stage"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "deliveryId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryId"
+        },
+        "deliveryTaskId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "reworkAuthorization": {
+          "$ref": "#/$defs/DeliveryReworkAuthorizationScope"
+        }
+      },
+      "required": [
+        "kind",
+        "productSessionId",
+        "deliveryId",
+        "stageRunId"
+      ]
+    },
+    "ExecutionScope": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductSessionExecutionScope"
+        },
+        {
+          "$ref": "#/$defs/DeliveryStageExecutionScope"
+        }
+      ]
+    },
+    "ExecutionWorkspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repositoryId": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryId"
+        },
+        "checkoutRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "writeMode": {
+          "type": "string",
+          "enum": [
+            "read-only",
+            "candidate"
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "checkoutRevision",
+        "writeMode"
+      ]
+    },
+    "ExecutionLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deadlineAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "maxRuntimeSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+        },
+        "maxArtifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        }
+      },
+      "required": [
+        "deadlineAt",
+        "maxRuntimeSeconds",
+        "maxArtifactBytes"
+      ]
+    },
+    "DeliveryStageAcceptanceCriterionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "criterionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "verificationMethod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "criterionId",
+        "description",
+        "required"
+      ]
+    },
+    "DeliveryStageTaskInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "acceptanceCriterionIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+          }
+        }
+      },
+      "required": [
+        "taskId",
+        "title",
+        "goal",
+        "acceptanceCriterionIds"
+      ]
+    },
+    "DeliveryStageInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "deliverySpecId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        },
+        "deliverySpecRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "scope": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "outOfScope": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/DeliveryStageAcceptanceCriterionInput"
+          }
+        },
+        "task": {
+          "$ref": "#/$defs/DeliveryStageTaskInput"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "deliverySpecId",
+        "deliverySpecRevision",
+        "title",
+        "goal",
+        "scope",
+        "outOfScope",
+        "constraints",
+        "acceptanceCriteria"
+      ]
+    },
+    "ExecutionJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "$ref": "#/$defs/DeliveryStageExecutionScope"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "properties": {
+              "stageInput": {
+                "$ref": "#/$defs/DeliveryStageInput"
+              }
+            },
+            "required": [
+              "stageInput"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "$ref": "#/$defs/ProductSessionExecutionScope"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "not": {
+              "properties": {
+                "stageInput": {
+                  "$ref": "#/$defs/DeliveryStageInput"
+                }
+              },
+              "required": [
+                "stageInput"
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "payloadDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "scope": {
+          "$ref": "#/$defs/ExecutionScope"
+        },
+        "workspace": {
+          "$ref": "#/$defs/ExecutionWorkspace"
+        },
+        "executionProfile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "stageInput": {
+          "$ref": "#/$defs/DeliveryStageInput"
+        },
+        "limits": {
+          "$ref": "#/$defs/ExecutionLimits"
+        }
+      },
+      "required": [
+        "jobId",
+        "attempt",
+        "payloadDigest",
+        "scope",
+        "workspace",
+        "executionProfile",
+        "goal",
+        "limits"
+      ]
+    },
+    "EncodedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contentType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+\\-/]*$"
+        },
+        "dataBase64": {
+          "type": "string",
+          "maxLength": 16777216,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "payloadDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "contentType",
+        "dataBase64",
+        "payloadDigest"
+      ]
+    },
+    "ExecutionEventCategory": {
+      "type": "string",
+      "enum": [
+        "lifecycle",
+        "activity",
+        "command",
+        "test",
+        "diff",
+        "usage",
+        "attention",
+        "diagnostic"
+      ]
+    },
+    "ExecutionEventRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventId": {
+          "$ref": "#/$defs/ExecutionEventId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "category": {
+          "$ref": "#/$defs/ExecutionEventCategory"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "payload": {
+          "$ref": "#/$defs/EncodedPayload"
+        }
+      },
+      "required": [
+        "eventId",
+        "sequence",
+        "occurredAt",
+        "category",
+        "summary"
+      ]
+    },
+    "ArtifactKind": {
+      "type": "string",
+      "enum": [
+        "candidate",
+        "command_output",
+        "diff",
+        "log",
+        "report",
+        "test_output",
+        "usage"
+      ]
+    },
+    "ArtifactDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "digest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "artifactId",
+        "kind",
+        "mediaType",
+        "digest",
+        "sizeBytes"
+      ]
+    },
+    "ArtifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "digest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "artifactId",
+        "digest"
+      ]
+    },
+    "ModelGatewayRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "route": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "capability": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "route",
+        "capability"
+      ]
+    },
+    "InteractiveInputChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "ApprovalActionCategory": {
+      "type": "string",
+      "enum": [
+        "filesystem_write",
+        "mcp",
+        "network",
+        "shell"
+      ]
+    },
+    "ApprovalAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/ApprovalActionCategory"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "details": {
+          "$ref": "#/$defs/EncodedPayload"
+        }
+      },
+      "required": [
+        "category",
+        "summary"
+      ]
+    },
+    "ExecutionOutcomeStatus": {
+      "type": "string",
+      "enum": [
+        "cancelled",
+        "failed",
+        "infrastructure_error",
+        "succeeded"
+      ]
+    },
+    "ExecutionOutcomeUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runtimeMillis": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "costMicrounits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "runtimeMillis",
+        "tokens",
+        "costMicrounits"
+      ]
+    },
+    "ExecutionOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ExecutionOutcomeStatus"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "finishedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lastEventSequence": {
+          "$ref": "#/$defs/ExecutionAckSequence"
+        },
+        "usage": {
+          "$ref": "#/$defs/ExecutionOutcomeUsage"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "uniqueItems": true
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        }
+      },
+      "required": [
+        "status",
+        "summary",
+        "finishedAt",
+        "lastEventSequence",
+        "artifacts"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "usage": {}
+            },
+            "required": [
+              "usage"
+            ]
+          }
+        }
+      ]
+    },
+    "LeaseWriteStatus": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "duplicate",
+        "gap",
+        "rejected_conflict",
+        "rejected_expired_lease",
+        "rejected_stale_fencing_token",
+        "rejected_worker_instance"
+      ]
+    },
+    "WorkerRegisterMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "worker.register"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "startedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/WorkerCapabilitySet"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "workerId",
+        "workerInstanceId",
+        "startedAt",
+        "capabilities"
+      ],
+      "title": "worker.register",
+      "description": "Registers one stable Worker identity and one process-boot identity.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "worker-registry"
+    },
+    "WorkerRegistrationResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "worker.registration_result"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate",
+            "rejected"
+          ]
+        },
+        "leaseRecovery": {
+          "type": "string",
+          "enum": [
+            "no_active_leases",
+            "reacquire_required"
+          ]
+        },
+        "heartbeatIntervalMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "serverTime": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "workerId",
+        "workerInstanceId",
+        "status",
+        "leaseRecovery",
+        "heartbeatIntervalMs",
+        "serverTime"
+      ],
+      "title": "worker.registration_result",
+      "description": "Returns the idempotent registration result and restart lease recovery rule.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "WorkerCapabilitiesMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "worker.capabilities"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "observedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/WorkerCapabilitySet"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "workerId",
+        "workerInstanceId",
+        "observedAt",
+        "capabilities"
+      ],
+      "title": "worker.capabilities",
+      "description": "Replaces the registered capability snapshot for the current Worker instance.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "worker-registry"
+    },
+    "WorkerHeartbeatMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "worker.heartbeat"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "heartbeatSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "observedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "capacity": {
+          "$ref": "#/$defs/WorkerCapacity"
+        },
+        "activeLeases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActiveLeaseSummary"
+          },
+          "uniqueItems": true,
+          "maxItems": 1024
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "workerId",
+        "workerInstanceId",
+        "heartbeatSequence",
+        "observedAt",
+        "capacity",
+        "activeLeases"
+      ],
+      "title": "worker.heartbeat",
+      "description": "Reports liveness, capacity, and lease progress for one Worker instance.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "worker-registry"
+    },
+    "WorkerHeartbeatAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "worker.heartbeat_ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "heartbeatSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate",
+            "rejected_worker_instance"
+          ]
+        },
+        "serverTime": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "nextHeartbeatWithinMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "workerId",
+        "workerInstanceId",
+        "heartbeatSequence",
+        "status",
+        "serverTime",
+        "nextHeartbeatWithinMs"
+      ],
+      "title": "worker.heartbeat_ack",
+      "description": "Acknowledges exactly one heartbeat without dispatching jobs as a side effect.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "JobDispatchMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "job.dispatch"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "job": {
+          "$ref": "#/$defs/ExecutionJob"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "replacementAuthority": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExecutionJobReplacementAuthority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "job",
+        "lease",
+        "replacementAuthority"
+      ],
+      "title": "job.dispatch",
+      "description": "Dispatches one immutable job payload under one attempt and lease.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "JobDispatchResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "job.dispatch_result"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "payloadDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate",
+            "conflict",
+            "rejected_capacity",
+            "rejected_capability",
+            "rejected_expired_lease",
+            "rejected_stale_fencing_token",
+            "rejected_worker_instance"
+          ]
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "jobId",
+        "lease",
+        "payloadDigest",
+        "status"
+      ],
+      "title": "job.dispatch_result",
+      "description": "Returns the idempotent result of accepting or rejecting a job dispatch.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "LeaseRenewMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "lease.renew"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "priorExpiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "priorExpiresAt"
+      ],
+      "title": "lease.renew",
+      "description": "Extends one lease for the same Worker instance, attempt, and fencing token.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "RuntimeEventMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "runtime.event"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "event": {
+          "$ref": "#/$defs/ExecutionEventRecord"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "codexThreadId",
+        "event",
+        "sessionIdentity"
+      ],
+      "title": "runtime.event",
+      "description": "Publishes one ordered, replayable, provider-neutral runtime fact.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "RuntimeAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "runtime.ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/LeaseWriteStatus"
+        },
+        "ackSequence": {
+          "$ref": "#/$defs/ExecutionAckSequence"
+        },
+        "replayFromSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "status",
+        "ackSequence",
+        "sessionIdentity"
+      ],
+      "title": "runtime.ack",
+      "description": "Acknowledges the highest contiguous runtime event and requests a gap replay when needed.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "gap"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "replayFromSequence"
+            ],
+            "properties": {
+              "replayFromSequence": true
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "not": {
+                  "const": "gap"
+                }
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "replayFromSequence"
+              ],
+              "properties": {
+                "replayFromSequence": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "RuntimeReplayRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "runtime.replay_request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "afterSequence": {
+          "$ref": "#/$defs/ExecutionAckSequence"
+        },
+        "maxEvents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "afterSequence",
+        "maxEvents",
+        "sessionIdentity"
+      ],
+      "title": "runtime.replay_request",
+      "description": "Requests original runtime events strictly after the acknowledged sequence.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "ArtifactOpenMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "artifact.open"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactDescriptor"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "artifact",
+        "sessionIdentity"
+      ],
+      "title": "artifact.open",
+      "description": "Begins a lease-scoped artifact stream without exposing an object-store implementation.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "ArtifactChunkMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "artifact.chunk"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "payload": {
+          "$ref": "#/$defs/EncodedPayload"
+        },
+        "isFinal": {
+          "type": "boolean"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "artifactId",
+        "sequence",
+        "payload",
+        "isFinal",
+        "sessionIdentity"
+      ],
+      "title": "artifact.chunk",
+      "description": "Transfers one ordered artifact chunk through either local or remote adapters.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "ArtifactAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "artifact.ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "artifactId": {
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "status": {
+          "$ref": "#/$defs/LeaseWriteStatus"
+        },
+        "ackSequence": {
+          "$ref": "#/$defs/ExecutionAckSequence"
+        },
+        "replayFromSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "artifactId",
+        "status",
+        "ackSequence",
+        "sessionIdentity"
+      ],
+      "title": "artifact.ack",
+      "description": "Acknowledges the highest contiguous artifact chunk.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "gap"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "replayFromSequence"
+            ],
+            "properties": {
+              "replayFromSequence": true
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "not": {
+                  "const": "gap"
+                }
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "replayFromSequence"
+              ],
+              "properties": {
+                "replayFromSequence": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ModelOpenMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "model.open"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "modelExchangeId": {
+          "$ref": "#/$defs/ModelExchangeId"
+        },
+        "route": {
+          "$ref": "#/$defs/ModelGatewayRoute"
+        },
+        "request": {
+          "$ref": "#/$defs/EncodedPayload"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "modelExchangeId",
+        "route",
+        "request",
+        "sessionIdentity"
+      ],
+      "title": "model.open",
+      "description": "Opens one provider-neutral model exchange through the Control Plane gateway.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "ModelChunkMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "model.chunk"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "modelExchangeId": {
+          "$ref": "#/$defs/ModelExchangeId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "payload": {
+          "$ref": "#/$defs/EncodedPayload"
+        },
+        "isFinal": {
+          "type": "boolean"
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "modelExchangeId",
+        "sequence",
+        "isFinal",
+        "sessionIdentity"
+      ],
+      "title": "model.chunk",
+      "description": "Streams one opaque provider-neutral model response chunk.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "ModelAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "model.ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "modelExchangeId": {
+          "$ref": "#/$defs/ModelExchangeId"
+        },
+        "status": {
+          "$ref": "#/$defs/LeaseWriteStatus"
+        },
+        "ackSequence": {
+          "$ref": "#/$defs/ExecutionAckSequence"
+        },
+        "replayFromSequence": {
+          "$ref": "#/$defs/ExecutionSequence"
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "modelExchangeId",
+        "status",
+        "ackSequence",
+        "sessionIdentity"
+      ],
+      "title": "model.ack",
+      "description": "Acknowledges model chunks and requests replay after a stream interruption.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "gap"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "replayFromSequence"
+            ],
+            "properties": {
+              "replayFromSequence": true
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "not": {
+                  "const": "gap"
+                }
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "replayFromSequence"
+              ],
+              "properties": {
+                "replayFromSequence": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "InputRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "input.request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "inputRequestId": {
+          "$ref": "./domain.schema.json#/$defs/InputRequestId"
+        },
+        "mode": {
+          "$ref": "./domain.schema.json#/$defs/InteractiveInputMode"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InteractiveInputChoice"
+          },
+          "uniqueItems": true,
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "allowEmpty": {
+          "type": "boolean"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "inputRequestId",
+        "mode",
+        "prompt",
+        "allowEmpty",
+        "expiresAt",
+        "sessionIdentity"
+      ],
+      "title": "input.request",
+      "description": "Requests one typed user input through the Control Plane product session.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "InputResponseMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "input.response"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "inputRequestId": {
+          "$ref": "./domain.schema.json#/$defs/InputRequestId"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "cancelled",
+            "expired",
+            "provided"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/InteractiveInputValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "respondedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "inputRequestId",
+        "status",
+        "value",
+        "respondedAt",
+        "sessionIdentity"
+      ],
+      "title": "input.response",
+      "description": "Returns a typed input result without exposing product-session storage.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "provided"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "./domain.schema.json#/$defs/InteractiveInputValue"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "approval.request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "approvalId": {
+          "$ref": "./domain.schema.json#/$defs/ApprovalId"
+        },
+        "action": {
+          "$ref": "#/$defs/ApprovalAction"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "approvalId",
+        "action",
+        "expiresAt",
+        "sessionIdentity"
+      ],
+      "title": "approval.request",
+      "description": "Requests a decision for one execution action; business approval state remains Control Plane owned.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "ApprovalDecisionMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "approval.decision"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "approvalId": {
+          "$ref": "./domain.schema.json#/$defs/ApprovalId"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "cancelled",
+            "denied",
+            "expired"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "once",
+            "worker_session"
+          ]
+        },
+        "decidedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "approvalId",
+        "decision",
+        "scope",
+        "decidedAt",
+        "sessionIdentity"
+      ],
+      "title": "approval.decision",
+      "description": "Returns the resolved execution approval decision.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "JobCancelMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "job.cancel"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "deadline",
+            "policy",
+            "shutdown",
+            "superseded",
+            "user_requested"
+          ]
+        },
+        "requestedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "reason",
+        "requestedAt",
+        "sessionIdentity"
+      ],
+      "title": "job.cancel",
+      "description": "Requests cooperative cancellation for the currently fenced attempt.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "JobCancelAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "job.cancel_ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "already_cancelling",
+            "already_terminal",
+            "rejected_expired_lease",
+            "rejected_stale_fencing_token",
+            "rejected_worker_instance"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "lease",
+        "workerSessionId",
+        "status",
+        "sessionIdentity"
+      ],
+      "title": "job.cancel_ack",
+      "description": "Acknowledges cancellation without declaring a Delivery result.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "JobOutcomeMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "job.outcome"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ExecutionOutcome"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "outcome",
+        "sessionIdentity"
+      ],
+      "title": "job.outcome",
+      "description": "Reports an execution outcome; Control Plane alone derives canonical Delivery state and verdicts.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "JobOutcomeAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "job.outcome_ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate",
+            "rejected_conflict",
+            "rejected_expired_lease",
+            "rejected_stale_fencing_token",
+            "rejected_worker_instance"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/ExecutionPortError"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "workerSessionId",
+        "status",
+        "sessionIdentity"
+      ],
+      "title": "job.outcome_ack",
+      "description": "Accepts or rejects one lease-fenced execution outcome idempotently.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "ExecutionPortMessage": {
+      "title": "ExecutionPortMessage",
+      "description": "The single versioned message union shared by local and remote ExecutionPort adapters.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorkerRegisterMessage"
+        },
+        {
+          "$ref": "#/$defs/WorkerRegistrationResultMessage"
+        },
+        {
+          "$ref": "#/$defs/WorkerCapabilitiesMessage"
+        },
+        {
+          "$ref": "#/$defs/WorkerHeartbeatMessage"
+        },
+        {
+          "$ref": "#/$defs/WorkerHeartbeatAckMessage"
+        },
+        {
+          "$ref": "#/$defs/JobDispatchMessage"
+        },
+        {
+          "$ref": "#/$defs/JobDispatchResultMessage"
+        },
+        {
+          "$ref": "#/$defs/SessionBindingMessage"
+        },
+        {
+          "$ref": "#/$defs/LeaseRenewMessage"
+        },
+        {
+          "$ref": "#/$defs/RuntimeEventMessage"
+        },
+        {
+          "$ref": "#/$defs/RuntimeAckMessage"
+        },
+        {
+          "$ref": "#/$defs/RuntimeReplayRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/ArtifactOpenMessage"
+        },
+        {
+          "$ref": "#/$defs/ArtifactChunkMessage"
+        },
+        {
+          "$ref": "#/$defs/ArtifactAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ModelOpenMessage"
+        },
+        {
+          "$ref": "#/$defs/ModelChunkMessage"
+        },
+        {
+          "$ref": "#/$defs/ModelAckMessage"
+        },
+        {
+          "$ref": "#/$defs/InputRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/InputResponseMessage"
+        },
+        {
+          "$ref": "#/$defs/ApprovalRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/ApprovalDecisionMessage"
+        },
+        {
+          "$ref": "#/$defs/JobCancelMessage"
+        },
+        {
+          "$ref": "#/$defs/JobCancelAckMessage"
+        },
+        {
+          "$ref": "#/$defs/JobOutcomeMessage"
+        },
+        {
+          "$ref": "#/$defs/JobOutcomeAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ActionEnforcementRequestMessage"
+        },
+        {
+          "$ref": "#/$defs/ActionEnforcementReceiptMessage"
+        }
+      ]
+    },
+    "DeliveryReworkTargetScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deliveryTaskId": {
+          "$ref": "./domain.schema.json#/$defs/DeliveryTaskId"
+        },
+        "diagramId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        },
+        "nodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        },
+        "filePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sourceHunkSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidenceRefIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^evidence:sha256:[0-9a-f]{64}$"
+          }
+        }
+      },
+      "required": [
+        "deliveryTaskId",
+        "diagramId",
+        "nodeId",
+        "filePath",
+        "sourceHunkSha256",
+        "evidenceRefIds"
+      ]
+    },
+    "DeliveryReworkAuthorizationScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authorizationDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "candidateRef": {
+          "type": "string",
+          "pattern": "^git-candidate:sha256:[0-9a-f]{64}$"
+        },
+        "diffSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sourceCandidateCommitId": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "sourceCandidateTreeId": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "requiresFullReverification": {
+          "const": true
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/DeliveryReworkTargetScope"
+          }
+        }
+      },
+      "required": [
+        "authorizationDigest",
+        "candidateRef",
+        "diffSha256",
+        "sourceCandidateCommitId",
+        "sourceCandidateTreeId",
+        "requiresFullReverification",
+        "targets"
+      ]
+    },
+    "SessionBindingMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "lease",
+        "productSessionId",
+        "workerSessionId",
+        "codexThreadId",
+        "boundAt",
+        "sessionIdentity",
+        "sourceIdentity",
+        "workerId",
+        "leaseId",
+        "attempt",
+        "fencingToken"
+      ],
+      "properties": {
+        "kind": {
+          "const": "session.binding"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "codexThreadId": {
+          "$ref": "./domain.schema.json#/$defs/CodexThreadId"
+        },
+        "boundAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "sourceIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionBindingSourceIdentity"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId",
+          "description": "Exact Delivery StageRun identity. ProductSession Chat bindings omit this field."
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "leaseId": {
+          "$ref": "./domain.schema.json#/$defs/LeaseId"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        }
+      },
+      "description": "Authoritative WorkerSession-to-CodexThread binding for one exact active Job lease. Delivery-stage bindings carry the exact StageRun; ProductSession Chat bindings omit it.",
+      "title": "session.binding",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "lease-write"
+    },
+    "ActionPolicyKind": {
+      "type": "string",
+      "enum": [
+        "repository",
+        "tool",
+        "network"
+      ],
+      "title": "ActionPolicyKind",
+      "description": "Enterprise Policy family selected for one normalized Worker action."
+    },
+    "ActionEnforcementDecision": {
+      "type": "string",
+      "enum": [
+        "permit",
+        "reject"
+      ],
+      "title": "ActionEnforcementDecision",
+      "description": "Closed Control Plane action enforcement outcome."
+    },
+    "ActionPolicyVersionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policyId": {
+          "type": "string",
+          "pattern": "^pol_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "versionDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "effectiveDefinitionSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "policyId",
+        "version",
+        "versionDigest",
+        "effectiveDefinitionSha256"
+      ],
+      "title": "ActionPolicyVersionReference",
+      "description": "Exact immutable enterprise Policy version used for one action decision."
+    },
+    "ActionEnforcementRequestMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "action.enforcement_request"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "policyKind": {
+          "$ref": "#/$defs/ActionPolicyKind"
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "subjectSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "matchedConditionSha256": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "jobId",
+        "lease",
+        "workerSessionId",
+        "sessionIdentity",
+        "policyKind",
+        "resource",
+        "subjectSha256",
+        "matchedConditionSha256"
+      ],
+      "title": "action.enforcement_request",
+      "description": "Requests one Control Plane Policy decision for a normalized action under current durable Worker authority.",
+      "x-direction": "worker-to-control-plane",
+      "x-authority": "telemetry"
+    },
+    "ActionEnforcementReceiptMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "action.enforcement_receipt"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ExecutionMessageId"
+        },
+        "sentAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "requestId": {
+          "$ref": "./domain.schema.json#/$defs/RequestId"
+        },
+        "jobId": {
+          "$ref": "./domain.schema.json#/$defs/ExecutionJobId"
+        },
+        "lease": {
+          "$ref": "#/$defs/ExecutionLeaseStamp"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "sessionIdentity": {
+          "$ref": "./domain.schema.json#/$defs/SessionIdentity"
+        },
+        "scope": {
+          "$ref": "./domain.schema.json#/$defs/RepositoryScope"
+        },
+        "actor": {
+          "$ref": "./domain.schema.json#/$defs/UserActor"
+        },
+        "policyKind": {
+          "$ref": "#/$defs/ActionPolicyKind"
+        },
+        "resource": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "subjectSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "matchedConditionSha256": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+          }
+        },
+        "decision": {
+          "$ref": "#/$defs/ActionEnforcementDecision"
+        },
+        "policyMode": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ActionPolicyMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyVersion": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ActionPolicyVersionReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluationSha256": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "evaluatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "receiptSignature": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "sentAt",
+        "requestId",
+        "jobId",
+        "lease",
+        "workerSessionId",
+        "sessionIdentity",
+        "scope",
+        "actor",
+        "policyKind",
+        "resource",
+        "subjectSha256",
+        "matchedConditionSha256",
+        "decision",
+        "policyMode",
+        "policyVersion",
+        "evaluationSha256",
+        "evaluatedAt",
+        "receiptSignature"
+      ],
+      "title": "action.enforcement_receipt",
+      "description": "Immutable Control Plane-issued action receipt bound to tenant, actor, Policy version, invocation, action digest, and current Worker authority.",
+      "x-direction": "control-plane-to-worker",
+      "x-authority": "control-command"
+    },
+    "ActionPolicyMode": {
+      "type": "string",
+      "enum": [
+        "enforce",
+        "audit"
+      ],
+      "title": "ActionPolicyMode",
+      "description": "Enterprise Policy enforcement mode captured by an action receipt."
+    }
+  }
+}

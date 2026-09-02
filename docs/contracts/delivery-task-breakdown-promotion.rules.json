@@ -1,0 +1,571 @@
+{
+  "schemaVersion": "winwincode.delivery-task-breakdown-promotion-rules.v1",
+  "status": "implemented-enforced",
+  "issueId": "winwincode-9c4.16.2.5.7",
+  "preflightIssueId": "winwincode-9c4.16.2.5.7.1",
+  "documentation": "docs/contracts/delivery-task-breakdown-promotion.md",
+  "inspection": {
+    "mode": "git-file-inventory-and-direct-source",
+    "localCodeIndex": "unavailable-module-not-found",
+    "symbolGraphCoverageClaimed": false,
+    "coverageClaim": "repository-file-level-only"
+  },
+  "authorityChain": [
+    {
+      "order": 1,
+      "owner": "planner-through-typed-solution-review-context",
+      "fact": "DeliveryTaskProposal",
+      "storedOutsideReviewSet": false,
+      "writes": "SolutionReviewContextV1.taskProposals"
+    },
+    {
+      "order": 2,
+      "owner": "winwincode-delivery",
+      "fact": "ValidatedSolutionReviewSet",
+      "constructor": "resolve_current_solution_review",
+      "source": "current-canonical-delivery-attention"
+    },
+    {
+      "order": 3,
+      "owner": "winwincode-delivery",
+      "fact": "ApprovedTaskPromotion",
+      "constructor": "ValidatedSolutionReviewSet::approved_task_promotion",
+      "decision": "approved-only",
+      "currentAttemptValidator": "ApprovedTaskPromotion::validate_for_delivery",
+      "productionDeserializeAllowed": false,
+      "rawConstructorAllowed": false
+    },
+    {
+      "order": 4,
+      "owner": "winwincode-delivery",
+      "fact": "TaskBreakdownPromotionTransition",
+      "constructor": "prepare_task_breakdown_promotion",
+      "callerTasksAllowed": false
+    },
+    {
+      "order": 5,
+      "owner": "winwincode-delivery-store",
+      "fact": "DeliveryCommand::ApproveTaskBreakdown",
+      "input": "Box<ApproveDeliveryTaskBreakdown>",
+      "callerTasksAllowed": false
+    },
+    {
+      "order": 6,
+      "owner": "winwincode-control-plane",
+      "fact": "DeliveryTaskBreakdownApprovedEvent",
+      "source": "same-sealed-domain-transition-and-committed-delivery-record"
+    }
+  ],
+  "proposal": {
+    "type": "DeliveryTaskProposal",
+    "fields": [
+      "id",
+      "title",
+      "goal",
+      "acceptanceCriterionIds",
+      "blockedByTaskIds"
+    ],
+    "minimumCount": 1,
+    "maximumCount": 200,
+    "maximumTitleCodeUnits": 256,
+    "orderIsAuthority": true,
+    "digestIncludesExactOrder": true,
+    "ownerSuppliedByPlanner": false,
+    "statusSuppliedByPlanner": false
+  },
+  "task": {
+    "type": "DeliveryTask",
+    "fields": [
+      "id",
+      "deliveryId",
+      "title",
+      "goal",
+      "acceptanceCriterionIds",
+      "blockedByTaskIds",
+      "owner",
+      "status"
+    ],
+    "copiedFields": {
+      "id": "proposal.id",
+      "title": "proposal.title",
+      "goal": "proposal.goal",
+      "acceptanceCriterionIds": "proposal.acceptanceCriterionIds",
+      "blockedByTaskIds": "proposal.blockedByTaskIds"
+    },
+    "derivedFields": {
+      "deliveryId": "current-delivery-id",
+      "owner": null,
+      "status": "pending"
+    },
+    "order": "exact-reviewed-proposal-order",
+    "codexPlanItemIdentityReused": false
+  },
+  "graph": {
+    "policy": "non-empty-bounded-current-criteria-complete-acyclic-dag",
+    "invalidCases": [
+      "empty",
+      "duplicate-task-id",
+      "empty-criterion-set",
+      "duplicate-criterion-id",
+      "foreign-or-missing-current-criterion",
+      "incomplete-current-criterion-coverage",
+      "self-dependency",
+      "duplicate-dependency",
+      "missing-dependency",
+      "cycle"
+    ],
+    "invalidCaseEffect": "no-delivery-journal-receipt-or-outbox-change",
+    "topologicalReorderingAllowed": false,
+    "validateBeforeMutation": true
+  },
+  "reviewAuthority": {
+    "requiredStatus": "approved",
+    "rejectedStatuses": [
+      "pending",
+      "changes_requested",
+      "rejected"
+    ],
+    "mustMatch": [
+      "deliveryId",
+      "deliverySpecId",
+      "deliverySpecRevision",
+      "planningStageRunId",
+      "planningSessionBindingId",
+      "reviewStageRunId",
+      "attentionItemId",
+      "authenticatedReviewer",
+      "reviewedAt",
+      "reviewSetSha256"
+    ],
+    "staleForeignOrRevisedEffect": "reject-before-transition",
+    "approvedSealMustRevalidateCurrentAttempt": true,
+    "currentAttemptValidator": "ApprovedTaskPromotion::validate_for_delivery",
+    "humanExecutionSessionBindingRequired": false
+  },
+  "http": {
+    "schemaPath": "schema/winwincode/v1/control-plane-http.schema.json",
+    "generatedRustPath": "crates/winwincode-api/src/generated.rs",
+    "generatedTypeScriptPath": "apps/client/src/generated/contracts.ts",
+    "command": "delivery.approve_task_breakdown",
+    "commandType": "DeliveryApproveTaskBreakdownCommand",
+    "payload": {
+      "type": "DeliveryApproveTaskBreakdownPayload",
+      "exactFields": [
+        "deliveryId",
+        "reviewSetSha256"
+      ],
+      "additionalProperties": false,
+      "callerTasksAllowed": false
+    },
+    "envelopeFields": [
+      "schemaVersion",
+      "command",
+      "actor",
+      "scope",
+      "requestId",
+      "expectedRevision",
+      "payload"
+    ],
+    "digestTransport": "Sha256Digest-sha256-prefix-lowercase-64hex",
+    "digestComparison": "strip-one-prefix-and-compare-exact-approved-review",
+    "forbiddenPayloadFields": [
+      "tasks",
+      "taskProposals",
+      "owner",
+      "ownerActorId",
+      "status",
+      "review",
+      "solutionReview"
+    ],
+    "oldShapePolicy": "replace-generated-contract-no-alias-no-dual-read"
+  },
+  "domain": {
+    "owner": "winwincode-delivery",
+    "interface": {
+      "module": "application::task_breakdown",
+      "constructor": "prepare_task_breakdown_promotion",
+      "input": [
+        "&Delivery",
+        "&ApprovedTaskPromotion"
+      ],
+      "output": "Result<TaskBreakdownPromotionTransition, TaskBreakdownPromotionError>"
+    },
+    "transitionConstruction": "pub(crate)-constructor-derived-only",
+    "transitionDeserializeAllowed": false,
+    "transitionRawConstructorAllowed": false,
+    "transitionMustSeal": [
+      "source-delivery",
+      "current-approved-review-attempt-identity",
+      "approved-review-set-digest",
+      "exact-promoted-delivery",
+      "exact-public-event"
+    ]
+  },
+  "store": {
+    "owner": "winwincode-delivery",
+    "command": {
+      "variant": "DeliveryCommand::ApproveTaskBreakdown",
+      "input": "Box<ApproveDeliveryTaskBreakdown>",
+      "genericAppendAllowed": false
+    },
+    "commandFields": [
+      "delivery_id",
+      "request_id",
+      "request_digest",
+      "expected_revision",
+      "review_set_sha256"
+    ],
+    "operation": "DeliveryMutationOperation::TaskBreakdownApproved",
+    "replaySource": "verified-original-journal-record",
+    "secondApproval": "conflict",
+    "rawSnapshotInputAllowed": false,
+    "rawTransitionInputAllowed": false
+  },
+  "controlPlane": {
+    "owner": "winwincode-control-plane",
+    "module": "task_breakdown_transaction.rs",
+    "entry": "ControlPlane::commit_delivery_task_breakdown",
+    "generatedInput": "DeliveryApproveTaskBreakdownPayload",
+    "atomicMembers": [
+      "canonical-delivery-state",
+      "delivery-journal-record",
+      "scoped-command-receipt",
+      "outbox-event"
+    ],
+    "event": {
+      "type": "DeliveryTaskBreakdownApprovedEvent",
+      "topic": "delivery.task_breakdown.approved",
+      "exactFields": [
+        "schema_version",
+        "delivery_id",
+        "delivery_revision",
+        "delivery_spec_id",
+        "delivery_spec_revision",
+        "review_set_sha256",
+        "tasks"
+      ],
+      "taskOrder": "exact-promoted-task-order",
+      "strictDecode": true
+    },
+    "publishSource": "committed-outbox-only",
+    "preCommitFailure": "rollback-all-four-and-publish-nothing",
+    "postCommitPublishFailure": "return-committed-publication-pending-and-replay-same-event",
+    "genericCommitAllowed": false
+  },
+  "replay": {
+    "identity": "authenticated-actor-full-scope-requestId",
+    "commandDigest": "canonical-command-envelope-sha256",
+    "order": [
+      "derive-scoped-receipt-identity-and-command-digest",
+      "load-receipt-before-current-delivery-or-review",
+      "on-hit-load-and-verify-original-journal-revision-and-event",
+      "on-miss-load-current-delivery-journal",
+      "resolve-current-approved-review-and-prepare-transition",
+      "stage-state-journal-receipt-and-outbox",
+      "commit-one-storage-transaction",
+      "publish-committed-outbox"
+    ],
+    "identicalRequest": "return-original-revision-graph-and-event-bytes",
+    "changedDigest": "request-conflict",
+    "recomputeCurrentReviewOnReplay": false,
+    "appendSecondJournalRecordOnReplay": false,
+    "appendSecondOutboxEventOnReplay": false
+  },
+  "concurrency": {
+    "optimisticToken": "expectedRevision",
+    "oneWinnerPerSourceRevision": true,
+    "loser": "revision-conflict-with-no-partial-facts",
+    "approvedGraphReplacementAllowed": false,
+    "newGraphRequires": "new-spec-revision-new-planning-new-review"
+  },
+  "implementationOrder": [
+    {
+      "order": 1,
+      "action": "land-canonical-http-payload-and-generated-types",
+      "proof": "strict positive and caller-tasks negative schema fixtures"
+    },
+    {
+      "order": 2,
+      "action": "land-typed-solution-review-and-approved-only-seal",
+      "proof": "pending-changes-rejected-return-no-promotion"
+    },
+    {
+      "order": 3,
+      "action": "replace-old-task-function-with-sealed-task-breakdown-transition",
+      "proof": "exact mapping and graph adversarial tests"
+    },
+    {
+      "order": 4,
+      "action": "add-specialized-store-command-and-operation",
+      "proof": "generic append rejection and journal replay tests"
+    },
+    {
+      "order": 5,
+      "action": "add-control-plane-receipt-first-four-member-transaction",
+      "proof": "replay race rollback and outbox tests"
+    },
+    {
+      "order": 6,
+      "action": "remove-old-path-and-run-generated-domain-control-plane-gates",
+      "proof": "no aliases no caller tasks and all executable gates green"
+    }
+  ],
+  "implementationGate": {
+    "activation": {
+      "status": "active",
+      "triggerPaths": [
+        "crates/winwincode-delivery/src/application/task_breakdown.rs",
+        "crates/winwincode-control-plane/src/task_breakdown_transaction.rs",
+        "crates/winwincode-delivery/tests/task_breakdown_promotion.rs",
+        "crates/winwincode-control-plane/tests/task_breakdown_transaction.rs"
+      ]
+    },
+    "requiredPaths": [
+      "crates/winwincode-delivery/src/application/solution_review.rs",
+      "crates/winwincode-delivery/src/application/task_breakdown.rs",
+      "crates/winwincode-delivery/src/application/mod.rs",
+      "crates/winwincode-delivery/src/store.rs",
+      "crates/winwincode-delivery/tests/task_breakdown_promotion.rs",
+      "crates/winwincode-control-plane/src/lib.rs",
+      "crates/winwincode-control-plane/src/task_breakdown_transaction.rs",
+      "crates/winwincode-control-plane/tests/task_breakdown_transaction.rs"
+    ],
+    "solutionReviewPath": "crates/winwincode-delivery/src/application/solution_review.rs",
+    "taskBreakdownPath": "crates/winwincode-delivery/src/application/task_breakdown.rs",
+    "applicationModulePath": "crates/winwincode-delivery/src/application/mod.rs",
+    "storePath": "crates/winwincode-delivery/src/store.rs",
+    "controlPlanePath": "crates/winwincode-control-plane/src/lib.rs",
+    "controlPlaneTransactionPath": "crates/winwincode-control-plane/src/task_breakdown_transaction.rs",
+    "minimumTransitionPrivateFieldCount": 4,
+    "eventFields": [
+      "schema_version",
+      "delivery_id",
+      "delivery_revision",
+      "delivery_spec_id",
+      "delivery_spec_revision",
+      "review_set_sha256",
+      "tasks"
+    ],
+    "storeCommandFields": [
+      "delivery_id",
+      "request_id",
+      "request_digest",
+      "expected_revision",
+      "review_set_sha256"
+    ],
+    "domainUnitTests": {
+      "package": "winwincode-delivery",
+      "path": "crates/winwincode-delivery/src/application/task_breakdown.rs",
+      "requiredTests": [
+        "approved_task_promotion_maps_exact_ordered_proposals",
+        "task_breakdown_transition_rejects_changed_source_or_seal"
+      ]
+    },
+    "solutionReviewTests": {
+      "package": "winwincode-delivery",
+      "path": "crates/winwincode-delivery/src/application/solution_review.rs",
+      "requiredTests": [
+        "solution_review_rejects_empty_task_proposals",
+        "solution_review_rejects_duplicate_task_and_criterion_ids",
+        "solution_review_rejects_self_missing_duplicate_and_cyclic_dependencies"
+      ]
+    },
+    "deliveryIntegrationTest": {
+      "package": "winwincode-delivery",
+      "target": "task_breakdown_promotion",
+      "path": "crates/winwincode-delivery/tests/task_breakdown_promotion.rs",
+      "requiredTests": [
+        "task_breakdown_store_promotes_the_exact_ordered_graph_once",
+        "task_breakdown_store_rejects_stale_foreign_revised_or_changed_review",
+        "task_breakdown_store_replay_returns_the_original_graph",
+        "generic_append_cannot_write_task_breakdown_approved",
+        "task_breakdown_revision_race_has_one_winner_and_no_partial_graph"
+      ]
+    },
+    "controlPlaneIntegrationTest": {
+      "package": "winwincode-control-plane",
+      "target": "task_breakdown_transaction",
+      "path": "crates/winwincode-control-plane/tests/task_breakdown_transaction.rs",
+      "requiredTests": [
+        "task_breakdown_command_commits_state_journal_receipt_and_outbox_together",
+        "task_breakdown_receipt_first_replay_returns_original_graph_revision_and_event",
+        "task_breakdown_same_scoped_request_with_changed_digest_is_a_conflict",
+        "task_breakdown_revision_race_commits_no_partial_loser_facts",
+        "task_breakdown_failure_at_each_atomic_member_rolls_back_all_four",
+        "task_breakdown_publish_failure_keeps_the_committed_event_for_replay",
+        "generic_control_plane_commit_cannot_bypass_task_breakdown_authority"
+      ]
+    },
+    "forbiddenProductionInputs": [
+      "Vec<DeliveryTask>",
+      "DeliveryTaskInput",
+      "DeliveryTaskProposalProjection",
+      "raw-solution-review-json",
+      "raw-attention-context",
+      "raw-attention-resolution"
+    ],
+    "forbiddenOldPaths": [
+      "application::task::approve_task_breakdown",
+      "DeliveryApproveTaskBreakdownPayload.tasks",
+      "generic-AppendDelivery-task-breakdown",
+      "generic-ControlPlane-commit-delivery-command"
+    ],
+    "removedPathEvidence": {
+      "legacyTaskPath": "crates/winwincode-delivery/src/application/task.rs"
+    }
+  },
+  "rules": [
+    {
+      "id": "authority.planner_proposals_are_review_digest_input",
+      "statement": "Planner task proposals exist only inside the typed solution review context, keep their product order, and are covered by reviewSetSha256 before a human decision.",
+      "sources": [
+        "docs/contracts/delivery-solution-review-authority.md",
+        "docs/contracts/delivery-solution-review-authority.rules.json"
+      ]
+    },
+    {
+      "id": "authority.approved_seal_is_the_only_promotion_input",
+      "statement": "Only the opaque ApprovedTaskPromotion borrowed from the exact current approved ValidatedSolutionReviewSet can authorize promotion.",
+      "sources": [
+        "docs/contracts/delivery-solution-review-authority.md",
+        "docs/contracts/delivery-solution-review-authority.rules.json"
+      ]
+    },
+    {
+      "id": "authority.transition_is_the_only_task_constructor",
+      "statement": "prepare_task_breakdown_promotion is the only production constructor that turns approved proposals into a sealed Delivery transition and event.",
+      "sources": [
+        "crates/winwincode-delivery/src/application/task.rs",
+        "crates/winwincode-delivery/src/application/mod.rs"
+      ]
+    },
+    {
+      "id": "mapping.proposal_fields_and_order_are_exact",
+      "statement": "The promoted graph preserves proposal order and copies id, title, goal, acceptanceCriterionIds, and blockedByTaskIds without caller or scheduler rewriting.",
+      "sources": [
+        "docs/contracts/delivery-solution-review-authority.rules.json",
+        "crates/winwincode-delivery/src/domain/task.rs"
+      ]
+    },
+    {
+      "id": "mapping.control_plane_derives_owner_and_status",
+      "statement": "Every promoted task receives the current Delivery identity, owner null, and pending status; Planner and HTTP cannot set these fields.",
+      "sources": [
+        "docs/contracts/delivery-solution-review-authority.rules.json",
+        "crates/winwincode-delivery/src/domain/task.rs"
+      ]
+    },
+    {
+      "id": "graph.invalid_graphs_change_no_fact",
+      "statement": "Empty, duplicate, foreign, self-dependent, missing-dependent, or cyclic proposal graphs fail before any durable mutation.",
+      "sources": [
+        "docs/contracts/delivery-solution-review-authority.rules.json",
+        "crates/winwincode-delivery/src/domain/mod.rs"
+      ]
+    },
+    {
+      "id": "freshness.current_delivery_spec_review_and_digest_are_required",
+      "statement": "Promotion must resolve the current Delivery, Spec, planning run and binding, human review, Attention, authenticated reviewer, and exact reviewSetSha256 again.",
+      "sources": [
+        "docs/contracts/delivery-solution-review-authority.md",
+        "docs/contracts/delivery-stage-coordination.md"
+      ]
+    },
+    {
+      "id": "freshness.revision_race_and_second_approval_fail_closed",
+      "statement": "A changed expectedRevision, a second approval for the same Spec revision, or a concurrent winner rejects the loser without partial facts.",
+      "sources": [
+        "crates/winwincode-delivery/src/store.rs",
+        "crates/winwincode-storage/src/lib.rs"
+      ]
+    },
+    {
+      "id": "http.payload_contains_stale_identity_only",
+      "statement": "delivery.approve_task_breakdown accepts only deliveryId and reviewSetSha256 in its payload; tasks and task fields are unknown properties.",
+      "sources": [
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "docs/contracts/delivery-stage-coordination.md"
+      ]
+    },
+    {
+      "id": "store.specialized_command_is_the_only_append",
+      "statement": "Only DeliveryCommand::ApproveTaskBreakdown may append TaskBreakdownApproved; generic Append cannot acquire the sealed transition authority.",
+      "sources": [
+        "crates/winwincode-delivery/src/store.rs",
+        "docs/contracts/delivery-stage-coordination.md"
+      ]
+    },
+    {
+      "id": "transaction.four_members_commit_or_rollback",
+      "statement": "Canonical Delivery state, journal record, scoped command receipt, and the internal task-breakdown plus public Delivery-change outbox rows commit in one storage transaction or all roll back.",
+      "sources": [
+        "docs/contracts/control-plane-storage-lifecycle.md",
+        "crates/winwincode-storage/src/lib.rs"
+      ]
+    },
+    {
+      "id": "replay.receipt_first_returns_original_graph",
+      "statement": "An identical scoped request checks its receipt before current authority and returns the first committed revision, graph, and event bytes without recomputation.",
+      "sources": [
+        "crates/winwincode-storage/src/lib.rs",
+        "crates/winwincode-control-plane/src/verdict_transaction.rs"
+      ]
+    },
+    {
+      "id": "outbox.only_committed_event_is_published",
+      "statement": "The publisher reads only the committed internal DeliveryTaskBreakdownApprovedEvent and public delivery.changed.v1 rows; publication failure leaves their exact bytes and projection cursor pending for replay.",
+      "sources": [
+        "docs/contracts/control-plane-storage-lifecycle.md",
+        "crates/winwincode-control-plane/src/lib.rs"
+      ]
+    },
+    {
+      "id": "bypass.generic_append_and_commit_are_rejected",
+      "statement": "The generic Delivery Append and generic ControlPlane::commit paths reject task-breakdown authority, so no caller can persist a replacement graph.",
+      "sources": [
+        "crates/winwincode-delivery/src/store.rs",
+        "crates/winwincode-control-plane/src/lib.rs"
+      ]
+    }
+  ],
+  "closedFindings": [
+    {
+      "id": "caller-supplied-tasks-http",
+      "status": "closed",
+      "preflightFinding": "The preflight base schema still accepts payload.tasks; phase 2.5.3 replaces it with reviewSetSha256 and no alias.",
+      "closureEvidence": "DeliveryApproveTaskBreakdownPayload now has exactly deliveryId and reviewSetSha256 in canonical schema plus generated Rust and TypeScript.",
+      "refs": [
+        "schema/winwincode/v1/control-plane-http.schema.json",
+        "crates/winwincode-api/src/generated.rs",
+        "apps/client/src/generated/contracts.ts"
+      ]
+    },
+    {
+      "id": "caller-supplied-tasks-domain",
+      "status": "closed",
+      "preflightFinding": "The preflight base application::task function accepts Vec<DeliveryTask> from its caller.",
+      "closureEvidence": "The old application::task approval function is removed; application::task_breakdown accepts only ApprovedTaskPromotion.",
+      "refs": [
+        "crates/winwincode-delivery/src/application/task_breakdown.rs"
+      ]
+    },
+    {
+      "id": "specialized-store-command-missing",
+      "status": "closed",
+      "preflightFinding": "The preflight base DeliveryCommand has no ApproveTaskBreakdown variant.",
+      "closureEvidence": "DeliveryCommand::ApproveTaskBreakdown is the sole Store mutation and generic Append rejects TaskBreakdownApproved.",
+      "refs": [
+        "crates/winwincode-delivery/src/store.rs"
+      ]
+    },
+    {
+      "id": "specialized-control-plane-transaction-missing",
+      "status": "closed",
+      "preflightFinding": "The preflight base Control Plane has no task_breakdown_transaction or receipt-first entry.",
+      "closureEvidence": "ControlPlane::commit_delivery_task_breakdown performs receipt-first replay and one atomic state/journal/receipt/outbox transaction.",
+      "refs": [
+        "crates/winwincode-control-plane/src/task_breakdown_transaction.rs"
+      ]
+    }
+  ]
+}
