@@ -413,7 +413,8 @@ test('desktop workbench renders navigation, main, context, and artifact landmark
 
   const workspace = findByClass(rootElement, 'wwc-strongflow-workspace')
   assert.notEqual(workspace, null)
-  assert.equal(workspace.tagName, 'MAIN')
+  assert.equal(workspace.tagName, 'SECTION')
+  assert.equal(flatten(rootElement).filter(node => node.tagName === 'MAIN').length, 1)
   const navigation = findByClass(rootElement, 'wwc-strongflow-navigation')
   const mainRegion = findByClass(rootElement, 'wwc-strongflow-main-region')
   const context = findByClass(rootElement, 'wwc-strongflow-context')
@@ -781,5 +782,68 @@ test('viewport mode changes re-render without losing the current projection', ()
   assert.notEqual(findByClass(rootElement, 'wwc-strongflow-heading').textContent.match(
     /Bounded StrongFlow workspace/u,
   ), null)
+  mounted.close()
+})
+
+test('workspace uses the canonical 64rem breakpoint', () => {
+  assert.equal(page.strongFlowLayoutMode(900), 'narrow')
+  assert.equal(page.strongFlowLayoutMode(1_024), 'narrow')
+  assert.equal(page.strongFlowLayoutMode(1_025), 'wide')
+})
+
+test('two hundred equivalent state snapshots preserve drafts, focus, and artifact identity', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const initialState = state()
+  initialState.projection.solutionReview.reviewStatus = 'pending'
+  const model = new FakeStrongFlowViewModel(initialState)
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: many(2, deliverySummary),
+    limits,
+    storage: new FakeStorage(),
+    viewport: { width: 1_440 },
+  })
+
+  const solutionActions = findByClass(rootElement, 'wwc-strongflow-solution-actions')
+  const attentionActions = findByClass(rootElement, 'wwc-strongflow-attention-actions')
+  const comments = findFirst(solutionActions, node => node.tagName === 'TEXTAREA')
+  const attentionDraft = findFirst(attentionActions, node => node.tagName === 'TEXTAREA')
+  const taskRow = findByClass(rootElement, 'wwc-strongflow-task-list').children[0]
+  const candidate = findByClass(rootElement, 'wwc-strongflow-view-candidate')
+  const diagrams = findByClass(rootElement, 'wwc-strongflow-diagrams')
+  const selectedTab = findAllByClass(rootElement, 'wwc-strongflow-artifact-tab')
+    .find(tab => tab.getAttribute('aria-selected') === 'true')
+  comments.value = 'Keep this review draft'
+  attentionDraft.value = 'Keep this Attention draft'
+  attentionDraft.focus()
+  candidate.scrollTop = 37
+
+  for (let index = 0; index < 200; index += 1) {
+    model.publish({
+      ...structuredClone(initialState),
+      status: index % 2 === 0 ? 'refreshing' : 'ready',
+    })
+  }
+
+  assert.equal(findFirst(solutionActions, node => node.tagName === 'TEXTAREA'), comments)
+  assert.equal(comments.value, 'Keep this review draft')
+  assert.equal(findFirst(attentionActions, node => node.tagName === 'TEXTAREA'), attentionDraft)
+  assert.equal(attentionDraft.value, 'Keep this Attention draft')
+  assert.equal(document.activeElement, attentionDraft)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-task-list').children[0], taskRow)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-view-candidate'), candidate)
+  assert.equal(candidate.scrollTop, 37)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-diagrams'), diagrams)
+
+  selectedTab.focus()
+  model.publish(structuredClone(initialState))
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-strongflow-artifact-tab')
+      .find(tab => tab.getAttribute('aria-selected') === 'true'),
+    selectedTab,
+  )
+  assert.equal(document.activeElement, selectedTab)
   mounted.close()
 })

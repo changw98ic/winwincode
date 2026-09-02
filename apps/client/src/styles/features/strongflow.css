@@ -335,15 +335,15 @@
   .wwc-strongflow-diagrams {
     grid-template-columns: 1fr;
   }
-}
-
-@media (max-width: 50rem) {
-  .wwc-strongflow {
-    padding: var(--wwc-space-3);
-  }
 
   .wwc-strongflow-workspace[data-viewport='narrow'] .wwc-strongflow-navigation-split {
     grid-template-columns: minmax(var(--wwc-space-0), 1fr);
+  }
+}
+
+@media (max-width: 48rem) {
+  .wwc-strongflow {
+    padding: var(--wwc-space-3);
   }
 
   .wwc-strongflow-workspace[data-viewport='narrow'] .wwc-strongflow-artifacts {

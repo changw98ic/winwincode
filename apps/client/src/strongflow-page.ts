@@ -39,7 +39,7 @@ import {
   type StrongFlowLayoutPreferences,
 } from './strongflow-layout-preferences.js'
 
-export const STRONGFLOW_NARROW_VIEWPORT_WIDTH = 800
+export const STRONGFLOW_NARROW_VIEWPORT_WIDTH = 1_024
 
 export interface StrongFlowPageOptions {
   readonly root: HTMLElement
@@ -77,7 +77,7 @@ export interface StrongFlowPagePresentation {
 }
 
 export function strongFlowLayoutMode(width: number): 'wide' | 'narrow' {
-  return width < STRONGFLOW_NARROW_VIEWPORT_WIDTH ? 'narrow' : 'wide'
+  return width <= STRONGFLOW_NARROW_VIEWPORT_WIDTH ? 'narrow' : 'wide'
 }
 
 export function strongFlowPagePresentation(
@@ -168,7 +168,7 @@ export function mountStrongFlowCreatePage(
   const document = options.root.ownerDocument
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow wwc-strongflow-create')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-create-status')
-  const content = strongFlowElement(document, 'main', 'wwc-strongflow-create-content')
+  const content = strongFlowElement(document, 'section', 'wwc-strongflow-create-content')
   const form = strongFlowElement(document, 'form', 'wwc-strongflow-create-form') as HTMLFormElement
   const error = strongFlowElement(document, 'p', 'wwc-strongflow-create-error')
   const title = strongFlowElement(
@@ -537,7 +537,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     : safeWindowStorage(browserWindow)
   const viewport = options.viewport ?? {
     get width() {
-      return browserWindow?.innerWidth ?? STRONGFLOW_NARROW_VIEWPORT_WIDTH
+      return browserWindow?.innerWidth ?? STRONGFLOW_NARROW_VIEWPORT_WIDTH + 1
     },
   }
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
@@ -551,7 +551,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'wwc-strongflow-reconnect',
   ) as HTMLButtonElement
   const content = strongFlowElement(document, 'div', 'wwc-strongflow-content')
-  const workspace = strongFlowElement(document, 'main', 'wwc-strongflow-workspace')
+  const workspace = strongFlowElement(document, 'section', 'wwc-strongflow-workspace')
   const desktopControls = strongFlowElement(
     document,
     'div',
@@ -670,12 +670,10 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let candidateNode: HTMLElement | null = null
   let contextEvidenceNode: HTMLElement | null = null
   let artifactEvidenceNode: HTMLElement | null = null
-  let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
-  let lastRuntime: StrongFlowProjection['runtime'] | null = null
-  let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
-  let lastEvidence: StrongFlowProjection['evidence'] | null = null
-  let lastVerdict: StrongFlowProjection['verdict'] | null = null
-  let lastPublication: StrongFlowProjection['publication'] | null = null
+  let lastDiagramsKey: string | null = null
+  let lastCandidateKey: string | null = null
+  let lastEvidenceKey: string | null = null
+  let lastLayoutKey: string | null = null
   let solutionDraftKey: string | null = null
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
@@ -1267,12 +1265,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       candidateNode = null
       contextEvidenceNode = null
       artifactEvidenceNode = null
-      lastSolutionReview = null
-      lastRuntime = null
-      lastCandidate = null
-      lastEvidence = null
-      lastVerdict = null
-      lastPublication = null
+      lastDiagramsKey = null
+      lastCandidateKey = null
+      lastEvidenceKey = null
       return
     }
 
@@ -1291,33 +1286,31 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     updateOmitted(stagesOmitted, boundedStages.omitted, 'stages')
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
 
-    if (
-      diagramsNode === null
-      || lastSolutionReview !== projection.solutionReview
-      || lastRuntime !== projection.runtime
-    ) {
+    const diagramsKey = JSON.stringify([projection.solutionReview, projection.runtime])
+    if (diagramsNode === null || lastDiagramsKey !== diagramsKey) {
       diagramsNode?.remove()
       diagramsNode = renderStrongFlowDiagrams(document, projection, limits)
       diagramsHost.append(diagramsNode)
-      lastSolutionReview = projection.solutionReview
-      lastRuntime = projection.runtime
+      lastDiagramsKey = diagramsKey
     }
-    const evidenceChanged = lastEvidence !== projection.evidence
-    if (
-      candidateNode === null
-      || lastCandidate !== projection.currentCandidate
-      || evidenceChanged
-      || lastVerdict !== projection.verdict
-      || lastPublication !== projection.publication
-    ) {
+    const evidenceKey = JSON.stringify(projection.evidence)
+    const candidateKey = JSON.stringify([
+      projection.currentCandidate,
+      projection.evidence,
+      projection.verdict,
+      projection.publication,
+    ])
+    if (candidateNode === null || lastCandidateKey !== candidateKey) {
       candidateNode?.remove()
       candidateNode = renderStrongFlowCandidate(document, projection, limits)
       candidateHost.append(candidateNode)
-      lastCandidate = projection.currentCandidate
-      lastVerdict = projection.verdict
-      lastPublication = projection.publication
+      lastCandidateKey = candidateKey
     }
-    if (contextEvidenceNode === null || artifactEvidenceNode === null || evidenceChanged) {
+    if (
+      contextEvidenceNode === null
+      || artifactEvidenceNode === null
+      || lastEvidenceKey !== evidenceKey
+    ) {
       contextEvidenceNode?.remove()
       artifactEvidenceNode?.remove()
       contextEvidenceNode = renderEvidencePanel(document, projection, limits)
@@ -1325,7 +1318,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       contextEvidenceHost.append(contextEvidenceNode)
       artifactEvidenceHost.append(artifactEvidenceNode)
     }
-    lastEvidence = projection.evidence
+    lastEvidenceKey = evidenceKey
   }
 
   function renderActions(state: StrongFlowViewModelState): void {
@@ -1392,6 +1385,37 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
 
   function renderLayout(mode: 'wide' | 'narrow'): void {
     const narrow = mode === 'narrow'
+    const layoutKey = [
+      mode,
+      preferences.navigationWidth,
+      preferences.contextWidth,
+      preferences.navigationCollapsed,
+      preferences.contextCollapsed,
+      preferences.artifactsTab,
+      navigationDrawerOpen,
+      contextDrawerOpen,
+    ].join(':')
+
+    for (const tab of STRONGFLOW_ARTIFACTS_TABS) {
+      const panel = artifactPanels.get(tab)
+      if (panel !== undefined) panel.hidden = tab !== preferences.artifactsTab
+    }
+    const diagramPanel = artifactPanels.get(
+      preferences.artifactsTab === 'execution' ? 'execution' : 'solution',
+    )
+    if (diagramPanel !== undefined) mountRegion(diagramPanel, [diagramsHost])
+    if (diagramsNode !== null) {
+      for (const child of [...diagramsNode.children] as HTMLElement[]) {
+        if (child.className === 'wwc-strongflow-view-solution') {
+          child.hidden = preferences.artifactsTab === 'execution'
+        } else if (child.className === 'wwc-strongflow-view-execution') {
+          child.hidden = preferences.artifactsTab !== 'execution'
+        }
+      }
+    }
+    if (lastLayoutKey === layoutKey) return
+    lastLayoutKey = layoutKey
+
     workspace.dataset.viewport = mode
     workspace.dataset.navigationWidth = String(preferences.navigationWidth)
     workspace.dataset.contextWidth = String(preferences.contextWidth)
@@ -1477,6 +1501,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     collapseContext.root.setAttribute('aria-controls', context.id)
     collapseContext.root.setAttribute('aria-expanded', String(contextExpanded))
 
+    const restoreArtifactTabFocus = STRONGFLOW_ARTIFACTS_TABS.some(
+      tab => artifactTabs.tab(tab) === document.activeElement,
+    )
     artifactTabs.update({
       id: 'wwc-strongflow-artifact-tab',
       label: 'Delivery artifacts',
@@ -1489,22 +1516,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       const tabButton = artifactTabs.tab(tab)
       tabButton.className = 'wwc-strongflow-artifact-tab'
       tabButton.dataset.artifactTab = tab
-      const panel = artifactPanels.get(tab)
-      if (panel !== undefined) panel.hidden = tab !== preferences.artifactsTab
     }
-    const diagramPanel = artifactPanels.get(
-      preferences.artifactsTab === 'execution' ? 'execution' : 'solution',
-    )
-    if (diagramPanel !== undefined) mountRegion(diagramPanel, [diagramsHost])
-    if (diagramsNode !== null) {
-      for (const child of [...diagramsNode.children] as HTMLElement[]) {
-        if (child.className === 'wwc-strongflow-view-solution') {
-          child.hidden = preferences.artifactsTab === 'execution'
-        } else if (child.className === 'wwc-strongflow-view-execution') {
-          child.hidden = preferences.artifactsTab !== 'execution'
-        }
-      }
-    }
+    if (restoreArtifactTabFocus) artifactTabs.tab(preferences.artifactsTab).focus()
 
     openNavigation.update({
       className: 'wwc-strongflow-open-navigation',
