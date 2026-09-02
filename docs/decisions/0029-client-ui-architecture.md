@@ -106,7 +106,8 @@ feature 不能读取全局认证变量，也不能自行扩大 Scope。
 | --- | --- | --- |
 | AuthSession、Actor、authorizedScopes | Control Plane | 缓存当前响应并展示恢复/失效状态 |
 | ProductSession、消息、Delivery、StageRun、Approval、Attention、Settings、Worker、企业资源及其 revision/status | Control Plane | 校验并冻结 HTTP snapshot 或 WebSocket 投影，按 ID 派生只读显示 |
-| query 游标、subscription 游标、请求中/重连/分页/错误 | 对应 feature view-model | 控制读取生命周期；不改写业务状态 |
+| HTTP query snapshot 的缓存键、新旧 snapshot 交接与 invalidation 合并 | `core/query-cache.ts` | 以 Actor、Scope、query、参数和分页为键；只缓存已校验的 Server 响应，不解释业务字段 |
+| query 游标、subscription 游标、请求中/重连/分页/错误 | 对应 feature view-model | 控制读取生命周期；不改写业务状态；重连后从失效 cache 重新 query |
 | 当前 surface、Scope 和实体选择 | typed route | 解析、验证并传给 feature |
 | 未提交的输入、选择、过滤、排序、展开、滚动和焦点 | 挂载中的页面 module | 仅存浏览器内存，以实体 ID 作为草稿 key |
 | 已提交但 Server 尚未确认的表单 | 页面 module | 保留原草稿并显示 busy；失败时保留，成功并刷新 snapshot 后清除 |
@@ -116,6 +117,13 @@ WebSocket 是 Server 事实的实时入口，不是第二个浏览器业务模�
 Scope/实体身份、revision 和 cursor 均匹配的事件；出现 gap、reset 或 revision 冲突时丢弃受影响
 缓存并重新 query snapshot。页面不能通过“看起来应该进入下一状态”来推进业务对象，也不做
 乐观 Delivery/Session/Approval 状态迁移。command 完成后以响应或后续 snapshot 为准。
+
+`core/query-cache.ts` 包裹 connection observer 提供的唯一 Control Plane facade。它保留生成 client 已完成的
+request/response correlation；cache 命中时只把同一已校验 snapshot 交给新 request envelope，
+仍使用调用方自己的 requestId。普通 invalidation 保留旧 snapshot 供页面刷新期间显示，随后
+只允许一个当前 reload 和一个合并后的尾随 reload。retention loss/4409、权限 epoch 变化、
+授权撤销和显式 reconnect 会丢弃对应 Scope 的 snapshot。WebSocket payload 只选择需要失效的
+query；新业务值始终由后续 HTTP query 提供。
 
 浏览器草稿与 Server snapshot 分开保存。snapshot 更新时，仍对应同一实体的未提交草稿保留；
 实体消失、Scope 改变、提交成功或页面关闭时删除草稿。draft 不复制 revision/status，也不成为

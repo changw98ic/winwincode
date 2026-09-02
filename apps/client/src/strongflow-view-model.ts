@@ -5,6 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
+import { invalidateClientQueryCache } from './core/query-cache.js'
 import type {
   Actor,
   AttentionItemId,
@@ -1377,6 +1378,11 @@ export function createStrongFlowViewModel(
       'STRONGFLOW_VIEW_MODEL_CLOSED',
       'The StrongFlow view-model is closed.',
     )
+    invalidateClientQueryCache(options.client, {
+      actor: options.actor,
+      scope: options.scope,
+      reason: 'manual',
+    })
     generation += 1
     const ownGeneration = generation
     abortRequests()
@@ -1696,10 +1702,17 @@ export function createStrongFlowViewModel(
       )
       patch({ realtime: 'reconnecting', error: null })
       realtime.reconnect()
+      void refresh()
     },
     close() {
       if (closed) return
       closed = true
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+        discard: true,
+      })
       generation += 1
       supersedingGeneration = null
       abortRequests()

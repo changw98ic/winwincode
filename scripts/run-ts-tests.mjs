@@ -44,6 +44,8 @@ const canonicalTestFiles = Object.freeze([
   'tests/local-operations-client.test.mjs',
   'tests/open-source-governance.test.mjs',
   'tests/pnpm-pack-report.test.mjs',
+  'tests/query-cache.test.mjs',
+  'tests/query-cache-view-model.test.mjs',
   'tests/readme-quickstart.test.mjs',
   'tests/release-artifact-contract.test.mjs',
   'tests/release-artifact-security.test.mjs',

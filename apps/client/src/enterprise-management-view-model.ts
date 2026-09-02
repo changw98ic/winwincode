@@ -5,6 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
+import { invalidateClientQueryCache } from './core/query-cache.js'
 import { ControlPlaneWebSocketEventType } from './generated/contracts.js'
 import type {
   Actor,
@@ -681,6 +682,11 @@ export function createEnterpriseManagementViewModel(
       if (!closed && currentState.status !== 'authentication-required') subscribeRealtime()
     },
     async refresh(area) {
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+      })
       const areas = area === undefined ? ENTERPRISE_MANAGEMENT_AREAS : [area]
       await loadAreas(areas, false)
       if (!closed && subscription === null && currentState.status !== 'authentication-required') {
@@ -826,10 +832,24 @@ export function createEnterpriseManagementViewModel(
       realtimeGeneration += 1
       patch({ realtime: 'reconnecting', error: null })
       subscription.reconnect()
+      const ownGeneration = realtimeGeneration
+      void loadAreas(ENTERPRISE_MANAGEMENT_AREAS, false).then(() => {
+        if (
+          !closed
+          && realtimeGeneration === ownGeneration
+          && currentState.realtime === 'reconnecting'
+        ) patch({ realtime: 'subscribed' })
+      })
     },
     close() {
       if (closed) return
       closed = true
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+        discard: true,
+      })
       realtimeGeneration += 1
       for (const controller of controllers.values()) controller.abort()
       controllers.clear()

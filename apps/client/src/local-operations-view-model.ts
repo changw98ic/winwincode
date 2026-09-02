@@ -5,6 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
+import { invalidateClientQueryCache } from './core/query-cache.js'
 import type {
   Actor,
   CommandAcceptedResponse,
@@ -635,6 +636,11 @@ export function createLocalOperationsViewModel(
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+      })
       await load(false, realtime === null ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && realtime === null && !closed) subscribeRealtime()
     },
@@ -733,10 +739,17 @@ export function createLocalOperationsViewModel(
       )
       patch({ realtime: 'reconnecting', error: null })
       realtime.reconnect()
+      void load(false, 'reloading')
     },
     close() {
       if (closed) return
       closed = true
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+        discard: true,
+      })
       generation += 1
       abortRequests()
       realtime?.close()

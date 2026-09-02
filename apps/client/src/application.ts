@@ -22,6 +22,7 @@ import {
   type ConnectionMonitor,
   type ConnectionSnapshot,
 } from './core/connection-state.js'
+import { createQueryCache } from './core/query-cache.js'
 import { mountAuthSessionPage, type AuthSessionPage } from './auth-page.js'
 import {
   createAuthSessionViewModel,
@@ -154,7 +155,8 @@ export function mountWinWinCodeClient(
     online: browserIsOnline,
     onAuthorizationRevoked() { onRouteAuthorizationRevoked?.() },
   })
-  const controlPlane = observedControlPlane.client
+  const queryCache = createQueryCache({ client: observedControlPlane.client })
+  const controlPlane = queryCache.client
   const authSession = createAuthSessionViewModel(controlPlane)
   accessFailureSession = authSession
   let lastKnownDiagnosticScope: unknown = null
@@ -228,6 +230,7 @@ export function mountWinWinCodeClient(
       connection.offline()
       return
     }
+    queryCache.clear('reconnect')
     observedControlPlane.reconnectAll()
   }
 
@@ -871,7 +874,10 @@ export function mountWinWinCodeClient(
 
   const onHashChange = () => { render() }
   const onOffline = () => { connection.offline() }
-  const onOnline = () => { observedControlPlane.reconnectAll() }
+  const onOnline = () => {
+    queryCache.clear('reconnect')
+    observedControlPlane.reconnectAll()
+  }
   const onWindowError = (event: ErrorEvent) => {
     event.preventDefault()
     showRouteFailure(event.error, 'CLIENT_RENDER_FAILURE')

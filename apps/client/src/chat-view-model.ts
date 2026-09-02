@@ -5,6 +5,7 @@ import {
   type ControlPlaneClient,
   type ControlPlaneSubscription,
 } from './control-plane-client.js'
+import { invalidateClientQueryCache } from './core/query-cache.js'
 import type {
   Actor,
   ApprovalDecideCompletedResponse,
@@ -1749,6 +1750,11 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       await load(true)
     },
     async refresh() {
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+      })
       await load(false)
     },
     async selectSession(productSessionId) {
@@ -1873,10 +1879,17 @@ export function createChatViewModel(options: ChatViewModelOptions): ChatViewMode
       patch({ realtime: 'reconnecting', error: null })
       realtime?.reconnect()
       for (const subscription of modelRouteRealtime) subscription.reconnect()
+      void load(false)
     },
     close() {
       if (closed) return
       closed = true
+      invalidateClientQueryCache(options.client, {
+        actor: options.actor,
+        scope: options.scope,
+        reason: 'manual',
+        discard: true,
+      })
       generation += 1
       abortRequests()
       realtime?.close()
