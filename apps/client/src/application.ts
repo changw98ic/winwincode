@@ -948,13 +948,7 @@ export function mountWinWinCodeClient(
       connection.failure(state.error, browserIsOnline())
     }
     if (state.status === 'signed-in') diagnosticScope()
-    if ((state.status === 'signed-in' || state.status === 'signed-out') && (
-      activeSurface.id === 'chat'
-      || activeSurface.id === 'strongflow'
-      || activeSurface.id === 'settings'
-      || activeSurface.id === 'approvals'
-      || activeSurface.id === 'enterprise'
-    )) render()
+    render()
   })
   render()
   void authSession.restore()
