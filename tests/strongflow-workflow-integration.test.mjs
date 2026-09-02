@@ -300,6 +300,7 @@ function deliveryDetail(state) {
       scope: ['apps/client'],
       outOfScope: [],
       constraints: [],
+      sourceProductSessionId: null,
       acceptanceCriteria: [{
         id: 'criterion:1',
         description: 'All decisions retain current identities.',
