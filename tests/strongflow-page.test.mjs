@@ -39,6 +39,10 @@ const application = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/application.js',
 )).href}`)
+const clientSurface = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/client-surface.js',
+)).href}`)
 
 const {
   mountStrongFlowCreatePage,
@@ -46,7 +50,8 @@ const {
   strongFlowPagePresentation,
 } = page
 const { boundedItems } = rendering
-const { clientSurfaceFromHash, strongFlowRouteHash } = application
+const { strongFlowRouteHash } = application
+const { clientSurfaceFromHash } = clientSurface
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
 
@@ -569,6 +574,40 @@ test('review controls send only current view-model decisions and disable while w
   assert.equal(findByClass(rootElement, 'wwc-strongflow-approve-solution').disabled, true)
   assert.equal(findByClass(rootElement, 'wwc-strongflow-actions').getAttribute('aria-busy'), 'true')
   mounted.close()
+})
+
+test('read-only StrongFlow keeps the snapshot visible and blocks review decisions', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.solutionReview.reviewStatus = 'pending'
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model, limits, readOnly: true })
+  const approve = findByClass(rootElement, 'wwc-strongflow-approve-solution')
+  assert.equal(approve.disabled, true)
+  approve.emit('click')
+  assert.equal(model.calls.some(([name]) => name === 'decideSolutionReview'), false)
+  assert.notEqual(findByClass(rootElement, 'wwc-strongflow-view-candidate'), null)
+  mounted.close()
+
+  const createRoot = document.createElement('main')
+  const creator = new FakeStrongFlowCreateViewModel()
+  const created = mountStrongFlowCreatePage({
+    root: createRoot,
+    model: creator,
+    readOnly: true,
+    scope: {
+      kind: 'repository',
+      organizationId: 'org_00000000000000000000000001',
+      workspaceId: 'wsp_00000000000000000000000001',
+      projectId: 'prj_00000000000000000000000001',
+      repositoryId: 'rep_00000000000000000000000001',
+    },
+  })
+  assert.equal(findByClass(createRoot, 'wwc-strongflow-create-submit').disabled, true)
+  findByClass(createRoot, 'wwc-strongflow-create-form').emit('submit', { preventDefault() {} })
+  assert.equal(creator.calls.some(([name]) => name === 'create'), false)
+  created.close()
 })
 
 test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, and large views', () => {

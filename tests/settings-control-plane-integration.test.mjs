@@ -637,6 +637,40 @@ test('settings page clears each write-only input before handing it to the view-m
   mounted.close()
 })
 
+test('read-only Settings disables mutation controls and ignores synthetic submits', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  const state = pageState()
+  const model = {
+    state,
+    subscribe(next) { next(state); return () => {} },
+    async start() {},
+    async refresh() {},
+    async updateSettings() { calls.push('settings') },
+    async createCredentialReference() { calls.push('create') },
+    async rotateCredentialReference() { calls.push('rotate') },
+    async revokeCredentialReference() { calls.push('revoke') },
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model, readOnly: true })
+  for (const className of [
+    'wwc-settings-provider',
+    'wwc-settings-save-route',
+    'wwc-settings-create-submit',
+    'wwc-settings-rotate',
+    'wwc-settings-revoke',
+  ]) assert.equal(byClass(rootElement, className).disabled, true, className)
+  byClass(rootElement, 'wwc-settings-route-form').dispatch('submit')
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+  byClass(rootElement, 'wwc-settings-revoke').dispatch('click')
+  assert.deepEqual(calls, [])
+  mounted.close()
+})
+
 test('settings keyed updates preserve route drafts, Credential row identity, focus, and scroll', () => {
   const document = new FakeDocument()
   document.activeElement = null

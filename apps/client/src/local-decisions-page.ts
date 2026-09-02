@@ -28,6 +28,8 @@ import type {
 export interface LocalDecisionsPageOptions {
   readonly root: HTMLElement
   readonly model: LocalDecisionsViewModel
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface LocalDecisionsPage {
@@ -381,6 +383,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
           choice.dataset.wwcComponent = 'button'
           choice.dataset.variant = 'default'
           const onClick = () => {
+            if (options.readOnly === true) return
             const currentRow = inputRows.get(row)
             const currentOption = optionStates.get(choice)
             if (currentRow === undefined || currentOption === undefined) return
@@ -410,6 +413,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       })
       const onSubmit = (event: SubmitEvent) => {
         event.preventDefault()
+        if (options.readOnly === true) return
         const current = inputRows.get(row)
         if (current === undefined || current.current.projection.mode !== 'text') return
         const value: InteractiveInputValue = {
@@ -423,6 +427,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
         )
       }
       const onCancel = () => {
+        if (options.readOnly === true) return
         const current = inputRows.get(row)
         if (current !== undefined) {
           void options.model.cancelInput(current.current.projection.inputRequestId)
@@ -455,7 +460,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       const projection = item.projection
       const decisionDisabled = localDecisionsPagePresentation(
         options.model.state,
-      ).decisionsDisabled || item.expired
+      ).decisionsDisabled || options.readOnly === true || item.expired
       mounted.current = item
       mounted.title.textContent = projection.prompt
       row.dataset.state = item.expired ? 'expired' : 'pending'
@@ -531,6 +536,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       reject.dataset.wwcComponent = 'button'
       reject.dataset.variant = 'destructive'
       const decide = (decision: 'approve' | 'reject') => {
+        if (options.readOnly === true) return
         const current = approvalRows.get(row)
         if (current === undefined) return
         const explanation = current.reason.value
@@ -567,7 +573,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       const projection = item.projection
       const decisionDisabled = localDecisionsPagePresentation(
         options.model.state,
-      ).decisionsDisabled || item.expired
+      ).decisionsDisabled || options.readOnly === true || item.expired
       mounted.current = item
       mounted.title.textContent = projection.subject
       row.dataset.state = item.expired ? 'expired' : 'pending'
@@ -667,6 +673,7 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
         remove(optionItem) { optionRows.delete(optionItem) },
       })
       const decide = (decision: 'resolve' | 'dismiss') => {
+        if (options.readOnly === true) return
         const current = attentionRows.get(row)
         if (current === undefined) return
         const explanation = current.resolution.value
@@ -702,7 +709,8 @@ export function mountLocalDecisionsPage(options: LocalDecisionsPageOptions): Loc
       const mounted = attentionRows.get(row)
       if (mounted === undefined) return
       const projection = item.projection
-      const disabled = localDecisionsPagePresentation(options.model.state).decisionsDisabled
+      const disabled = options.readOnly === true
+        || localDecisionsPagePresentation(options.model.state).decisionsDisabled
       mounted.current = item
       mounted.title.textContent = projection.title
       row.dataset.state = projection.blocking ? 'blocking' : 'open'

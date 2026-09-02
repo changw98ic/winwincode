@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { AuthSessionViewModelState } from './auth-view-model.js'
-import { CLIENT_SURFACES, type ClientSurface } from './application.js'
+import { CLIENT_SURFACES, type ClientSurface } from './client-surface.js'
 import type { Scope } from './generated/contracts.js'
 
 /**

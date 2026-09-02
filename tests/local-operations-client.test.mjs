@@ -431,6 +431,34 @@ test('local operations page shows safe diagnostics and delegates Worker commands
   mounted.close()
 })
 
+test('read-only local operations keeps Worker state visible and blocks commands', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  const state = pageState()
+  const model = {
+    state,
+    subscribe(next) { next(state); return () => {} },
+    async start() {},
+    async refresh() {},
+    async drainWorker() { calls.push('drain') },
+    async enableWorker() { calls.push('enable') },
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountLocalOperationsPage({ root: rootElement, model, readOnly: true })
+  const drain = byClass(rootElement, 'wwc-local-worker-drain')
+  const enable = byClass(rootElement, 'wwc-local-worker-enable')
+  assert.equal(drain.disabled, true)
+  assert.equal(enable.disabled, true)
+  drain.dispatch('click')
+  enable.dispatch('click')
+  assert.deepEqual(calls, [])
+  assert.match(visibleText(rootElement), /Reported capacity slots/iu)
+  mounted.close()
+})
+
 test('local operations source has one facade and no local process, filesystem, or raw transport path', () => {
   const viewModelSource = readFileSync(
     resolve(root, 'apps/client/src/local-operations-view-model.ts'),

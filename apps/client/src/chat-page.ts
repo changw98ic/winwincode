@@ -46,6 +46,8 @@ export interface ChatPageOptions {
   readonly nextProductSessionId?: () => ProductSessionId
   readonly deliveryCreator?: ChatDeliveryCreator
   readonly scope?: RepositoryScope
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface ChatPage {
@@ -267,6 +269,7 @@ function deliveryConversionError(state: ChatDeliveryCreatorState): string | null
 
 /** Mount the default, keyboard-accessible Chat page against the read/write view-model only. */
 export function mountChatPage(options: ChatPageOptions): ChatPage {
+  const readOnly = options.readOnly === true
   const document = options.root.ownerDocument
   const layout = element(document, 'div', 'wwc-chat')
   const sessionPanel = element(document, 'aside', 'wwc-chat-sessions')
@@ -577,11 +580,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     heading.textContent = state.session?.title ?? 'Chat'
     messages.setAttribute('aria-busy', String(presentation.messageListBusy))
     composerLabel.textContent = presentation.composerLabel
-    composer.disabled = presentation.composerDisabled
-    send.disabled = presentation.composerDisabled || composer.value.trim().length === 0
+    composer.disabled = readOnly || presentation.composerDisabled
+    send.disabled = readOnly || presentation.composerDisabled || composer.value.trim().length === 0
     send.textContent = presentation.sendLabel
     cancel.hidden = !presentation.cancelVisible
-    cancel.disabled = state.interaction.status === 'cancelling'
+    cancel.disabled = readOnly || state.interaction.status === 'cancelling'
     empty.hidden = state.messages.length > 0
     empty.textContent = presentation.emptyText
     loadEarlier.hidden = !state.messagePagination.hasMore
@@ -629,7 +632,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       : 'The previously selected model route is no longer ready: '
         + `${modelRouteReasonLabel(state.modelRouteSelectionIssue)}. `
         + 'Choose an enabled route.'
-    newSession.disabled = options.nextProductSessionId === undefined
+    newSession.disabled = readOnly || options.nextProductSessionId === undefined
       || state.selectedModelRoute === null
       || pageUnavailable
     convertDelivery.update({
@@ -637,7 +640,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       label: 'Convert to StrongFlow',
       type: 'button',
       variant: 'primary',
-      disabled: options.deliveryCreator === undefined
+      disabled: readOnly || options.deliveryCreator === undefined
         || options.scope === undefined
         || state.session === null
         || confirmedRequirement(state) === null
@@ -692,7 +695,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       label: 'Confirm and create Delivery',
       busy,
       busyLabel: state.status === 'waiting' ? 'Waiting for Delivery…' : 'Creating Delivery…',
-      disabled: !conversionOpen || state.status === 'created' || state.status === 'closed',
+      disabled: readOnly || !conversionOpen || state.status === 'created' || state.status === 'closed',
       type: 'submit',
       variant: 'primary',
     })
@@ -714,7 +717,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   }
 
   const onComposerInput = () => {
-    send.disabled = chatPagePresentation(options.model.state).composerDisabled
+    send.disabled = readOnly || chatPagePresentation(options.model.state).composerDisabled
       || composer.value.trim().length === 0
   }
   const onModelRouteChange = () => {
@@ -728,12 +731,14 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     options.model.selectModelRoute(selected.route)
   }
   const onComposerKeydown = (event: KeyboardEvent) => {
+    if (readOnly) return
     if (chatComposerKeyAction(event) !== 'submit') return
     event.preventDefault()
     form.requestSubmit()
   }
   const onComposerSubmit = (event: SubmitEvent) => {
     event.preventDefault()
+    if (readOnly) return
     const draft = composer.value.trim()
     if (draft.length === 0) return
     void options.model.submitMessage(draft).then(() => {
@@ -745,6 +750,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   }
   const onConversionSubmit = (event: SubmitEvent) => {
     event.preventDefault()
+    if (readOnly) return
     if (
       options.deliveryCreator === undefined
       || !conversionOpen
@@ -761,9 +767,11 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     })
   }
   const onCancel = () => {
+    if (readOnly) return
     void options.model.cancelSession('Stopped from the Chat page.')
   }
   const onNewSession = () => {
+    if (readOnly) return
     if (options.model.state.selectedModelRoute === null
       || options.nextProductSessionId === undefined) return
     void options.model.createSession({

@@ -48,6 +48,8 @@ export interface StrongFlowPageOptions {
   readonly limits?: StrongFlowRenderLimits
   readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
   readonly viewport?: StrongFlowLayoutViewport
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface StrongFlowLayoutViewport {
@@ -62,6 +64,8 @@ export interface StrongFlowCreatePageOptions {
   readonly root: HTMLElement
   readonly model: StrongFlowCreateViewModel
   readonly scope: RepositoryScope
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface StrongFlowCreatePage {
@@ -165,6 +169,7 @@ function strongFlowCreateError(state: StrongFlowCreateState): string | null {
 export function mountStrongFlowCreatePage(
   options: StrongFlowCreatePageOptions,
 ): StrongFlowCreatePage {
+  const readOnly = options.readOnly === true
   const document = options.root.ownerDocument
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow wwc-strongflow-create')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-create-status')
@@ -209,12 +214,15 @@ export function mountStrongFlowCreatePage(
   error.setAttribute('aria-live', 'assertive')
   title.type = 'text'
   title.required = true
+  title.disabled = readOnly
   goal.required = true
+  goal.disabled = readOnly
   repository.type = 'text'
   repository.readOnly = true
   repository.value = options.scope.repositoryId
   baseline.type = 'text'
   baseline.required = true
+  baseline.disabled = readOnly
   scope.type = 'text'
   scope.readOnly = true
   scope.value = [
@@ -224,6 +232,7 @@ export function mountStrongFlowCreatePage(
     options.scope.repositoryId,
   ].join(' / ')
   criteria.required = true
+  criteria.disabled = readOnly
 
   const titleField = mountFormField({
     document,
@@ -326,6 +335,7 @@ export function mountStrongFlowCreatePage(
 
   const onSubmit = (event: SubmitEvent) => {
     event.preventDefault()
+    if (readOnly) return
     void options.model.create({
       title: title.value,
       goal: goal.value,
@@ -354,7 +364,7 @@ export function mountStrongFlowCreatePage(
       label: 'Create Delivery and open StrongFlow',
       busy,
       busyLabel: state.status === 'waiting' ? 'Waiting for Delivery…' : 'Creating Delivery…',
-      disabled: state.status === 'created' || state.status === 'closed',
+      disabled: readOnly || state.status === 'created' || state.status === 'closed',
       type: 'submit',
       variant: 'primary',
     })
@@ -528,6 +538,7 @@ function safeWindowStorage(
 
 /** Mount the advanced StrongFlow workspace against its Control Plane view-model. */
 export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowPage {
+  const readOnly = options.readOnly === true
   const document = options.root.ownerDocument
   const limits = options.limits ?? DEFAULT_STRONGFLOW_RENDER_LIMITS
   const browserWindow = document.defaultView
@@ -1098,6 +1109,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         },
       })
       const decide = (decision: 'resolve' | 'dismiss', remediation: boolean) => {
+        if (readOnly) return
         const row = attentionActionRows.get(group)
         if (row === undefined) return
         void options.model.resolveAttention({
@@ -1148,9 +1160,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       row.current = item
       row.title.textContent = item.record.title
       group.dataset.attentionItemId = item.record.id
-      row.resolve.disabled = item.busy
-      row.dismiss.disabled = item.busy
-      row.rework.disabled = item.busy
+      row.resolve.disabled = readOnly || item.busy
+      row.dismiss.disabled = readOnly || item.busy
+      row.rework.disabled = readOnly || item.busy
+      row.resolution.disabled = readOnly || item.busy
+      row.task.disabled = readOnly || item.busy
+      row.node.disabled = readOnly || item.busy
+      row.instructions.disabled = readOnly || item.busy
       const reworkVisible = item.record.type === 'verification_blocked'
         && item.candidateAvailable
         && item.nodes.length > 0
@@ -1173,6 +1189,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   })
 
   const onApproveSolution = () => {
+    if (readOnly) return
     void options.model.decideSolutionReview({
       action: 'approve',
       comments: comments.value,
@@ -1180,6 +1197,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
   const onRequestChanges = () => {
+    if (readOnly) return
     void options.model.decideSolutionReview({
       action: 'request_changes',
       comments: comments.value,
@@ -1187,15 +1205,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
   const onRejectSolution = () => {
+    if (readOnly) return
     void options.model.decideSolutionReview({
       action: 'reject',
       comments: comments.value,
       requestedChanges: [],
     })
   }
-  const onApproveTasks = () => { void options.model.approveTaskBreakdown() }
-  const onSubmitVerdict = () => { void options.model.submitVerdict() }
-  const onAdvanceDelivery = () => { void options.model.advanceDelivery() }
+  const onApproveTasks = () => { if (!readOnly) void options.model.approveTaskBreakdown() }
+  const onSubmitVerdict = () => { if (!readOnly) void options.model.submitVerdict() }
+  const onAdvanceDelivery = () => { if (!readOnly) void options.model.advanceDelivery() }
   const onRetry = () => { void options.model.refresh() }
   const onReconnect = () => { options.model.reconnect() }
   approveSolution.addEventListener('click', onApproveSolution)
@@ -1337,21 +1356,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       solutionDraftKey = nextDraftKey
     }
     solutionActions.hidden = !pendingReview
-    approveSolution.disabled = busy
-    requestChanges.disabled = busy
-    rejectSolution.disabled = busy
+    comments.disabled = readOnly || busy
+    changes.disabled = readOnly || busy
+    approveSolution.disabled = readOnly || busy
+    requestChanges.disabled = readOnly || busy
+    rejectSolution.disabled = readOnly || busy
     approveTasks.hidden = review?.reviewStatus !== 'approved'
       || (projection?.delivery.tasks.length ?? 0) > 0
-    approveTasks.disabled = busy
+    approveTasks.disabled = readOnly || busy
     const verdictVisible = projection !== null && canSubmitStrongFlowVerdict(projection)
     if (verdictVisible && submitVerdict.parentNode === null) {
       actions.insertBefore(submitVerdict, attentionActions)
     } else if (!verdictVisible) {
       submitVerdict.remove()
     }
-    submitVerdict.disabled = busy
+    submitVerdict.disabled = readOnly || busy
     advanceDelivery.hidden = projection?.delivery.status !== 'ready-to-deliver'
-    advanceDelivery.disabled = busy
+    advanceDelivery.disabled = readOnly || busy
     const nodes: readonly ReviewNode[] = review === null
       ? []
       : boundedItems(
