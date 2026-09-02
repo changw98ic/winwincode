@@ -339,12 +339,17 @@ impl KernelOptions {
     /// Create options with bounded defaults.
     #[must_use]
     pub fn new(home: PathBuf, helper_executable: PathBuf) -> Self {
+        // The bundled helper dispatches `codex-linux-sandbox` by argv0. Linux
+        // command execution must receive that sealed helper explicitly;
+        // otherwise Codex Core selects seccomp but has no executable with
+        // which to enter the sandbox.
+        let linux_sandbox_executable = cfg!(target_os = "linux").then(|| helper_executable.clone());
         Self {
             home,
             helper_executable,
             event_capacity: DEFAULT_EVENT_CAPACITY,
             shutdown_timeout: Duration::from_millis(DEFAULT_SHUTDOWN_TIMEOUT_MILLIS),
-            linux_sandbox_executable: None,
+            linux_sandbox_executable,
         }
     }
 }
@@ -2009,6 +2014,22 @@ mod tests {
         );
         assert_eq!(build.event_capacity, 16);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn kernel_options_bind_the_bundled_helper_only_as_the_linux_sandbox() {
+        let home = std::env::temp_dir().join(format!(
+            "winwincode-kernel-sandbox-options-{}",
+            std::process::id()
+        ));
+        let helper = home.join("winwincode-kernel-helper");
+        let options = KernelOptions::new(home, helper.clone());
+
+        if cfg!(target_os = "linux") {
+            assert_eq!(options.linux_sandbox_executable, Some(helper));
+        } else {
+            assert_eq!(options.linux_sandbox_executable, None);
+        }
     }
 
     #[tokio::test]
