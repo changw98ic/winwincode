@@ -35,6 +35,8 @@ import type {
 export interface EnterpriseResourcePageOptions {
   readonly root: HTMLElement
   readonly model: EnterpriseManagementViewModel
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface EnterpriseResourcePage {
@@ -434,15 +436,19 @@ export function mountEnterpriseResourcePage(
     organization.render(
       snapshot.organizations,
       state,
-      presentation.mutationsDisabled.organization,
+      options.readOnly === true || presentation.mutationsDisabled.organization,
     )
-    membership.render(snapshot.members, state, presentation.mutationsDisabled.members)
+    membership.render(
+      snapshot.members,
+      state,
+      options.readOnly === true || presentation.mutationsDisabled.members,
+    )
     roles.render(snapshot.roleGroups, state)
     projects.render(
       snapshot.projects,
       snapshot.repositories,
       state,
-      presentation.mutationsDisabled.projects,
+      options.readOnly === true || presentation.mutationsDisabled.projects,
     )
   }
 

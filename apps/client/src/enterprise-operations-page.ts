@@ -35,6 +35,8 @@ import type {
 export interface EnterpriseOperationsPageOptions {
   readonly root: HTMLElement
   readonly model: EnterpriseManagementViewModel
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
   /** Browser-host download seam; receives only the public bounded audit projection. */
   readonly onAuditExport?: (filename: string, content: string) => void
   /** Canonical effective instant seam for deterministic browser fixtures. */
@@ -452,14 +454,22 @@ export function mountEnterpriseOperationsPage(
     })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
-    policy.render(snapshot.policies, state, presentation.mutationsDisabled.policy)
-    fleet.render(snapshot.fleets, state, presentation.mutationsDisabled.fleet)
+    policy.render(
+      snapshot.policies,
+      state,
+      options.readOnly === true || presentation.mutationsDisabled.policy,
+    )
+    fleet.render(
+      snapshot.fleets,
+      state,
+      options.readOnly === true || presentation.mutationsDisabled.fleet,
+    )
     usage.render(snapshot.usage, state, false)
     audit.render(snapshot.audit, state, false)
     integration.render(
       snapshot.integrations,
       state,
-      presentation.mutationsDisabled.integration,
+      options.readOnly === true || presentation.mutationsDisabled.integration,
     )
   }
 

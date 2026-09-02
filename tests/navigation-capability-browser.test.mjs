@@ -101,6 +101,17 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
     'approvals', 'chat', 'enterprise', 'settings', 'strongflow',
   ])
   assert.equal(enterprise.entries.enterprise.capability, 'available')
+  const websocketRevoked = await evaluate(
+    devtools,
+    sessionId,
+    'globalThis.revokeEnterpriseSubscription()',
+  )
+  assert.equal(websocketRevoked.subscriptionClosed, true)
+  assert.equal(websocketRevoked.safeHref, '#/chat')
+  assert.equal(websocketRevoked.routeAccess, 'denied')
+  assert.equal(websocketRevoked.capability, 'available')
+
+  await navigate('enterprise')
   const revoked = await evaluate(devtools, sessionId, 'globalThis.revokeEnterpriseRoute()')
   assert.equal(revoked.subscriptionClosed, true)
   assert.equal(revoked.visibleEntries, 0)

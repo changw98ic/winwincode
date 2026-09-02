@@ -779,6 +779,42 @@ test('local decisions page exposes safe labels, clears responses synchronously, 
   mounted.close()
 })
 
+test('read-only Approvals disables decision controls and ignores synthetic actions', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  const state = pageState()
+  const model = {
+    state,
+    subscribe(next) { next(state); return () => {} },
+    async start() {},
+    async refresh() {},
+    async provideInput() { calls.push('input') },
+    async cancelInput() { calls.push('cancel-input') },
+    async decideApproval() { calls.push('approval') },
+    async resolveAttention() { calls.push('attention') },
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountLocalDecisionsPage({ root: rootElement, model, readOnly: true })
+  for (const className of [
+    'wwc-local-input-response',
+    'wwc-local-input-submit',
+    'wwc-local-input-cancel',
+    'wwc-local-approval-approve',
+    'wwc-local-approval-reject',
+    'wwc-local-attention-resolve',
+    'wwc-local-attention-dismiss',
+  ]) assert.equal(byClass(rootElement, className).disabled, true, className)
+  byClass(rootElement, 'wwc-local-input-form').dispatch('submit')
+  byClass(rootElement, 'wwc-local-input-cancel').dispatch('click')
+  byClass(rootElement, 'wwc-local-approval-approve').dispatch('click')
+  byClass(rootElement, 'wwc-local-attention-resolve').dispatch('click')
+  assert.deepEqual(calls, [])
+  mounted.close()
+})
+
 test('local decision keyed updates preserve row drafts, focus, scroll, and bounded DOM', () => {
   const document = new FakeDocument()
   document.activeElement = null

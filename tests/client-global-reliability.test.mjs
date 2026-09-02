@@ -88,6 +88,7 @@ test('HTTP and WebSocket activity feed the same connection monitor', async () =>
   const monitor = createConnectionMonitor({ now: () => '2026-09-02T01:00:00.000Z' })
   let subscriptionOptions = null
   let reconnects = 0
+  const revocationOrder = []
   const rawClient = {
     serverUrl: 'https://control.localhost',
     async restore() { return { actor: {}, authorizedScopes: [] } },
@@ -110,12 +111,14 @@ test('HTTP and WebSocket activity feed the same connection monitor', async () =>
     client: rawClient,
     monitor,
     online: () => true,
+    onAuthorizationRevoked() { revocationOrder.push('shell') },
   })
   const subscription = observed.client.subscribe({
     subscriptionId: 'sub_00000000000000000000000001',
     subscription: {},
     async onEvent() {},
     async onResetRequired() { return null },
+    async onAuthorizationRevoked() { revocationOrder.push('feature') },
   })
 
   await subscriptionOptions.onEvent({})
@@ -124,6 +127,7 @@ test('HTTP and WebSocket activity feed the same connection monitor', async () =>
   assert.equal(monitor.state.status, 'refresh-required')
   await subscriptionOptions.onAuthorizationRevoked({})
   assert.equal(monitor.state.status, 'permission-denied')
+  assert.deepEqual(revocationOrder, ['feature', 'shell'])
   subscriptionOptions.onError(error('version', 'SCHEMA_VERSION_MISMATCH'))
   assert.equal(monitor.state.status, 'version-mismatch')
   observed.reconnectAll()

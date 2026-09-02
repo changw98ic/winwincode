@@ -505,9 +505,90 @@ test('read-only navigation stays enterable and names its access level', async ()
   fixture.application.close()
 })
 
+test('WebSocket authorization revocation closes the feature and shows the shell safe entry', async () => {
+  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
+  const fixture = await restoredFixture('#/enterprise/resources', client)
+  await waitFor(() => fixture.client.subscriptions.length > 0, 'enterprise subscription')
+  const subscription = fixture.client.subscriptions[0]
+
+  await subscription.options.onAuthorizationRevoked(null)
+
+  await waitFor(() => subscription.handle.closed === true, 'revoked subscription cleanup')
+  await waitFor(
+    () => descendants(fixture.rootElement).some(node => (
+      node.className === 'wwc-surface-route-safe-entry'
+    )),
+    'shell safe entry',
+  )
+  assert.equal(fixture.application.activeSurface.id, 'enterprise')
+  assert.equal(navigationLinks(fixture.rootElement).enterprise.dataset.capability, 'available')
+  assert.equal(navigationLinks(fixture.rootElement).enterprise.getAttribute('data-route-access'), 'denied')
+  fixture.application.close()
+})
+
+test('one denied enterprise area does not disable the whole surface', async () => {
+  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
+  client.deniedAreas.add('organization')
+  const fixture = await restoredFixture('#/enterprise/resources', client)
+  await waitFor(
+    () => fixture.client.queries.some(query => areaByQuery[query.query] === 'organization'),
+    'denied object-area query',
+  )
+  await waitFor(
+    () => fixture.client.queries.some(query => areaByQuery[query.query] === 'members'),
+    'authorized sibling query',
+  )
+
+  assert.equal(navigationLinks(fixture.rootElement).enterprise.dataset.capability, 'available')
+  assert.equal(descendants(fixture.rootElement).some(node => (
+    node.className === 'wwc-surface-route-denied'
+  )), false)
+  fixture.application.close()
+})
+
+test('read-only Enterprise disables mutation controls while direct commands still reach Server authority', async () => {
+  const client = facadeFake(sessionWith([organizationScope, repositoryScope]))
+  const fixture = mountedFixture('#/enterprise/resources', client, {
+    navigationCapabilities: {
+      deployment: 'enterprise',
+      surfaceAccess: { enterprise: 'read-only' },
+    },
+  })
+  await waitFor(
+    () => descendants(fixture.rootElement).some(node => (
+      node.className === 'wwc-enterprise-organization-fields'
+    )),
+    'enterprise mutation controls',
+  )
+  const fields = descendants(fixture.rootElement).find(node => (
+    node.className === 'wwc-enterprise-organization-fields'
+  ))
+  assert.equal(fields.disabled, true)
+  assert.equal(descendants(fixture.rootElement).find(node => (
+    node.className === 'wwc-surface-read-only'
+  )).hidden, false)
+  await assert.rejects(
+    fixture.application.controlPlane.command({
+      schemaVersion,
+      requestId: 'req_00000000000000000000000001',
+      actor,
+      scope: repositoryScope,
+      command: 'enterprise.organization.update',
+      expectedRevision: 1,
+      payload: {},
+    }),
+    error => error instanceof ControlPlaneClientError && error.kind === 'authorization',
+  )
+  assert.equal(client.commands.length, 1)
+  fixture.application.close()
+})
+
 test('navigation shell keeps one facade and no direct network path', () => {
   const application = readFileSync(resolve(root, 'apps/client/src/application.ts'), 'utf8')
-  assert.match(application, /import\('\.\/navigation-capability\.js'\)/u)
+  const navigation = readFileSync(resolve(root, 'apps/client/src/navigation-capability.ts'), 'utf8')
+  assert.match(application, /from '\.\/navigation-capability\.js'/u)
+  assert.match(navigation, /from '\.\/client-surface\.js'/u)
+  assert.doesNotMatch(navigation, /from '\.\/application\.js'/u)
   assert.equal((application.match(/createControlPlaneClient/gu) ?? []).length, 2)
   assert.doesNotMatch(application, /\bfetch\s*\(|new\s+WebSocket/u)
 })

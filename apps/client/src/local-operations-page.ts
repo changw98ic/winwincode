@@ -21,6 +21,8 @@ import type {
 export interface LocalOperationsPageOptions {
   readonly root: HTMLElement
   readonly model: LocalOperationsViewModel
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface LocalOperationsPage {
@@ -306,8 +308,12 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
     enable.dataset.wwcComponent = 'button'
     enable.dataset.variant = 'default'
     enable.disabled = commandsDisabled || worker.state === 'enabled'
-    drain.addEventListener('click', () => { void options.model.drainWorker(worker.id) })
-    enable.addEventListener('click', () => { void options.model.enableWorker(worker.id) })
+    drain.addEventListener('click', () => {
+      if (options.readOnly !== true) void options.model.drainWorker(worker.id)
+    })
+    enable.addEventListener('click', () => {
+      if (options.readOnly !== true) void options.model.enableWorker(worker.id)
+    })
     controls.append(drain, enable)
     item.append(title, details, controls)
     return item
@@ -372,7 +378,7 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       ['Cleanup', 'Not reported by Control Plane'],
     ], 'wwc-local-resource-details'))
     workers.replaceChildren(...state.workers.map(worker => (
-      renderWorker(worker, presentation.commandsDisabled)
+      renderWorker(worker, options.readOnly === true || presentation.commandsDisabled)
     )))
     workers.hidden = state.workers.length === 0
     workersEmpty.root.hidden = state.workers.length !== 0

@@ -72,6 +72,8 @@ export interface EnterpriseApplicationOptions extends EnterpriseClientContext {
   readonly client: ControlPlaneClient
   readonly hash: string
   readonly signal?: AbortSignal
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface EnterpriseApplication {
@@ -108,7 +110,11 @@ export async function mountEnterpriseApplication(
   const mountPage = route.id === 'resources'
     ? await import('./enterprise-resource-page.js').then(module => (
         (root: HTMLElement, model: EnterpriseManagementViewModel) => (
-          module.mountEnterpriseResourcePage({ root, model })
+          module.mountEnterpriseResourcePage({
+            root,
+            model,
+            ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+          })
         )
       ))
     : await import('./enterprise-operations-page.js').then(module => (
@@ -116,6 +122,7 @@ export async function mountEnterpriseApplication(
           module.mountEnterpriseOperationsPage({
             root,
             model,
+            ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
             ...(options.onAuditExport === undefined
               ? {}
               : { onAuditExport: options.onAuditExport }),

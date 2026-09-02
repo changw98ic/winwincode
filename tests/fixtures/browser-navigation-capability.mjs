@@ -65,7 +65,7 @@ const controlPlane = {
     throw new Error(`unexpected query: ${request.query}`)
   },
   async command() { throw new Error('unexpected command') },
-  subscribe() {
+  subscribe(options) {
     const handle = {
       cursor: null,
       closed: false,
@@ -73,7 +73,7 @@ const controlPlane = {
       reconnect() {},
       close() { this.closed = true },
     }
-    subscriptions.push(handle)
+    subscriptions.push({ options, handle })
     return handle
   },
   close() {},
@@ -150,7 +150,7 @@ globalThis.tryDisabledEnterpriseEntry = async () => {
 globalThis.revokeEnterpriseRoute = async () => {
   location.hash = '#/enterprise/resources'
   await waitFor(() => subscriptions.length > 0, 'Enterprise subscription')
-  const subscription = subscriptions.at(-1)
+  const subscription = subscriptions.at(-1).handle
   application.authSession.authenticationRequired(new ControlPlaneClientError({
     kind: 'authentication',
     code: 'AUTHENTICATION_REQUIRED',
@@ -165,5 +165,22 @@ globalThis.revokeEnterpriseRoute = async () => {
     routeText: document.querySelector('.wwc-enterprise-context-required')?.textContent ?? '',
     subscriptionClosed: subscription.closed,
     visibleEntries: document.querySelectorAll('.wwc-navigation-link').length,
+  }
+}
+
+globalThis.revokeEnterpriseSubscription = async () => {
+  location.hash = '#/enterprise/resources'
+  await waitFor(() => subscriptions.length > 0, 'Enterprise subscription')
+  const subscription = subscriptions.at(-1)
+  await subscription.options.onAuthorizationRevoked(null)
+  await waitFor(() => subscription.handle.closed, 'revoked subscription cleanup')
+  await waitFor(() => document.querySelector('.wwc-surface-route-safe-entry') !== null,
+    'shell safe entry')
+  const entry = document.querySelector('[data-surface="enterprise"]')
+  return {
+    capability: entry?.dataset.capability ?? null,
+    routeAccess: entry?.dataset.routeAccess ?? null,
+    safeHref: document.querySelector('.wwc-surface-route-safe-entry')?.getAttribute('href') ?? null,
+    subscriptionClosed: subscription.handle.closed,
   }
 }

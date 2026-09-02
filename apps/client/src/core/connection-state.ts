@@ -4,6 +4,7 @@ import {
   ControlPlaneClientError,
   type ControlPlaneClient,
   type ControlPlaneClientErrorKind,
+  type ControlPlaneWebSocketAuthorizationRevokedFrame,
   type ControlPlaneSubscribeOptions,
   type ControlPlaneSubscription,
   type RequestId,
@@ -388,6 +389,10 @@ export interface ObserveControlPlaneClientOptions {
   readonly client: ControlPlaneClient
   readonly monitor: ConnectionMonitor
   readonly online: () => boolean
+  /** Called after the feature has handled and closed its revoked subscription. */
+  readonly onAuthorizationRevoked?: (
+    frame: ControlPlaneWebSocketAuthorizationRevokedFrame | null,
+  ) => Promise<void> | void
 }
 
 export function observeControlPlaneClient(
@@ -447,6 +452,7 @@ export function observeControlPlaneClient(
         async onAuthorizationRevoked(frame) {
           options.monitor.permissionDenied('PERMISSION_REVOKED')
           await subscriptionOptions.onAuthorizationRevoked?.(frame)
+          await options.onAuthorizationRevoked?.(frame)
         },
         onError(error) {
           options.monitor.failure(error, options.online())

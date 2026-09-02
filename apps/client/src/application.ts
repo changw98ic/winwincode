@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  ControlPlaneClientError,
   createControlPlaneClient,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
 } from './control-plane-client.js'
 import { mountClientErrorBoundary } from './components/client-error-boundary.js'
 import { mountConnectionBar } from './components/connection-bar.js'
+import {
+  CLIENT_SURFACES,
+  clientSurfaceFromHash,
+  type ClientSurface,
+  type ClientSurfaceId,
+} from './client-surface.js'
 import {
   classifyClientFailure,
   createConnectionMonitor,
@@ -34,74 +39,13 @@ import type {
   StageRunId,
 } from './generated/contracts.js'
 import { QueryName } from './generated/contracts.js'
-import type {
-  NavigationCapabilityFacts,
-  NavigationCapabilityProjection,
-  NavigationSurfaceAccess,
-  SurfaceCapability,
+import {
+  projectionForSession,
+  surfaceCapabilityForHash,
+  type NavigationCapabilityFacts,
+  type NavigationCapabilityProjection,
+  type SurfaceCapability,
 } from './navigation-capability.js'
-
-export type ClientSurfaceId =
-  | 'chat'
-  | 'strongflow'
-  | 'settings'
-  | 'approvals'
-  | 'enterprise'
-
-export interface ClientSurface {
-  readonly id: ClientSurfaceId
-  readonly path: `/${ClientSurfaceId}`
-  readonly label: string
-  readonly description: string
-  readonly default: boolean
-}
-
-export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
-  Object.freeze({
-    id: 'chat',
-    path: '/chat',
-    label: 'Chat',
-    description: 'Conversation workspace',
-    default: true,
-  }),
-  Object.freeze({
-    id: 'strongflow',
-    path: '/strongflow',
-    label: 'StrongFlow',
-    description: 'Advanced delivery workspace',
-    default: false,
-  }),
-  Object.freeze({
-    id: 'settings',
-    path: '/settings',
-    label: 'Settings',
-    description: 'Personal and workspace settings',
-    default: false,
-  }),
-  Object.freeze({
-    id: 'approvals',
-    path: '/approvals',
-    label: 'Approvals',
-    description: 'Human decisions awaiting review',
-    default: false,
-  }),
-  Object.freeze({
-    id: 'enterprise',
-    path: '/enterprise',
-    label: 'Enterprise',
-    description: 'Organization administration',
-    default: false,
-  }),
-])
-
-const DEFAULT_SURFACE = CLIENT_SURFACES[0] as ClientSurface
-
-export function clientSurfaceFromHash(hash: string): ClientSurface {
-  const path = hash.replace(/^#/u, '').replace(/\?.*$/u, '')
-  return CLIENT_SURFACES.find(surface => (
-    surface.path === path || path.startsWith(`${surface.path}/`)
-  )) ?? DEFAULT_SURFACE
-}
 
 export interface WinWinCodeClientApplicationOptions {
   readonly serverUrl: string
@@ -112,7 +56,7 @@ export interface WinWinCodeClientApplicationOptions {
   /** Secret-safe clipboard seam for browser hosts and deterministic fixtures. */
   readonly copyText?: (value: string) => Promise<void> | void
   readonly now?: () => string
-  /** Read-only deployment and query facts used only to project navigation state. */
+  /** Server/deployment facts projected into navigation presentation only. */
   readonly navigationCapabilities?: Readonly<NavigationCapabilityFacts>
 }
 
@@ -196,6 +140,7 @@ export function mountWinWinCodeClient(
     return navigatorValue?.onLine !== false
   }
   let accessFailureSession: AuthSessionViewModel | null = null
+  let onRouteAuthorizationRevoked: (() => void) | null = null
   const rawControlPlane = options.controlPlane ?? createControlPlaneClient({
       serverUrl: options.serverUrl,
       transport: browserControlPlaneTransport(browser),
@@ -207,6 +152,7 @@ export function mountWinWinCodeClient(
     client: rawControlPlane,
     monitor: connection,
     online: browserIsOnline,
+    onAuthorizationRevoked() { onRouteAuthorizationRevoked?.() },
   })
   const controlPlane = observedControlPlane.client
   const authSession = createAuthSessionViewModel(controlPlane)
@@ -220,6 +166,7 @@ export function mountWinWinCodeClient(
   const main = element(document, 'main', 'wwc-main')
   const title = element(document, 'h1', 'wwc-surface-title')
   const description = element(document, 'p', 'wwc-surface-description')
+  const readOnlyNotice = element(document, 'p', 'wwc-surface-read-only')
   const slot = element(document, 'section', 'wwc-surface-slot')
   const links = new Map<ClientSurfaceId, HTMLAnchorElement>()
   let activeSurface = clientSurfaceFromHash(browser.location.hash)
@@ -227,9 +174,7 @@ export function mountWinWinCodeClient(
   let featureController: AbortController | null = null
   let renderGeneration = 0
   let currentFailure: ClientFailure | null = null
-  let navigationModule: typeof import('./navigation-capability.js') | null = null
-  let navigationLoadFailed = false
-  const learnedSurfaceAccess = new Map<ClientSurfaceId, NavigationSurfaceAccess>()
+  let activeRouteReadOnly = false
   let closed = false
 
   function diagnosticScope(): unknown {
@@ -373,6 +318,9 @@ export function mountWinWinCodeClient(
 
   brand.textContent = 'WinWinCode'
   navigation.setAttribute('aria-label', 'Product areas')
+  readOnlyNotice.setAttribute('role', 'status')
+  readOnlyNotice.textContent = 'This product area is read-only. Write actions are unavailable, and Server authorization still applies to every request.'
+  readOnlyNotice.hidden = true
   slot.setAttribute('aria-live', 'polite')
 
   for (const surface of CLIENT_SURFACES) {
@@ -390,7 +338,7 @@ export function mountWinWinCodeClient(
   }
 
   header.append(brand, navigation, authRoot)
-  main.append(title, description, errorBoundary.root, slot)
+  main.append(title, description, readOnlyNotice, errorBoundary.root, slot)
   shell.append(header, connectionBar.root, main)
   options.root.replaceChildren(shell)
   const authPage: AuthSessionPage = mountAuthSessionPage({
@@ -398,26 +346,10 @@ export function mountWinWinCodeClient(
     model: authSession,
   })
 
-  function navigationFacts(): NavigationCapabilityFacts {
-    return {
-      ...(options.navigationCapabilities?.deployment === undefined
-        ? {}
-        : { deployment: options.navigationCapabilities.deployment }),
-      surfaceAccess: {
-        ...options.navigationCapabilities?.surfaceAccess,
-        ...Object.fromEntries(learnedSurfaceAccess),
-      },
-    }
-  }
-
-  function updateNavigation(): NavigationCapabilityProjection | null {
-    if (navigationModule === null) {
-      navigation.replaceChildren()
-      return null
-    }
-    const projection = navigationModule.projectionForSession(
+  function updateNavigation(): NavigationCapabilityProjection {
+    const projection = projectionForSession(
       authSession.state,
-      navigationFacts(),
+      options.navigationCapabilities,
     )
     const visible: HTMLAnchorElement[] = []
     for (const entry of projection.surfaces) {
@@ -461,18 +393,27 @@ export function mountWinWinCodeClient(
     slot.replaceChildren(denied)
   }
 
-  function learnRouteDenial(error: unknown): boolean {
-    if (!(error instanceof ControlPlaneClientError) || error.kind !== 'authorization') return false
-    learnedSurfaceAccess.set(activeSurface.id, 'denied')
-    updateNavigation()
-    if (navigationModule !== null) {
-      routeDenied(navigationModule.surfaceCapabilityForHash(
-        browser.location.hash,
-        authSession.state,
-        navigationFacts(),
-      ))
-    }
-    return true
+  onRouteAuthorizationRevoked = () => {
+    if (closed) return
+    renderGeneration += 1
+    featureController?.abort()
+    featureController = null
+    activeFeature?.close()
+    activeFeature = null
+    clearRouteFailure()
+    const link = links.get(activeSurface.id)
+    link?.setAttribute('data-route-access', 'denied')
+    slot.dataset.routeAccess = 'denied'
+    const current = surfaceCapabilityForHash(
+      browser.location.hash,
+      authSession.state,
+      options.navigationCapabilities,
+    )
+    routeDenied({
+      ...current,
+      capability: 'disabled',
+      reason: 'capability-denied',
+    })
   }
 
   function authenticatedRouteContext(): {
@@ -564,6 +505,7 @@ export function mountWinWinCodeClient(
         model,
         deliveryCreator,
         scope: context.scope,
+        readOnly: activeRouteReadOnly,
         nextProductSessionId: () => contractId(
           'psn',
           browser.crypto,
@@ -571,7 +513,6 @@ export function mountWinWinCodeClient(
       })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      if (learnRouteDenial(error)) return
       showRouteFailure(error, 'CHAT_ROUTE_FAILURE')
     }
   }
@@ -602,7 +543,11 @@ export function mountWinWinCodeClient(
           ) as ControlPlaneWebSocketSubscriptionId,
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         })
-        activeFeature = mountLocalOperationsPage({ root: slot, model })
+        activeFeature = mountLocalOperationsPage({
+          root: slot,
+          model,
+          readOnly: activeRouteReadOnly,
+        })
         return
       }
       const [{ createSettingsViewModel }, { mountSettingsPage }] = await Promise.all([
@@ -624,10 +569,10 @@ export function mountWinWinCodeClient(
         root: slot,
         model,
         localOperationsHref: '#/settings/runtime',
+        readOnly: activeRouteReadOnly,
       })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      if (learnRouteDenial(error)) return
       showRouteFailure(error, operationsRoute
         ? 'LOCAL_OPERATIONS_ROUTE_FAILURE'
         : 'SETTINGS_ROUTE_FAILURE')
@@ -675,10 +620,13 @@ export function mountWinWinCodeClient(
             }),
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
       })
-      activeFeature = mountLocalDecisionsPage({ root: slot, model })
+      activeFeature = mountLocalDecisionsPage({
+        root: slot,
+        model,
+        readOnly: activeRouteReadOnly,
+      })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      if (learnRouteDenial(error)) return
       showRouteFailure(error, 'APPROVALS_ROUTE_FAILURE')
     }
   }
@@ -729,6 +677,7 @@ export function mountWinWinCodeClient(
           root: slot,
           model,
           scope: context.scope,
+          readOnly: activeRouteReadOnly,
         })
         return
       }
@@ -790,10 +739,14 @@ export function mountWinWinCodeClient(
           ))
         },
       })
-      activeFeature = mountStrongFlowPage({ root: slot, model, deliveries })
+      activeFeature = mountStrongFlowPage({
+        root: slot,
+        model,
+        deliveries,
+        readOnly: activeRouteReadOnly,
+      })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      if (learnRouteDenial(error)) return
       showRouteFailure(error, 'STRONGFLOW_ROUTE_FAILURE')
     }
   }
@@ -832,6 +785,7 @@ export function mountWinWinCodeClient(
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        readOnly: activeRouteReadOnly,
       })
       if (mounted === null) return
       if (closed || generation !== renderGeneration || controller.signal.aborted) {
@@ -841,7 +795,6 @@ export function mountWinWinCodeClient(
       activeFeature = mounted
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      if (learnRouteDenial(error)) return
       showRouteFailure(error, 'ENTERPRISE_ROUTE_FAILURE')
     }
   }
@@ -854,26 +807,24 @@ export function mountWinWinCodeClient(
     activeFeature?.close()
     activeFeature = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
+    for (const link of links.values()) link.removeAttribute('data-route-access')
+    delete slot.dataset.routeAccess
     clearRouteFailure()
     const navigationProjection = updateNavigation()
+    const capability = navigationProjection.surfaces.find(entry => (
+      entry.surface.id === activeSurface.id
+    )) as SurfaceCapability
+    activeRouteReadOnly = capability.capability === 'read-only'
     title.textContent = activeSurface.label
     description.textContent = activeSurface.description
+    readOnlyNotice.hidden = !activeRouteReadOnly
     slot.dataset.winwincodeSurface = activeSurface.id
+    slot.dataset.navigationCapability = capability.capability
     slot.replaceChildren()
     for (const [id, link] of links) {
       if (id === activeSurface.id) link.setAttribute('aria-current', 'page')
       else link.removeAttribute('aria-current')
     }
-    if (navigationProjection === null) {
-      routeUnavailable(navigationLoadFailed
-        ? 'Product access could not be evaluated.'
-        : 'Checking available product areas…')
-      return
-    }
-    const capability = navigationProjection.surfaces.find(entry => (
-      entry.surface.id === activeSurface.id
-    )) as SurfaceCapability
-    slot.dataset.navigationCapability = capability.capability
     if (
       authSession.state.status === 'signed-in'
       && (capability.capability === 'hidden' || capability.capability === 'disabled')
@@ -906,7 +857,6 @@ export function mountWinWinCodeClient(
   ): void {
     void operation.catch(error => {
       if (closed || generation !== renderGeneration) return
-      if (learnRouteDenial(error)) return
       showRouteFailure(error, fallbackCode)
     })
   }
@@ -937,7 +887,6 @@ export function mountWinWinCodeClient(
   browser.addEventListener('unhandledrejection', onUnhandledRejection)
   const unsubscribeConnection = connection.subscribe(updateReliabilityViews)
   const unsubscribeAuthSession = authSession.subscribe(state => {
-    if (state.status === 'signed-in') learnedSurfaceAccess.clear()
     if (state.status === 'authentication-required') {
       connection.authenticationRequired(state.error?.code, state.error?.requestId)
     } else if (state.status === 'signed-in'
@@ -948,19 +897,20 @@ export function mountWinWinCodeClient(
       connection.failure(state.error, browserIsOnline())
     }
     if (state.status === 'signed-in') diagnosticScope()
-    render()
+    updateNavigation()
+    if ((state.status === 'signed-in'
+      || state.status === 'signed-out'
+      || state.status === 'authentication-required'
+      || state.status === 'error') && (
+      activeSurface.id === 'chat'
+      || activeSurface.id === 'strongflow'
+      || activeSurface.id === 'settings'
+      || activeSurface.id === 'approvals'
+      || activeSurface.id === 'enterprise'
+    )) render()
   })
   render()
   void authSession.restore()
-  void import('./navigation-capability.js').then(module => {
-    if (closed) return
-    navigationModule = module
-    render()
-  }, () => {
-    if (closed) return
-    navigationLoadFailed = true
-    render()
-  })
 
   return {
     controlPlane,

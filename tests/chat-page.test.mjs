@@ -512,6 +512,36 @@ test('mounted Chat page exposes accessible state and delegates every interaction
   assert.deepEqual(rootElement.children, [])
 })
 
+test('read-only Chat keeps reads available and blocks every write action', async () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeChatViewModel(state())
+  const mounted = mountChatPage({
+    root: rootElement,
+    model,
+    readOnly: true,
+    nextProductSessionId: () => 'psn_00000000000000000000000003',
+  })
+  const composer = findByClass(rootElement, 'wwc-chat-composer-input')
+  const send = findByClass(rootElement, 'wwc-chat-send')
+  const cancel = findByClass(rootElement, 'wwc-chat-cancel')
+  const newSession = findByClass(rootElement, 'wwc-chat-new-session')
+  assert.equal(composer.disabled, true)
+  assert.equal(send.disabled, true)
+  assert.equal(cancel.disabled, true)
+  assert.equal(newSession.disabled, true)
+  composer.value = 'must stay local'
+  findByClass(rootElement, 'wwc-chat-composer').emit('submit')
+  cancel.emit('click')
+  newSession.emit('click')
+  await Promise.resolve()
+  assert.equal(model.calls.some(([name]) => (
+    name === 'submitMessage' || name === 'cancelSession' || name === 'createSession'
+  )), false)
+  assert.equal(findByClass(rootElement, 'wwc-chat-retry').disabled, false)
+  mounted.close()
+})
+
 test('Chat keyed updates retain session, message, model, composer, focus, and scroll identity', () => {
   const document = new FakeDocument()
   document.activeElement = null

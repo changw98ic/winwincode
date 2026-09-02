@@ -24,6 +24,8 @@ export interface SettingsPageOptions {
   readonly root: HTMLElement
   readonly model: SettingsViewModel
   readonly localOperationsHref?: string
+  /** Presentation-only capability; Server authorization remains authoritative. */
+  readonly readOnly?: boolean
 }
 
 export interface SettingsPage {
@@ -431,6 +433,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       revoke.dataset.variant = 'destructive'
       const onRotate = (event: SubmitEvent) => {
         event.preventDefault()
+        if (options.readOnly === true) return
         const row = credentialRows.get(item)
         if (row === undefined) return
         const secret = row.rotateSecret.value
@@ -441,6 +444,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         })
       }
       const onRevoke = () => {
+        if (options.readOnly === true) return
         const row = credentialRows.get(item)
         if (row !== undefined) void options.model.revokeCredentialReference(row.current.id)
       }
@@ -481,7 +485,8 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
           description.textContent = value
         }
       })
-      const disabled = settingsPagePresentation(options.model.state).mutationsDisabled
+      const disabled = options.readOnly === true
+        || settingsPagePresentation(options.model.state).mutationsDisabled
         || reference.secretState === 'revoked'
       row.rotate.disabled = disabled
       row.rotateSecret.disabled = disabled
@@ -545,17 +550,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const credentialValue = route?.credentialReferenceId ?? ''
       if (credential.value !== credentialValue) credential.value = credentialValue
     }
-    provider.input.disabled = presentation.mutationsDisabled
-    model.input.disabled = presentation.mutationsDisabled
-    credential.disabled = presentation.mutationsDisabled
-    concurrency.input.disabled = presentation.mutationsDisabled
-    saveRoute.disabled = presentation.mutationsDisabled
-    clearRoute.disabled = presentation.mutationsDisabled || route === null
-    createId.input.disabled = presentation.mutationsDisabled
-    createName.input.disabled = presentation.mutationsDisabled
-    createProvider.input.disabled = presentation.mutationsDisabled
-    createSecret.input.disabled = presentation.mutationsDisabled
-    createButton.disabled = presentation.mutationsDisabled
+    const mutationsDisabled = options.readOnly === true || presentation.mutationsDisabled
+    provider.input.disabled = mutationsDisabled
+    model.input.disabled = mutationsDisabled
+    credential.disabled = mutationsDisabled
+    concurrency.input.disabled = mutationsDisabled
+    saveRoute.disabled = mutationsDisabled
+    clearRoute.disabled = mutationsDisabled || route === null
+    createId.input.disabled = mutationsDisabled
+    createName.input.disabled = mutationsDisabled
+    createProvider.input.disabled = mutationsDisabled
+    createSecret.input.disabled = mutationsDisabled
+    createButton.disabled = mutationsDisabled
     credentialReferences.update(state.credentials)
     references.hidden = state.credentials.length === 0
     referencesEmpty.root.hidden = state.credentials.length !== 0
@@ -563,6 +569,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
 
   const onRouteSubmit = (event: SubmitEvent) => {
     event.preventDefault()
+    if (options.readOnly === true) return
     void options.model.updateSettings({
       defaultModelRoute: {
         providerId: provider.input.value,
@@ -575,6 +582,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
     })
   }
   const onClearRoute = () => {
+    if (options.readOnly === true) return
     void options.model.updateSettings({
       defaultModelRoute: null,
       workerConcurrencyLimit: Number(concurrency.input.value),
@@ -584,6 +592,7 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
   }
   const onCreateCredential = (event: SubmitEvent) => {
     event.preventDefault()
+    if (options.readOnly === true) return
     const secret = createSecret.input.value
     createSecret.input.value = ''
     void options.model.createCredentialReference({
