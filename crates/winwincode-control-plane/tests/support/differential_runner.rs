@@ -100,8 +100,8 @@ use winwincode_domain::{
     StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
-    ExecutionLimits, ExecutionOutcomeStatus, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
-    JobOutcomeMessage, SessionBindingMessage,
+    ExecutionLimits, ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionWorkspace,
+    ExecutionWorkspaceWriteMode, JobOutcomeMessage, SessionBindingMessage,
 };
 use winwincode_session::migration::{
     MigrationCommit, MigrationOutcome, MigrationTransaction, MigrationTransactionError,
@@ -117,6 +117,7 @@ use winwincode_storage::{
 const PLAN_SCHEMA: &str = "winwincode.delivery-strongflow-differential-plan.v2";
 const RESULT_SCHEMA: &str = "winwincode.delivery-strongflow-rust-differential-result.v1";
 const API_SCHEMA: &str = "winwincode/v1";
+const FIXTURE_USER_ID: &str = "usr_00000000000000000000000000";
 const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 #[derive(Debug, Deserialize)]
@@ -1168,7 +1169,7 @@ impl ScenarioRunner {
             .get("spec")
             .ok_or_else(|| "cyclic create migration lacks spec".to_owned())?;
         let (delivery, input) = cycle_validation_delivery(spec)?;
-        let invalid_review = invalid_cycle_review_fixture(&delivery, &self.id)?;
+        let invalid_review = invalid_cycle_review_fixture(&delivery)?;
         let primary_delivery_id = self
             .delivery_id
             .as_ref()
@@ -1299,7 +1300,7 @@ impl ScenarioRunner {
                     Ok::<_, String>(ReviewAttentionSeed {
                         title: required_str(attention, "title")?.to_owned(),
                         context: required_str(attention, "context")?.to_owned(),
-                        assigned_to: canonical_id("sys_", &self.id),
+                        assigned_to: FIXTURE_USER_ID.to_owned(),
                     })
                 })
                 .transpose()?;
@@ -1339,7 +1340,7 @@ impl ScenarioRunner {
                     },
                     {
                         let mut fixture = solution_review_fixture(attention)?;
-                        fixture.assigned_to = canonical_id("sys_", &self.id);
+                        fixture.assigned_to = FIXTURE_USER_ID.to_owned();
                         fixture
                     },
                 )
@@ -1748,7 +1749,7 @@ impl ScenarioRunner {
                 .then_some((delivery, item))
         });
         let (resolution, review_set_sha256) = if let Some((delivery, item)) = plan_review {
-            let actor = canonical_id("sys_", &self.id);
+            let actor = FIXTURE_USER_ID;
             let settled = settle_solution_review_fixture(
                 delivery,
                 &actor,
@@ -1810,7 +1811,7 @@ impl ScenarioRunner {
                 .stage_run_id
                 .clone()
                 .ok_or_else(|| "WRONG_STATE:Attention item has no StageRun".to_owned())?;
-            let actor = canonical_id("sys_", &self.id);
+            let actor = FIXTURE_USER_ID.to_owned();
             let transition = resolve_attention(
                 &delivery,
                 ResolveAttentionInput {
@@ -2232,6 +2233,7 @@ impl ScenarioRunner {
                 "lastEventSequence": fact.key.last_event_sequence,
                 "status": outcome_status,
                 "summary": fact.summary,
+                "usage": terminal_outcome_usage(),
             },
         });
         let message: JobOutcomeMessage = serde_json::from_value(request.clone())
@@ -2584,7 +2586,10 @@ impl ScenarioRunner {
             .iter()
             .filter(|run| {
                 run.actor_type == StageRunActorType::Codex
-                    && matches!(run.stage, DeliveryStage::Executing | DeliveryStage::Reworking)
+                    && matches!(
+                        run.stage,
+                        DeliveryStage::Executing | DeliveryStage::Reworking
+                    )
                     && matches!(run.role.as_str(), "executor" | "remediator")
                     && matches!(
                         run.status,
@@ -2605,15 +2610,12 @@ impl ScenarioRunner {
         let [writer] = writers.as_slice() else {
             return Err("verification dispatch writer attempt is ambiguous".to_owned());
         };
-        let planned = self
-            .planned_candidates
-            .get(&writer.id.0)
-            .ok_or_else(|| {
-                format!(
-                    "verification dispatch lacks the sealed writer candidate input for {}",
-                    writer.id.0
-                )
-            })?;
+        let planned = self.planned_candidates.get(&writer.id.0).ok_or_else(|| {
+            format!(
+                "verification dispatch lacks the sealed writer candidate input for {}",
+                writer.id.0
+            )
+        })?;
         self.freeze_candidate_input(delivery, planned).map(Some)
     }
 
@@ -2902,10 +2904,7 @@ fn solution_review_fixture(attention: &Value) -> Result<SolutionReviewFixture, S
     })
 }
 
-fn invalid_cycle_review_fixture(
-    delivery: &Delivery,
-    scenario: &str,
-) -> Result<SolutionReviewFixture, String> {
+fn invalid_cycle_review_fixture(delivery: &Delivery) -> Result<SolutionReviewFixture, String> {
     let diagram = |id: &str, kind: &str| -> Result<SolutionDiagramFixture, String> {
         serde_json::from_value(json!({
             "id": id,
@@ -2940,7 +2939,7 @@ fn invalid_cycle_review_fixture(
     };
     Ok(SolutionReviewFixture {
         attention_title: "Reject the cyclic task proposal".to_owned(),
-        assigned_to: canonical_id("sys_", scenario),
+        assigned_to: FIXTURE_USER_ID.to_owned(),
         solution: serde_json::from_value::<SolutionFixture>(json!({
             "id": "solution:task-dag-cycle",
             "summary": "Exercise the canonical cyclic task rejection.",
@@ -3209,7 +3208,7 @@ fn command_envelope(
     let request_id = canonical_request_id(request_id);
     json!({
         "schemaVersion": API_SCHEMA,
-        "actor": { "kind": "system", "id": canonical_id("sys_", scenario) },
+        "actor": { "kind": "user", "id": FIXTURE_USER_ID },
         "scope": fixture_scope(scenario),
         "requestId": request_id,
         "expectedRevision": expected_revision,
@@ -3231,7 +3230,7 @@ fn query_envelope(scenario: &str, query: &str, request_id: &str, parameters: Val
     let request_id = canonical_request_id(request_id);
     json!({
         "schemaVersion": API_SCHEMA,
-        "actor": { "kind": "system", "id": canonical_id("sys_", scenario) },
+        "actor": { "kind": "user", "id": FIXTURE_USER_ID },
         "scope": fixture_scope(scenario),
         "requestId": request_id,
         "query": query,
@@ -3868,6 +3867,14 @@ fn terminal_verifier_fact(payload: &Value) -> Result<TerminalVerifierFact, Strin
         },
         summary: required_str(object(event, "data")?, "last_agent_message")?.to_owned(),
     })
+}
+
+fn terminal_outcome_usage() -> ExecutionOutcomeUsage {
+    ExecutionOutcomeUsage {
+        cost_microunits: 0,
+        runtime_millis: 0,
+        tokens: 0,
+    }
 }
 
 fn verification_semantic_authority(
@@ -4781,7 +4788,7 @@ fn execution_config_for_transition(
         _ => {
             if verifying_candidate.is_some() {
                 return Err(
-                    "only a verification dispatch may carry the frozen candidate".to_owned()
+                    "only a verification dispatch may carry the frozen candidate".to_owned(),
                 );
             }
             match intent.rework_authorization() {
@@ -5248,6 +5255,54 @@ mod tests {
         assert!(
             serde_json::from_value::<ExecutionOutcomeStatus>(json!("infrastructure-error"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn migrated_terminal_outcome_binds_the_documented_zero_usage() {
+        let usage = terminal_outcome_usage();
+        assert_eq!(
+            serde_json::to_value(&usage).expect("generated Usage wire value"),
+            json!({ "costMicrounits": 0, "runtimeMillis": 0, "tokens": 0 })
+        );
+        let request = json!({
+            "schemaVersion": "winwincode/v1",
+            "messageId": "xmsg_00000000000000000000000000",
+            "kind": "job.outcome",
+            "sentAt": "2026-01-01T00:00:00Z",
+            "lease": {
+                "attempt": 1,
+                "expiresAt": "2026-01-01T00:01:00Z",
+                "fencingToken": "1",
+                "issuedAt": "2026-01-01T00:00:00Z",
+                "jobId": "job_00000000000000000000000000",
+                "leaseId": "lea_00000000000000000000000000",
+                "workerId": "wrk_00000000000000000000000000",
+                "workerInstanceId": "wki_00000000000000000000000000",
+            },
+            "workerSessionId": "wsn_00000000000000000000000000",
+            "sessionIdentity": {
+                "codexThreadId": "cdx_00000000000000000000000000",
+                "productSessionId": "psn_00000000000000000000000000",
+                "stageRunId": "run_00000000000000000000000000",
+                "workerSessionId": "wsn_00000000000000000000000000",
+            },
+            "outcome": {
+                "artifacts": [],
+                "codexThreadId": "cdx_00000000000000000000000000",
+                "finishedAt": "2026-01-01T00:00:00Z",
+                "lastEventSequence": 1,
+                "status": "succeeded",
+                "summary": "fixture summary",
+                "usage": serde_json::to_value(&usage).expect("generated Usage"),
+            },
+        });
+        let message: JobOutcomeMessage =
+            serde_json::from_value(request.clone()).expect("generated JobOutcomeMessage");
+        assert_eq!(message.outcome.usage, Some(usage));
+        assert_eq!(
+            serde_json::to_value(&message).expect("generated JobOutcomeMessage round-trip"),
+            request
         );
     }
 
@@ -5814,16 +5869,15 @@ mod tests {
         approved_spec["id"] = json!("spec-write-mode-approved");
         approved_spec["revision"] = json!(2);
         approved_spec["acceptanceCriteria"][0]["id"] = json!("criterion-write-mode-approved");
-        let request = |request_id: &str, operation: &str, payload: Value| {
-            PlanCommand::StrongFlowRequest {
+        let request =
+            |request_id: &str, operation: &str, payload: Value| PlanCommand::StrongFlowRequest {
                 request: json!({
                     "operation": operation,
                     "requestId": request_id,
                     "schemaVersion": 7,
                     "payload": payload,
                 }),
-            }
-        };
+            };
         let opening_commands = vec![
             request(
                 "write-mode:create",
@@ -6097,8 +6151,7 @@ mod tests {
                 });
             for entry in &entries {
                 assert_eq!(
-                    entry["response"]["outcome"],
-                    "completed",
+                    entry["response"]["outcome"], "completed",
                     "write-mode verifying command {source_index} entry {entry}"
                 );
             }
@@ -6109,21 +6162,17 @@ mod tests {
                 .first()
                 .expect("verifying advance kept its command entry");
             assert_eq!(
-                advance["request"]["command"],
-                "delivery.advance",
+                advance["request"]["command"], "delivery.advance",
                 "verifying entry {advance}"
             );
             assert_eq!(
-                advance["response"]["outcome"],
-                "completed",
+                advance["response"]["outcome"], "completed",
                 "verifying advance response {advance}"
             );
         }
-        let observation = sqlite_durable_observation(
-            &runner.home,
-            &DeliveryId(delivery_id.to_owned()),
-        )
-        .expect("durable write-mode observation");
+        let observation =
+            sqlite_durable_observation(&runner.home, &DeliveryId(delivery_id.to_owned()))
+                .expect("durable write-mode observation");
         let outbox = observation["outbox"]
             .as_array()
             .expect("durable outbox events");

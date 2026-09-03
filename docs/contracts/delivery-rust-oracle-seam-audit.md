@@ -8,8 +8,10 @@ canonical Rust Delivery contract. The TypeScript commands, DTOs, snapshots,
 error names, and store representation are migration input only. They are not a
 second runtime contract.
 
-The final audit was repeated after the integrated Rust differential runner at
-`cea0f1e71bfe42178e0fcb5ec5b8b2ea3b1c3325`. The repository-local index entry
+The final audit was repeated after the integrated Rust differential runner
+fixed in `4b1099d1db577bf523f3de65ddaeede10fa139ff`, and the canonical expected
+oracle was regenerated in full from one fresh real ten-scenario execution of
+that runner. The repository-local index entry
 was absent, so this document claims Git inventory, `rg`, and direct file
 coverage only. It does not claim a complete symbol or call graph.
 
@@ -24,9 +26,9 @@ The complete canonical result is committed at
 `tests/fixtures/oracles/delivery-strongflow-rust-expected.v1.json`:
 
 ```text
-bytes: 5,111,503
-lines: 80,473
-sha256: 246451128fbc0526b5f9c23377f63a2dca54921f58b6140cad7b0f3cf22a0aa7
+bytes: 5,200,904
+lines: 82,348
+sha256: 496511c2c5910a7877a8ae4392e8cae4e119798481b7b7b4fcab3e18f3d5d5da
 ```
 
 The final comparison is 10/10. There are no remaining P0 or P1 seam gaps and
@@ -37,7 +39,7 @@ no unresolved canonical result differences.
 | Base Delivery commands | `ControlPlane::commit_delivery_command` handles create, update, human advance, and Attention resolution with trusted repository, Spec, clock, and sealed transition facts. |
 | Codex dispatch | `commit_delivery_execution` persists the Delivery advance and ExecutionJob intent atomically. |
 | Session binding | `commit_delivery_session_binding` applies WorkerSession and CodexThread facts as two ordered, receipt-backed mutations. |
-| Worker terminal outcome | `commit_delivery_terminal_outcome` verifies the generated `job.outcome`, durable job, lease, session, thread, time, sequence, and artifacts before one atomic terminal mutation. |
+| Worker terminal outcome | `commit_delivery_terminal_outcome` verifies the generated `job.outcome`, durable job, lease, session, thread, time, sequence, and artifacts before one atomic terminal mutation. Every migrated terminal outcome carries immutable zero Usage because the legacy terminal fact has no provider Usage measurement; the typed seam requires Usage on a successful outcome. |
 | Task promotion | `commit_delivery_task_breakdown` promotes only a sealed approved review graph and returns a validated durable receipt before current facts on replay. |
 | Verdict | `commit_delivery_verdict` consumes sealed current-candidate verification facts; replay returns its validated durable receipt before current state or journal. |
 | Rework | The precise rework authorization joins the sealed failed candidate, exact changed hunk, current verdict Evidence, and replacement candidate. |
@@ -106,7 +108,7 @@ retaining old error aliases.
 
 | Fact | Product authority | Differential fixture |
 | --- | --- | --- |
-| Actor, repository scope, request ID, expected revision, payload | Generated envelope plus authenticated transport | Fixed canonical actor, scope, and request IDs |
+| Actor, repository scope, request ID, expected revision, payload | Generated envelope plus authenticated transport | Fixed canonical User actor `usr_00000000000000000000000000`, scope, and request IDs; every human attention assignee is that same User |
 | Clock | Trusted Control Plane clock/facts | Frozen scenario time |
 | Repository and source | Trusted repository/source adapter | Local Git fixture and recorded source identity |
 | Spec semantics | Trusted Spec authority bound to exact criterion IDs and order | Frozen scope, constraints, rework limit, and verification methods |

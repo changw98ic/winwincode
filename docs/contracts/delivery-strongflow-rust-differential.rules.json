@@ -409,6 +409,7 @@
         "status": "exact status derived from the completed legacy submit response current verifier StageRun and Verdict",
         "summary": "selected terminal turn.completed data.last_agent_message",
         "artifacts": "empty array because the legacy terminal fact has no ExecutionPort ArtifactReference",
+        "usage": "zero Usage on every migrated terminal outcome because the legacy terminal fact carries no provider Usage measurement; the typed seam requires immutable Usage on a successful outcome",
         "sentAt": "same exact Instant as outcome.finishedAt",
         "messageId": "deterministic terminal-outcome identity mapping v1"
       },
@@ -704,7 +705,8 @@
             "finishedAt",
             "lastEventSequence",
             "status",
-            "summary"
+            "summary",
+            "usage"
           ]
         },
         "outcomeStatusesByTarget": {

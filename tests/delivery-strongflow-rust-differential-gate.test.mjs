@@ -1295,6 +1295,7 @@ function canonicalFixtureRequest(
           lastEventSequence: Number(terminal.cursor.sequence),
           status: terminalOutcomeStatus,
           summary: terminal.data.last_agent_message,
+          usage: { costMicrounits: 0, runtimeMillis: 0, tokens: 0 },
         },
         schemaVersion: 'winwincode/v1',
         sentAt: terminalInstant,

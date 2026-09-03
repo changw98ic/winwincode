@@ -507,6 +507,7 @@ function validateTerminalOutcomeRules(rules, oracle) {
   )
   requireDeepEqual(policy.requestValueSources, {
     artifacts: 'empty array because the legacy terminal fact has no ExecutionPort ArtifactReference',
+    usage: 'zero Usage on every migrated terminal outcome because the legacy terminal fact carries no provider Usage measurement; the typed seam requires immutable Usage on a successful outcome',
     codexThreadId: 'exact current verifier SessionBinding.codexThreadId',
     finishedAt: 'selected terminal turn.completed occurredAtMillis encoded as an exact UTC Instant',
     lastEventSequence: 'selected terminal turn.completed cursor.sequence',
