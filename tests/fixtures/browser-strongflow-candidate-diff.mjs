@@ -255,9 +255,13 @@ globalThis.runCandidateDiffScenario = async () => {
     contextToggle: query('.wwc-candidate-diff-context-toggle').textContent,
   }
 
-  const sideBySide = [...document.querySelectorAll('.wwc-candidate-diff-view-option')]
-    .find(node => node.dataset.mode === 'side-by-side')
-  sideBySide.click()
+  const stableHeaderBeforeSwitch = rows()[0]
+  const diffScroll = query('.wwc-candidate-diff-content')
+  diffScroll.style.maxHeight = '4rem'
+  diffScroll.scrollTop = 48
+  const scrollTopBeforeSwitch = diffScroll.scrollTop
+  const focusedHunkBeforeSwitch = document.activeElement?.dataset.hunkKey ?? null
+  key(document.activeElement, 's')
   await new Promise(resolve => { setTimeout(resolve, 0) })
   const switched = {
     columns: query('.wwc-candidate-diff-table').getAttribute('data-columns'),
@@ -270,6 +274,11 @@ globalThis.runCandidateDiffScenario = async () => {
     pressed: [...document.querySelectorAll('.wwc-candidate-diff-view-option')]
       .map(node => `${node.dataset.mode}:${node.getAttribute('aria-pressed')}`),
     calls: calls.filter(call => call[0] === 'viewMode'),
+    stableHeaderPreserved: rows()[0] === stableHeaderBeforeSwitch,
+    scrollTopBeforeSwitch,
+    focusedHunkBeforeSwitch,
+    focusedHunkAfterSwitch: document.activeElement?.dataset.hunkKey ?? null,
+    focusedClassAfterSwitch: document.activeElement?.className ?? null,
   }
 
   key(query('.wwc-candidate-diff-content'), 'u')

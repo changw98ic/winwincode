@@ -961,6 +961,8 @@
         "apps/client/src/settings-view-model.ts",
         "apps/client/src/strongflow-candidate.ts",
         "apps/client/src/strongflow-diagrams.ts",
+        "apps/client/src/strongflow-diff-model.ts",
+        "apps/client/src/strongflow-diff-viewer.ts",
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-rendering.ts",
         "apps/client/src/strongflow-view-model.ts"
