@@ -220,7 +220,7 @@ test('real Chrome keeps the complete StrongFlow workbench reachable across layou
   assert.deepEqual(narrow.contextOpen, {
     attentionVisible: true,
     drawerVisible: true,
-    evidenceVisible: true,
+    evidenceVisible: false,
   })
   assert.equal(narrow.approvalVisible, true)
   assert.equal(narrow.candidateVisible, true)

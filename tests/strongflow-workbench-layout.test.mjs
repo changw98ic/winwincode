@@ -700,7 +700,7 @@ test('artifact tabs switch between solution, execution, candidate, and evidence 
   assert.notEqual(findByClass(artifacts, 'wwc-strongflow-view-solution'), null)
   assert.notEqual(findByClass(artifacts, 'wwc-strongflow-view-execution'), null)
   assert.notEqual(findByClass(artifacts, 'wwc-strongflow-view-candidate'), null)
-  assert.notEqual(findByClass(artifacts, 'wwc-strongflow-evidence'), null)
+  assert.notEqual(findByClass(artifacts, 'wwc-strongflow-evidence-host'), null)
   assert.equal(panel('solution').hidden, false)
   assert.equal(panel('execution').hidden, true)
   assert.equal(panel('candidate').hidden, true)

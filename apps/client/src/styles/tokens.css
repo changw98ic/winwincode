@@ -45,6 +45,7 @@
   --wwc-space-12: 3rem;
   --wwc-space-16: 4rem;
   --wwc-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  --wwc-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --wwc-font-size-xs: 0.75rem;
   --wwc-font-size-sm: 0.875rem;
   --wwc-font-size-md: 1rem;
@@ -69,6 +70,7 @@
   --wwc-content-max: 90rem;
   --wwc-readable-max: 48rem;
   --wwc-drawer-width: 28rem;
+  --wwc-log-preview-max-height: 24rem;
   --wwc-control-min-height: 2.75rem;
   --wwc-shadow-dialog: 0 1.5rem 4rem rgb(15 23 42 / 22%);
   --wwc-transition-fast: 120ms ease;

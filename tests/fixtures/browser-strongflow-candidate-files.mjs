@@ -146,7 +146,15 @@ const model = {
     calls.push(['selectCandidateFile', path])
     const file = candidateFiles.find(item => item.path === path)
     if (file === undefined) return
-    location.hash = strongFlowRouteHash(deliveryId, productSessionId, stageRunId, path)
+    location.hash = strongFlowRouteHash({
+      deliveryId,
+      productSessionId,
+      stageRunId,
+      candidatePath: path,
+      candidateView: 'unified',
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    })
     publish({
       ...state.candidateFiles,
       selectedPath: path,

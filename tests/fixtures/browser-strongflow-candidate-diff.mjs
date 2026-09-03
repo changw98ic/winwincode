@@ -1,4 +1,5 @@
 import {
+  parseStrongFlowRouteHash,
   strongFlowCandidateViewFromHash,
   strongFlowRouteHash,
 } from '/module/application.js'
@@ -144,12 +145,14 @@ function publish(candidateFilesState) {
 }
 
 function candidateRoute(path, mode = strongFlowCandidateViewFromHash(location.hash) ?? 'unified') {
-  return strongFlowRouteHash(
+  return strongFlowRouteHash({
+    ...parseStrongFlowRouteHash(location.hash),
     deliveryId,
     productSessionId,
     stageRunId,
-    path,
-    mode,
+    candidatePath: path,
+    candidateView: mode,
+  },
     scopeSelectionFromHash(location.hash),
     strongFlowHistorySelectionFromHash(location.hash),
   )
@@ -166,6 +169,8 @@ function routeFacts() {
     'repositoryId',
     'task',
     'run',
+    'tab',
+    'evidence',
   ].map(name => [name, parameters.get(name)]))
 }
 

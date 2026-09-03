@@ -44,10 +44,15 @@ import {
 import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
 import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import {
-  strongFlowHistoryHashWithSelection,
   strongFlowHistorySelectionFromHash,
-  type StrongFlowHistorySelection,
 } from './strongflow-history-selection.js'
+import {
+  parseStrongFlowRouteHash,
+  strongFlowCandidateViewFromHash,
+  strongFlowRouteHash,
+  type StrongFlowEvidenceRouteState,
+  type StrongFlowRoute,
+} from './strongflow-route.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
@@ -57,7 +62,6 @@ import type {
   RepositoryScope,
   RequestId,
   Scope,
-  StageRunId,
 } from './generated/contracts.js'
 import { QueryName } from './generated/contracts.js'
 import {
@@ -125,34 +129,12 @@ function routeParameters(hash: string): URLSearchParams {
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
 }
 
-/** The one canonical typed route seam for every StrongFlow deep link. */
-export function strongFlowRouteHash(
-  deliveryId: DeliveryId,
-  productSessionId: ProductSessionId,
-  stageRunId: StageRunId,
-  candidatePath: string | null = null,
-  candidateView: CandidateDiffViewMode = 'unified',
-  scope?: ScopeRouteSelection,
-  historySelection?: StrongFlowHistorySelection,
-): string {
-  const hash = `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
-    + `&session=${encodeURIComponent(productSessionId)}`
-    + `&stageRun=${encodeURIComponent(stageRunId)}`
-    + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
-    + `&view=${encodeURIComponent(candidateView)}`
-  const scopedHash = scope === undefined ? hash : scopeHash(hash, scope)
-  return historySelection === undefined
-    ? scopedHash
-    : strongFlowHistoryHashWithSelection(scopedHash, historySelection)
+export {
+  parseStrongFlowRouteHash,
+  strongFlowCandidateViewFromHash,
+  strongFlowRouteHash,
 }
-
-/** Read the Candidate Diff layout from a route, rejecting everything else. */
-export function strongFlowCandidateViewFromHash(
-  hash: string,
-): CandidateDiffViewMode | null {
-  const value = routeParameters(hash).get('view')
-  return value === 'side-by-side' || value === 'unified' ? value : null
-}
+export type { StrongFlowEvidenceRouteState, StrongFlowRoute }
 
 function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransport {
   const nativeFetch = browser.fetch
@@ -736,7 +718,7 @@ export function mountWinWinCodeClient(
     featureController = controller
     routeLoading('Loading StrongFlow…')
     try {
-      const parameters = routeParameters(browser.location.hash)
+      const route = parseStrongFlowRouteHash(browser.location.hash)
       const deliveriesValue = await controlPlane.query({
         schemaVersion: 'winwincode/v1',
         requestId: contractId('req', browser.crypto) as RequestId,
@@ -750,9 +732,7 @@ export function mountWinWinCodeClient(
         throw new Error('The StrongFlow route received another list response.')
       }
       const deliveries = (deliveriesValue as DeliveryListResultResponse).result.items
-      const deliveryId = (
-        parameters.get('delivery') as DeliveryId | null
-      ) ?? deliveries[0]?.deliveryId ?? null
+      const deliveryId = route.deliveryId ?? deliveries[0]?.deliveryId ?? null
       if (deliveryId === null) {
         const [{ createStrongFlowCreateViewModel }, { mountStrongFlowCreatePage }] = await Promise.all([
           import('./strongflow-view-model.js'),
@@ -767,10 +747,15 @@ export function mountWinWinCodeClient(
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
           onCreated(createdDeliveryId) {
             if (closed || generation !== renderGeneration || controller.signal.aborted) return
-            replaceHash(scopeHash(
-              `#/strongflow?delivery=${encodeURIComponent(createdDeliveryId)}`,
-              scopeSelectionFromHash(browser.location.hash),
-            ))
+            replaceHash(strongFlowRouteHash({
+              deliveryId: createdDeliveryId,
+              productSessionId: null,
+              stageRunId: null,
+              candidatePath: null,
+              candidateView: 'unified',
+              evidenceTab: 'evidence',
+              evidenceId: null,
+            }, scopeSelectionFromHash(browser.location.hash)))
             render()
           },
         })
@@ -795,38 +780,35 @@ export function mountWinWinCodeClient(
         throw new Error('The StrongFlow route received another detail response.')
       }
       const detail = (detailValue as DeliveryGetResultResponse).result
-      const requestedStageRunId = parameters.get('stageRun') as StageRunId | null
-      const routeCandidatePath = parameters.get('file')
-      let selectedCandidatePath = routeCandidatePath === null || routeCandidatePath.length === 0
-        ? null
-        : routeCandidatePath
+      const requestedStageRunId = route.stageRunId
+      let selectedCandidatePath = route.candidatePath
       const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
-      let candidateView: CandidateDiffViewMode = routeCandidateView ?? 'unified'
+      let candidateView: CandidateDiffViewMode = route.candidateView
       const stage = requestedStageRunId === null
         ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
         : detail.stages.find(candidate => candidate.id === requestedStageRunId)
-      const productSessionId = (
-        parameters.get('session') as ProductSessionId | null
-      ) ?? stage?.sessionBinding?.productSessionId ?? null
+      const productSessionId = route.productSessionId
+        ?? stage?.sessionBinding?.productSessionId
+        ?? null
       if (stage === undefined || stage.sessionBinding === null || productSessionId === null) {
         routeUnavailable('This Delivery does not have an executable StrongFlow stage yet.')
         return
       }
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      let routeProductSessionId = productSessionId
-      let routeStageRunId = stage.id
+      let currentRoute: StrongFlowRoute = Object.freeze({
+        ...route,
+        deliveryId,
+        productSessionId,
+        stageRunId: stage.id,
+      })
       if (
-        parameters.get('delivery') === null
-        || parameters.get('session') === null
-        || parameters.get('stageRun') === null
+        route.deliveryId === null
+        || route.productSessionId === null
+        || route.stageRunId === null
         || routeCandidateView === null
       ) {
         replaceHash(strongFlowRouteHash(
-          deliveryId,
-          productSessionId,
-          stage.id,
-          selectedCandidatePath,
-          candidateView,
+          currentRoute,
           scopeSelectionFromHash(browser.location.hash),
           strongFlowHistorySelectionFromHash(browser.location.hash),
         ))
@@ -852,26 +834,23 @@ export function mountWinWinCodeClient(
         onCandidatePathChange(path) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
           selectedCandidatePath = path
+          currentRoute = Object.freeze({ ...currentRoute, candidatePath: path })
           replaceHash(strongFlowRouteHash(
-            deliveryId,
-            routeProductSessionId,
-            routeStageRunId,
-            path,
-            candidateView,
+            currentRoute,
             scopeSelectionFromHash(browser.location.hash),
             strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
         },
         onStageBindingChange(binding) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          routeProductSessionId = binding.productSessionId
-          routeStageRunId = binding.stageRunId
+          currentRoute = Object.freeze({
+            ...currentRoute,
+            productSessionId: binding.productSessionId,
+            stageRunId: binding.stageRunId,
+            evidenceId: null,
+          })
           replaceHash(strongFlowRouteHash(
-            deliveryId,
-            binding.productSessionId,
-            binding.stageRunId,
-            selectedCandidatePath,
-            candidateView,
+            currentRoute,
             scopeSelectionFromHash(browser.location.hash),
             strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
@@ -885,15 +864,35 @@ export function mountWinWinCodeClient(
         onCandidateViewModeChange(mode) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
           candidateView = mode
+          currentRoute = Object.freeze({ ...currentRoute, candidateView: mode })
           replaceHash(strongFlowRouteHash(
-            deliveryId,
-            routeProductSessionId,
-            routeStageRunId,
-            selectedCandidatePath,
-            mode,
+            currentRoute,
             scopeSelectionFromHash(browser.location.hash),
             strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
+        },
+        evidence: {
+          client: controlPlane,
+          actor: context.actor,
+          scope: context.scope,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+          route: {
+            tab: currentRoute.evidenceTab,
+            evidenceId: currentRoute.evidenceId,
+          },
+          onRouteChange(next) {
+            if (closed || generation !== renderGeneration || controller.signal.aborted) return
+            currentRoute = Object.freeze({
+              ...currentRoute,
+              evidenceTab: next.tab,
+              evidenceId: next.evidenceId,
+            })
+            replaceHash(strongFlowRouteHash(
+              currentRoute,
+              scopeSelectionFromHash(browser.location.hash),
+              strongFlowHistorySelectionFromHash(browser.location.hash),
+            ))
+          },
         },
         routeScope: scopeSelectionFromHash(browser.location.hash),
         readOnly: activeRouteReadOnly,

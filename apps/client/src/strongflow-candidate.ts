@@ -3,8 +3,11 @@
 import {
   CandidateFileStatus,
   type CandidateFileProjection,
+  type DeliveryCriterionResultProjection,
+  type DeliveryEvidenceProjection,
+  type EvidenceId,
 } from './generated/contracts.js'
-import { mountKeyedCollection } from './components/keyed-collection.js'
+import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { mountCandidateDiffViewer, type CandidateDiffViewer } from './strongflow-diff-viewer.js'
 import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import type {
@@ -209,6 +212,7 @@ export interface StrongFlowCandidateViewOptions {
   readonly onLoadMoreFiles: () => void
   readonly onSelectFile: (path: string) => void
   readonly onLoadMoreDiff: () => void
+  readonly onOpenEvidence: (evidenceId: EvidenceId) => void
 }
 
 export interface StrongFlowCandidateView {
@@ -251,6 +255,51 @@ function candidateViewIdentity(candidate: StrongFlowProjection['currentCandidate
       ].join('\n')
 }
 
+function mountEvidenceButtons(
+  document: Document,
+  parent: HTMLElement,
+  onOpenEvidence: (evidenceId: EvidenceId) => void,
+  className: string,
+): KeyedCollectionView<EvidenceId, string, HTMLButtonElement> {
+  const listeners = new WeakMap<HTMLButtonElement, () => void>()
+  return mountKeyedCollection({
+    parent,
+    key: evidenceId => evidenceId,
+    create() {
+      const button = document.createElement('button')
+      const onClick = () => {
+        const evidenceId = button.dataset.evidenceId
+        if (evidenceId !== undefined) onOpenEvidence(evidenceId as EvidenceId)
+      }
+      button.type = 'button'
+      button.className = className
+      button.addEventListener('click', onClick)
+      listeners.set(button, onClick)
+      return button
+    },
+    update(button, evidenceId) {
+      button.dataset.evidenceId = evidenceId
+      button.textContent = `Open Evidence ${evidenceId}`
+    },
+    remove(button) {
+      const onClick = listeners.get(button)
+      if (onClick !== undefined) button.removeEventListener('click', onClick)
+      listeners.delete(button)
+    },
+  })
+}
+
+interface CriterionItem {
+  readonly criterion: DeliveryCriterionResultProjection
+  readonly evidenceIds: readonly EvidenceId[]
+}
+
+interface CriterionRow {
+  readonly summary: HTMLElement
+  readonly evidence: HTMLElement
+  readonly evidenceButtons: KeyedCollectionView<EvidenceId, string, HTMLButtonElement>
+}
+
 /** Stable Candidate region that UI-301 can place in either desktop or tabbed layouts. */
 export function mountStrongFlowCandidate(
   options: StrongFlowCandidateViewOptions,
@@ -285,11 +334,12 @@ export function mountStrongFlowCandidate(
   const technicalSummary = document.createElement('summary')
   const technicalList = document.createElement('dl')
   const evidenceHeading = strongFlowElement(document, 'h4', 'wwc-strongflow-subheading')
-  const evidence = strongFlowElement(document, 'ul', 'wwc-strongflow-evidence')
+  const evidence = strongFlowElement(document, 'ul', 'wwc-strongflow-candidate-evidence')
   const evidenceOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
   const verdictHeading = strongFlowElement(document, 'h4', 'wwc-strongflow-subheading')
   const verdict = strongFlowElement(document, 'section', 'wwc-strongflow-verdict')
   const verdictBody = strongFlowElement(document, 'div', 'wwc-strongflow-verdict-body')
+  const criteria = strongFlowElement(document, 'ul', 'wwc-strongflow-criterion-results')
   const publicationHeading = strongFlowElement(document, 'h4', 'wwc-strongflow-subheading')
   const publication = strongFlowElement(document, 'section', 'wwc-strongflow-publication')
   const publicationBody = strongFlowElement(document, 'div', 'wwc-strongflow-publication-body')
@@ -395,10 +445,95 @@ export function mountStrongFlowCandidate(
   evidenceHeading.textContent = 'Evidence'
   evidence.setAttribute('aria-label', 'Delivery evidence')
   verdictHeading.textContent = 'Verdict'
-  verdict.append(verdictHeading, verdictBody)
+  verdict.append(verdictHeading, verdictBody, criteria)
   publicationHeading.textContent = 'Publication'
   publication.append(publicationHeading, publicationBody)
   root.append(heading, empty, workspace, evidenceHeading, evidence, evidenceOmitted, verdict, publication)
+
+  const evidenceRows = new WeakMap<HTMLLIElement, {
+    readonly title: HTMLElement
+    readonly source: HTMLElement
+    readonly buttons: KeyedCollectionView<EvidenceId, string, HTMLButtonElement>
+  }>()
+  const candidateEvidenceCollection = mountKeyedCollection<
+    DeliveryEvidenceProjection,
+    string,
+    HTMLLIElement
+  >({
+    parent: evidence,
+    key: item => item.id,
+    create() {
+      const row = document.createElement('li')
+      const title = document.createElement('strong')
+      const source = document.createElement('p')
+      const buttonsHost = strongFlowElement(
+        document,
+        'div',
+        'wwc-strongflow-candidate-evidence-actions',
+      )
+      const buttons = mountEvidenceButtons(
+        document,
+        buttonsHost,
+        options.onOpenEvidence,
+        'wwc-strongflow-candidate-evidence-open',
+      )
+      row.append(title, source, buttonsHost)
+      evidenceRows.set(row, { title, source, buttons })
+      return row
+    },
+    update(row, item) {
+      const state = evidenceRows.get(row)
+      if (state === undefined) return
+      row.dataset.candidateRef = item.candidateRef
+      state.title.textContent = `${item.type} · ${item.id}`
+      state.source.textContent = item.sourceRef
+      state.buttons.update([item.id])
+    },
+    remove(row) {
+      evidenceRows.get(row)?.buttons.close()
+      evidenceRows.delete(row)
+    },
+  })
+  const criterionRows = new WeakMap<HTMLLIElement, CriterionRow>()
+  const criterionCollection = mountKeyedCollection<CriterionItem, string, HTMLLIElement>({
+    parent: criteria,
+    key: item => item.criterion.criterionId,
+    create() {
+      const row = document.createElement('li')
+      const summary = document.createElement('span')
+      const evidenceButtonsHost = strongFlowElement(
+        document,
+        'span',
+        'wwc-strongflow-criterion-evidence',
+      )
+      const evidenceButtons = mountEvidenceButtons(
+        document,
+        evidenceButtonsHost,
+        options.onOpenEvidence,
+        'wwc-strongflow-criterion-evidence-open',
+      )
+      row.append(summary, evidenceButtonsHost)
+      criterionRows.set(row, {
+        summary,
+        evidence: evidenceButtonsHost,
+        evidenceButtons,
+      })
+      return row
+    },
+    update(row, item) {
+      const state = criterionRows.get(row)
+      if (state === undefined) return
+      row.dataset.criterionId = item.criterion.criterionId
+      row.dataset.verdict = item.criterion.verdict
+      state.summary.textContent = `${item.criterion.criterionId} · ${item.criterion.verdict}`
+      state.evidenceButtons.update(item.evidenceIds)
+      state.evidence.hidden = item.evidenceIds.length === 0
+    },
+    remove(row) {
+      criterionRows.get(row)?.evidenceButtons.close()
+      criterionRows.delete(row)
+    },
+  })
 
   const rowCollection = mountKeyedCollection({
     parent: tree,
@@ -588,6 +723,8 @@ export function mountStrongFlowCandidate(
     if (candidate === null || props.projection === null) {
       requestedCandidateIdentity = null
       rowCollection.update([])
+      candidateEvidenceCollection.update([])
+      criterionCollection.update([])
       return
     }
     const identity = candidateViewIdentity(candidate)
@@ -627,17 +764,11 @@ export function mountStrongFlowCandidate(
       ...definition(document, 'Frozen', candidate.frozenAt),
     )
 
-    const boundedEvidence = boundedItems(props.projection.evidence, options.limits.evidence)
-    evidence.replaceChildren(...boundedEvidence.items.map(item => {
-      const row = document.createElement('li')
-      const title = document.createElement('strong')
-      const source = document.createElement('p')
-      title.textContent = `${item.type} · ${item.id}`
-      source.textContent = item.sourceRef
-      row.dataset.candidateRef = item.candidateRef
-      row.append(title, source)
-      return row
-    }))
+    const boundedEvidence = boundedItems(
+      props.projection.evidence.filter(item => item.candidateRef === candidate.candidateRef),
+      options.limits.evidence,
+    )
+    candidateEvidenceCollection.update(boundedEvidence.items)
     evidenceOmitted.hidden = boundedEvidence.omitted === 0
     evidenceOmitted.textContent = boundedEvidence.omitted === 0
       ? ''
@@ -646,10 +777,16 @@ export function mountStrongFlowCandidate(
     verdict.dataset.status = props.projection.verdict?.status ?? ''
     if (props.projection.verdict === null) {
       verdictBody.textContent = 'No current Verdict is available.'
+      criterionCollection.update([])
     } else {
       verdictBody.textContent = `${props.projection.verdict.status} · produced ${
         props.projection.verdict.producedAt
       }`
+      const currentEvidenceIds = new Set(props.projection.evidence.map(item => item.id))
+      criterionCollection.update((props.projection.verdict.criteria ?? []).map(criterion => ({
+        criterion,
+        evidenceIds: criterion.evidenceRefs.filter(evidenceId => currentEvidenceIds.has(evidenceId)),
+      })))
     }
     publication.dataset.status = props.projection.publication?.state ?? ''
     if (props.projection.publication === null) {
@@ -675,6 +812,8 @@ export function mountStrongFlowCandidate(
       loadMoreFiles.removeEventListener('click', onLoadFiles)
       diffViewer.close()
       rowCollection.close()
+      candidateEvidenceCollection.close()
+      criterionCollection.close()
       root.remove()
     },
   }
