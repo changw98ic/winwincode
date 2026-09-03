@@ -140,7 +140,7 @@ test('Client shell has one facade and the five canonical product entries with Ch
   const application = readFileSync(join(clientRoot, 'src', 'application.ts'), 'utf8')
   const surfaces = readFileSync(join(clientRoot, 'src', 'client-surface.ts'), 'utf8')
   const index = readFileSync(join(clientRoot, 'src', 'index.ts'), 'utf8')
-  for (const surface of ['chat', 'strongflow', 'settings', 'approvals', 'enterprise']) {
+  for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
     assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
   assert.match(surfaces, /id: 'chat'[\s\S]+default: true/u)

@@ -359,7 +359,7 @@ test('personal deployment hides the Enterprise entry and keeps product areas nav
   const links = navigationLinks(fixture.rootElement)
   assert.deepEqual(
     Object.keys(links).sort(),
-    ['approvals', 'chat', 'settings', 'strongflow'],
+    ['attention', 'chat', 'settings', 'strongflow'],
   )
   assert.equal(links.chat.getAttribute('aria-disabled'), null)
   fixture.application.close()

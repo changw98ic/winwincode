@@ -4,7 +4,7 @@ export type ClientSurfaceId =
   | 'chat'
   | 'strongflow'
   | 'settings'
-  | 'approvals'
+  | 'attention'
   | 'enterprise'
 
 export interface ClientSurface {
@@ -38,10 +38,10 @@ export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
     default: false,
   }),
   Object.freeze({
-    id: 'approvals',
-    path: '/approvals',
-    label: 'Approvals',
-    description: 'Human decisions awaiting review',
+    id: 'attention',
+    path: '/attention',
+    label: 'Attention',
+    description: 'Every pending decision across the repository',
     default: false,
   }),
   Object.freeze({

@@ -90,7 +90,7 @@ const SIGNED_OUT = { status: 'signed-out', session: null, error: null }
 test('signed-out and restoring sessions hide every navigation entry', () => {
   for (const status of ['signed-out', 'restoring']) {
     const capabilities = capabilityMap(status)
-    for (const surface of ['chat', 'strongflow', 'settings', 'approvals', 'enterprise']) {
+    for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
       assert.equal(
         capabilities[surface].capability,
         'hidden',
@@ -106,7 +106,7 @@ test('a personal repository-only session trims Enterprise and keeps product area
   assert.equal(capabilities.chat.capability, 'available')
   assert.equal(capabilities.strongflow.capability, 'available')
   assert.equal(capabilities.settings.capability, 'available')
-  assert.equal(capabilities.approvals.capability, 'available')
+  assert.equal(capabilities.attention.capability, 'available')
   assert.equal(capabilities.enterprise.capability, 'hidden')
   assert.equal(capabilities.chat.reason, 'authorized-scope')
   assert.equal(capabilities.enterprise.reason, 'no-enterprise-scope')
@@ -165,7 +165,7 @@ test('deployment projection distinguishes personal from enterprise sessions', ()
 
 test('a session without any scope hides product areas without crashing', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([]))
-  for (const surface of ['chat', 'strongflow', 'settings', 'approvals', 'enterprise']) {
+  for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
     assert.equal(capabilities[surface].capability, 'hidden', surface)
   }
 })

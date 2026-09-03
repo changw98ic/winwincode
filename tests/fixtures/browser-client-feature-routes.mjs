@@ -120,6 +120,9 @@ const controlPlane = {
     if (request.query === 'delivery.list') {
       return response(request, { kind: 'delivery_page', items: [] })
     }
+    if (request.query === 'session.list') {
+      return response(request, { kind: 'product_session_page', items: [] })
+    }
     if (request.query === 'session.get') return response(request, session())
     if (request.query === 'session.interactions.list') {
       return response(request, { kind: 'chat_interaction_page', items: [] })
@@ -193,7 +196,10 @@ globalThis.inspectFeatureRoute = async name => {
   if (name === 'operations') {
     return settled('.wwc-local-operations', '.wwc-local-operations-status')
   }
-  if (name === 'approvals') {
+  if (name === 'attention') {
+    return settled('.wwc-attention-center', '.wwc-attention-center-status')
+  }
+  if (name === 'attention-session') {
     return settled('.wwc-local-decisions', '.wwc-local-decisions-status')
   }
   throw new Error(`unknown feature route: ${name}`)
@@ -204,9 +210,11 @@ globalThis.inspectManagementPresentation = name => {
     ? '.wwc-settings'
     : name === 'operations'
       ? '.wwc-local-operations'
-      : name === 'approvals'
-        ? '.wwc-local-decisions'
-        : null
+      : name === 'attention'
+        ? '.wwc-attention-center'
+        : name === 'attention-session'
+          ? '.wwc-local-decisions'
+          : null
   if (selector === null) throw new Error(`unknown management page: ${name}`)
   const pageRoot = document.querySelector(selector)
   const status = pageRoot?.querySelector('[data-wwc-component="status-badge"]')
@@ -370,12 +378,12 @@ globalThis.runFeatureNavigationScenario = async () => {
   const operations = await globalThis.inspectFeatureRoute('operations')
   const settingsSubscriptionClosed = calls.subscriptions[0]?.closed ?? false
 
-  document.querySelector('[data-surface="approvals"]').click()
+  document.querySelector('[data-surface="attention"]').click()
   await waitFor(
-    () => document.querySelector('.wwc-feature-route-unavailable') !== null,
-    'unconfigured Approvals route',
+    () => document.querySelector('.wwc-attention-center') !== null,
+    'Attention Center route',
   )
-  const unconfigured = document.querySelector('.wwc-feature-route-unavailable').textContent
+  const attentionCenter = await globalThis.inspectFeatureRoute('attention')
 
   failureMode = 'authorization'
   location.hash = '#/settings?fixture=denied'
@@ -412,10 +420,10 @@ globalThis.runFeatureNavigationScenario = async () => {
     afterCancellation,
     denied,
     network,
+    attentionCenter,
     operations,
     settings,
     settingsSubscriptionClosed,
-    unconfigured,
     calls,
   }
 }

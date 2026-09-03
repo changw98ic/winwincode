@@ -1,0 +1,79 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.wwc-attention-center {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.wwc-attention-center-heading,
+.wwc-attention-center-status,
+.wwc-attention-center-refresh,
+.wwc-attention-center-error,
+.wwc-attention-center-controls,
+.wwc-attention-center-items {
+  grid-column: 1 / -1;
+}
+
+.wwc-attention-center-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--wwc-space-3);
+}
+
+.wwc-attention-center-control-label {
+  display: grid;
+  gap: var(--wwc-space-1);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-attention-center-list {
+  display: grid;
+  gap: var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-attention-card {
+  display: grid;
+  min-width: 0;
+  gap: var(--wwc-space-2);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-attention-card[data-urgency='blocking'] {
+  border-color: var(--wwc-color-danger-border);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-attention-card[data-urgency='expired'] {
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-attention-card[data-urgency='binding-invalid'] {
+  border-style: dashed;
+}
+
+.wwc-attention-card-kind {
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-attention-card-title {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-attention-card-context {
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  padding-inline-start: var(--wwc-space-4);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-attention-card-action[aria-disabled='true'] {
+  pointer-events: none;
+  opacity: 0.6;
+}

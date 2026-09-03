@@ -15,6 +15,7 @@ const sourceFiles = [
   'features/settings.css',
   'features/local-operations.css',
   'features/local-decisions.css',
+  'features/attention-center.css',
   'features/enterprise.css',
 ]
 
