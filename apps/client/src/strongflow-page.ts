@@ -32,6 +32,7 @@ import {
   strongFlowHistoryTree,
   type StrongFlowHistoryTree,
 } from './strongflow-history-tree.js'
+import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -72,6 +73,9 @@ export interface StrongFlowPageOptions {
   readonly routeScope?: ScopeRouteSelection
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
+  /** Candidate Diff layout requested by the typed route seam. */
+  readonly candidateView?: CandidateDiffViewMode
+  readonly onCandidateViewModeChange?: (mode: CandidateDiffViewMode) => void
 }
 
 export interface StrongFlowLayoutViewport {
@@ -853,6 +857,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
    * Server stays the sole mutation authority for the live run.
    */
   let historicalReviewOpen = false
+  let candidateViewMode: CandidateDiffViewMode = options.candidateView ?? 'unified'
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -1118,6 +1123,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const candidateView = mountStrongFlowCandidate({
     document,
     limits,
+    viewMode: options.candidateView ?? 'unified',
+    onViewModeChange(mode) {
+      candidateViewMode = mode
+      options.onCandidateViewModeChange?.(mode)
+    },
     onLoadFiles() { void options.model.loadCandidateFiles() },
     onLoadMoreFiles() { void options.model.loadMoreCandidateFiles() },
     onSelectFile(path) { void options.model.selectCandidateFile(path) },
@@ -1661,7 +1671,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       artifactEvidenceNode = null
       diagramsFingerprint = null
       lastEvidenceKey = null
-      candidateView.update({ projection: null, candidateFiles })
+      candidateView.update({ projection: null, candidateFiles, viewMode: candidateViewMode })
       return
     }
 
@@ -1695,7 +1705,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       diagramsHost.append(diagramsNode)
       diagramsFingerprint = nextDiagramsFingerprint
     }
-    candidateView.update({ projection, candidateFiles })
+    candidateView.update({ projection, candidateFiles, viewMode: candidateViewMode })
     if (
       contextEvidenceNode === null
       || artifactEvidenceNode === null

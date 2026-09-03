@@ -42,6 +42,7 @@ import {
   type ScopeSelectorPage,
 } from './scope-selector-page.js'
 import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
+import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
@@ -124,13 +125,23 @@ export function strongFlowRouteHash(
   productSessionId: ProductSessionId,
   stageRunId: StageRunId,
   candidatePath: string | null = null,
+  candidateView: CandidateDiffViewMode = 'unified',
   scope?: ScopeRouteSelection,
 ): string {
   const hash = `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
     + `&session=${encodeURIComponent(productSessionId)}`
     + `&stageRun=${encodeURIComponent(stageRunId)}`
     + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
+    + `&view=${encodeURIComponent(candidateView)}`
   return scope === undefined ? hash : scopeHash(hash, scope)
+}
+
+/** Read the Candidate Diff layout from a route, rejecting everything else. */
+export function strongFlowCandidateViewFromHash(
+  hash: string,
+): CandidateDiffViewMode | null {
+  const value = routeParameters(hash).get('view')
+  return value === 'side-by-side' || value === 'unified' ? value : null
 }
 
 function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransport {
@@ -779,6 +790,8 @@ export function mountWinWinCodeClient(
       let selectedCandidatePath = routeCandidatePath === null || routeCandidatePath.length === 0
         ? null
         : routeCandidatePath
+      const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
+      let candidateView: CandidateDiffViewMode = routeCandidateView ?? 'unified'
       const stage = requestedStageRunId === null
         ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
         : detail.stages.find(candidate => candidate.id === requestedStageRunId)
@@ -796,12 +809,14 @@ export function mountWinWinCodeClient(
         parameters.get('delivery') === null
         || parameters.get('session') === null
         || parameters.get('stageRun') === null
+        || routeCandidateView === null
       ) {
         replaceHash(strongFlowRouteHash(
           deliveryId,
           productSessionId,
           stage.id,
           selectedCandidatePath,
+          candidateView,
           scopeSelectionFromHash(browser.location.hash),
         ))
       }
@@ -831,6 +846,7 @@ export function mountWinWinCodeClient(
             routeProductSessionId,
             routeStageRunId,
             path,
+            candidateView,
             scopeSelectionFromHash(browser.location.hash),
           ))
         },
@@ -843,6 +859,7 @@ export function mountWinWinCodeClient(
             binding.productSessionId,
             binding.stageRunId,
             selectedCandidatePath,
+            candidateView,
             scopeSelectionFromHash(browser.location.hash),
           ))
         },
@@ -851,6 +868,19 @@ export function mountWinWinCodeClient(
         root: slot,
         model,
         deliveries,
+        candidateView,
+        onCandidateViewModeChange(mode) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          candidateView = mode
+          replaceHash(strongFlowRouteHash(
+            deliveryId,
+            routeProductSessionId,
+            routeStageRunId,
+            selectedCandidatePath,
+            mode,
+            scopeSelectionFromHash(browser.location.hash),
+          ))
+        },
         routeScope: scopeSelectionFromHash(browser.location.hash),
         readOnly: activeRouteReadOnly,
       })
