@@ -446,10 +446,13 @@ test('expired, resolved, and Scope-violating items carry explicit fail-closed st
   const foreignInput = items.find(item => item.id === 'inp_00000000000000000000000004')
   assert.equal(foreignInput.bindingValid, false)
   assert.equal(foreignInput.urgency, 'binding-invalid')
-  const foreignDelivery = items.find(item => item.deliveryId === 'dlv_00000000000000000000000002')
+  const foreignDelivery = items.find(item => item.kind === 'attention' && !item.bindingValid)
+  assert.notEqual(foreignDelivery, undefined)
   assert.equal(foreignDelivery.kind, 'attention')
   assert.equal(foreignDelivery.bindingValid, false)
   assert.equal(foreignDelivery.urgency, 'binding-invalid')
+  assert.equal(foreignDelivery.title.includes('Foreign delivery'), false)
+  assert.equal(foreignDelivery.deliveryId, null)
   assert.deepEqual(items.map(item => item.urgency), [
     'blocking',
     'expired',
@@ -459,6 +462,33 @@ test('expired, resolved, and Scope-violating items carry explicit fail-closed st
     'binding-invalid',
   ])
   assert.equal(model.state.status, 'ready')
+  model.close()
+})
+
+test('a ProductSession outside the exact Scope triggers no interaction query or visible input', async () => {
+  const client = contractFake()
+  client.sessions = [productSession(productSessionId, {
+    repositoryId: 'rep_00000000000000000000000009',
+  })]
+  const model = modelFor(client)
+  await model.start()
+  assert.equal(
+    client.queries.some(request => request.query === 'session.interactions.list'),
+    false,
+  )
+  assert.equal(model.state.items.some(item => item.kind === 'input'), false)
+  model.close()
+})
+
+test('an Approval without a current scoped ProductSession is binding-invalid', async () => {
+  const client = contractFake()
+  client.sessions = [productSession(productSessionId)]
+  const model = modelFor(client)
+  await model.start()
+  const item = model.state.items.find(candidate => candidate.kind === 'approval')
+  assert.notEqual(item, undefined)
+  assert.equal(item.bindingValid, false)
+  assert.equal(item.urgency, 'binding-invalid')
   model.close()
 })
 
@@ -530,6 +560,27 @@ test('refresh revalidates the snapshot and a network drop only degrades to recon
   assert.equal(model.state.realtime, 'reconnecting')
   assert.equal(model.state.items.length > 0, true, 'a network drop must not discard the loaded list')
   model.reconnect()
+  model.close()
+})
+
+test('an initial snapshot failure offers retry without a dead reconnect action', async () => {
+  const client = contractFake()
+  client.query = async request => {
+    throw new ControlPlaneClientError({
+      kind: 'network',
+      code: 'NETWORK_ERROR',
+      message: 'initial snapshot unavailable',
+      requestId: request.requestId,
+      retryable: true,
+    })
+  }
+  const model = modelFor(client)
+  await model.start()
+  const presentation = attentionCenterPresentation(model.state, { kind: 'all', sort: 'urgency' })
+  assert.equal(model.state.status, 'error')
+  assert.equal(model.state.realtime, 'inactive')
+  assert.equal(presentation.retryVisible, true)
+  assert.equal(presentation.reconnectVisible, false)
   model.close()
 })
 
@@ -629,6 +680,10 @@ class FakeElement {
   }
 
   get childNodes() { return this.children }
+
+  get href() { return this.getAttribute('href') ?? '' }
+
+  set href(value) { this.setAttribute('href', value) }
 
   append(...children) {
     for (const child of children) this.insertBefore(child, null)
@@ -866,6 +921,8 @@ test('presentation filters by kind, keeps fail-closed labels, and never hides st
     error: { kind: 'authentication', code: 'AUTHENTICATION_REQUIRED', message: 'x', requestId: null, retryable: false },
   }), { kind: 'all', sort: 'urgency' })
   assert.equal(revoked.actionsDisabled, true)
+  assert.equal(revoked.retryVisible, false)
+  assert.equal(revoked.reconnectVisible, false)
   assert.notEqual(revoked.errorText, null)
   assert.equal(revoked.statusText.includes('sign in'), true)
 
@@ -930,6 +987,8 @@ test('the mounted center shows safe cards, disables fail-closed actions, and kee
   assert.equal(text.includes('Review the proposed delivery scope'), true)
   assert.equal(text.includes('Describe the exact local change'), true)
   assert.equal(hiddenCandidateDigest.includes('not-enter-dom') && text.includes(hiddenCandidateDigest), false)
+  assert.equal(text.includes('Task ·'), true)
+  assert.equal(text.includes('Candidate ·'), true)
   for (const secret of [executionJobId, workerSessionId, codexThreadId, hiddenRepositoryLocator, hiddenToolPayload]) {
     assert.equal(text.includes(secret), false, secret)
   }
@@ -938,8 +997,10 @@ test('the mounted center shows safe cards, disables fail-closed actions, and kee
   const invalidCard = cardNodes.find(node => node.dataset.urgency === 'binding-invalid')
   assert.notEqual(invalidCard, undefined)
   assert.equal(byClass(invalidCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
+  assert.equal(byClass(invalidCard, 'wwc-attention-card-action').getAttribute('href'), null)
   const expiredCard = cardNodes.find(node => node.dataset.urgency === 'expired')
   assert.equal(byClass(expiredCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
+  assert.equal(byClass(expiredCard, 'wwc-attention-card-action').getAttribute('href'), null)
   const actionableCard = cardNodes.find(node => node.dataset.urgency === 'pending')
   assert.equal(byClass(actionableCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), null)
 
@@ -971,6 +1032,7 @@ test('read-only centers and failures present explicit, non-actionable states', (
   const pendingCard = [...byClass(rootElement, 'wwc-attention-center-list').children]
     .find(node => node.dataset.urgency === 'pending')
   assert.equal(byClass(pendingCard, 'wwc-attention-card-action').getAttribute('aria-disabled'), 'true')
+  assert.equal(byClass(pendingCard, 'wwc-attention-card-action').getAttribute('href'), null)
   mounted.close()
 
   const failedRoot = new FakeElement(document, 'div')

@@ -280,8 +280,14 @@ function inputItem(
   return Object.freeze({ ...item, urgency: urgencyOf(item) })
 }
 
-function approvalItem(projection: ApprovalProjection, titles: Map<string, string>, clock: number): AttentionCenterItem {
+function approvalItem(
+  projection: ApprovalProjection,
+  titles: Map<string, string>,
+  clock: number,
+  scopedSessionIds: ReadonlySet<string>,
+): AttentionCenterItem {
   const bindingValid = bindingIsComplete(projection.binding)
+    && scopedSessionIds.has(projection.binding.productSessionId)
   const isExpired = projection.state !== 'pending' || expired(projection.expiresAt, clock)
   const item: AttentionCenterItem = {
     kind: 'approval',
@@ -312,24 +318,25 @@ interface AttentionSource {
   readonly candidateBound: boolean
 }
 
-/** Explicit fail-closed placeholder for a Delivery whose ownership left the selected Scope. */
+/** Generic fail-closed placeholder for a Delivery whose ownership left the selected Scope:
+    no foreign title, identifier, or link enters the rendered card. */
 function bindingInvalidAttention(summary: DeliveryProjection): AttentionCenterItem {
   const item: AttentionCenterItem = {
     kind: 'attention',
     id: `delivery ${summary.deliveryId}`,
-    title: summary.title,
+    title: 'Delivery outside the current repository Scope',
     blocking: true,
     expired: false,
     bindingValid: false,
     urgency: 'pending',
-    createdAt: summary.updatedAt,
+    createdAt: null,
     expiresAt: null,
     productSessionId: null,
     sessionTitle: null,
     stageRunId: null,
     executionJobId: null,
-    deliveryId: summary.deliveryId,
-    deliveryTitle: summary.title,
+    deliveryId: null,
+    deliveryTitle: null,
     candidateBound: false,
     revision: summary.revision,
   }
@@ -558,8 +565,14 @@ export function createAttentionCenterViewModel(
       deliverySummaries(signal),
     ])
     const clock = nowMillis()
-    const titles = new Map(sessionValues.map(session => [session.id, session.title]))
-    const inputSources: readonly InputSource[] = sessionValues
+    // Exact Scope check: a joined ProductSession outside the selected repository
+    // never contributes titles, inputs, or interaction queries.
+    const scopedSessions = sessionValues.filter(session =>
+      session.projectId === options.scope.projectId
+      && session.repositoryId === options.scope.repositoryId)
+    const titles = new Map(scopedSessions.map(session => [session.id, session.title]))
+    const scopedSessionIds: ReadonlySet<string> = new Set(scopedSessions.map(session => session.id))
+    const inputSources: readonly InputSource[] = scopedSessions
       .filter(session => session.state === 'waiting_for_input')
       .map(session => ({ session: session.id, title: session.title }))
     const seenApprovals = new Set<string>()
@@ -574,7 +587,7 @@ export function createAttentionCenterViewModel(
     const attention = await attentionItemsFor(signal, deliveryValues)
     return orderedAttentionCenterItems([
       ...inputs,
-      ...approvalValues.map(approval => approvalItem(approval, titles, clock)),
+      ...approvalValues.map(approval => approvalItem(approval, titles, clock, scopedSessionIds)),
       ...attention,
     ])
   }
@@ -612,7 +625,7 @@ export function createAttentionCenterViewModel(
       }
       patch({
         status: statusForError(normalized),
-        realtime: 'reconnecting',
+        realtime: subscription === null ? 'inactive' : 'reconnecting',
         error: normalized,
       })
     } finally {

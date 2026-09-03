@@ -396,7 +396,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       const row = element(document, 'li', 'wwc-attention-card')
       const kind = element(document, 'span', 'wwc-attention-card-kind')
       const title = element(document, 'h3', 'wwc-attention-card-title')
-      const context = cardContext(document, ['', '', '', '', '', '', ''])
+      const context = cardContext(document, ['', '', '', '', '', '', '', ''])
       const action = element(document, 'a', 'wwc-attention-card-action')
       row.append(kind, title, context, action)
       cardParts.set(row, { kind, title, context, action })
@@ -424,17 +424,23 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
           ? (item.stageRunId === null ? 'Delivery-bound' : 'StageRun-bound')
           : (item.stageRunId === null ? 'ProductSession-bound' : 'ProductSession and StageRun-bound'),
         item.executionJobId === null ? 'No execution job' : 'Execution job-bound',
-        item.candidateBound ? 'Current candidate-bound' : 'No candidate is currently bound',
+        // The Attention snapshot carries no authoritative DeliveryTask mapping, so the
+        // Task field is explicitly unavailable; an ExecutionJob is never shown as a Task.
+        'Task · Unavailable',
+        item.kind === 'attention'
+          ? (item.candidateBound ? 'Candidate · bound' : 'Candidate · not bound')
+          : 'Candidate · not reported',
       ])
-      parts.action.href = attentionCenterItemHash(item, options.scopeSelection)
       parts.action.textContent = item.kind === 'attention'
         ? 'Open delivery context'
         : 'Open decisions'
       if (disabled) {
+        parts.action.removeAttribute('href')
         parts.action.setAttribute('aria-disabled', 'true')
         parts.action.tabIndex = -1
         parts.action.title = 'This entry is disabled. Refresh for the current state.'
       } else {
+        parts.action.href = attentionCenterItemHash(item, options.scopeSelection)
         parts.action.removeAttribute('aria-disabled')
         parts.action.tabIndex = 0
         parts.action.title = ''
