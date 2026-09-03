@@ -956,6 +956,8 @@
         "apps/client/src/local-decisions-view-model.ts",
         "apps/client/src/local-operations-page.ts",
         "apps/client/src/local-operations-view-model.ts",
+        "apps/client/src/readiness-page.ts",
+        "apps/client/src/readiness-view-model.ts",
         "apps/client/src/runtime-config.ts",
         "apps/client/src/settings-page.ts",
         "apps/client/src/settings-view-model.ts",
