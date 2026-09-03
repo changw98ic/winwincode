@@ -247,6 +247,8 @@ export function createStrongFlowDeliveryListViewModel(
     status = nextStatus
     moreFailure = null
     loadFailure = null
+    // A takeover retires the in-flight continuation, so its flag cannot outlive it.
+    loadingMore = false
     publish()
     return generation
   }
@@ -388,15 +390,15 @@ export function createStrongFlowDeliveryListViewModel(
         { cursor: currentCursor, limit: pageLimit },
       )
     } catch (error) {
-      if (superseded(ownGeneration)) return
       loadingMore = false
+      if (superseded(ownGeneration)) return
       moreFailure = failureOf(error)
       publish()
       return
     }
+    loadingMore = false
     if (superseded(ownGeneration)) return
     if (response.query !== QueryName.DeliveryList) {
-      loadingMore = false
       moreFailure = failureOf(protocolFailure(
         'STRONGFLOW_DELIVERY_LIST_PAGE_INVALID',
         'The StrongFlow route received another list response.',
@@ -417,14 +419,12 @@ export function createStrongFlowDeliveryListViewModel(
       cursor = next
       hasMore = next !== null
     } catch (error) {
-      loadingMore = false
       hasMore = false
       moreFailure = failureOf(error)
       publish()
       return
     }
     loaded = Object.freeze([...loaded, ...appended])
-    loadingMore = false
     status = 'ready'
     publish()
   }
