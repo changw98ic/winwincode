@@ -12,6 +12,7 @@ import type {
   ApprovalProjection,
   ChatInputInteractionProjection,
   ChatInteractionListResultResponse,
+  ChatInteractionProjection,
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
   DeliveryId,
@@ -484,20 +485,32 @@ export function createAttentionCenterViewModel(
     signal: AbortSignal,
     sessions: readonly InputSource[],
   ): Promise<readonly AttentionCenterItem[]> {
+    const clock = nowMillis()
     const pages = await Promise.all(sessions.map(async source => {
-      const response: ChatInteractionListResultResponse = expectQuery(await options.client.query({
-        ...requestBase(),
-        requestId: options.nextRequestId(),
-        query: QueryName.SessionInteractionsList,
-        parameters: {
-          productSessionId: source.session,
-          states: INTERACTION_STATES,
-        },
-        page: page(null),
-      }, { signal }), QueryName.SessionInteractionsList)
-      return response.result.items
-        .filter(item => item.kind === 'input')
-        .map(item => inputItem(item, source, nowMillis()))
+      const items: ChatInteractionProjection[] = []
+      const seen = new Set<OpaqueCursor>()
+      let cursor: OpaqueCursor | null = null
+      for (let index = 0; index < MAX_PAGES; index += 1) {
+        const response: ChatInteractionListResultResponse = expectQuery(await options.client.query({
+          ...requestBase(),
+          requestId: options.nextRequestId(),
+          query: QueryName.SessionInteractionsList,
+          parameters: {
+            productSessionId: source.session,
+            states: INTERACTION_STATES,
+          },
+          page: page(cursor),
+        }, { signal }), QueryName.SessionInteractionsList)
+        items.push(...response.result.items)
+        cursor = cursorAfter(response, seen)
+        if (cursor === null) return Object.freeze(items
+          .filter(item => item.kind === 'input')
+          .map(item => inputItem(item, source, clock)))
+      }
+      throw clientFailure(
+        'ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED',
+        'The input interaction list exceeded the bounded page limit.',
+      )
     }))
     return Object.freeze(pages.flat())
   }
@@ -593,11 +606,13 @@ export function createAttentionCenterViewModel(
     } catch (error) {
       if (!isCurrent(ownGeneration)) return
       const normalized = normalizedError(error, active.signal)
+      if (normalized.kind === 'authentication' || normalized.kind === 'authorization') {
+        revokeAccess(normalized)
+        return
+      }
       patch({
         status: statusForError(normalized),
-        realtime: normalized.kind === 'authentication' || normalized.kind === 'authorization'
-          ? 'access-revoked'
-          : 'reconnecting',
+        realtime: 'reconnecting',
         error: normalized,
       })
     } finally {
@@ -605,7 +620,8 @@ export function createAttentionCenterViewModel(
     }
   }
 
-  function accessRevoked(error: ControlPlaneClientError): void {
+  /** One fail-closed settlement for lost authentication or authorization. */
+  function revokeAccess(error: ControlPlaneClientError): void {
     generation += 1
     abortRequests()
     subscription?.close()
@@ -637,7 +653,7 @@ export function createAttentionCenterViewModel(
         await load(false, 'reloading')
       },
       onAuthorizationRevoked() {
-        accessRevoked(new ControlPlaneClientError({
+        revokeAccess(new ControlPlaneClientError({
           kind: 'authentication',
           code: 'AUTHENTICATION_REQUIRED',
           message: 'Attention Center event authorization is no longer valid.',
@@ -648,7 +664,7 @@ export function createAttentionCenterViewModel(
       onError(error: ControlPlaneClientError) {
         if (closed) return
         if (error.kind === 'authentication' || error.kind === 'authorization') {
-          accessRevoked(error)
+          revokeAccess(error)
           return
         }
         patch({ realtime: 'reconnecting', error })
@@ -669,12 +685,16 @@ export function createAttentionCenterViewModel(
       if (currentState.status === 'ready' && !closed) subscribeRealtime()
     },
     async refresh() {
+      if (currentState.status === 'authentication-required'
+        || currentState.status === 'authorization-denied') return
       queryCache.refresh()
       await load(false, subscription === null ? 'inactive' : 'subscribed')
       if (currentState.status === 'ready' && subscription === null && !closed) subscribeRealtime()
     },
     cancelPending() {
       if (closed) return
+      if (currentState.status === 'authentication-required'
+        || currentState.status === 'authorization-denied') return
       generation += 1
       abortRequests()
       subscription?.close()

@@ -154,15 +154,17 @@ export function attentionCenterPresentation(
     || state.realtime === 'reloading'
     || state.realtime === 'reconnecting'
   const errorText = errorLabel(state.error)
+  const actionsDisabled = state.status === 'authentication-required'
+    || state.status === 'authorization-denied'
+    || state.status === 'closed'
   return Object.freeze({
     statusText,
     errorText,
     busy,
-    retryVisible: errorText !== null,
+    // Revoked access permits no further read from page controls until remount.
+    retryVisible: errorText !== null && !actionsDisabled,
     reconnectVisible: state.realtime === 'reconnecting',
-    actionsDisabled: state.status === 'authentication-required'
-      || state.status === 'authorization-denied'
-      || state.status === 'closed',
+    actionsDisabled,
     counts,
   })
 }
@@ -475,6 +477,12 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     })
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
+    refreshButton.update({
+      label: 'Refresh now',
+      className: 'wwc-attention-center-refresh',
+      onActivate: () => { void options.model.refresh() },
+      disabled: presentation.actionsDisabled,
+    })
     const visible = selectAttentionCenterItems(state, selection)
     cardCollection.update(visible)
     cards.hidden = visible.length === 0
@@ -502,6 +510,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       statusBadge.close()
       pageHeader.close()
       options.root.replaceChildren()
+      options.model.close()
     },
   }
 }

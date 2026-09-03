@@ -35,6 +35,11 @@ const pageModule = await import(`${pathToFileURL(resolve(
   '.cache/attention-center-tests/attention-center-page.js',
 )).href}`)
 
+const { ControlPlaneClientError } = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/attention-center-tests/control-plane-client.js',
+)).href}`)
+
 const { createAttentionCenterViewModel } = viewModelModule
 const {
   attentionCenterItemHash,
@@ -528,6 +533,71 @@ test('refresh revalidates the snapshot and a network drop only degrades to recon
   model.close()
 })
 
+test('each waiting session follows every bounded interaction page', async () => {
+  const client = contractFake()
+  const query = client.query.bind(client)
+  const continuation = 'cursor_attention_inputs_page_2'
+  client.query = async request => {
+    const response = await query(request)
+    if (request.query !== 'session.interactions.list') return response
+    if (request.page.cursor === null) {
+      return {
+        ...response,
+        result: { ...response.result, items: [input()] },
+        page: { hasMore: true, nextCursor: continuation },
+      }
+    }
+    assert.equal(request.page.cursor, continuation)
+    return {
+      ...response,
+      result: {
+        ...response.result,
+        items: [input({ inputRequestId: 'inp_00000000000000000000000002' })],
+      },
+      page: { hasMore: false, nextCursor: null },
+    }
+  }
+  const model = modelFor(client)
+  await model.start()
+  assert.deepEqual(
+    client.queries
+      .filter(request => request.query === 'session.interactions.list')
+      .map(request => request.page.cursor),
+    [null, continuation],
+  )
+  assert.deepEqual(
+    model.state.items.filter(item => item.kind === 'input').map(item => item.id),
+    [inputRequestId, 'inp_00000000000000000000000002'],
+  )
+  model.close()
+})
+
+test('authorization loss during refresh clears cards and closes the live subscription', async () => {
+  const client = contractFake()
+  const model = modelFor(client)
+  await model.start()
+  assert.equal(model.state.items.length, 3)
+  const query = client.query.bind(client)
+  client.query = async request => {
+    if (request.query === 'approval.list') {
+      throw new ControlPlaneClientError({
+        kind: 'authorization',
+        code: 'AUTHORIZATION_DENIED',
+        message: 'private authorization detail',
+        requestId: request.requestId,
+        retryable: false,
+      })
+    }
+    return query(request)
+  }
+  await model.refresh()
+  assert.equal(model.state.status, 'authorization-denied')
+  assert.equal(model.state.realtime, 'access-revoked')
+  assert.deepEqual(model.state.items, [])
+  assert.equal(client.subscriptionHandles[0].closed, true)
+  model.close()
+})
+
 class FakeElement {
   constructor(ownerDocument, tagName) {
     this.ownerDocument = ownerDocument
@@ -725,8 +795,10 @@ const emptyScopeSelection = {
 function fakeModel(initialStateValue) {
   let state = initialStateValue
   const listeners = new Set()
+  let closeCalls = 0
   return {
     get state() { return state },
+    get closeCalls() { return closeCalls },
     subscribe(listener) {
       listeners.add(listener)
       listener(state)
@@ -740,7 +812,7 @@ function fakeModel(initialStateValue) {
     async refresh() {},
     cancelPending() {},
     reconnect() {},
-    close() {},
+    close() { closeCalls += 1 },
   }
 }
 
@@ -920,4 +992,18 @@ test('read-only centers and failures present explicit, non-actionable states', (
   assert.notEqual(presentation.errorText, null)
   assert.equal(byClass(failedRoot, 'wwc-attention-center-list').children.length, 0)
   failedMount.close()
+})
+
+test('closing the Attention Center page closes its model exactly once', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const model = fakeModel(centerState())
+  const mounted = mountAttentionCenterPage({
+    root: rootElement,
+    model,
+    scopeSelection: emptyScopeSelection,
+  })
+  mounted.close()
+  mounted.close()
+  assert.equal(model.closeCalls, 1)
 })
