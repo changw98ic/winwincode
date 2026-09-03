@@ -13,6 +13,7 @@ import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { mountStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -33,6 +34,9 @@ export interface StrongFlowPageOptions {
   readonly model: StrongFlowViewModel
   readonly deliveries?: readonly DeliveryProjection[]
   readonly limits?: StrongFlowRenderLimits
+  /** Candidate Diff layout requested by the typed route seam. */
+  readonly candidateView?: CandidateDiffViewMode
+  readonly onCandidateViewModeChange?: (mode: CandidateDiffViewMode) => void
 }
 
 export interface StrongFlowPage {
@@ -513,6 +517,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
   let lastRuntime: StrongFlowProjection['runtime'] | null = null
   let solutionDraftKey: string | null = null
+  let candidateViewMode: CandidateDiffViewMode = options.candidateView ?? 'unified'
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -588,6 +593,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const candidateView = mountStrongFlowCandidate({
     document,
     limits,
+    viewMode: options.candidateView ?? 'unified',
+    onViewModeChange(mode) {
+      candidateViewMode = mode
+      options.onCandidateViewModeChange?.(mode)
+    },
     onLoadFiles() { void options.model.loadCandidateFiles() },
     onLoadMoreFiles() { void options.model.loadMoreCandidateFiles() },
     onSelectFile(path) { void options.model.selectCandidateFile(path) },
@@ -935,7 +945,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       diagramsNode = null
       lastSolutionReview = null
       lastRuntime = null
-      candidateView.update({ projection: null, candidateFiles })
+      candidateView.update({ projection: null, candidateFiles, viewMode: candidateViewMode })
       return
     }
 
@@ -965,7 +975,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       lastSolutionReview = projection.solutionReview
       lastRuntime = projection.runtime
     }
-    candidateView.update({ projection, candidateFiles })
+    candidateView.update({ projection, candidateFiles, viewMode: candidateViewMode })
   }
 
   function renderActions(state: StrongFlowViewModelState): void {

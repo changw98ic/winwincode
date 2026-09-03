@@ -77,12 +77,15 @@ test('real Chrome reviews a bounded Candidate tree and drives the linked Diff by
   assert.notEqual(result.keyboard.target, 'src/current.ts')
   assert.equal(result.keyboard.selectedPath, result.keyboard.target)
   assert.equal(result.keyboard.activePath, result.keyboard.target)
-  assert.match(result.keyboard.hash, new RegExp(`&file=${encodeURIComponent(result.keyboard.target)}$`, 'u'))
+  assert.match(
+    result.keyboard.hash,
+    new RegExp(`&file=${encodeURIComponent(result.keyboard.target)}&view=unified$`, 'u'),
+  )
   assert.match(result.keyboard.diff, new RegExp(result.keyboard.target.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
 
   assert.deepEqual(result.filtered.paths, ['src/current.ts'])
   assert.equal(result.filtered.count, 2)
-  assert.match(result.binary.hash, /&file=public%2Flogo\.png$/u)
+  assert.match(result.binary.hash, /&file=public%2Flogo\.png&view=unified$/u)
   assert.match(result.binary.status, /Binary file preview is unavailable/u)
   assert.equal(result.calls.some(call => call[0] === 'loadMoreCandidateFiles'), true)
   assert.equal(result.mainCount, 1)

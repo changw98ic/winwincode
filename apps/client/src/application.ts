@@ -22,6 +22,7 @@ import {
   type AuthSessionViewModel,
 } from './auth-view-model.js'
 import type { EnterpriseApplication } from './enterprise-application.js'
+import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
@@ -149,16 +150,27 @@ function routeParameters(hash: string): URLSearchParams {
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
 }
 
+/** The one canonical typed route seam for every StrongFlow deep link. */
 export function strongFlowRouteHash(
   deliveryId: DeliveryId,
   productSessionId: ProductSessionId,
   stageRunId: StageRunId,
   candidatePath: string | null = null,
+  candidateView: CandidateDiffViewMode = 'unified',
 ): string {
   return `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
     + `&session=${encodeURIComponent(productSessionId)}`
     + `&stageRun=${encodeURIComponent(stageRunId)}`
     + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
+    + `&view=${encodeURIComponent(candidateView)}`
+}
+
+/** Read the Candidate Diff layout from a route, rejecting everything else. */
+export function strongFlowCandidateViewFromHash(
+  hash: string,
+): CandidateDiffViewMode | null {
+  const value = routeParameters(hash).get('view')
+  return value === 'side-by-side' || value === 'unified' ? value : null
 }
 
 function repositoryScope(
@@ -655,6 +667,8 @@ export function mountWinWinCodeClient(
       let selectedCandidatePath = routeCandidatePath === null || routeCandidatePath.length === 0
         ? null
         : routeCandidatePath
+      const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
+      let candidateView: CandidateDiffViewMode = routeCandidateView ?? 'unified'
       const stage = requestedStageRunId === null
         ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
         : detail.stages.find(candidate => candidate.id === requestedStageRunId)
@@ -672,12 +686,14 @@ export function mountWinWinCodeClient(
         parameters.get('delivery') === null
         || parameters.get('session') === null
         || parameters.get('stageRun') === null
+        || routeCandidateView === null
       ) {
         replaceHash(strongFlowRouteHash(
           deliveryId,
           productSessionId,
           stage.id,
           selectedCandidatePath,
+          candidateView,
         ))
       }
       const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
@@ -706,6 +722,7 @@ export function mountWinWinCodeClient(
             routeProductSessionId,
             routeStageRunId,
             path,
+            candidateView,
           ))
         },
         onStageBindingChange(binding) {
@@ -717,10 +734,27 @@ export function mountWinWinCodeClient(
             binding.productSessionId,
             binding.stageRunId,
             selectedCandidatePath,
+            candidateView,
           ))
         },
       })
-      activeFeature = mountStrongFlowPage({ root: slot, model, deliveries })
+      activeFeature = mountStrongFlowPage({
+        root: slot,
+        model,
+        deliveries,
+        candidateView,
+        onCandidateViewModeChange(mode) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          candidateView = mode
+          replaceHash(strongFlowRouteHash(
+            deliveryId,
+            routeProductSessionId,
+            routeStageRunId,
+            selectedCandidatePath,
+            mode,
+          ))
+        },
+      })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'STRONGFLOW_ROUTE_FAILURE')
