@@ -12754,9 +12754,11 @@ dependencies = [
 name = "winwincode-execution-port"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "quick-xml",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "toml 0.9.11+spec-1.1.0",
  "winwincode-domain",
 ]
 

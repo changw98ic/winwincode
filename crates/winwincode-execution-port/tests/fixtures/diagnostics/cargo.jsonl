@@ -1,0 +1,4 @@
+{"reason":"compiler-message","message":{"code":{"code":"E0425"},"level":"error","message":"cannot find value `missing` in this scope","spans":[{"file_name":"src/one.rs","line_start":1,"column_start":2,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"E0432"},"level":"error","message":"unresolved import `missing`","spans":[{"file_name":"src/two.rs","line_start":2,"column_start":3,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"E0433"},"level":"error","message":"failed to resolve module","spans":[{"file_name":"src/three.rs","line_start":3,"column_start":4,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"E0308"},"level":"error","message":"mismatched types","spans":[{"file_name":"src/four.rs","line_start":4,"column_start":5,"is_primary":true}]}}
