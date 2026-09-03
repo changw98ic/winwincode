@@ -20,7 +20,12 @@ import {
   type EditableDraft,
 } from './editable-draft.js'
 import { mountStrongFlowCandidate } from './strongflow-candidate.js'
-import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import { renderStrongFlowSolutionDiagrams } from './strongflow-diagrams.js'
+import {
+  mountStrongFlowExecutionGraph,
+  strongFlowExecutionEvidenceLink,
+  type StrongFlowExecutionApprovalRow,
+} from './strongflow-execution-graph.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -505,6 +510,7 @@ function renderEvidencePanel(
     title.textContent = `${item.type} · ${item.id}`
     source.textContent = item.sourceRef
     row.dataset.candidateRef = item.candidateRef
+    row.dataset.evidenceId = item.id
     row.append(title, source)
     return row
   }))
@@ -514,6 +520,26 @@ function renderEvidencePanel(
   omitted.textContent = `${String(bounded.omitted)} more evidence records not shown.`
   section.append(omitted)
   return section
+}
+
+/** Reveal one delivered Evidence row after a timeline jump, if it is rendered. */
+function highlightEvidenceRow(host: HTMLElement | null, evidenceId: string): void {
+  if (host === null) return
+  const queue: { readonly node: HTMLElement; readonly depth: number }[] = [
+    { node: host, depth: 0 },
+  ]
+  while (queue.length > 0) {
+    const { node, depth } = queue.shift() ?? { node: host, depth: 0 }
+    if (node.dataset.evidenceId === evidenceId) {
+      node.dataset.evidenceTarget = 'true'
+      node.scrollIntoView?.({ block: 'nearest' })
+      return
+    }
+    if (depth > 12) continue
+    for (const child of node.children) {
+      queue.push({ node: child as HTMLElement, depth: depth + 1 })
+    }
+  }
 }
 
 interface StrongFlowResizeHandle {
@@ -743,6 +769,19 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'wwc-strongflow-context-evidence-host',
   )
   const diagramsHost = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams-host')
+  const executionSection = strongFlowElement(document, 'section', 'wwc-strongflow-view-execution')
+  const executionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  executionHeading.textContent = 'Live execution view'
+  const executionGraph = mountStrongFlowExecutionGraph({
+    document,
+    limits,
+    onOpenEvidence: evidenceId => {
+      selectArtifactTab('evidence')
+      highlightEvidenceRow(contextEvidenceNode, evidenceId)
+      highlightEvidenceRow(artifactEvidenceNode, evidenceId)
+    },
+  })
+  executionSection.append(executionHeading, executionGraph.root)
   const candidateHost = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-host')
   const artifactEvidenceHost = strongFlowElement(
     document,
@@ -944,6 +983,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     artifactPanels.set(tab, panel)
   }
   artifactPanels.get('solution')?.append(diagramsHost)
+  artifactPanels.get('execution')?.append(executionSection)
   artifactPanels.get('candidate')?.append(candidateHost)
   artifactPanels.get('evidence')?.append(artifactEvidenceHost)
   artifacts.append(artifactsHeading, artifactTabs.root, ...artifactPanels.values())
@@ -1641,6 +1681,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     stagesSection.hidden = projection === null
     attentionSection.hidden = projection === null
     diagramsHost.hidden = projection === null
+    executionSection.hidden = projection === null
     candidateHost.hidden = projection === null
     if (projection === null) {
       empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
@@ -1653,6 +1694,14 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       runDetail.update({ tree: null, selection: historyNavigation.selection() })
       attentionCollection.update([])
       updateOmitted(attentionOmitted, 0, 'Attention records')
+      executionGraph.update({
+        heading: 'Live execution view',
+        emptyText: 'No live execution sessions are available.',
+        sessions: [],
+        evidence: [],
+        approvals: [],
+        readOnly: false,
+      })
       if (diagramsNode !== null) diagramsNode.remove()
       if (contextEvidenceNode !== null) contextEvidenceNode.remove()
       if (artifactEvidenceNode !== null) artifactEvidenceNode.remove()
@@ -1687,14 +1736,33 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     const nextDiagramsFingerprint = JSON.stringify([
       projection.solutionReview?.architectureDiagram ?? null,
       projection.solutionReview?.processDiagram ?? null,
-      projection.runtime.sessions,
     ])
     if (diagramsNode === null || diagramsFingerprint !== nextDiagramsFingerprint) {
       diagramsNode?.remove()
-      diagramsNode = renderStrongFlowDiagrams(document, projection, limits)
+      diagramsNode = renderStrongFlowSolutionDiagrams(document, projection, limits)
       diagramsHost.append(diagramsNode)
       diagramsFingerprint = nextDiagramsFingerprint
     }
+    // The execution graph is a stable keyed view: high-frequency runtime
+    // deltas update rows in place instead of rebuilding this section.
+    const executionApprovals: readonly StrongFlowExecutionApprovalRow[] = projection.attention
+      .filter(item => item.status === 'open'
+        && (item.type === 'delivery_approval' || item.blocking))
+      .map(item => ({
+        id: item.id,
+        title: item.title,
+        type: item.type,
+        status: item.status,
+        blocking: item.blocking,
+      }))
+    executionGraph.update({
+      heading: 'Live execution view',
+      emptyText: 'No live execution sessions are available.',
+      sessions: projection.runtime.sessions,
+      evidence: projection.evidence.map(strongFlowExecutionEvidenceLink),
+      approvals: executionApprovals,
+      readOnly: false,
+    })
     candidateView.update({ projection, candidateFiles })
     if (
       contextEvidenceNode === null
@@ -2056,6 +2124,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       runDetail.close()
       deliveryCollection.close()
       diagramsNode?.remove()
+      executionGraph.close()
       candidateView.close()
       contextEvidenceNode?.remove()
       artifactEvidenceNode?.remove()

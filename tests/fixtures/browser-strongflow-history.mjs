@@ -482,15 +482,16 @@ globalThis.historyReturnToCurrent = () => {
 globalThis.historyRuntimeProbe = async () => {
   await settled()
   const sessions = document.querySelector('.wwc-strongflow-history-runtime-sessions')
-  const activities = document.querySelector('.wwc-strongflow-history-runtime-activities')
+  const timeline = document.querySelector('.wwc-strongflow-activity-timeline')
+  const rows = document.querySelector('.wwc-strongflow-activity-rows')
   return {
     runtimeText: (document.querySelector('.wwc-strongflow-history-runtime')?.innerText ?? '')
       .replace(/\s+/gu, ' ').trim(),
     sessionText: (sessions?.children[0]?.innerText ?? '').replace(/\s+/gu, ' ').trim(),
     sessionCount: sessions?.children.length ?? 0,
-    activityCount: activities?.children.length ?? 0,
-    activityText: (activities?.children[0]?.innerText ?? '').replace(/\s+/gu, ' ').trim(),
-    omittedText: (sessions?.querySelector('.wwc-strongflow-omitted')?.innerText ?? '')
+    activityCount: rows?.children.length ?? 0,
+    activityText: (timeline?.innerText ?? '').replace(/\s+/gu, ' ').trim(),
+    omittedText: (document.querySelector('.wwc-strongflow-activity-omitted')?.innerText ?? '')
       .replace(/\s+/gu, ' ').trim(),
   }
 }
@@ -515,7 +516,7 @@ globalThis.historyIdentityProbe = () => {
   globalThis.__historyIdentity = {
     detail,
     evidenceFirst: document.querySelector('.wwc-strongflow-history-evidence li'),
-    activityFirst: document.querySelector('.wwc-strongflow-history-runtime-activities li'),
+    activityFirst: document.querySelector('.wwc-strongflow-activity-row'),
     focus: document.activeElement,
     scrollTop: detail?.scrollTop ?? 0,
   }
@@ -535,10 +536,10 @@ globalThis.historyEquivalentRepublish = () => {
   return {
     sameDetail: detailElement() === after.detail,
     sameEvidence: document.querySelector('.wwc-strongflow-history-evidence li') === after.evidenceFirst,
-    sameActivity: document.querySelector('.wwc-strongflow-history-runtime-activities li') === after.activityFirst,
+    sameActivity: document.querySelector('.wwc-strongflow-activity-row') === after.activityFirst,
     focusPreserved: document.activeElement === after.focus,
     scrollPreserved: (detailElement()?.scrollTop ?? 0) === after.scrollTop,
-    activityCount: document.querySelector('.wwc-strongflow-history-runtime-activities')?.children.length ?? 0,
+    activityCount: document.querySelectorAll('.wwc-strongflow-activity-row').length,
   }
 }
 

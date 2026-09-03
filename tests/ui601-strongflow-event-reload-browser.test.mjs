@@ -83,7 +83,8 @@ test('real Chrome retains StrongFlow review work across event reloads', async t 
   })
   assert.deepEqual(result.runtimeChange, {
     candidateRetained: true,
-    diagramsRebuilt: true,
+    diagramsRetained: true,
+    executionSessionRetained: true,
   })
   assert.deepEqual(result.revisionConflict, {
     icon: true,

@@ -803,9 +803,9 @@ test('the read-only historical run detail shows exact identity, binding, runtime
     allText(findByClass(view.root, 'wwc-strongflow-history-runtime-sessions')),
     /cdx_00000000000000000000000001/u,
   )
-  const activities = findByClass(view.root, 'wwc-strongflow-history-runtime-activities')
+  const activities = findByClass(view.root, 'wwc-strongflow-activity-rows')
   assert.equal(activities.children.length, 1)
-  assert.match(activities.children[0].textContent, /cargo test/u)
+  assert.match(allText(activities.children[0]), /cargo test/u)
 
   const candidates = findByClass(view.root, 'wwc-strongflow-history-candidates')
   const candidateButton = findByClass(candidates, 'wwc-strongflow-history-candidate')
@@ -1246,7 +1246,7 @@ test('equivalent snapshots preserve historical detail DOM identity and focus', a
 
   const evidence = findByClass(view.root, 'wwc-strongflow-history-evidence')
   const identity = findByClass(view.root, 'wwc-strongflow-history-identity')
-  const activities = findByClass(view.root, 'wwc-strongflow-history-runtime-activities')
+  const activities = findByClass(view.root, 'wwc-strongflow-activity-rows')
   const evidenceBefore = [...evidence.children]
   const identityBefore = [...identity.children]
   const activityBefore = [...activities.children]

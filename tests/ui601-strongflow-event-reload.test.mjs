@@ -109,6 +109,10 @@ function projection() {
     runtime: {
       stageRunId,
       sessions: many(3, sessionValue => ({
+        productSessionId: `psn_${String(sessionValue).padStart(26, '0')}`,
+        stageRunId,
+        sessionBindingId: `bind:${String(sessionValue)}`,
+        codexThreadId: `cdx_t${String(sessionValue).padStart(25, '0')}`,
         deliveryTaskId: `task:${String(sessionValue)}`,
         attempt: sessionValue,
         asOfSequence: sessionValue,
@@ -132,6 +136,15 @@ function projection() {
           additions: 20,
           deletions: 5,
           sourceRef: 'runtime:diff:1',
+        },
+        usage: null,
+        plan: null,
+        recovery: {
+          failureCount: 0,
+          lastFailureSourceRef: null,
+          latestRecoverySourceRef: null,
+          recoveryCount: 0,
+          state: 'none',
         },
       })),
     },
@@ -414,16 +427,27 @@ test('UI-601: mounted artifact views retain identity while their content changes
   const runtimeChanged = projection()
   runtimeChanged.runtime.sessions[0].diffSummary.sourceRef = 'runtime:diff:2'
   model.publish(state({ projection: runtimeChanged }))
-  const diagramsAfterRuntime = findByClass(root, 'wwc-strongflow-diagrams')
-  assert.notEqual(diagramsAfterRuntime, diagramsBefore)
+  // Runtime deltas update the keyed execution graph in place; the diagrams
+  // only depend on the solution review, so they keep their node identity.
+  assert.equal(findByClass(root, 'wwc-strongflow-diagrams'), diagramsBefore)
+  assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
+  assert.equal(comments.value, 'draft for the current candidate')
+
+  const reviewChanged = projection()
+  reviewChanged.runtime.sessions[0].diffSummary.sourceRef = 'runtime:diff:2'
+  reviewChanged.solutionReview.processDiagram = diagram('process-flow-v2')
+  model.publish(state({ projection: reviewChanged }))
+  const diagramsAfterReview = findByClass(root, 'wwc-strongflow-diagrams')
+  assert.notEqual(diagramsAfterReview, diagramsBefore)
   assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
   assert.equal(comments.value, 'draft for the current candidate')
 
   const candidateChanged = projection()
+  candidateChanged.solutionReview.processDiagram = diagram('process-flow-v2')
   candidateChanged.runtime.sessions[0].diffSummary.sourceRef = 'runtime:diff:2'
   candidateChanged.currentCandidate.diffSha256 = `sha256:${'4'.repeat(64)}`
   model.publish(state({ projection: candidateChanged }))
-  assert.equal(findByClass(root, 'wwc-strongflow-diagrams'), diagramsAfterRuntime)
+  assert.equal(findByClass(root, 'wwc-strongflow-diagrams'), diagramsAfterReview)
   assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
   assert.equal(comments.value, '')
   mounted.close()

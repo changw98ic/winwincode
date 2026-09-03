@@ -52,6 +52,10 @@ function createProjection({ candidateDigest = '3', runtimeSource = '1' } = {}) {
     runtime: {
       stageRunId,
       sessions: [{
+        productSessionId: 'psn_00000000000000000000000001',
+        stageRunId,
+        sessionBindingId: 'bind:1',
+        codexThreadId: 'cdx_t0000000000000000000000001',
         deliveryTaskId: 'task:browser',
         attempt: 1,
         asOfSequence: 1,
@@ -63,6 +67,15 @@ function createProjection({ candidateDigest = '3', runtimeSource = '1' } = {}) {
           additions: 2,
           deletions: 0,
           sourceRef: `runtime:diff:${runtimeSource}`,
+        },
+        usage: null,
+        plan: null,
+        recovery: {
+          failureCount: 0,
+          lastFailureSourceRef: null,
+          latestRecoverySourceRef: null,
+          recoveryCount: 0,
+          state: 'none',
         },
       }],
     },
@@ -200,12 +213,15 @@ globalThis.runStrongFlowEventReloadScenario = () => {
   model.publish(ready(createProjection({ candidateDigest: '4' })))
   const candidateAfterChange = document.querySelector('.wwc-strongflow-view-candidate')
   const diagramsAfterCandidate = document.querySelector('.wwc-strongflow-diagrams')
+  const sessionAfterCandidate = document.querySelector('.wwc-strongflow-execution-session')
   model.publish(ready(createProjection({ candidateDigest: '4', runtimeSource: '2' })))
   const runtimeChange = {
     candidateRetained: document.querySelector('.wwc-strongflow-view-candidate')
       === candidateAfterChange,
-    diagramsRebuilt: document.querySelector('.wwc-strongflow-diagrams')
-      !== diagramsAfterCandidate,
+    diagramsRetained: document.querySelector('.wwc-strongflow-diagrams')
+      === diagramsAfterCandidate,
+    executionSessionRetained: document.querySelector('.wwc-strongflow-execution-session')
+      === sessionAfterCandidate,
   }
 
   comments.value = 'conflicted review draft'

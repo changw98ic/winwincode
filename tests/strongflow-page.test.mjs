@@ -125,6 +125,10 @@ function projection() {
     runtime: {
       stageRunId,
       sessions: many(3, sessionValue => ({
+        productSessionId: `psn_${String(sessionValue).padStart(26, '0')}`,
+        stageRunId,
+        sessionBindingId: `bind:${String(sessionValue)}`,
+        codexThreadId: `cdx_t${String(sessionValue).padStart(25, '0')}`,
         deliveryTaskId: `task:${String(sessionValue)}`,
         attempt: sessionValue,
         asOfSequence: sessionValue,
@@ -148,6 +152,15 @@ function projection() {
           additions: 20,
           deletions: 5,
           sourceRef: 'runtime:diff:1',
+        },
+        usage: null,
+        plan: null,
+        recovery: {
+          failureCount: 0,
+          lastFailureSourceRef: null,
+          latestRecoverySourceRef: null,
+          recoveryCount: 0,
+          state: 'none',
         },
       })),
     },

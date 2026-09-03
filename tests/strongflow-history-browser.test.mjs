@@ -102,7 +102,7 @@ test('real Chrome restores, navigates, and reviews StrongFlow history through th
   assert.match(runtime.runtimeText, /Runtime revision 7/u)
   assert.match(runtime.sessionText, /cdx_00000000000000000000000001/u)
   assert.match(runtime.activityText, /cargo test --event 1/u)
-  assert.match(runtime.omittedText, /100 more runtime events not shown/u)
+  assert.match(runtime.omittedText, /100 more runtime activities not shown/u)
 
   // The historical Candidate opens as a display-only review.
   const review = await evaluate(devtools, sessionId, 'historyOpenCandidate()')

@@ -51,6 +51,10 @@ const projection = {
   runtime: {
     stageRunId,
     sessions: [{
+      productSessionId: 'psn_00000000000000000000000001',
+      stageRunId,
+      sessionBindingId: 'bind:1',
+      codexThreadId: 'cdx_t0000000000000000000000001',
       deliveryTaskId: 'task:browser',
       attempt: 1,
       asOfSequence: 1,
@@ -67,6 +71,15 @@ const projection = {
         additions: 20,
         deletions: 5,
         sourceRef: 'runtime:diff:browser-layout',
+      },
+      usage: null,
+      plan: null,
+      recovery: {
+        failureCount: 0,
+        lastFailureSourceRef: null,
+        latestRecoverySourceRef: null,
+        recoveryCount: 0,
+        state: 'none',
       },
     }],
   },
