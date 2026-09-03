@@ -430,7 +430,7 @@ globalThis.runEmptyStrongFlowScenario = async () => {
       heading: document.querySelector('.wwc-strongflow-heading').textContent,
       listDeliveryIds: [...document.querySelectorAll('[data-delivery-id]')]
         .map(node => node.dataset.deliveryId),
-      status: document.querySelector('.wwc-strongflow-status').textContent,
+      status: document.querySelector('.wwc-strongflow-header-status').textContent,
     },
     calls,
     deliveryId,
@@ -489,7 +489,7 @@ globalThis.runChatConversionScenario = async () => {
       heading: document.querySelector('.wwc-strongflow-heading').textContent,
       listDeliveryIds: [...document.querySelectorAll('[data-delivery-id]')]
         .map(node => node.dataset.deliveryId),
-      status: document.querySelector('.wwc-strongflow-status').textContent,
+      status: document.querySelector('.wwc-strongflow-header-status').textContent,
     },
   }
 }
@@ -511,6 +511,6 @@ globalThis.inspectConvertedAfterReload = async () => {
     )),
     hash: location.hash,
     heading: document.querySelector('.wwc-strongflow-heading').textContent,
-    status: document.querySelector('.wwc-strongflow-status').textContent,
+    status: document.querySelector('.wwc-strongflow-header-status').textContent,
   }
 }

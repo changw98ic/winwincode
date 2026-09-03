@@ -379,6 +379,11 @@ export function mountStrongFlowHeader(options: StrongFlowHeaderOptions): StrongF
   toggle.type = 'button'
   const list = strongFlowElement(document, 'dl', 'wwc-strongflow-identity-list')
   list.id = 'wwc-strongflow-identity-list'
+  // The card always describes the canonical current StageRun, so it carries a
+  // visible current-run marker; during a historical review the reviewed run is
+  // never mistaken for these facts.
+  const identityLabel = strongFlowElement(document, 'p', 'wwc-strongflow-identity-label')
+  identityLabel.textContent = 'Current execution identity'
   const note = strongFlowElement(document, 'p', 'wwc-strongflow-identity-note')
   note.textContent = 'Values come from the exact Delivery snapshot; absent facts are Not reported.'
   const rows = IDENTITY_TERMS.map(term => {
@@ -391,7 +396,7 @@ export function mountStrongFlowHeader(options: StrongFlowHeaderOptions): StrongF
     list.append(row)
     return { term, value: valueNode }
   })
-  identity.append(toggle, list, note)
+  identity.append(identityLabel, toggle, list, note)
   root.append(status, run, reason, nextLine, identity)
 
   let open = false

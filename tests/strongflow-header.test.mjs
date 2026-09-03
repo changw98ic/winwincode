@@ -312,6 +312,47 @@ function findByClass(node, className) {
   return null
 }
 
+function findAllByClass(node, className, matches = []) {
+  if (node.className === className) matches.push(node)
+  for (const child of node.children) findAllByClass(child, className, matches)
+  return matches
+}
+
+function textOf(node) {
+  if (node.children.length === 0) return node.textContent
+  return node.children.map(textOf).join(' ')
+}
+
+function mountedPageModel(initial) {
+  return {
+    state: initial,
+    calls: [],
+    listener: null,
+    subscribe(listener) {
+      this.listener = listener
+      listener(this.state)
+      return () => { this.listener = null }
+    },
+    async start() { this.calls.push(['start']) },
+    async refresh() { this.calls.push(['refresh']) },
+    async decideSolutionReview() {},
+    async approveTaskBreakdown() {},
+    async resolveAttention() {},
+    async submitVerdict() {},
+    async advanceDelivery() {},
+    async loadStageRunRuntime() { return null },
+    async loadStageRunCandidates() { return [] },
+    async loadCandidateHistoricalReview() { return null },
+    cancelPending() {},
+    reconnect() {},
+    close() { this.calls.push(['close']) },
+    publish(next) {
+      this.state = next
+      this.listener?.(next)
+    },
+  }
+}
+
 test('each Delivery situation answers with a distinct human status, reason, and next step', () => {
   const active = strongFlowNextStep(projection())
   const verifying = strongFlowNextStep(projection({
@@ -678,8 +719,7 @@ test('the mounted page keeps the human header above the workspace and presentati
   assert.doesNotMatch(status.textContent, /dlv_|executing/u)
 
   const presentation = strongFlowPagePresentation(state())
-  assert.match(presentation.statusText, /In progress/u)
-  assert.doesNotMatch(presentation.statusText, /revision/u)
+  assert.equal(presentation.statusText, '')
   assert.equal(strongFlowPagePresentation(state({
     projection: null,
     status: 'loading',
@@ -688,4 +728,60 @@ test('the mounted page keeps the human header above the workspace and presentati
   mounted.close()
   assert.deepEqual(model.calls.at(-1), ['close'])
   assert.deepEqual(rootElement.children, [])
+})
+
+test('the next-step status is announced by a single polite live region, not duplicated', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = mountedPageModel(state())
+  const mounted = mountStrongFlowPage({ root: rootElement, model })
+  const legacyStatus = findByClass(rootElement, 'wwc-strongflow-status')
+  const headerStatus = findByClass(rootElement, 'wwc-strongflow-header-status')
+  const liveRegions = [legacyStatus, headerStatus].filter(node => (
+    node.getAttribute('role') === 'status'
+    && node.getAttribute('aria-live') === 'polite'
+    && node.textContent.length > 0
+  ))
+  assert.equal(
+    liveRegions.length,
+    1,
+    `the same next-step status is announced by ${String(liveRegions.length)} polite live regions`,
+  )
+  mounted.close()
+})
+
+test('an open historical review is not mistaken for the unmarked header identity card', () => {
+  const olderStage = stage({
+    id: olderRunId,
+    role: 'verifier',
+    status: 'failed',
+    sessionBinding: unattachedBinding(),
+  })
+  const currentStage = stage()
+  const historical = projection({
+    delivery: delivery({ stages: [olderStage, currentStage] }),
+    stage: currentStage,
+  })
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = mountedPageModel(state({ projection: historical }))
+  const mounted = mountStrongFlowPage({ root: rootElement, model })
+  const historicalButton = findAllByClass(rootElement, 'wwc-strongflow-run-button')
+    .find(node => node.dataset.stageRunId === olderRunId)
+  assert.notEqual(historicalButton, undefined)
+  historicalButton.emit('click')
+  model.publish(state({ projection: historical }))
+  const header = findByClass(rootElement, 'wwc-strongflow-header')
+  const identityList = findByClass(header, 'wwc-strongflow-identity-list')
+  const stageRunRow = identityList.children.find(
+    row => row.children[0]?.textContent === 'StageRun',
+  )
+  const marksCurrent = /current/iu.test(textOf(header))
+  const showsReviewedRun = stageRunRow?.children[1]?.textContent === olderRunId
+  assert.ok(
+    marksCurrent || showsReviewedRun,
+    'the header identity card reports the current run without any visible current marker '
+      + 'while a historical StageRun review is open',
+  )
+  mounted.close()
 })

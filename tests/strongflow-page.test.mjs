@@ -401,8 +401,7 @@ test('render limits are deterministic and reject unbounded configuration', () =>
 
 test('presentation keeps reconnect and errors understandable without raw server details', () => {
   const ready = strongFlowPagePresentation(state())
-  assert.match(ready.statusText, /Waiting for your input/u)
-  assert.doesNotMatch(ready.statusText, /revision|executing/u)
+  assert.equal(ready.statusText, '')
   const disconnected = strongFlowPagePresentation(state({
     realtime: 'reconnecting',
     error: error('network', 'http://worker.internal:9000/TOKEN'),

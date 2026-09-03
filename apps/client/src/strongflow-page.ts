@@ -15,7 +15,7 @@ import { mountSplitPane } from './components/split-pane.js'
 import { mountTabs, type TabItem } from './components/tabs.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
-import { mountStrongFlowHeader, strongFlowNextStep } from './strongflow-header.js'
+import { mountStrongFlowHeader } from './strongflow-header.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -105,6 +105,11 @@ export function strongFlowPagePresentation(
 ): StrongFlowPagePresentation {
   const interaction = state.interaction ?? { status: 'idle', error: null }
   const visibleError = interaction.error ?? state.error
+  // The mounted header is the single polite live region for the next-step
+  // status, so the legacy status line stays empty whenever its only content
+  // would repeat the header's own label. Every state the header hides
+  // (loading, reconnecting, errors, cancelled, closed, no Delivery) keeps its
+  // visible, announced line here.
   const statusText = interaction.status === 'submitting'
     ? 'Submitting StrongFlow decision…'
     : interaction.status === 'waiting'
@@ -127,7 +132,7 @@ export function strongFlowPagePresentation(
                     ? 'StrongFlow closed'
                     : state.projection === null
                       ? 'No Delivery selected'
-                      : strongFlowNextStep(state.projection).statusLabel
+                      : ''
   const errorText = visibleError === null
     ? null
     : visibleError.code === 'REVISION_CONFLICT'
@@ -1664,6 +1669,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   function render(state: StrongFlowViewModelState): void {
     if (closed) return
     const presentation = strongFlowPagePresentation(state)
+    status.hidden = presentation.statusText.length === 0
     status.textContent = presentation.statusText
     header.update(state)
     content.setAttribute('aria-busy', String(presentation.busy))
