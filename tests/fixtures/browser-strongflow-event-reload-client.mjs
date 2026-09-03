@@ -229,6 +229,7 @@ globalThis.runStrongFlowEventReloadScenario = () => {
     status: 'ready',
     realtime: 'subscribed',
     projection: conflicted,
+    candidateFiles: model.state.candidateFiles,
     interaction: { status: 'waiting', error: null },
     error: null,
   })
@@ -236,6 +237,7 @@ globalThis.runStrongFlowEventReloadScenario = () => {
     status: 'refreshing',
     realtime: 'reloading',
     projection: conflicted,
+    candidateFiles: model.state.candidateFiles,
     interaction: { status: 'idle', error: null },
     error: null,
   })
