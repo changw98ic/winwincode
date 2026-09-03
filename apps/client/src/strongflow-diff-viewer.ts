@@ -15,6 +15,7 @@ import type { StrongFlowCandidateDiffState } from './strongflow-view-model.js'
 
 const NARROW_DIFF_VIEW_QUERY = '(max-width: 48rem)'
 const MAX_DIFF_ROW_CHARACTERS = 2_000
+const MAX_RENDERED_DIFF_ROWS = 500
 const DEFAULT_DIFF_ROW_LIMIT = 300
 const DEFAULT_DIFF_MATCH_LIMIT = 100
 
@@ -47,6 +48,16 @@ interface DiffIdentity {
   readonly path: string
   readonly fileDiffSha256: string | null
 }
+
+type CandidateDiffFocusAnchor =
+  | {
+      readonly kind: 'hunk-toggle'
+      readonly hunkKey: string
+    }
+  | {
+      readonly kind: 'row'
+      readonly row: CandidateDiffRow
+    }
 
 function sameIdentity(left: DiffIdentity | null, right: DiffIdentity | null): boolean {
   if (left === null || right === null) return false
@@ -163,6 +174,7 @@ export function mountCandidateDiffViewer(
   let matchKeys: readonly string[] = []
   let matchIndex = -1
   let visibleRows: readonly CandidateDiffRow[] = []
+  let renderLimitReached = false
 
   viewToggle.setAttribute('role', 'group')
   viewToggle.setAttribute('aria-label', 'Diff layout')
@@ -317,6 +329,69 @@ export function mountCandidateDiffViewer(
     return (document.activeElement as HTMLElement | null) ?? null
   }
 
+  function currentFocusAnchor(): CandidateDiffFocusAnchor | null {
+    const active = activeElement()
+    const index = rowIndexFor(active)
+    if (index < 0) return null
+    const row = visibleRows[index]
+    const node = rowNodes()[index]
+    if (row === undefined || node === undefined) return null
+    if (row.kind === 'hunk-header') {
+      const toggle = findDescendant(node, 'wwc-candidate-diff-hunk-toggle')
+      if (toggle !== null && (toggle === active || containsNode(toggle, active))) {
+        return { kind: 'hunk-toggle', hunkKey: row.hunkKey }
+      }
+    }
+    return { kind: 'row', row }
+  }
+
+  function semanticRowFor(
+    anchor: CandidateDiffRow,
+    candidates: readonly CandidateDiffRow[],
+  ): CandidateDiffRow | null {
+    const exact = candidates.find(candidate => candidate.key === anchor.key)
+    if (exact !== undefined) return exact
+    if (anchor.kind !== 'line') return null
+    let best: CandidateDiffRow | null = null
+    let bestScore = 0
+    for (const candidate of candidates) {
+      if (candidate.kind !== 'line' || candidate.hunkKey !== anchor.hunkKey) continue
+      let score = 0
+      if (anchor.oldLine !== null && candidate.oldLine === anchor.oldLine) score += 1
+      if (anchor.newLine !== null && candidate.newLine === anchor.newLine) score += 1
+      if (score > bestScore) {
+        best = candidate
+        bestScore = score
+      }
+    }
+    return best
+  }
+
+  function restoreFocus(
+    anchor: CandidateDiffFocusAnchor | null,
+    candidates: readonly CandidateDiffRow[],
+  ): void {
+    if (anchor === null) return
+    if (anchor.kind === 'hunk-toggle') {
+      const row = candidates.find(candidate => (
+        candidate.kind === 'hunk-header' && candidate.hunkKey === anchor.hunkKey
+      ))
+      if (row === undefined) return
+      const node = rows.node(row.key)
+      const toggle = node === null
+        ? null
+        : findDescendant(node, 'wwc-candidate-diff-hunk-toggle')
+      toggle?.focus()
+      return
+    }
+    const row = semanticRowFor(anchor.row, candidates)
+    if (row === null) return
+    const node = rows.node(row.key)
+    if (node === null) return
+    node.tabIndex = 0
+    node.focus()
+  }
+
   function focusHunk(delta: number): void {
     const toggles = hunkToggleNodes()
     if (toggles.length === 0) return
@@ -363,15 +438,17 @@ export function mountCandidateDiffViewer(
     renderRows()
   }
 
-  function renderRows(): void {
+  function renderRows(preserveFocus = true): void {
     contextToggle.textContent = collapsedContextHunks.size > 0
       ? 'Show unchanged lines'
       : 'Hide unchanged lines'
     const parsed = currentParsed
     if (parsed === null || identity === null) {
       visibleRows = []
+      renderLimitReached = false
       rows.update([])
       renderMore.hidden = true
+      renderMore.disabled = true
       return
     }
     const result = candidateDiffRows(parsed, {
@@ -379,18 +456,22 @@ export function mountCandidateDiffViewer(
       collapsedContextHunks,
       limit: renderedRowCount,
     })
+    const focusAnchor = preserveFocus ? currentFocusAnchor() : null
     visibleRows = result.rows
-    const previousFocusIndex = rowIndexFor(activeElement())
     rows.update(result.rows)
-    renderMore.hidden = result.omittedRows === 0
-    renderMore.textContent = `Render ${formatCount(Math.min(
+    const remainingCapacity = Math.max(0, MAX_RENDERED_DIFF_ROWS - renderedRowCount)
+    renderLimitReached = result.omittedRows > 0 && remainingCapacity === 0
+    const appendableRows = Math.min(
       rowLimit,
       result.omittedRows,
-    ))} more Diff rows`
-    if (previousFocusIndex >= 0) {
-      const restored = rowNodes()[previousFocusIndex]
-      if (restored !== undefined && document.activeElement !== null) restored.focus()
-    }
+      remainingCapacity,
+    )
+    renderMore.hidden = appendableRows === 0
+    renderMore.disabled = appendableRows === 0
+    renderMore.textContent = appendableRows === 0
+      ? 'Diff row render limit reached'
+      : `Render ${formatCount(appendableRows)} more Diff rows`
+    restoreFocus(focusAnchor, result.rows)
     applyMatches()
   }
 
@@ -461,8 +542,18 @@ export function mountCandidateDiffViewer(
     if (preferredMode !== 'side-by-side') options.onViewModeChange('side-by-side')
   }
   const onRenderMore = () => {
-    renderedRowCount = Math.min(500, renderedRowCount + rowLimit)
+    const nextRowCount = Math.min(
+      MAX_RENDERED_DIFF_ROWS,
+      renderedRowCount + rowLimit,
+    )
+    if (nextRowCount === renderedRowCount) {
+      renderMore.hidden = true
+      renderMore.disabled = true
+      return
+    }
+    renderedRowCount = nextRowCount
     renderRows()
+    if (currentProps !== null) status.textContent = statusTextFor(currentProps.diff)
   }
   const onLoadMore = () => { options.onLoadMoreDiff() }
 
@@ -500,11 +591,15 @@ export function mountCandidateDiffViewer(
     const parsed = currentParsed
     if (parsed === null) return 'This Diff does not match the selected file yet.'
     if (parsed.hunks.length === 0) return 'This file has no line changes to display.'
+    const visibleLineCount = visibleRows.filter(row => row.kind === 'line').length
     const parts: string[] = [
-      `${formatCount(visibleRows.filter(row => row.kind === 'line').length)} of ${formatCount(
+      `${formatCount(visibleLineCount)} of ${formatCount(
         parsed.lineCount,
       )} Diff lines shown.`,
     ]
+    if (renderLimitReached) {
+      parts.push(`The viewer renders at most ${formatCount(MAX_RENDERED_DIFF_ROWS)} rows.`)
+    }
     if (diff.previewLimited) parts.push('Diff preview limit reached.')
     else if (diff.hasMore) {
       parts.push(`Showing the first ${formatCount(diff.loadedBytes)} of ${formatCount(
@@ -524,8 +619,8 @@ export function mountCandidateDiffViewer(
     effectiveMode = nextMode
     preferredMode = props.viewMode
     table.setAttribute('data-columns', effectiveMode === 'side-by-side' ? '4' : '3')
-    unifiedOption.setAttribute('aria-pressed', String(props.viewMode === 'unified'))
-    sideBySideOption.setAttribute('aria-pressed', String(props.viewMode === 'side-by-side'))
+    unifiedOption.setAttribute('aria-pressed', String(effectiveMode === 'unified'))
+    sideBySideOption.setAttribute('aria-pressed', String(effectiveMode === 'side-by-side'))
     sideBySideOption.disabled = narrowViewport
     viewToggle.dataset.narrow = String(narrowViewport)
 
@@ -538,7 +633,8 @@ export function mountCandidateDiffViewer(
           path: props.diff.path,
           fileDiffSha256: props.diff.fileDiffSha256,
         }
-    if (!sameIdentity(identity, nextIdentity)) {
+    const identityChanged = !sameIdentity(identity, nextIdentity)
+    if (identityChanged) {
       identity = nextIdentity
       collapsedContextHunks = new Set()
       renderedRowCount = rowLimit
@@ -547,13 +643,9 @@ export function mountCandidateDiffViewer(
     currentParsed = identity === null || props.diff.status !== 'ready'
       ? null
       : parseCandidateDiff(props.diff.content)
-    if (modeChanged) {
-      const previousScroll = scroll.scrollTop
-      renderRows()
-      scroll.scrollTop = previousScroll
-      return
-    }
-    renderRows()
+    const previousScroll = modeChanged ? scroll.scrollTop : null
+    renderRows(!identityChanged)
+    if (previousScroll !== null) scroll.scrollTop = previousScroll
     loadMore.hidden = props.diff.status !== 'error' && (
       props.diff.status !== 'ready' || !props.diff.hasMore
     )
