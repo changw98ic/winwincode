@@ -95,6 +95,50 @@ test('one typed StrongFlow route round-trips Delivery, history, Candidate, panel
   })
 })
 
+test('file paths with UTF-8 control bytes or Windows drive prefixes fail closed', () => {
+  for (const file of [
+    'src%0Aevil.ts',
+    'src%0D',
+    'src%09',
+    'src%7F',
+    'C%3Aevil.ts',
+  ]) assert.deepEqual(route.strongFlowRouteRequestFromHash(
+    `#/strongflow?delivery=${deliveryId}&file=${file}`,
+  ), { status: 'invalid', reason: 'invalid-route' })
+})
+
+test('canonical portable file paths and dtk_ task deep links stay valid', () => {
+  const hash = route.strongFlowRouteHash({
+    deliveryId,
+    productSessionId,
+    stageRunId,
+    historySelection: { taskId: 'dtk_portable_task', stageRunId: null },
+    candidateRef,
+    panel: 'candidate',
+    candidatePath: 'docs/architecture/deep link file.ts',
+    candidateView: 'unified',
+    candidateLine: null,
+  }, scope)
+  assert.deepEqual(route.strongFlowRouteRequestFromHash(hash), {
+    status: 'valid',
+    request: {
+      deliveryId,
+      productSessionId,
+      stageRunId,
+      historySelection: { taskId: 'dtk_portable_task', stageRunId: null },
+      candidateRef,
+      panel: 'candidate',
+      candidatePath: 'docs/architecture/deep link file.ts',
+      candidateView: 'unified',
+      candidateLine: null,
+    },
+  })
+  // A digit before the colon is not a Windows drive prefix and stays portable.
+  assert.equal(route.strongFlowRouteRequestFromHash(
+    `#/strongflow?delivery=${deliveryId}&file=1%3Arelative.txt`,
+  ).status, 'valid')
+})
+
 test('malformed, duplicate, and structurally incomplete route values fail closed', () => {
   for (const hash of [
     `#/strongflow?delivery=${deliveryId}&delivery=${deliveryId}`,

@@ -101,8 +101,9 @@ function validPath(value: string): boolean {
     && value.length <= 4096
     && !value.startsWith('/')
     && !value.includes('\\')
-    && !value.includes('\0')
+    && !new TextEncoder().encode(value).some(byte => byte <= 31 || byte === 127)
     && value.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+    && !(value[1] === ':' && /^[A-Za-z]/u.test(value))
 }
 
 function single(

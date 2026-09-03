@@ -744,6 +744,69 @@ test('Candidate deep links select the exact file after its bounded page arrives'
   assert.equal(client.calls[3].page.cursor, 'candidate-files:deep-link')
 })
 
+test('a file deep link that exhausts bounded pages without its target reports route stale without a Diff request', async () => {
+  const { client, model } = view(undefined, {
+    selectedCandidatePath: 'src/gone.ts',
+    onCandidatePathChange() {},
+  })
+  const currentCandidate = delivery().currentCandidate
+  for (const [index, hasMore, nextCursor] of [
+    [3, true, 'candidate-files:route-stale-2'],
+    [4, true, 'candidate-files:route-stale-3'],
+    [5, false, null],
+  ]) {
+    client.enqueue('candidate.files.list', {
+      schemaVersion,
+      requestId: requestId(index),
+      query: 'candidate.files.list',
+      result: {
+        kind: 'candidate_file_page',
+        candidate: currentCandidate,
+        readCursor: readCursor(),
+        items: [{
+          path: `src/page-${String(index - 2)}.ts`,
+          oldPath: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          encoding: 'utf-8',
+        }],
+      },
+      page: { hasMore, nextCursor },
+    })
+  }
+
+  await model.start()
+  await model.loadCandidateFiles()
+
+  assert.equal(model.state.candidateFiles.status, 'error')
+  assert.equal(
+    model.state.candidateFiles.error.code,
+    'STRONGFLOW_CANDIDATE_FILE_ROUTE_STALE',
+  )
+  assert.match(model.state.candidateFiles.error.message, /file named by this StrongFlow link/u)
+  assert.equal(model.state.candidateFiles.hasMore, false)
+  assert.equal(model.state.candidateFiles.selectedPath, 'src/gone.ts')
+  assert.deepEqual(model.state.candidateFiles.items.map(file => file.path), [
+    'src/page-1.ts',
+    'src/page-2.ts',
+    'src/page-3.ts',
+  ])
+  assert.deepEqual(client.calls.map(call => call.query), [
+    'delivery.get',
+    'runtime.projection.get',
+    'candidate.files.list',
+    'candidate.files.list',
+    'candidate.files.list',
+  ])
+  assert.deepEqual(
+    client.calls.filter(call => call.query === 'candidate.files.list')
+      .map(call => call.page.cursor),
+    [null, 'candidate-files:route-stale-2', 'candidate-files:route-stale-3'],
+  )
+})
+
 test('a pinned Candidate deep link fails closed when refresh replaces that Candidate', async () => {
   const initial = delivery()
   let pinnedCandidateRef = null
