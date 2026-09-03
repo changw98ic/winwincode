@@ -660,6 +660,7 @@ export function createStrongFlowViewModel(
 ): StrongFlowViewModel {
   const listeners = new Set<StrongFlowViewModelListener>()
   const controllers = new Set<AbortController>()
+  const commandControllers = new Set<AbortController>()
   let currentState = initialState()
   let realtime: ControlPlaneSubscription | null = null
   let generation = 0
@@ -669,7 +670,6 @@ export function createStrongFlowViewModel(
     stageRunId: options.stageRunId,
   })
   let acceptedDeliveryRevision: number | null = null
-  let supersedingGeneration: number | null = null
 
   function publish(state: StrongFlowViewModelState): void {
     currentState = Object.freeze(state)
@@ -686,13 +686,29 @@ export function createStrongFlowViewModel(
     return value
   }
 
+  function commandController(): AbortController {
+    const value = new AbortController()
+    commandControllers.add(value)
+    return value
+  }
+
   function releaseController(value: AbortController): void {
     controllers.delete(value)
+  }
+
+  function releaseCommandController(value: AbortController): void {
+    commandControllers.delete(value)
   }
 
   function abortRequests(): void {
     for (const active of controllers) active.abort()
     controllers.clear()
+  }
+
+  function abortAllRequests(): void {
+    abortRequests()
+    for (const active of commandControllers) active.abort()
+    commandControllers.clear()
   }
 
   function closeRealtime(): void {
@@ -854,7 +870,6 @@ export function createStrongFlowViewModel(
     minimum: StrongFlowSnapshotMinimum = {},
   ): Promise<EventReadCursor | null> {
     const active = controller()
-    let published = false
     try {
       const snapshot = await querySnapshot(active.signal, minimum)
       if (!operationIsCurrent(ownGeneration)) return null
@@ -871,7 +886,6 @@ export function createStrongFlowViewModel(
         interaction: frozenInteraction('idle'),
         error: null,
       })
-      published = true
       return projection.metadata.readCursor.eventCursor
     } catch (error) {
       if (!operationIsCurrent(ownGeneration)) return null
@@ -887,7 +901,6 @@ export function createStrongFlowViewModel(
       })
       throw normalized
     } finally {
-      if (supersedingGeneration === ownGeneration && !published) supersedingGeneration = null
       releaseController(active)
     }
   }
@@ -952,7 +965,6 @@ export function createStrongFlowViewModel(
         : {}
     generation += 1
     const ownGeneration = generation
-    supersedingGeneration = ownGeneration
     abortRequests()
     clearForReload('refreshing')
     await completeSnapshot(ownGeneration, 'subscribed', minimum)
@@ -960,8 +972,7 @@ export function createStrongFlowViewModel(
 
   function accessRevoked(error: ControlPlaneClientError): void {
     generation += 1
-    supersedingGeneration = null
-    abortRequests()
+    abortAllRequests()
     closeRealtime()
     publish({
       status: statusForError(error),
@@ -999,7 +1010,6 @@ export function createStrongFlowViewModel(
         )
         generation += 1
         const ownGeneration = generation
-        supersedingGeneration = ownGeneration
         abortRequests()
         clearForReload('refreshing')
         const next = await completeSnapshot(ownGeneration, 'subscribed')
@@ -1025,15 +1035,6 @@ export function createStrongFlowViewModel(
           accessRevoked(error)
           return
         }
-        if (
-          error.code === 'REQUEST_CANCELLED'
-          && error.requestId === null
-          && supersedingGeneration === generation
-        ) {
-          supersedingGeneration = null
-          return
-        }
-        if (supersedingGeneration === generation) supersedingGeneration = null
         patch({ realtime: 'reconnecting', error })
       },
     })
@@ -1114,7 +1115,7 @@ export function createStrongFlowViewModel(
     const projection = commandProjection()
     if (projection === null) return
     const ownGeneration = generation
-    const active = controller()
+    const active = commandController()
     let requestId = options.nextRequestId()
     let commandRequest = request(projection, requestId)
     const trustedFactsRetryDeadline = Date.now()
@@ -1151,7 +1152,7 @@ export function createStrongFlowViewModel(
       if (!operationIsCurrent(ownGeneration)) return
       patch({ interaction: frozenInteraction('error', normalizedError(error, active.signal)) })
     } finally {
-      releaseController(active)
+      releaseCommandController(active)
     }
   }
 
@@ -1349,8 +1350,7 @@ export function createStrongFlowViewModel(
     cancelPending() {
       if (closed) return
       generation += 1
-      supersedingGeneration = null
-      abortRequests()
+      abortAllRequests()
       closeRealtime()
       publish({
         status: 'cancelled',
@@ -1388,8 +1388,7 @@ export function createStrongFlowViewModel(
       if (closed) return
       closed = true
       generation += 1
-      supersedingGeneration = null
-      abortRequests()
+      abortAllRequests()
       closeRealtime()
       publish({
         status: 'closed',
