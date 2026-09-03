@@ -89,7 +89,7 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
   assert.match(result.initial.fileSummary, /3 files loaded/u)
   assert.equal(result.initial.selectedPath, 'src/renamed.ts')
   assert.match(result.initial.hash, /&file=src%2Frenamed\.ts&view=unified$/u)
-  assert.equal(result.mainCount, 1)
+  assert.equal(result.mainRegionCount, 1)
 
   assert.match(result.search.matchStatus, /Match 1 of 1/u)
   assert.match(result.search.activeText, /\+const kappa = 3/u)
