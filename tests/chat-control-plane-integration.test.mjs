@@ -162,6 +162,9 @@ function approval(state = 'pending', revision = 1, id = productSessionId) {
     revision,
     state,
     subject: 'Allow one bounded tool call',
+    category: 'shell',
+    effectiveDecisionScope: 'once',
+    sanitizedDetail: { kind: 'unavailable', reason: 'producer_unavailable' },
     binding: binding(id),
   }
 }
