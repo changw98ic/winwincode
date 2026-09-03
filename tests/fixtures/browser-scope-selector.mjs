@@ -157,11 +157,21 @@ function control(level) {
 
 async function choose(level, value) {
   const selector = control(level)
+  selector.focus()
   selector.value = value
   selector.dispatchEvent(new Event('change', { bubbles: true }))
   await waitFor(() => new URLSearchParams(location.hash.split('?')[1] ?? '').get(
     `${level}Id`,
   ) === value, `${level} selection`)
+  return {
+    activeId: document.activeElement?.id ?? null,
+    bodyHasFocus: document.activeElement === document.body,
+    connected: selector.isConnected,
+    insideSelector: document.querySelector('.wwc-scope-selector')?.contains(
+      document.activeElement,
+    ) ?? false,
+    sameNode: control(level) === selector,
+  }
 }
 
 function selectorState() {
@@ -189,13 +199,16 @@ function selectorState() {
 }
 
 async function chooseRepository(scope) {
-  await choose('organization', scope.organizationId)
-  await choose('workspace', scope.workspaceId)
-  await choose('project', scope.projectId)
-  await choose('repository', scope.repositoryId)
+  const focusTransitions = {
+    organization: await choose('organization', scope.organizationId),
+    workspace: await choose('workspace', scope.workspaceId),
+    project: await choose('project', scope.projectId),
+    repository: await choose('repository', scope.repositoryId),
+  }
   await waitFor(() => queries.some(query => (
     query.query === 'settings.get' && query.scope.repositoryId === scope.repositoryId
   )), 'repository settings')
+  return focusTransitions
 }
 
 globalThis.scopeSelectorReady = () => true
@@ -205,13 +218,14 @@ globalThis.runScopeSelection = async () => {
   await waitFor(() => control('organization') !== null, 'Scope selector')
   const initial = selectorState()
   const initialProductReads = queries.filter(query => query.query === 'settings.get').length
-  await chooseRepository(repositoryTwo)
+  const focusTransitions = await chooseRepository(repositoryTwo)
   await waitFor(() => subscriptions.length > 0, 'settings subscription')
   const selected = selectorState()
   return {
     hash: location.hash,
     initial,
     initialProductReads,
+    focusTransitions,
     selected,
     selectedProductScopes: queries
       .filter(query => query.query === 'settings.get')

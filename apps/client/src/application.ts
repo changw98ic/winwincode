@@ -89,6 +89,8 @@ interface MountedClientFeature {
   close(): void
 }
 
+type ScopeSelectorRenderMode = 'replace' | 'preserve'
+
 function element<K extends keyof HTMLElementTagNameMap>(
   document: Document,
   tag: K,
@@ -914,15 +916,17 @@ export function mountWinWinCodeClient(
     }
   }
 
-  function performRender(): void {
+  function performRender(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
     renderGeneration += 1
     const generation = renderGeneration
     featureController?.abort()
     featureController = null
     activeFeature?.close()
     activeFeature = null
-    scopeSelectorPage?.close()
-    scopeSelectorPage = null
+    if (scopeSelectorMode === 'replace') {
+      scopeSelectorPage?.close()
+      scopeSelectorPage = null
+    }
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
     for (const link of links.values()) link.removeAttribute('data-route-access')
@@ -958,27 +962,33 @@ export function mountWinWinCodeClient(
           })
         : resolved
       currentScopeResolution = resolution
-      const model = createScopeSelectorViewModel({
-        client: rawControlPlane,
-        actor: session.actor,
-        authorizedScopes: session.authorizedScopes,
-        selection: resolution.selection,
-        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        onSelectionChange(nextSelection) {
-          if (closed || scopeSelectorPage === null) return
-          if (selectionLeavesRevokedScope(nextSelection)) revokedScopeIdentity = null
-          replaceHash(scopeHash(browser.location.hash, nextSelection))
-          render()
-        },
-      })
-      scopeSelectorPage = mountScopeSelectorPage({
-        root: scopeRoot,
-        model,
-        contextStatus: resolution.status,
-      })
-      if (!routeAccessDenied && resolution.status !== 'denied') void model.start()
+      if (scopeSelectorPage === null) {
+        const model = createScopeSelectorViewModel({
+          client: rawControlPlane,
+          actor: session.actor,
+          authorizedScopes: session.authorizedScopes,
+          selection: resolution.selection,
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+          onSelectionChange(nextSelection) {
+            if (closed || scopeSelectorPage === null) return
+            if (selectionLeavesRevokedScope(nextSelection)) revokedScopeIdentity = null
+            replaceHash(scopeHash(browser.location.hash, nextSelection))
+            render('preserve')
+          },
+        })
+        scopeSelectorPage = mountScopeSelectorPage({
+          root: scopeRoot,
+          model,
+          contextStatus: resolution.status,
+        })
+        if (!routeAccessDenied && resolution.status !== 'denied') void model.start()
+      } else {
+        scopeSelectorPage.updateContextStatus(resolution.status)
+      }
       scopeRoot.hidden = false
     } else {
+      scopeSelectorPage?.close()
+      scopeSelectorPage = null
       scopeRoot.hidden = true
       scopeRoot.replaceChildren()
     }
@@ -1019,9 +1029,9 @@ export function mountWinWinCodeClient(
     })
   }
 
-  function render(): void {
+  function render(scopeSelectorMode: ScopeSelectorRenderMode = 'replace'): void {
     try {
-      performRender()
+      performRender(scopeSelectorMode)
     } catch (error) {
       showRouteFailure(error, 'CLIENT_RENDER_FAILURE')
     }

@@ -78,6 +78,15 @@ test('real Chrome cascades, switches, restores, and revokes one exact Scope', as
   assert.equal(selected.selectedProductScopes.every(scope => (
     scope.repositoryId === 'rep_00000000000000000000000002'
   )), true)
+  for (const level of ['organization', 'workspace', 'project', 'repository']) {
+    assert.deepEqual(selected.focusTransitions[level], {
+      activeId: `wwc-scope-${level}`,
+      bodyHasFocus: false,
+      connected: true,
+      insideSelector: true,
+      sameNode: true,
+    })
+  }
 
   const switched = await evaluate(
     devtools,

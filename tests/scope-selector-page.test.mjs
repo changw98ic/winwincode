@@ -189,3 +189,37 @@ test('revoked URL context is announced and network metadata failures offer retry
   assert.deepEqual(model.calls, [['retry']])
   page.close()
 })
+
+test('context access status updates in place without replacing Scope controls', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const model = modelFake()
+  const page = mountScopeSelectorPage({
+    root: rootElement,
+    model,
+    contextStatus: 'selection-required',
+  })
+  const controls = descendants(rootElement).filter(node => node.tagName === 'SELECT')
+  const access = descendants(rootElement).find(node => (
+    node.className === 'wwc-scope-selector-access'
+  ))
+
+  page.updateContextStatus('selected')
+
+  assert.equal(access.hidden, true)
+  assert.deepEqual(
+    descendants(rootElement).filter(node => node.tagName === 'SELECT'),
+    controls,
+  )
+
+  page.updateContextStatus('denied')
+
+  assert.equal(access.hidden, false)
+  assert.equal(access.getAttribute('role'), 'alert')
+  assert.match(access.textContent, /no longer authorized/iu)
+  assert.deepEqual(
+    descendants(rootElement).filter(node => node.tagName === 'SELECT'),
+    controls,
+  )
+  page.close()
+})

@@ -334,10 +334,16 @@ test('switching an active Scope closes old subscriptions before the next context
   const fixture = mount(hash, facadeFake(session([repositoryOne, repositoryTwo])))
   await waitFor(() => fixture.client.subscriptions.length > 0, 'settings subscription')
   const oldSubscription = fixture.client.subscriptions.at(-1)
+  const mountedControls = scopeControls(fixture.rootElement)
 
   choose(fixture.rootElement, 'organization', repositoryTwo.organizationId)
 
   await waitFor(() => oldSubscription.handle.closed, 'old subscription close')
+  const currentControls = scopeControls(fixture.rootElement)
+  assert.equal(currentControls.organization, mountedControls.organization)
+  assert.equal(currentControls.workspace, mountedControls.workspace)
+  assert.equal(currentControls.project, mountedControls.project)
+  assert.equal(currentControls.repository, mountedControls.repository)
   assert.equal(
     fixture.client.queries.filter(call => call.request.query === 'settings.get').length,
     1,

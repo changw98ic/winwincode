@@ -19,6 +19,7 @@ export interface ScopeSelectorPageOptions {
 }
 
 export interface ScopeSelectorPage {
+  updateContextStatus(status: ScopeSelectorPageOptions['contextStatus']): void
   close(): void
 }
 
@@ -112,9 +113,6 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
 
   region.setAttribute('aria-label', 'Current Scope')
   heading.textContent = 'Scope'
-  access.setAttribute('role', options.contextStatus === 'denied' ? 'alert' : 'status')
-  access.textContent = accessMessage(options.contextStatus)
-  access.hidden = options.contextStatus === 'selected'
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
   retry.type = 'button'
@@ -122,6 +120,17 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
   controls.append(organization.root, workspace.root, project.root, repository.root)
   region.append(heading, access, controls, status, retry)
   options.root.replaceChildren(region)
+
+  function updateContextStatus(
+    contextStatus: ScopeSelectorPageOptions['contextStatus'],
+  ): void {
+    if (closed) return
+    access.setAttribute('role', contextStatus === 'denied' ? 'alert' : 'status')
+    access.textContent = accessMessage(contextStatus)
+    access.hidden = contextStatus === 'selected'
+  }
+
+  updateContextStatus(options.contextStatus)
 
   function render(state: ScopeSelectorViewModelState): void {
     if (closed) return
@@ -194,6 +203,7 @@ export function mountScopeSelectorPage(options: ScopeSelectorPageOptions): Scope
   retry.addEventListener('click', onRetry)
 
   return {
+    updateContextStatus,
     close() {
       if (closed) return
       closed = true
