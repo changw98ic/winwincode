@@ -120,6 +120,7 @@ function routeParameters(hash: string): URLSearchParams {
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
 }
 
+/** The one canonical typed route seam for every StrongFlow deep link. */
 export function strongFlowRouteHash(
   deliveryId: DeliveryId,
   productSessionId: ProductSessionId,

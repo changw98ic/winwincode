@@ -231,7 +231,7 @@ globalThis.runCandidateDiffScenario = async () => {
       .map(node => `${node.dataset.mode}:${node.getAttribute('aria-pressed')}`),
     status: query('.wwc-candidate-diff-status').textContent,
     fileSummary: query('.wwc-candidate-file-summary').textContent,
-    selectedPath: query('[aria-selected="true"]')?.dataset.path ?? null,
+    selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
     hash: location.hash,
   }
 
@@ -269,7 +269,7 @@ globalThis.runCandidateDiffScenario = async () => {
     modifiedLine: lineRows().find(row => row.dataset.type === 'modified')?.textContent ?? null,
     searchDraft: query('.wwc-candidate-diff-search').value,
     hash: location.hash,
-    selectedPath: query('[aria-selected="true"]')?.dataset.path ?? null,
+    selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
     scrollTop: query('.wwc-candidate-diff-content').scrollTop,
     pressed: [...document.querySelectorAll('.wwc-candidate-diff-view-option')]
       .map(node => `${node.dataset.mode}:${node.getAttribute('aria-pressed')}`),
@@ -313,7 +313,7 @@ globalThis.runCandidateDiffScenario = async () => {
     loadedMore,
     binary,
     narrow: {},
-    mainCount: document.querySelectorAll('main').length,
+    mainRegionCount: document.querySelectorAll('.wwc-strongflow-main-region').length,
   }
 }
 

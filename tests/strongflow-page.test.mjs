@@ -730,6 +730,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       'psn_00000000000000000000000002',
       'run_00000000000000000000000003',
       'src/current file.ts',
+      'unified',
       {
         organizationId: 'org_00000000000000000000000001',
         workspaceId: 'wsp_00000000000000000000000001',
@@ -741,6 +742,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
       + '&file=src%2Fcurrent+file.ts'
+      + '&view=unified'
       + '&organizationId=org_00000000000000000000000001'
       + '&workspaceId=wsp_00000000000000000000000001'
       + '&projectId=prj_00000000000000000000000001'
