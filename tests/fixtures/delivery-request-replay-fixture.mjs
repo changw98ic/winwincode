@@ -134,6 +134,7 @@ export class DeliveryRequestReplayFixture {
     this.deliveryId = options.deliveryId ?? DEFAULT_DELIVERY_ID
     this.clock = new DeterministicReplayClock(options.clockStart)
     this.repositoryIdentity = options.repositoryIdentity
+    this.#ownsRoot = options.ownsRoot
     this.diagramFacts = { runtimeEvents: Object.freeze([]), candidate: null }
     this.authenticator = createStrongFlowDeliveryLocalProofAuthenticator({
       localSessionProof: DELIVERY_FIXTURE_UI_PROOF,
@@ -157,21 +158,26 @@ export class DeliveryRequestReplayFixture {
     const root = options.root === undefined
       ? await mkdtemp(join(tmpdir(), 'winwincode-delivery-replay-'))
       : resolve(options.root)
-    await mkdir(root, { recursive: true })
-    const repository = join(root, 'repository')
-    let repositoryIdentity
     try {
-      repositoryIdentity = await readRepositoryIdentity(repository)
-    } catch {
-      repositoryIdentity = await initializeRepository(repository)
+      await mkdir(root, { recursive: true })
+      const repository = join(root, 'repository')
+      let repositoryIdentity
+      try {
+        repositoryIdentity = await readRepositoryIdentity(repository)
+      } catch {
+        repositoryIdentity = await initializeRepository(repository)
+      }
+      await mkdir(join(root, 'home'), { recursive: true })
+      return new DeliveryRequestReplayFixture({
+        ...options,
+        root,
+        ownsRoot,
+        repositoryIdentity,
+      })
+    } catch (error) {
+      if (ownsRoot) await rm(root, { recursive: true, force: true })
+      throw error
     }
-    await mkdir(join(root, 'home'), { recursive: true })
-    return new DeliveryRequestReplayFixture({
-      ...options,
-      root,
-      ownsRoot,
-      repositoryIdentity,
-    })
   }
 
   spec(revision, suffix = `v${String(revision)}`) {
@@ -218,7 +224,9 @@ export class DeliveryRequestReplayFixture {
   }
 
   cleanup() {
-    this.#cleanupPromise ??= rm(this.root, { recursive: true, force: true })
+    this.#cleanupPromise ??= (this.#ownsRoot
+      ? rm(this.root, { recursive: true, force: true })
+      : Promise.resolve())
     return this.#cleanupPromise
   }
 }
