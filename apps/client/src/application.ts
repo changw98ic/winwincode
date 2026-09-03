@@ -46,7 +46,6 @@ import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
   DeliveryId,
-  DeliveryListResultResponse,
   ProductSessionId,
   RepositoryScope,
   RequestId,
@@ -709,30 +708,44 @@ export function mountWinWinCodeClient(
   }
 
   async function renderStrongFlow(generation: number): Promise<void> {
-    const context = authenticatedRouteContext()
-    if (context === null) return
+    const routeContext = authenticatedRouteContext()
+    if (routeContext === null) return
     const controller = new AbortController()
     featureController = controller
     routeLoading('Loading StrongFlow…')
-    try {
-      const parameters = routeParameters(browser.location.hash)
-      const deliveriesValue = await controlPlane.query({
-        schemaVersion: 'winwincode/v1',
-        requestId: contractId('req', browser.crypto) as RequestId,
+    const context = routeContext
+    let deliveryList: Awaited<ReturnType<typeof createStrongFlowDeliveryList>> | null = null
+    async function createStrongFlowDeliveryList() {
+      const { createStrongFlowDeliveryListViewModel } = await import(
+        './strongflow-delivery-list-view-model.js'
+      )
+      const list = createStrongFlowDeliveryListViewModel({
+        client: controlPlane,
         actor: context.actor,
         scope: context.scope,
-        query: QueryName.DeliveryList,
-        parameters: { states: [] },
-        page: { cursor: null, limit: 50 },
-      }, { signal: controller.signal })
-      if (deliveriesValue.query !== QueryName.DeliveryList) {
-        throw new Error('The StrongFlow route received another list response.')
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+      })
+      await list.start()
+      return list
+    }
+    try {
+      const parameters = routeParameters(browser.location.hash)
+      deliveryList = await createStrongFlowDeliveryList()
+      if (closed || generation !== renderGeneration || controller.signal.aborted) {
+        deliveryList.close()
+        return
       }
-      const deliveries = (deliveriesValue as DeliveryListResultResponse).result.items
-      const deliveryId = (
-        parameters.get('delivery') as DeliveryId | null
-      ) ?? deliveries[0]?.deliveryId ?? null
+      const routeDeliveryId = parameters.get('delivery') as DeliveryId | null
+      // A failed first page leaves no honest fallback selection: fail the route
+      // instead of showing the empty-repository create surface.
+      if (routeDeliveryId === null && deliveryList.state.error !== null) {
+        throw new Error('The Delivery list could not be loaded for this repository.')
+      }
+      const deliveries = deliveryList.state.visible
+      const deliveryId = routeDeliveryId ?? deliveries[0]?.deliveryId ?? null
       if (deliveryId === null) {
+        deliveryList.close()
+        deliveryList = null
         const [{ createStrongFlowCreateViewModel }, { mountStrongFlowCreatePage }] = await Promise.all([
           import('./strongflow-view-model.js'),
           import('./strongflow-page.js'),
@@ -786,10 +799,16 @@ export function mountWinWinCodeClient(
         parameters.get('session') as ProductSessionId | null
       ) ?? stage?.sessionBinding?.productSessionId ?? null
       if (stage === undefined || stage.sessionBinding === null || productSessionId === null) {
+        deliveryList.close()
+        deliveryList = null
         routeUnavailable('This Delivery does not have an executable StrongFlow stage yet.')
         return
       }
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      if (closed || generation !== renderGeneration || controller.signal.aborted) {
+        deliveryList.close()
+        deliveryList = null
+        return
+      }
       let routeProductSessionId = productSessionId
       let routeStageRunId = stage.id
       if (
@@ -809,7 +828,11 @@ export function mountWinWinCodeClient(
         import('./strongflow-view-model.js'),
         import('./strongflow-page.js'),
       ])
-      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      if (closed || generation !== renderGeneration || controller.signal.aborted) {
+        deliveryList.close()
+        deliveryList = null
+        return
+      }
       const model = createStrongFlowViewModel({
         client: controlPlane,
         actor: context.actor,
@@ -850,11 +873,14 @@ export function mountWinWinCodeClient(
       activeFeature = mountStrongFlowPage({
         root: slot,
         model,
-        deliveries,
+        deliveryList,
         routeScope: scopeSelectionFromHash(browser.location.hash),
         readOnly: activeRouteReadOnly,
       })
+      deliveryList = null
     } catch (error) {
+      deliveryList?.close()
+      deliveryList = null
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       showRouteFailure(error, 'STRONGFLOW_ROUTE_FAILURE')
     }

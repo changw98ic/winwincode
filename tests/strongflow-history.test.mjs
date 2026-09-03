@@ -65,7 +65,6 @@ const planningRunId = 'run_00000000000000000000000003'
 const reviewRunId = 'run_00000000000000000000000004'
 
 const limits = {
-  deliveries: 50,
   tasks: 100,
   stages: 50,
   attention: 50,
@@ -74,6 +73,49 @@ const limits = {
   graphNodes: 100,
   graphEdges: 200,
   activities: 100,
+}
+
+class FakeDeliveryListModel {
+  constructor(visible) {
+    this.state = {
+      status: 'ready',
+      filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+      visible,
+      loadedCount: visible.length,
+      hasMore: false,
+      loadingMore: false,
+      moreFailure: null,
+      error: null,
+      advance: { deliveryId: null, failure: null },
+    }
+  }
+
+  calls = []
+  listener = null
+
+  subscribe(listener) {
+    this.listener = listener
+    listener(this.state)
+    return () => { this.listener = null }
+  }
+
+  publish(next) {
+    this.state = next
+    this.listener?.(next)
+  }
+
+  async refresh() { this.calls.push(['refresh']) }
+  async loadMore() { this.calls.push(['loadMore']) }
+  setSearch(value) { this.calls.push(['setSearch', value]) }
+  async setStatusFilter(value) { this.calls.push(['setStatusFilter', value]) }
+  setAttentionOnly(value) { this.calls.push(['setAttentionOnly', value]) }
+  setOrder(value) { this.calls.push(['setOrder', value]) }
+  async advanceDelivery(id, revision) { this.calls.push(['advanceDelivery', id, revision]) }
+  close() { this.calls.push(['close']) }
+}
+
+function fakeDeliveryList(visible) {
+  return new FakeDeliveryListModel(visible)
 }
 
 function historyProjection() {
@@ -1021,14 +1063,14 @@ test('the page restores history selection from a deep link and keeps the URL aut
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: [{
+    deliveryList: fakeDeliveryList([{
       schemaVersion: 'winwincode/v1',
       deliveryId,
       revision: 7,
       status: 'executing',
       title: 'History navigation Delivery',
       updatedAt: '2026-09-02T08:12:30.000Z',
-    }],
+    }]),
     limits,
     historyLocation: location,
   })
@@ -1088,6 +1130,7 @@ test('historical attempt review blocks current Delivery mutation controls', () =
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
+    deliveryList: fakeDeliveryList([]),
     limits,
     historyLocation: new FakeHistoryLocation(
       `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
@@ -1178,6 +1221,7 @@ test('historical review disables every current Delivery mutation control, double
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
+    deliveryList: fakeDeliveryList([]),
     limits,
     historyLocation: new FakeHistoryLocation(
       `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
@@ -1310,7 +1354,7 @@ test('a crossed task/run deep link is normalized onto the canonical association 
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: [],
+    deliveryList: fakeDeliveryList([]),
     limits,
     historyLocation: location,
   })
@@ -1356,6 +1400,7 @@ test('an unchanged historical selection reloads exact payloads when the snapshot
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
+    deliveryList: fakeDeliveryList([]),
     limits,
     historyLocation: new FakeHistoryLocation(
       `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
@@ -1410,7 +1455,7 @@ test('the page shows empty history notes instead of dead lists', () => {
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
-    deliveries: [],
+    deliveryList: fakeDeliveryList([]),
     limits,
   })
   const taskList = findByClass(rootElement, 'wwc-strongflow-task-list')

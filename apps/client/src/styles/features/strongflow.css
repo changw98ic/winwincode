@@ -206,6 +206,121 @@
   background: var(--wwc-color-surface-subtle);
 }
 
+.wwc-delivery-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--wwc-space-2);
+  margin-bottom: var(--wwc-space-3);
+}
+
+.wwc-delivery-field {
+  display: grid;
+  gap: var(--wwc-space-1);
+  font-size: var(--wwc-font-size-xs);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-delivery-field input[type='text'],
+.wwc-delivery-field select {
+  min-width: var(--wwc-space-8);
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+  font: inherit;
+}
+
+.wwc-delivery-view-switch {
+  display: flex;
+  gap: var(--wwc-space-1);
+}
+
+.wwc-delivery-feedback,
+.wwc-delivery-loaded-note,
+.wwc-delivery-empty {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-delivery-alert {
+  display: grid;
+  gap: var(--wwc-space-2);
+  margin-bottom: var(--wwc-space-3);
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-text);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+}
+
+.wwc-delivery-alert p {
+  margin: var(--wwc-space-0);
+  overflow-wrap: anywhere;
+}
+
+.wwc-delivery-alert-action {
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  margin-right: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.wwc-delivery-kanban-view {
+  display: grid;
+  gap: var(--wwc-space-3);
+}
+
+.wwc-delivery-kanban-column {
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-delivery-kanban-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-delivery-kanban-column-list {
+  margin: var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+}
+
+.wwc-delivery-kanban-card {
+  margin-bottom: var(--wwc-space-2);
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+}
+
+.wwc-delivery-kanban-card a {
+  color: var(--wwc-color-info-text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.wwc-delivery-kanban-card span {
+  display: block;
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+@media (max-width: 64rem) {
+  .wwc-delivery-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+
 .wwc-strongflow-deliveries-heading,
 .wwc-strongflow-heading,
 .wwc-strongflow-section-heading,

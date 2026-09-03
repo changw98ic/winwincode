@@ -20,6 +20,11 @@ import {
   type EditableDraft,
 } from './editable-draft.js'
 import { mountStrongFlowCandidate } from './strongflow-candidate.js'
+import {
+  mountStrongFlowDeliveryList,
+  type StrongFlowDeliveryListView,
+} from './strongflow-delivery-list-page.js'
+import type { StrongFlowDeliveryListViewModel } from './strongflow-delivery-list-view-model.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
@@ -60,7 +65,8 @@ export const STRONGFLOW_NARROW_VIEWPORT_WIDTH = 1_024
 export interface StrongFlowPageOptions {
   readonly root: HTMLElement
   readonly model: StrongFlowViewModel
-  readonly deliveries?: readonly DeliveryProjection[]
+  /** Server-cursored Delivery list behind the navigation panel. */
+  readonly deliveryList: StrongFlowDeliveryListViewModel
   readonly limits?: StrongFlowRenderLimits
   readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
   readonly viewport?: StrongFlowLayoutViewport
@@ -709,13 +715,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'wwc-strongflow-context-drawer-content',
   )
   const deliveriesRoot = strongFlowElement(document, 'aside', 'wwc-strongflow-deliveries')
-  const deliveriesHeading = strongFlowElement(
-    document,
-    'h2',
-    'wwc-strongflow-deliveries-heading',
-  )
-  const deliveries = strongFlowElement(document, 'ul', 'wwc-strongflow-delivery-list')
-  const deliveriesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
   const details = strongFlowElement(document, 'div', 'wwc-strongflow-details')
   const empty = strongFlowElement(document, 'p', 'wwc-strongflow-empty')
   const overview = strongFlowElement(document, 'section', 'wwc-strongflow-overview')
@@ -841,7 +840,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   // never each re-derive their own copy of the same business display state.
   let historyTree: StrongFlowHistoryTree | null = null
   let historyTreeSource: StrongFlowProjection | null = null
-  let activeDeliveryId: string | null = null
   type ReviewDraftValues = {
     readonly comments: string
     readonly requestedChanges: string
@@ -889,7 +887,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   artifacts.id = 'wwc-strongflow-artifacts'
   artifacts.setAttribute('aria-label', 'Delivery artifacts')
   artifactsHeading.textContent = 'Delivery artifacts'
-  deliveriesHeading.textContent = 'Deliveries'
   tasksHeading.textContent = 'Tasks'
   stagesHeading.textContent = 'Stages'
   attentionHeading.textContent = 'Attention'
@@ -1076,7 +1073,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     rejectSolution,
   )
   error.append(errorText, retry, reconnect)
-  deliveriesRoot.append(deliveriesHeading, deliveries, deliveriesOmitted)
   overview.append(heading, goal, metadata)
   tasksSection.append(tasksHeading, tasks, tasksEmpty, tasksOmitted)
   stagesSection.append(stagesHeading, stages, stagesEmpty, stagesOmitted)
@@ -1125,38 +1121,15 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   })
   candidateHost.append(candidateView.root)
 
-  const deliveryRows = new WeakMap<HTMLLIElement, {
-    readonly link: HTMLAnchorElement
-    readonly status: HTMLElement
-  }>()
-  const deliveryCollection = mountKeyedCollection({
-    parent: deliveries,
-    key: (delivery: DeliveryProjection) => delivery.deliveryId,
-    create() {
-      const item = document.createElement('li')
-      const link = document.createElement('a')
-      const deliveryStatus = document.createElement('span')
-      item.append(link, deliveryStatus)
-      deliveryRows.set(item, { link, status: deliveryStatus })
-      return item
+  const deliveryListPage = mountStrongFlowDeliveryList({
+    root: deliveriesRoot,
+    model: options.deliveryList,
+    view: preferences.deliveriesView,
+    onViewChange(nextView: StrongFlowDeliveryListView) {
+      persist({ ...preferences, deliveriesView: nextView })
     },
-    update(item, delivery: DeliveryProjection) {
-      const row = deliveryRows.get(item)
-      if (row === undefined) return
-      const route = `#/strongflow?delivery=${encodeURIComponent(delivery.deliveryId)}`
-      row.link.href = options.routeScope === undefined
-        ? route
-        : scopeHash(route, options.routeScope)
-      row.link.textContent = delivery.title
-      row.link.dataset.deliveryId = delivery.deliveryId
-      row.status.textContent = `${delivery.status} · r${String(delivery.revision)}`
-      if (delivery.deliveryId === activeDeliveryId) {
-        row.link.setAttribute('aria-current', 'page')
-      } else {
-        row.link.removeAttribute('aria-current')
-      }
-    },
-    remove(item) { deliveryRows.delete(item) },
+    readOnly,
+    ...(options.routeScope === undefined ? {} : { routeScope: options.routeScope }),
   })
 
   const runDetail = mountStrongFlowRunDetail({
@@ -1597,37 +1570,34 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   keepReviewDraft.addEventListener('click', onKeepReviewDraft)
   useServerReview.addEventListener('click', onUseServerReview)
 
-  function renderDeliveries(state: StrongFlowViewModelState): void {
+  /** The exact open Delivery as a list-row projection, kept visible across filters. */
+  function activeDeliverySummary(state: StrongFlowViewModelState): DeliveryProjection | null {
     const active = state.projection?.delivery ?? null
-    activeDeliveryId = active?.deliveryId ?? null
-    const byId = new Map(
-      (options.deliveries ?? []).map(delivery => [delivery.deliveryId, delivery]),
-    )
-    if (active !== null && !byId.has(active.deliveryId)) {
-      byId.set(active.deliveryId, {
-        schemaVersion: active.schemaVersion,
-        deliveryId: active.deliveryId,
-        revision: active.deliveryRevision,
-        status: active.status,
-        title: active.requirements.title,
-        updatedAt: state.projection?.metadata.updatedAt ?? '',
-        ownership: active.ownership,
-        activeStageRunId: state.projection?.stage.id ?? null,
-        openAttentionCount: active.attention.filter(item => item.status === 'open').length,
-        taskCounts: {
-          total: active.tasks.length,
-          pending: active.tasks.filter(item => item.status === 'pending').length,
-          active: active.tasks.filter(item => item.status === 'active').length,
-          blocked: active.tasks.filter(item => item.status === 'blocked').length,
-          verifying: active.tasks.filter(item => item.status === 'verifying').length,
-          completed: active.tasks.filter(item => item.status === 'completed').length,
-          failed: active.tasks.filter(item => item.status === 'failed').length,
-        },
-      })
+    if (active === null) return null
+    return {
+      schemaVersion: active.schemaVersion,
+      deliveryId: active.deliveryId,
+      revision: active.deliveryRevision,
+      status: active.status,
+      title: active.requirements.title,
+      updatedAt: state.projection?.metadata.updatedAt ?? '',
+      ownership: active.ownership,
+      activeStageRunId: state.projection?.stage.id ?? null,
+      openAttentionCount: active.attention.filter(item => item.status === 'open').length,
+      taskCounts: {
+        total: active.tasks.length,
+        pending: active.tasks.filter(item => item.status === 'pending').length,
+        active: active.tasks.filter(item => item.status === 'active').length,
+        blocked: active.tasks.filter(item => item.status === 'blocked').length,
+        verifying: active.tasks.filter(item => item.status === 'verifying').length,
+        completed: active.tasks.filter(item => item.status === 'completed').length,
+        failed: active.tasks.filter(item => item.status === 'failed').length,
+      },
     }
-    const bounded = boundedItems([...byId.values()], limits.deliveries)
-    deliveryCollection.update(bounded.items)
-    updateOmitted(deliveriesOmitted, bounded.omitted, 'Deliveries')
+  }
+
+  function renderDeliveries(state: StrongFlowViewModelState): void {
+    deliveryListPage.setActive(activeDeliverySummary(state))
   }
 
   function renderProjection(
@@ -2010,6 +1980,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
 
+  let lastRealtime: StrongFlowViewModelState['realtime'] | null = null
+
   function render(state: StrongFlowViewModelState): void {
     if (closed) return
     const presentation = strongFlowPagePresentation(state)
@@ -2019,6 +1991,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     errorText.textContent = presentation.errorText ?? ''
     retry.hidden = !presentation.retryVisible
     reconnect.hidden = !presentation.reconnectVisible
+    // Each realtime event batch invalidates the cached Delivery pages, so one
+    // rising edge rebuilds the list snapshot from the first page.
+    if (state.realtime === 'reloading' && lastRealtime !== 'reloading') {
+      void options.deliveryList.refresh()
+    }
+    lastRealtime = state.realtime
     renderDeliveries(state)
     renderProjection(state.projection, state.status, state.candidateFiles)
     renderActions(state)
@@ -2054,7 +2032,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       attentionCollection.close()
       historyNavigation.close()
       runDetail.close()
-      deliveryCollection.close()
+      deliveryListPage.close()
+      options.deliveryList.close()
       diagramsNode?.remove()
       candidateView.close()
       contextEvidenceNode?.remove()

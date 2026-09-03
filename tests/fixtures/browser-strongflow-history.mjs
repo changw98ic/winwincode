@@ -416,16 +416,55 @@ const model = new BrowserStrongFlowModel()
 const baseHash = `#/strongflow?delivery=${deliveryId}&session=psn_00000000000000000000000002&stageRun=${currentRunId}`
 // A deliberately crossed deep link: task:browser2 does not own the failed run.
 history.replaceState(null, '', `/${baseHash}&task=task%3Abrowser2&run=${failedRunId}`)
+const deliveryList = {
+  state: {
+    status: 'ready',
+    filters: { search: '', status: null, attentionOnly: false, order: 'recent' },
+    visible: [{
+      schemaVersion: 'winwincode/v1',
+      deliveryId,
+      title: 'Real browser history navigation',
+      revision: 6,
+      status: 'ready-to-deliver',
+      updatedAt: '2026-09-02T08:12:30.000Z',
+      openAttentionCount: 0,
+      activeStageRunId: null,
+      ownership: projection.delivery.ownership,
+      taskCounts: {
+        total: 0,
+        pending: 0,
+        active: 0,
+        blocked: 0,
+        verifying: 0,
+        completed: 0,
+        failed: 0,
+      },
+    }],
+    loadedCount: 1,
+    hasMore: false,
+    loadingMore: false,
+    moreFailure: null,
+    error: null,
+    advance: { deliveryId: null, failure: null },
+  },
+  subscribe(listener) {
+    listener(this.state)
+    return () => {}
+  },
+  async start() {},
+  async refresh() {},
+  async loadMore() {},
+  setSearch() {},
+  async setStatusFilter() {},
+  setAttentionOnly() {},
+  setOrder() {},
+  async advanceDelivery() {},
+  close() {},
+}
 const mounted = mountStrongFlowPage({
   root,
   model,
-  deliveries: [{
-    schemaVersion: 'winwincode/v1',
-    deliveryId,
-    title: 'Real browser history navigation',
-    revision: 6,
-    status: 'ready-to-deliver',
-  }],
+  deliveryList,
 })
 
 function detailElement() {
