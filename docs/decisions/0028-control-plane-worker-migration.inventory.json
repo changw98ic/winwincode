@@ -788,7 +788,11 @@
         "crates/winwincode-control-plane/src/worker_fleet_projection.rs",
         "crates/winwincode-control-plane/src/worker_interaction_outbound.rs",
         "crates/winwincode-control-plane/src/worker_management.rs",
-        "crates/winwincode-control-plane/src/worker_policy.rs"
+        "crates/winwincode-control-plane/src/worker_policy.rs",
+        "crates/winwincode-control-plane/src/model_route_availability.rs",
+        "crates/winwincode-control-plane/src/strongflow_projection/candidate_history.rs",
+        "crates/winwincode-control-plane/src/strongflow_projection/candidate_review.rs",
+        "crates/winwincode-control-plane/src/strongflow_projection/evidence_detail.rs"
       ],
       "entrySymbols": [
         "ControlPlane"
@@ -963,7 +967,30 @@
         "apps/client/src/strongflow-diagrams.ts",
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-rendering.ts",
-        "apps/client/src/strongflow-view-model.ts"
+        "apps/client/src/strongflow-view-model.ts",
+        "apps/client/src/client-surface.ts",
+        "apps/client/src/components/action-bar.ts",
+        "apps/client/src/components/button.ts",
+        "apps/client/src/components/client-error-boundary.ts",
+        "apps/client/src/components/connection-bar.ts",
+        "apps/client/src/components/drawer.ts",
+        "apps/client/src/components/empty-state.ts",
+        "apps/client/src/components/error-state.ts",
+        "apps/client/src/components/form-field.ts",
+        "apps/client/src/components/index.ts",
+        "apps/client/src/components/keyed-collection.ts",
+        "apps/client/src/components/metric.ts",
+        "apps/client/src/components/mounted-view.ts",
+        "apps/client/src/components/page-header.ts",
+        "apps/client/src/components/panel.ts",
+        "apps/client/src/components/split-pane.ts",
+        "apps/client/src/components/status-badge.ts",
+        "apps/client/src/components/tabs.ts",
+        "apps/client/src/components/toolbar.ts",
+        "apps/client/src/core/connection-state.ts",
+        "apps/client/src/navigation-capability.ts",
+        "apps/client/src/strongflow-diagram-graph.ts",
+        "apps/client/src/strongflow-layout-preferences.ts"
       ],
       "entrySymbols": [
         "mountWinWinCodeClient"

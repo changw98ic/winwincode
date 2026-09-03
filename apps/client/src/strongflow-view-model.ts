@@ -35,6 +35,9 @@ import type {
   StageRunId,
   StrongFlowReadCursor,
 } from './generated/contracts.js'
+import type {
+  StrongFlowDiagramExecutionProjection,
+} from '@winwincode/contracts'
 import {
   CommandName,
   ControlPlaneWebSocketEventType,
@@ -93,6 +96,9 @@ export interface StrongFlowProjectionMetadata {
   readonly readCursor: StrongFlowReadCursor
 }
 
+/** Browser projection carries the canonical shared diagram-execution contract unchanged. */
+export type StrongFlowDiagramExecutionFacts = StrongFlowDiagramExecutionProjection
+
 export interface StrongFlowProjection {
   readonly delivery: DeliveryDetailProjection
   readonly solutionReview: DeliveryDetailProjection['solutionReview']
@@ -103,6 +109,8 @@ export interface StrongFlowProjection {
   readonly attention: DeliveryDetailProjection['attention']
   readonly publication: DeliveryDetailProjection['publication']
   readonly currentCandidate: DeliveryDetailProjection['currentCandidate']
+  /** Exact canonical execution-to-diagram facts at this projection boundary. */
+  readonly diagramExecution: StrongFlowDiagramExecutionFacts | null
   readonly metadata: StrongFlowProjectionMetadata
 }
 
@@ -684,6 +692,7 @@ function projectionFromSnapshot(snapshot: StrongFlowSnapshot): StrongFlowProject
     attention: Object.freeze([...delivery.attention]),
     publication: delivery.publication,
     currentCandidate: delivery.currentCandidate,
+    diagramExecution: null,
     metadata: Object.freeze({
       source: 'control-plane-snapshot',
       updatedAt: projectionUpdatedAt(snapshot),

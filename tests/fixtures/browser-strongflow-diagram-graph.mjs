@@ -1,4 +1,5 @@
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
+import { mountStrongFlowDiagramGraph } from '/module/strongflow-diagram-graph.js'
 
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
@@ -99,6 +100,7 @@ const projection = {
     architectureDiagram: solutionDiagram('system-architecture'),
     processDiagram: solutionDiagram('process-flow'),
   },
+  diagramExecution: null,
   stage: { id: stageRunId },
   runtime: {
     stageRunId,
@@ -205,6 +207,59 @@ function nodeRectangles(graph) {
   })
 }
 
+globalThis.measureDiagramEdgeGeometry = () => {
+  const geometryProbe = mountStrongFlowDiagramGraph({
+    document,
+    props: {
+      id: 'diagram:edge-geometry-probe',
+      title: 'Edge geometry probe',
+      narrow: window.innerWidth <= 420,
+      nodes: [
+        {
+          id: 'probe:a',
+          label: 'A',
+          description: 'Origin.',
+          kind: 'component',
+          trustBoundary: null,
+          unresolved: false,
+        },
+        {
+          id: 'probe:b',
+          label: 'B',
+          description: 'First branch.',
+          kind: 'component',
+          trustBoundary: null,
+          unresolved: false,
+        },
+        {
+          id: 'probe:c',
+          label: 'C',
+          description: 'Second branch.',
+          kind: 'component',
+          trustBoundary: null,
+          unresolved: false,
+        },
+      ],
+      edges: [
+        { id: 'probe:a-b', from: 'probe:a', to: 'probe:b', label: 'first' },
+        { id: 'probe:a-c', from: 'probe:a', to: 'probe:c', label: 'second' },
+      ],
+    },
+  })
+  document.body.append(geometryProbe.root)
+  const probeEdge = geometryProbe.root.querySelector(
+    '.wwc-strongflow-graph-edge[data-id="probe:a-c"]',
+  ).getBoundingClientRect()
+  const probeFrom = geometryProbe.nodeElement('probe:a').getBoundingClientRect()
+  const probeTo = geometryProbe.nodeElement('probe:c').getBoundingClientRect()
+  const connected = probeEdge.left <= probeFrom.right + 1
+    && probeEdge.right >= probeTo.left - 1
+    && probeEdge.top <= probeFrom.bottom + 1
+    && probeEdge.bottom >= probeTo.top - 1
+  geometryProbe.close()
+  return connected
+}
+
 globalThis.runDiagramGraphScenario = () => {
   const graph = architectureGraph()
   const viewport = graph.querySelector('.wwc-strongflow-graph-viewport')
@@ -242,6 +297,8 @@ globalThis.runDiagramGraphScenario = () => {
   }
   const toggle = graph.querySelector('.wwc-strongflow-graph-toggle-view')
   toggle.click()
+  const edgeGeometryConnected = globalThis.measureDiagramEdgeGeometry()
+
   return {
     boundary: boundaryState,
     detail: graph.querySelector('.wwc-strongflow-graph-detail').textContent,
@@ -249,6 +306,11 @@ globalThis.runDiagramGraphScenario = () => {
       ariaLabel: edge.getAttribute('aria-label'),
       id: edge.dataset.id,
     })),
+    edgeGeometryConnected,
+    overview: {
+      label: graph.querySelector('.wwc-strongflow-graph-overview').getAttribute('aria-label'),
+      nodes: graph.querySelectorAll('.wwc-strongflow-graph-overview-node').length,
+    },
     keyboardFocus,
     listEquivalent: (() => {
       const list = graph.querySelector('.wwc-strongflow-graph-list')
@@ -296,6 +358,8 @@ globalThis.runDiagramStabilityScenario = () => {
   node.click()
   node.focus()
   const selectedBefore = node.getAttribute('aria-pressed')
+  const observer = new MutationObserver(() => {})
+  observer.observe(graph, { attributes: true, childList: true, characterData: true, subtree: true })
   for (let index = 0; index < 100; index += 1) {
     const next = structuredClone(model.state)
     next.projection.runtime.sessions[0].asOfSequence = 100 + index
@@ -303,9 +367,12 @@ globalThis.runDiagramStabilityScenario = () => {
     next.status = index % 2 === 0 ? 'refreshing' : 'ready'
     model.publish(next)
   }
+  const graphMutations = observer.takeRecords().length
+  observer.disconnect()
   const after = graph.querySelector('.wwc-strongflow-graph-node[data-id="platform:dsh"]')
   return {
     focusKept: document.activeElement === node,
+    graphMutations,
     nodeIdentity: after === node,
     pressedKept: after.getAttribute('aria-pressed') === selectedBefore,
     zoomKept: graph.querySelector('.wwc-strongflow-graph-viewport').getAttribute('data-zoom'),

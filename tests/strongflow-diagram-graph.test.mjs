@@ -132,6 +132,24 @@ test('layout is deterministic for reordered input and survives cycles', () => {
   const cyclic = strongFlowDiagramGraphLayout(solutionDiagramNodes(), edges)
   assert.equal(cyclic.size, solutionDiagramNodes().length)
   assert.ok([...cyclic.values()].every(position => Number.isFinite(position.rank)))
+
+  const cycleNodes = solutionDiagramNodes().slice(0, 3)
+  const cycleEdges = [
+    { id: 'cycle:1', from: cycleNodes[0].id, to: cycleNodes[1].id, label: 'next' },
+    { id: 'cycle:2', from: cycleNodes[1].id, to: cycleNodes[2].id, label: 'next' },
+    { id: 'cycle:3', from: cycleNodes[2].id, to: cycleNodes[0].id, label: 'next' },
+  ]
+  const canonicalCycle = [...strongFlowDiagramGraphLayout(cycleNodes, cycleEdges).entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+  const reorderedCycle = [...strongFlowDiagramGraphLayout(
+    [cycleNodes[1], cycleNodes[2], cycleNodes[0]],
+    [cycleEdges[2], cycleEdges[0], cycleEdges[1]],
+  ).entries()].sort(([left], [right]) => left.localeCompare(right))
+  assert.deepEqual(
+    reorderedCycle,
+    canonicalCycle,
+    'winwincode-8pc: cyclic geometry must not depend on snapshot array order',
+  )
 })
 
 test('graph renders keyed nodes and labelled edges with multi-signal node states', () => {
@@ -189,9 +207,81 @@ test('graph renders keyed nodes and labelled edges with multi-signal node states
     'DSH → WinWinCode: submit',
   )
   assert.equal(findByClass(edgeNodes[0], 'wwc-strongflow-graph-edge-label').textContent, 'submit')
+  assert.equal(
+    findByClass(edgeNodes[0], 'wwc-strongflow-graph-edge-line').getAttribute('aria-hidden'),
+    'true',
+  )
+
+  const overview = findByClass(view.root, 'wwc-strongflow-graph-overview')
+  assert.equal(overview.tagName, 'BUTTON')
+  assert.match(overview.getAttribute('aria-label'), /4 nodes and 3 connections/u)
+  assert.equal(findAllByClass(overview, 'wwc-strongflow-graph-overview-node').length, 4)
+  assert.equal(findAllByClass(overview, 'wwc-strongflow-graph-overview-edge').length, 3)
 
   assert.equal(view.selectedNodeId(), null)
   view.close()
+})
+
+test('keyed graph updates reject duplicate node identities', () => {
+  const document = new FakeDocument()
+  const nodes = solutionDiagramNodes()
+  assert.throws(() => {
+    const view = mountStrongFlowDiagramGraph({
+      document,
+      props: graphProps({ nodes: [...nodes, { ...nodes[0] }] }),
+    })
+    view.close()
+  }, /duplicate.*node|node.*duplicate/iu, 'winwincode-met: duplicate nodes must fail fast')
+})
+
+test('decorative node-kind icons stay out of the accessible name', () => {
+  const document = new FakeDocument()
+  const view = mountStrongFlowDiagramGraph({ document, props: graphProps() })
+  const icons = findAllByClass(view.root, 'wwc-strongflow-graph-node-icon')
+  assert.equal(
+    icons.every(icon => icon.getAttribute('aria-hidden') === 'true'),
+    true,
+    'winwincode-ec6: decorative status glyphs must be hidden from assistive technology',
+  )
+  view.close()
+})
+
+test('keyed graph updates reject duplicate edge identities', () => {
+  const document = new FakeDocument()
+  const edges = solutionDiagramEdges()
+  assert.throws(() => {
+    const view = mountStrongFlowDiagramGraph({
+      document,
+      props: graphProps({ edges: [...edges, { ...edges[0] }] }),
+    })
+    view.close()
+  }, /duplicate.*edge|edge.*duplicate/iu, 'winwincode-met: duplicate edges must fail fast')
+})
+
+test('fresh mounts use the same graph and list order for reordered snapshots', () => {
+  const document = new FakeDocument()
+  const canonical = mountStrongFlowDiagramGraph({ document, props: graphProps() })
+  const reordered = mountStrongFlowDiagramGraph({
+    document,
+    props: graphProps({
+      nodes: [...solutionDiagramNodes()].reverse(),
+      edges: [...solutionDiagramEdges()].reverse(),
+    }),
+  })
+  const identities = (root, className) => findAllByClass(root, className)
+    .map(node => node.dataset.id)
+  assert.deepEqual(
+    identities(reordered.root, 'wwc-strongflow-graph-node'),
+    identities(canonical.root, 'wwc-strongflow-graph-node'),
+    'winwincode-met: graph DOM order must not depend on first snapshot order',
+  )
+  assert.deepEqual(
+    identities(reordered.root, 'wwc-strongflow-graph-list-node'),
+    identities(canonical.root, 'wwc-strongflow-graph-list-node'),
+    'winwincode-met: equivalent list order must match the graph order',
+  )
+  canonical.close()
+  reordered.close()
 })
 
 test('selecting a node updates detail, aria state, and notifies the page', () => {
@@ -215,6 +305,25 @@ test('selecting a node updates detail, aria state, and notifies the page', () =>
   apiNode.emit('click')
   assert.equal(view.selectedNodeId(), null)
   assert.equal(apiNode.getAttribute('aria-pressed'), 'false')
+  assert.deepEqual(selected, ['component:api', null])
+  view.close()
+})
+
+test('replacing the canonical graph clears selection through the page callback', () => {
+  const document = new FakeDocument()
+  const selected = []
+  const view = mountStrongFlowDiagramGraph({
+    document,
+    props: graphProps({ onSelectNode: id => selected.push(id) }),
+  })
+  view.nodeElement('component:api').emit('click')
+
+  view.update(graphProps({
+    id: 'diagram:replacement',
+    onSelectNode: id => selected.push(id),
+  }))
+
+  assert.equal(view.selectedNodeId(), null)
   assert.deepEqual(selected, ['component:api', null])
   view.close()
 })
@@ -269,6 +378,15 @@ test('zoom buttons and viewport keys scale the graph and fit restores it', () =>
   findByClass(view.root, 'wwc-strongflow-graph-fit').emit('click')
   assert.equal(viewport.getAttribute('data-zoom'), '1')
   assert.equal(viewport.scrollTop, 0)
+
+  const canvas = findByClass(view.root, 'wwc-strongflow-graph-canvas')
+  viewport.clientWidth = 600
+  viewport.clientHeight = 300
+  canvas.scrollWidth = 1_000
+  canvas.scrollHeight = 300
+  findByClass(view.root, 'wwc-strongflow-graph-zoom-in').emit('click')
+  findByClass(view.root, 'wwc-strongflow-graph-overview').emit('click')
+  assert.equal(viewport.getAttribute('data-zoom'), '0.6')
   view.close()
 })
 
@@ -307,6 +425,82 @@ test('trust boundary groups collapse into one chip and expand back', () => {
   view.close()
 })
 
+function mountTwoBoundaryGraph(document) {
+  const nodes = [
+    {
+      id: 'node:a',
+      label: 'A',
+      description: 'First boundary.',
+      kind: 'component',
+      trustBoundary: 'Boundary A',
+      unresolved: false,
+    },
+    {
+      id: 'node:b',
+      label: 'B',
+      description: 'Second boundary.',
+      kind: 'component',
+      trustBoundary: 'Boundary B',
+      unresolved: false,
+    },
+  ]
+  return mountStrongFlowDiagramGraph({
+    document,
+    props: graphProps({
+      nodes,
+      edges: [{ id: 'edge:a-b', from: 'node:a', to: 'node:b', label: 'crosses' }],
+    }),
+  })
+}
+
+test('collapsing the roving node promotes a visible keyboard anchor', () => {
+  const document = new FakeDocument()
+  const view = mountTwoBoundaryGraph(document)
+  const headers = findAllByClass(view.root, 'wwc-strongflow-graph-boundary')
+  headers.find(header => header.dataset.boundary === 'Boundary A').emit('click')
+  const visibleTargets = [
+    ...findAllByClass(view.root, 'wwc-strongflow-graph-node'),
+    ...findAllByClass(view.root, 'wwc-strongflow-graph-group'),
+  ].filter(target => !target.hidden)
+  assert.equal(
+    visibleTargets.some(target => target.tabIndex === 0),
+    true,
+    'winwincode-ec6: collapsing the roving anchor must promote a visible target',
+  )
+  view.close()
+})
+
+test('collapsing two trust boundaries retains their cross-boundary edge', () => {
+  const document = new FakeDocument()
+  const view = mountTwoBoundaryGraph(document)
+  const headers = findAllByClass(view.root, 'wwc-strongflow-graph-boundary')
+  headers.find(header => header.dataset.boundary === 'Boundary A').emit('click')
+  headers.find(header => header.dataset.boundary === 'Boundary B').emit('click')
+  const edge = findByClass(view.root, 'wwc-strongflow-graph-edge')
+  assert.equal(
+    edge.hidden,
+    false,
+    'winwincode-ec6: an edge between two collapsed groups remains visible',
+  )
+  view.close()
+})
+
+test('close removes listeners from every retained graph control', () => {
+  const document = new FakeDocument()
+  const view = mountStrongFlowDiagramGraph({ document, props: graphProps() })
+  const header = findAllByClass(view.root, 'wwc-strongflow-graph-boundary')
+    .find(candidate => candidate.dataset.boundary === 'Delivery control plane')
+  header.emit('click')
+  const chip = findByClass(view.root, 'wwc-strongflow-graph-group')
+  const node = view.nodeElement('platform:dsh')
+
+  view.close()
+
+  assert.equal(node.listeners.size, 0)
+  assert.equal(header.listeners.size, 0, 'winwincode-ec6: close must detach boundary listeners')
+  assert.equal(chip.listeners.size, 0, 'winwincode-ec6: close must detach group listeners')
+})
+
 test('the equivalent list view stays reachable for accessibility users', () => {
   const document = new FakeDocument()
   const view = mountStrongFlowDiagramGraph({ document, props: graphProps() })
@@ -343,6 +537,8 @@ test('equivalent snapshot updates keep node identity, focus, and view state', ()
   const document = new FakeDocument()
   const view = mountStrongFlowDiagramGraph({ document, props: graphProps() })
   const apiNode = view.nodeElement('component:api')
+  const apiEdge = findAllByClass(view.root, 'wwc-strongflow-graph-edge')
+    .find(edge => edge.dataset.id === 'edge:api-exec')
 
   apiNode.emit('click')
   findByClass(view.root, 'wwc-strongflow-graph-zoom-in').emit('click')
@@ -357,6 +553,12 @@ test('equivalent snapshot updates keep node identity, focus, and view state', ()
   assert.equal(findByClass(view.root, 'wwc-strongflow-graph-list').hidden, false)
   assert.equal(document.activeElement, focused)
   assert.equal(viewportOf(view).contains(focused), true)
+  assert.equal(
+    findAllByClass(view.root, 'wwc-strongflow-graph-edge')
+      .find(edge => edge.dataset.id === 'edge:api-exec') === apiEdge,
+    true,
+    'canonical edge identity survives an equivalent snapshot',
+  )
   view.close()
 })
 
@@ -455,6 +657,11 @@ function projection(overrides = {}) {
       }],
     },
     solutionReview: {
+      deliveryId,
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      reviewSetSha256: `sha256:${'a'.repeat(64)}`,
+      attentionItemId: 'attention:1',
       reviewStatus: 'pending',
       architectureDiagram: diagram('system-architecture'),
       processDiagram: diagram('process-flow'),
@@ -487,6 +694,7 @@ function projection(overrides = {}) {
       status: 'open',
     }],
     currentCandidate: null,
+    diagramExecution: null,
     publication: null,
     metadata: {
       source: 'control-plane-snapshot',
@@ -602,7 +810,196 @@ test('the page mounts both solution graphs with state chips inside the solution 
   mounted.close()
 })
 
-test('high-frequency runtime snapshots keep graph node identity and focus', () => {
+test('canonical diagram execution state reaches matching graph nodes as a text signal', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  const reviewSetSha256 = 'a'.repeat(64)
+  current.solutionReview.reviewSetSha256 = `sha256:${reviewSetSha256}`
+  current.diagramExecution = {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId: current.delivery.deliveryId,
+    deliveryRevision: current.delivery.deliveryRevision,
+    reviewSetSha256,
+    state: 'executing',
+    affectedFileCount: 1,
+    architecture: {
+      diagramId: current.solutionReview.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: current.solutionReview.architectureDiagram.nodes.map(node => ({
+        nodeId: node.id,
+        state: node.id === 'node:1' ? 'affected-live' : 'normal',
+        affectedFileCount: node.id === 'node:1' ? 1 : 0,
+        fileIds: [],
+      })),
+    },
+    process: {
+      diagramId: current.solutionReview.processDiagram.id,
+      kind: 'process-flow',
+      nodes: current.solutionReview.processDiagram.nodes.map(node => ({
+        nodeId: node.id,
+        state: 'normal',
+        affectedFileCount: 0,
+        fileIds: [],
+      })),
+    },
+    details: null,
+    updatedAtMillis: 1,
+  }
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: [],
+    limits,
+    storage: new FakeStorage(),
+  })
+
+  const architecture = findAllByClass(
+    findByClass(rootElement, 'wwc-strongflow-view-solution'),
+    'wwc-strongflow-graph',
+  )[0]
+  const affectedNode = findAllByClass(architecture, 'wwc-strongflow-graph-node')
+    .find(node => node.dataset.id === 'node:1')
+  assert.match(
+    textContentOf(affectedNode),
+    /affected.*live/iu,
+    'winwincode-4hc: canonical affected-live state needs a visible text signal',
+  )
+  assert.match(
+    affectedNode.getAttribute('aria-label'),
+    /affected.*live/iu,
+    'winwincode-4hc: canonical affected-live state needs an accessible text signal',
+  )
+  affectedNode.emit('click')
+  const detail = findByClass(architecture, 'wwc-strongflow-graph-detail').textContent
+  assert.doesNotMatch(detail, /Task |Diff |Evidence /u)
+
+  const mismatched = structuredClone(model.state)
+  mismatched.projection.diagramExecution.deliveryRevision += 1
+  assert.throws(
+    () => model.publish(mismatched),
+    /diagram execution facts do not match the current review cut/u,
+  )
+  mounted.close()
+})
+
+test('node selection links only exact canonical Task Attention Diff and Evidence facts', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  const fileId = 'diagram-file:1'
+  const evidenceId = 'evidence:1'
+  current.evidence = [{
+    id: evidenceId,
+    type: 'diff',
+    sourceRef: 'candidate.diff:1',
+    candidateRef: 'git-candidate:1',
+  }]
+  const executionNode = node => ({
+    nodeId: node.id,
+    state: node.id === 'node:1' ? 'affected-finished' : 'normal',
+    affectedFileCount: node.id === 'node:1' ? 1 : 0,
+    fileIds: node.id === 'node:1' ? [fileId] : [],
+  })
+  current.diagramExecution = {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId: current.delivery.deliveryId,
+    deliveryRevision: current.delivery.deliveryRevision,
+    reviewSetSha256: 'a'.repeat(64),
+    state: 'execution-finished',
+    architecture: {
+      diagramId: current.solutionReview.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: current.solutionReview.architectureDiagram.nodes.map(executionNode),
+    },
+    process: {
+      diagramId: current.solutionReview.processDiagram.id,
+      kind: 'process-flow',
+      nodes: current.solutionReview.processDiagram.nodes.map(node => ({
+        nodeId: node.id,
+        state: 'normal',
+        affectedFileCount: 0,
+        fileIds: [],
+      })),
+    },
+    affectedFileCount: 1,
+    details: {
+      files: [{ id: fileId, path: 'src/linked.ts', nodeIds: ['node:1'] }],
+      provenance: { deliveryTaskId: 'task:1', evidenceRefIds: [evidenceId] },
+    },
+    updatedAtMillis: 2,
+  }
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: [],
+    limits,
+    storage: new FakeStorage(),
+  })
+
+  const architecture = findAllByClass(
+    findByClass(rootElement, 'wwc-strongflow-view-solution'),
+    'wwc-strongflow-graph',
+  )[0]
+  const node = findAllByClass(architecture, 'wwc-strongflow-graph-node')
+    .find(candidate => candidate.dataset.id === 'node:1')
+  node.emit('click')
+
+  const taskRows = findByClass(rootElement, 'wwc-strongflow-task-list').children
+  assert.equal(taskRows[0].dataset.diagramLinked, 'true')
+  assert.equal(taskRows[1].dataset.diagramLinked, 'false')
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-attention-list').children[0]
+      .dataset.diagramLinked,
+    'true',
+  )
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-host').dataset.diagramDiffPaths,
+    'src/linked.ts',
+  )
+  const evidenceRows = findAllByClass(rootElement, 'wwc-strongflow-evidence')
+    .flatMap(list => list.children)
+  assert.equal(
+    evidenceRows.filter(row => row.dataset.evidenceRefId === evidenceId)
+      .every(row => row.dataset.diagramLinked === 'true'),
+    true,
+  )
+  assert.match(
+    findByClass(architecture, 'wwc-strongflow-graph-detail').textContent,
+    /Task task:1.*Attention attention:1.*Diff src\/linked\.ts.*Evidence evidence:1/u,
+  )
+  mounted.close()
+})
+
+test('a missing solution review exposes only the empty state and resets graph chrome', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const withoutReview = projection({ solutionReview: null })
+  const model = new FakeStrongFlowViewModel(state({ projection: withoutReview }))
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: [],
+    limits,
+    storage: new FakeStorage(),
+  })
+
+  const solution = findByClass(rootElement, 'wwc-strongflow-view-solution')
+  const graphs = findAllByClass(solution, 'wwc-strongflow-graph')
+  assert.equal(findByClass(solution, 'wwc-strongflow-empty').hidden, false)
+  assert.equal(
+    graphs.every(graph => graph.hidden),
+    true,
+    'winwincode-7m1: empty reviews must not expose duplicate graph toolbars',
+  )
+  mounted.close()
+})
+
+test('two hundred runtime snapshots keep graph state and isolated session partitions', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
@@ -621,9 +1018,12 @@ test('high-frequency runtime snapshots keep graph node identity and focus', () =
   const architectureNode = findAllByClass(graphs[0], 'wwc-strongflow-graph-node')[0]
   architectureNode.focus()
   architectureNode.emit('click')
+  findByClass(graphs[0], 'wwc-strongflow-graph-zoom-in').emit('click')
   const diagramsRoot = findByClass(rootElement, 'wwc-strongflow-diagrams')
+  const initialSessions = findAllByClass(rootElement, 'wwc-strongflow-execution-session')
+  const untouchedSession = initialSessions[1]
 
-  for (let index = 0; index < 50; index += 1) {
+  for (let index = 0; index < 200; index += 1) {
     const next = structuredClone(model.state)
     next.projection.runtime.sessions[0].asOfSequence = 100 + index
     next.projection.runtime.sessions[0].agents[0].status = index % 2 === 0 ? 'running' : 'waiting'
@@ -641,7 +1041,74 @@ test('high-frequency runtime snapshots keep graph node identity and focus', () =
   )
   assert.equal(document.activeElement, architectureNode)
   assert.equal(architectureNode.getAttribute('aria-pressed'), 'true')
+  assert.equal(
+    findByClass(graphs[0], 'wwc-strongflow-graph-viewport').getAttribute('data-zoom'),
+    '1.25',
+  )
   assert.equal(findByClass(rootElement, 'wwc-strongflow-diagrams'), diagramsRoot)
+  const finalSessions = findAllByClass(rootElement, 'wwc-strongflow-execution-session')
+  assert.equal(
+    finalSessions.includes(untouchedSession),
+    true,
+    'unchanged session partition keeps identity',
+  )
+  assert.equal(
+    finalSessions[1] === untouchedSession,
+    true,
+    'winwincode-5nw: unchanged session stays in canonical snapshot order',
+  )
+  assert.match(
+    textContentOf(finalSessions[0]),
+    /Task task:1/u,
+    'winwincode-5nw: changed session stays in canonical snapshot order',
+  )
+  mounted.close()
+})
+
+test('two hundred unrelated runtime snapshots perform zero graph DOM writes', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveries: [],
+    limits,
+    storage: new FakeStorage(),
+  })
+
+  const graphs = findAllByClass(
+    findByClass(rootElement, 'wwc-strongflow-view-solution'),
+    'wwc-strongflow-graph',
+  )
+  let writes = 0
+  const observeWrites = node => {
+    const setAttribute = node.setAttribute.bind(node)
+    const removeAttribute = node.removeAttribute.bind(node)
+    node.setAttribute = (...args) => {
+      writes += 1
+      setAttribute(...args)
+    }
+    node.removeAttribute = (...args) => {
+      writes += 1
+      removeAttribute(...args)
+    }
+    for (const child of node.children) observeWrites(child)
+  }
+  for (const graph of graphs) observeWrites(graph)
+
+  for (let index = 0; index < 200; index += 1) {
+    const next = structuredClone(model.state)
+    next.projection.runtime.sessions[0].asOfSequence = 100 + index
+    next.projection.metadata.revisions.runtime = 9 + index
+    model.publish(next)
+  }
+
+  assert.equal(
+    writes,
+    0,
+    'winwincode-a79: equivalent diagram props must cause zero graph DOM writes',
+  )
   mounted.close()
 })
 
@@ -664,6 +1131,13 @@ class FakeElement {
   href = ''
   tabIndex = 0
   scrollTop = 0
+  scrollLeft = 0
+  clientWidth = 0
+  clientHeight = 0
+  scrollWidth = 0
+  scrollHeight = 0
+  offsetWidth = 0
+  offsetHeight = 0
   #textContent = ''
 
   get textContent() {
