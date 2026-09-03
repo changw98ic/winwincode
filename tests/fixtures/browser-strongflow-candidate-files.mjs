@@ -92,7 +92,12 @@ function diffState(path = 'src/current.ts') {
   return {
     status: 'ready',
     path,
-    content: `diff --git a/${path} b/${path}\n+selected ${path}`,
+    content: [
+      `diff --git a/${path} b/${path}`,
+      '@@ -1,2 +1,2 @@',
+      `-selected ${path}`,
+      `+selected ${path} (changed)`,
+    ].join('\n'),
     loadedBytes: 64,
     totalBytes: 128,
     hasMore: true,

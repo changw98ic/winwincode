@@ -544,7 +544,12 @@ test('Candidate workspace renders a bounded searchable tree and linked Diff with
     diff: {
       status: 'ready',
       path: 'src/current.ts',
-      content: 'diff --git a/src/legacy.ts b/src/current.ts',
+      content: [
+        'diff --git a/src/legacy.ts b/src/current.ts',
+        '@@ -1,2 +1,2 @@',
+        '-const legacy = 1',
+        '+const current = 2',
+      ].join('\n'),
       loadedBytes: 45,
       totalBytes: 90,
       hasMore: true,
@@ -556,7 +561,14 @@ test('Candidate workspace renders a bounded searchable tree and linked Diff with
     error: null,
   }
   const model = new FakeStrongFlowViewModel(candidateState)
-  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const viewModeChanges = []
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    candidateView: 'unified',
+    onCandidateViewModeChange(mode) { viewModeChanges.push(mode) },
+  })
 
   const tree = findByClass(rootElement, 'wwc-candidate-file-tree')
   const summary = findByClass(rootElement, 'wwc-candidate-file-summary')
@@ -570,11 +582,23 @@ test('Candidate workspace renders a bounded searchable tree and linked Diff with
   assert.equal(rows.length <= 200, true)
   assert.match(findByClass(rootElement, 'wwc-candidate-file-renamed').textContent, /src\/legacy\.ts/u)
   assert.match(findByClass(rootElement, 'wwc-candidate-file-preview-unavailable').textContent, /Binary/u)
-  assert.equal(findByClass(rootElement, 'wwc-candidate-diff-content').textContent,
-    'diff --git a/src/legacy.ts b/src/current.ts')
+  const diffTable = findByClass(rootElement, 'wwc-candidate-diff-table')
+  assert.notEqual(diffTable, null, 'the Candidate Diff renders through the Diff viewer table')
+  assert.match(findByClass(rootElement, 'wwc-candidate-diff-status').textContent,
+    /first 45 of 90 Diff bytes/u)
+  assert.match(findByClass(rootElement, 'wwc-candidate-diff-viewer').textContent,
+    /diff --git a\/src\/legacy\.ts b\/src\/current\.ts/u)
   assert.match(findByClass(rootElement, 'wwc-candidate-technical-details').textContent,
     new RegExp(`sha256:${'3'.repeat(64)}`, 'u'))
   assert.doesNotMatch(findByClass(rootElement, 'wwc-candidate-file-summary').textContent, /sha256|refs\//u)
+
+  const unifiedOption = findByClass(rootElement, 'wwc-candidate-diff-view-option')
+  unifiedOption.emit('click')
+  assert.deepEqual(viewModeChanges, [])
+  const sideBySideOption = findAllByClass(rootElement, 'wwc-candidate-diff-view-option')
+    .find(node => node.dataset.mode === 'side-by-side')
+  sideBySideOption.emit('click')
+  assert.deepEqual(viewModeChanges, ['side-by-side'])
 
   findByClass(rootElement, 'wwc-candidate-load-more-files').emit('click')
   assert.deepEqual(model.calls.at(-1), ['loadMoreCandidateFiles'])
@@ -670,7 +694,8 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
     ),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
-      + '&stageRun=run_00000000000000000000000003',
+      + '&stageRun=run_00000000000000000000000003'
+      + '&view=unified',
   )
   assert.equal(
     strongFlowRouteHash(
@@ -682,7 +707,22 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
-      + '&file=src%2Fcurrent%20file.ts',
+      + '&file=src%2Fcurrent%20file.ts'
+      + '&view=unified',
+  )
+  assert.equal(
+    strongFlowRouteHash(
+      deliveryId,
+      'psn_00000000000000000000000002',
+      'run_00000000000000000000000003',
+      'src/app.ts',
+      'side-by-side',
+    ),
+    `#/strongflow?delivery=${deliveryId}`
+      + '&session=psn_00000000000000000000000002'
+      + '&stageRun=run_00000000000000000000000003'
+      + '&file=src%2Fapp.ts'
+      + '&view=side-by-side',
   )
   assert.equal(
     strongFlowRouteHash(

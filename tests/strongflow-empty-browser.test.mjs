@@ -69,7 +69,7 @@ test('a real browser creates the first Delivery and opens subscribed StrongFlow 
   assert.match(result.empty.text, /Create the first Delivery/iu)
   assert.match(
     result.created.hash,
-    /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&stageRun=run_[0-9A-HJKMNP-TV-Z]{26}$/u,
+    /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&stageRun=run_[0-9A-HJKMNP-TV-Z]{26}&view=unified$/u,
   )
   assert.equal(result.created.heading, 'First StrongFlow Delivery')
   assert.match(result.created.status, /clarifying.*revision 2/iu)

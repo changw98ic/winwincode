@@ -5,6 +5,8 @@ import {
   type CandidateFileProjection,
 } from './generated/contracts.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
+import { mountCandidateDiffViewer, type CandidateDiffViewer } from './strongflow-diff-viewer.js'
+import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import type {
   StrongFlowCandidateFilesState,
   StrongFlowProjection,
@@ -195,11 +197,14 @@ export function candidateFileTreeRows(
 export interface StrongFlowCandidateViewProps {
   readonly projection: StrongFlowProjection | null
   readonly candidateFiles: StrongFlowCandidateFilesState
+  readonly viewMode: CandidateDiffViewMode
 }
 
 export interface StrongFlowCandidateViewOptions {
   readonly document: Document
   readonly limits: StrongFlowRenderLimits
+  readonly viewMode?: CandidateDiffViewMode
+  readonly onViewModeChange?: (mode: CandidateDiffViewMode) => void
   readonly onLoadFiles: () => void
   readonly onLoadMoreFiles: () => void
   readonly onSelectFile: (path: string) => void
@@ -272,13 +277,6 @@ export function mountStrongFlowCandidate(
   ) as HTMLButtonElement
   const diff = strongFlowElement(document, 'section', 'wwc-candidate-diff')
   const diffHeading = strongFlowElement(document, 'h4', 'wwc-strongflow-subheading')
-  const diffStatus = strongFlowElement(document, 'p', 'wwc-candidate-diff-status')
-  const diffContent = strongFlowElement(document, 'pre', 'wwc-candidate-diff-content')
-  const loadMoreDiff = strongFlowElement(
-    document,
-    'button',
-    'wwc-candidate-load-more-diff',
-  ) as HTMLButtonElement
   const technical = strongFlowElement(
     document,
     'details',
@@ -298,6 +296,7 @@ export function mountStrongFlowCandidate(
   const collapsedDirectories = new Set<string>()
   let current: StrongFlowCandidateViewProps = {
     projection: null,
+    viewMode: options.viewMode ?? 'unified',
     candidateFiles: {
       status: 'idle',
       items: [],
@@ -323,6 +322,28 @@ export function mountStrongFlowCandidate(
   let requestedCandidateIdentity: string | null = null
   let visibleRows: readonly CandidateFileTreeRow[] = []
   let rovingRowKey: string | null = null
+
+  const diffViewer: CandidateDiffViewer = mountCandidateDiffViewer({
+    document,
+    onLoadMoreDiff() {
+      const selectedDiff = current.candidateFiles.diff
+      if (selectedDiff.status === 'error' && selectedDiff.path !== null) {
+        options.onSelectFile(selectedDiff.path)
+      } else {
+        options.onLoadMoreDiff()
+      }
+    },
+    onViewModeChange(mode) {
+      current = { ...current, viewMode: mode }
+      diffViewer.update({
+        diff: current.candidateFiles.diff,
+        selectedPath: current.candidateFiles.selectedPath,
+        viewMode: mode,
+        candidateDigest: current.projection?.currentCandidate?.diffSha256 ?? null,
+      })
+      options.onViewModeChange?.(mode)
+    },
+  })
 
   root.dataset.view = 'frozen-candidate'
   heading.textContent = 'Candidate changes'
@@ -359,14 +380,9 @@ export function mountStrongFlowCandidate(
   loadMoreFiles.type = 'button'
   loadMoreFiles.textContent = 'Load more changed files'
   diffHeading.textContent = 'Selected file Diff'
-  diffStatus.setAttribute('role', 'status')
-  diffStatus.setAttribute('aria-live', 'polite')
-  diffContent.tabIndex = 0
-  loadMoreDiff.type = 'button'
-  loadMoreDiff.textContent = 'Load more Diff'
   technicalSummary.textContent = 'Candidate technical details'
   technical.append(technicalSummary, technicalList)
-  diff.append(diffHeading, diffStatus, diffContent, loadMoreDiff)
+  diff.append(diffHeading, diffViewer.root)
   fileBrowser.append(
     summary,
     controls,
@@ -553,20 +569,11 @@ export function mountStrongFlowCandidate(
     if (current.candidateFiles.status === 'error') options.onLoadFiles()
     else options.onLoadMoreFiles()
   }
-  const onLoadDiff = () => {
-    const selectedDiff = current.candidateFiles.diff
-    if (selectedDiff.status === 'error' && selectedDiff.path !== null) {
-      options.onSelectFile(selectedDiff.path)
-    } else {
-      options.onLoadMoreDiff()
-    }
-  }
   tree.addEventListener('click', onTreeClick)
   tree.addEventListener('keydown', onTreeKeyDown)
   search.addEventListener('input', onSearch)
   status.addEventListener('change', onStatus)
   loadMoreFiles.addEventListener('click', onLoadFiles)
-  loadMoreDiff.addEventListener('click', onLoadDiff)
 
   function update(props: StrongFlowCandidateViewProps): void {
     if (!open) throw new Error('StrongFlow Candidate view is closed.')
@@ -604,29 +611,12 @@ export function mountStrongFlowCandidate(
     loadMoreFiles.disabled = props.candidateFiles.status === 'loading-more'
 
     const selectedDiff = props.candidateFiles.diff
-    diffContent.hidden = selectedDiff.status !== 'ready'
-    diffContent.textContent = selectedDiff.status === 'ready' ? selectedDiff.content : ''
-    loadMoreDiff.hidden = selectedDiff.status !== 'error'
-      && (selectedDiff.status !== 'ready' || !selectedDiff.hasMore)
-    loadMoreDiff.textContent = selectedDiff.status === 'error'
-      ? 'Retry Diff'
-      : 'Load more Diff'
-    loadMoreDiff.disabled = selectedDiff.status === 'loading'
-    diffStatus.textContent = selectedDiff.status === 'idle'
-      ? 'Select a changed file to load its Diff.'
-      : selectedDiff.status === 'loading'
-        ? `Loading Diff for ${selectedDiff.path ?? 'the selected file'}…`
-        : selectedDiff.status === 'unavailable'
-          ? selectedDiff.unavailableReason === 'binary'
-            ? 'Binary file preview is unavailable.'
-            : 'This file encoding is not previewable.'
-          : selectedDiff.status === 'error'
-            ? 'The selected Diff could not be loaded.'
-            : selectedDiff.previewLimited
-              ? `Showing the first ${formatCount(selectedDiff.loadedBytes)} bytes; preview limit reached.`
-              : `Showing ${formatCount(selectedDiff.loadedBytes)} of ${formatCount(
-                selectedDiff.totalBytes ?? selectedDiff.loadedBytes,
-              )} Diff bytes.`
+    diffViewer.update({
+      diff: selectedDiff,
+      selectedPath: props.candidateFiles.selectedPath,
+      viewMode: props.viewMode,
+      candidateDigest: candidate.diffSha256,
+    })
 
     technicalList.replaceChildren(
       ...definition(document, 'Candidate reference', candidate.candidateRef),
@@ -683,7 +673,7 @@ export function mountStrongFlowCandidate(
       search.removeEventListener('input', onSearch)
       status.removeEventListener('change', onStatus)
       loadMoreFiles.removeEventListener('click', onLoadFiles)
-      loadMoreDiff.removeEventListener('click', onLoadDiff)
+      diffViewer.close()
       rowCollection.close()
       root.remove()
     },
