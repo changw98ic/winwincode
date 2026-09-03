@@ -244,7 +244,7 @@ impl ScenarioPlan {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 enum PlanCommand {
     #[serde(rename = "strongflow.request")]
@@ -2551,7 +2551,70 @@ impl ScenarioRunner {
         transition: &StageAdvanceResult,
     ) -> Result<DeliveryExecutionConfig, String> {
         let delivery = self.query(delivery_id)?;
-        execution_config_for_transition(&delivery, transition, &self.repository_scope.repository_id)
+        let verifying_candidate = self.frozen_verifying_candidate(transition)?;
+        execution_config_for_transition(
+            &delivery,
+            transition,
+            &self.repository_scope.repository_id,
+            verifying_candidate.as_ref(),
+        )
+    }
+
+    /// Mirrors the production verification authority: the exact frozen
+    /// candidate of the Delivery's current writer StageRun, rebuilt from the
+    /// sealed fixture input instead of storage artifacts. The transition
+    /// Delivery has already applied the successful writer facts, so its
+    /// terminal StageRun can be revalidated here.
+    fn frozen_verifying_candidate(
+        &self,
+        transition: &StageAdvanceResult,
+    ) -> Result<Option<FrozenDeliveryCandidate>, String> {
+        let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
+            &transition.effect
+        else {
+            return Ok(None);
+        };
+        if intent.stage != DeliveryStage::Verifying {
+            return Ok(None);
+        }
+        let delivery = &transition.delivery;
+        let mut writers = delivery
+            .snapshot()
+            .stage_runs
+            .iter()
+            .filter(|run| {
+                run.actor_type == StageRunActorType::Codex
+                    && matches!(run.stage, DeliveryStage::Executing | DeliveryStage::Reworking)
+                    && matches!(run.role.as_str(), "executor" | "remediator")
+                    && matches!(
+                        run.status,
+                        StageRunStatus::Running
+                            | StageRunStatus::Waiting
+                            | StageRunStatus::Succeeded
+                    )
+            })
+            .collect::<Vec<_>>();
+        let Some(current_key) = writers
+            .iter()
+            .map(|run| (run.started_at_millis, run.attempt))
+            .max()
+        else {
+            return Err("verification dispatch lacks a frozen writer StageRun".to_owned());
+        };
+        writers.retain(|run| (run.started_at_millis, run.attempt) == current_key);
+        let [writer] = writers.as_slice() else {
+            return Err("verification dispatch writer attempt is ambiguous".to_owned());
+        };
+        let planned = self
+            .planned_candidates
+            .get(&writer.id.0)
+            .ok_or_else(|| {
+                format!(
+                    "verification dispatch lacks the sealed writer candidate input for {}",
+                    writer.id.0
+                )
+            })?;
+        self.freeze_candidate_input(delivery, planned).map(Some)
     }
 
     fn current_revision(&self, delivery_id: &DeliveryId) -> Option<u64> {
@@ -4697,23 +4760,46 @@ fn execution_config_for_transition(
     delivery: &Delivery,
     transition: &StageAdvanceResult,
     repository_id: &RepositoryId,
+    verifying_candidate: Option<&FrozenDeliveryCandidate>,
 ) -> Result<DeliveryExecutionConfig, String> {
     transition.validate_projection().map_err(string_error)?;
-    let checkout_revision = match &transition.effect {
-        StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent) => {
-            intent.rework_authorization().map_or_else(
-                || delivery.snapshot().spec.base_revision.clone(),
-                |authorization| {
+    let (StageAdvanceEffect::Dispatch(intent) | StageAdvanceEffect::Resume(intent)) =
+        &transition.effect
+    else {
+        return Err("execution config requires a dispatch transition".to_owned());
+    };
+    let (candidate_ref, checkout_revision) = match intent.stage {
+        DeliveryStage::Verifying => {
+            let candidate = verifying_candidate.ok_or_else(|| {
+                "verification dispatch lacks its exact frozen writer candidate".to_owned()
+            })?;
+            (
+                Some(candidate.candidate_ref().to_owned()),
+                candidate.candidate_commit_id().to_owned(),
+            )
+        }
+        _ => {
+            if verifying_candidate.is_some() {
+                return Err(
+                    "only a verification dispatch may carry the frozen candidate".to_owned()
+                );
+            }
+            match intent.rework_authorization() {
+                Some(authorization) => (
+                    None,
                     authorization
                         .previous_candidate()
                         .candidate_commit_id()
-                        .to_owned()
-                },
-            )
+                        .to_owned(),
+                ),
+                None => (None, delivery.snapshot().spec.base_revision.clone()),
+            }
         }
-        StageAdvanceEffect::Review(_) | StageAdvanceEffect::Clarify(_) => {
-            return Err("execution config requires a dispatch transition".to_owned());
-        }
+    };
+    let write_mode = if matches!(intent.role.as_str(), "executor" | "remediator") {
+        ExecutionWorkspaceWriteMode::Candidate
+    } else {
+        ExecutionWorkspaceWriteMode::ReadOnly
     };
     let now = delivery.snapshot().updated_at_millis;
     Ok(DeliveryExecutionConfig {
@@ -4721,11 +4807,11 @@ fn execution_config_for_transition(
             "sha256:{:x}",
             Sha256::digest(delivery.encode_json().map_err(string_error)?)
         )),
-        candidate_ref: None,
+        candidate_ref,
         workspace: ExecutionWorkspace {
             checkout_revision,
             repository_id: repository_id.clone(),
-            write_mode: ExecutionWorkspaceWriteMode::Candidate,
+            write_mode,
         },
         limits: ExecutionLimits {
             deadline_at: Instant(millis_to_rfc3339(now.saturating_add(3_600_000))?),
@@ -5334,6 +5420,7 @@ mod tests {
             &fixture.source_delivery,
             &fixture.transition,
             &RepositoryId("repo_5F602BP1WZ9D57773Y51JX5QVC".to_owned()),
+            None,
         )
         .expect("execution config");
 
@@ -5666,5 +5753,408 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("remove minimal closed plan root");
+    }
+
+    #[test]
+    fn dispatched_stage_jobs_seal_role_exact_workspace_write_modes() {
+        let fixture = winwincode_delivery::domain::rework::test_support::authorized_rework_dispatch(
+            &DeliveryId("dlv_5F602BP1WZ9D57773Y51JX5QVC".to_owned()),
+        );
+        let remediator_config = execution_config_for_transition(
+            &fixture.source_delivery,
+            &fixture.transition,
+            &RepositoryId("repo_5F602BP1WZ9D57773Y51JX5QVC".to_owned()),
+            None,
+        )
+        .expect("remediator execution config");
+        assert_eq!(
+            remediator_config.workspace.write_mode,
+            ExecutionWorkspaceWriteMode::Candidate
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-differential-write-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let delivery_id = "dlv_4WZG68T3YFTA5G9Z3YQMW6CT0G";
+        let draft_spec = json!({
+            "acceptanceCriteria": [{
+                "description": "The typed Control Plane seals the reviewed value.",
+                "id": "criterion-write-mode-draft",
+                "required": true,
+                "schemaVersion": 3,
+                "verificationMethod": "Read the committed Delivery projection.",
+            }],
+            "baseRevision": "697b264db0d6398c9d7519f970c3e06605bdd299",
+            "constraints": [],
+            "createdAtMillis": 2_900_000_000_001_u64,
+            "deliveryId": delivery_id,
+            "goal": "Seal each stage role workspace write mode from real execution.",
+            "id": "spec-write-mode-draft",
+            "maxReworkAttempts": 1,
+            "outOfScope": [],
+            "publicationTarget": null,
+            "repository": {
+                "kind": "local-git",
+                "locator": root.join("repository"),
+                "schemaVersion": 3,
+            },
+            "revision": 1,
+            "schemaVersion": 3,
+            "scope": ["One deterministic role write mode"],
+            "sourceRef": null,
+            "title": "Role write mode differential plan",
+        });
+        let mut approved_spec = draft_spec.clone();
+        approved_spec["createdAtMillis"] = json!(2_900_000_000_002_u64);
+        approved_spec["id"] = json!("spec-write-mode-approved");
+        approved_spec["revision"] = json!(2);
+        approved_spec["acceptanceCriteria"][0]["id"] = json!("criterion-write-mode-approved");
+        let request = |request_id: &str, operation: &str, payload: Value| {
+            PlanCommand::StrongFlowRequest {
+                request: json!({
+                    "operation": operation,
+                    "requestId": request_id,
+                    "schemaVersion": 7,
+                    "payload": payload,
+                }),
+            }
+        };
+        let opening_commands = vec![
+            request(
+                "write-mode:create",
+                "createDelivery",
+                json!({ "tasks": [], "spec": draft_spec }),
+            ),
+            request(
+                "write-mode:update",
+                "updateDeliverySpec",
+                json!({
+                    "deliveryId": delivery_id,
+                    "expectedRevision": 1,
+                    "spec": approved_spec,
+                }),
+            ),
+            request(
+                "write-mode:planning",
+                "startStage",
+                json!({
+                    "actorType": "codex",
+                    "attention": null,
+                    "deliveryId": delivery_id,
+                    "deliveryTaskId": null,
+                    "expectedRevision": 2,
+                    "role": "planner",
+                    "stage": "planning",
+                    "stageRunId": "stage-write-mode-planning",
+                }),
+            ),
+            request(
+                "write-mode:bind-planning",
+                "bindSession",
+                json!({
+                    "codexSessionId": "codex-write-mode-planning",
+                    "deliveryId": delivery_id,
+                    "dshSessionId": "dsh-write-mode-planning",
+                    "expectedRevision": 3,
+                    "stageRunId": "stage-write-mode-planning",
+                }),
+            ),
+        ];
+        let plan = DifferentialPlan {
+            schema_version: PLAN_SCHEMA.to_owned(),
+            oracle_schema_version: "winwincode.delivery-strongflow-differential-oracle.v1"
+                .to_owned(),
+            bindings: PlanBindings {
+                oracle_root: root.clone(),
+                node_executable: "/fixture/bin/node".to_owned(),
+                auth_proof: "write-mode-plan-proof".to_owned(),
+                fixture_random_identities: BTreeMap::new(),
+            },
+            scenarios: vec![ScenarioPlan {
+                id: "write-mode-planner".to_owned(),
+                commands: opening_commands.clone(),
+                terminal_outcome_status_by_source_command_index: BTreeMap::new(),
+            }],
+        };
+
+        let result = run_differential_plan(&plan)
+            .expect("planner dispatch through the real typed Control Plane");
+        let scenario = &result["scenarios"][0];
+        let advance = &scenario["commands"][2];
+        assert_eq!(advance["request"]["command"], "delivery.advance");
+        assert_eq!(advance["response"]["outcome"], "completed");
+        let outbox = scenario["observation"]["store"]["outbox"]
+            .as_array()
+            .expect("outbox events");
+        let planner_job = outbox
+            .iter()
+            .find(|event| event["payload"]["executionProfile"] == "planner")
+            .expect("planner ExecutionJob outbox event");
+        assert_eq!(
+            planner_job["payload"]["workspace"]["writeMode"],
+            json!("read-only")
+        );
+
+        let candidate_input = json!({
+            "baseCommitId": "697b264db0d6398c9d7519f970c3e06605bdd299",
+            "baseTreeId": "93dd737f8f5ec6ea45f43c8351521bdd0d8c02a3",
+            "candidateCommitId": "8bf1d985689c401cf667d5c5a762931949ef4594",
+            "candidateRef": "git-candidate:sha256:8f4a2b1c9d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+            "candidateTreeId": "8ad93c3760c659a47b754ffa4bd900d363c4a56a",
+            "changedPaths": [{
+                "objectId": "2aa9c2f1a9d0b4c8e6f70a1b2c3d4e5f60718293",
+                "path": "src/write_mode.rs",
+                "state": "present",
+            }],
+            "diffSha256": "3d0a9c7b5e1f2a6b8c4d0e9f1a3b5c7d9e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b",
+            "producerSessionBindingId": "stage-write-mode-executing",
+            "producerStageRunId": "stage-write-mode-executing",
+        });
+        let mut runner = ScenarioRunner::open(
+            &root,
+            "write-mode-verifying",
+            HashMap::from([(
+                canonical_stage_run_id("stage-write-mode-executing").0,
+                candidate_input,
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("verifying scenario runner");
+        let attention_context = json!({
+            "solution": {
+                "id": "solution-write-mode",
+                "summary": "Seal each stage role workspace write mode from real execution.",
+                "approach": ["Keep the typed Control Plane as the only dispatch authority."],
+                "components": [{
+                    "id": "component-write-mode",
+                    "label": "Write mode fixture module",
+                    "responsibility": "Produce one reviewed local value for verification.",
+                    "kind": "component",
+                    "trustBoundary": "Local fixture repository",
+                    "unresolved": false,
+                    "repositoryPathPrefixes": ["src"],
+                }],
+                "connections": [{
+                    "id": "connection-write-mode",
+                    "from": "platform:codex-core",
+                    "to": "component-write-mode",
+                    "label": "Implements the approved local change",
+                }],
+            },
+            "architectureDiagram": {
+                "id": "diagram-write-mode-architecture",
+                "kind": "system-architecture",
+                "title": "Write mode architecture fixture",
+                "nodes": [
+                    {
+                        "id": "diagram-write-mode-architecture:input",
+                        "label": "Input",
+                        "description": "Starts the write mode fixture.",
+                        "kind": "stage",
+                        "trustBoundary": null,
+                        "unresolved": false,
+                    },
+                    {
+                        "id": "diagram-write-mode-architecture:output",
+                        "label": "Output",
+                        "description": "Completes the write mode fixture.",
+                        "kind": "decision",
+                        "trustBoundary": "fixture-review",
+                        "unresolved": false,
+                    },
+                ],
+                "edges": [{
+                    "id": "diagram-write-mode-architecture:edge",
+                    "from": "diagram-write-mode-architecture:input",
+                    "to": "diagram-write-mode-architecture:output",
+                    "label": "reviews",
+                }],
+            },
+            "processDiagram": {
+                "id": "diagram-write-mode-process",
+                "kind": "process-flow",
+                "title": "Write mode process fixture",
+                "nodes": [
+                    {
+                        "id": "diagram-write-mode-process:input",
+                        "label": "Input",
+                        "description": "Starts the write mode fixture.",
+                        "kind": "stage",
+                        "trustBoundary": null,
+                        "unresolved": false,
+                    },
+                    {
+                        "id": "diagram-write-mode-process:output",
+                        "label": "Output",
+                        "description": "Completes the write mode fixture.",
+                        "kind": "decision",
+                        "trustBoundary": "fixture-review",
+                        "unresolved": false,
+                    },
+                ],
+                "edges": [{
+                    "id": "diagram-write-mode-process:edge",
+                    "from": "diagram-write-mode-process:input",
+                    "to": "diagram-write-mode-process:output",
+                    "label": "reviews",
+                }],
+            },
+        })
+        .to_string();
+        let mut verifying_commands = opening_commands;
+        verifying_commands.extend([
+            request(
+                "write-mode:plan-review",
+                "startStage",
+                json!({
+                    "actorType": "human",
+                    "attention": {
+                        "id": "attention-write-mode-plan-review",
+                        "assignedTo": "write-mode-human-reviewer",
+                        "blocking": true,
+                        "context": attention_context,
+                        "title": "Approve the role write mode plan",
+                    },
+                    "deliveryId": delivery_id,
+                    "deliveryTaskId": null,
+                    "expectedRevision": 4,
+                    "role": "reviewer",
+                    "stage": "plan-review",
+                    "stageRunId": "stage-write-mode-plan-review",
+                }),
+            ),
+            request(
+                "write-mode:approve-plan",
+                "resolveAttention",
+                json!({
+                    "attentionItemId": "attention-write-mode-plan-review",
+                    "authentication": {
+                        "proof": "write-mode-plan-proof",
+                        "scheme": "local-session",
+                    },
+                    "channel": "local-ui",
+                    "deliveryId": delivery_id,
+                    "expectedRevision": 5,
+                    "remediation": null,
+                    "resolution": json!({
+                        "action": "approve",
+                        "comments": "Approve the exact current write mode review set.",
+                    })
+                    .to_string(),
+                    "status": "resolved",
+                }),
+            ),
+            request(
+                "write-mode:executing",
+                "startStage",
+                json!({
+                    "actorType": "codex",
+                    "attention": null,
+                    "deliveryId": delivery_id,
+                    "deliveryTaskId": null,
+                    "expectedRevision": 6,
+                    "role": "executor",
+                    "stage": "executing",
+                    "stageRunId": "stage-write-mode-executing",
+                }),
+            ),
+            request(
+                "write-mode:bind-executing",
+                "bindSession",
+                json!({
+                    "codexSessionId": "codex-write-mode-executing",
+                    "deliveryId": delivery_id,
+                    "dshSessionId": "dsh-write-mode-executing",
+                    "expectedRevision": 7,
+                    "stageRunId": "stage-write-mode-executing",
+                }),
+            ),
+            request(
+                "write-mode:verifying",
+                "startStage",
+                json!({
+                    "actorType": "codex",
+                    "attention": null,
+                    "deliveryId": delivery_id,
+                    "deliveryTaskId": null,
+                    "expectedRevision": 8,
+                    "role": "reviewer",
+                    "stage": "verifying",
+                    "stageRunId": "stage-write-mode-verifying",
+                }),
+            ),
+        ]);
+        for (source_index, command) in verifying_commands.iter().enumerate() {
+            let entries = runner
+                .execute(source_index, command)
+                .unwrap_or_else(|error| {
+                    panic!("write-mode verifying command {source_index} failed: {error}")
+                });
+            for entry in &entries {
+                assert_eq!(
+                    entry["response"]["outcome"],
+                    "completed",
+                    "write-mode verifying command {source_index} entry {entry}"
+                );
+            }
+            if source_index != 8 {
+                continue;
+            }
+            let advance = entries
+                .first()
+                .expect("verifying advance kept its command entry");
+            assert_eq!(
+                advance["request"]["command"],
+                "delivery.advance",
+                "verifying entry {advance}"
+            );
+            assert_eq!(
+                advance["response"]["outcome"],
+                "completed",
+                "verifying advance response {advance}"
+            );
+        }
+        let observation = sqlite_durable_observation(
+            &runner.home,
+            &DeliveryId(delivery_id.to_owned()),
+        )
+        .expect("durable write-mode observation");
+        let outbox = observation["outbox"]
+            .as_array()
+            .expect("durable outbox events");
+        let executor_job = outbox
+            .iter()
+            .find(|event| event["payload"]["executionProfile"] == "executor")
+            .expect("executor ExecutionJob outbox event");
+        assert_eq!(
+            executor_job["payload"]["workspace"]["writeMode"],
+            json!("candidate")
+        );
+        let reviewer_job = outbox
+            .iter()
+            .find(|event| event["payload"]["executionProfile"] == "reviewer")
+            .expect("reviewer ExecutionJob outbox event");
+        assert_eq!(
+            reviewer_job["payload"]["workspace"]["writeMode"],
+            json!("read-only")
+        );
+        assert_eq!(
+            reviewer_job["payload"]["workspace"]["checkoutRevision"],
+            json!("8bf1d985689c401cf667d5c5a762931949ef4594")
+        );
+        let stage_candidate_ref = reviewer_job["payload"]["stageInput"]["candidateRef"]
+            .as_str()
+            .expect("verifier stage input carries the frozen candidate ref");
+        assert!(
+            stage_candidate_ref.starts_with("git-candidate:sha256:"),
+            "unexpected verifier candidate ref {stage_candidate_ref}"
+        );
+
+        fs::remove_dir_all(root).expect("remove write-mode fixture root");
     }
 }
