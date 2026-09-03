@@ -517,6 +517,14 @@ function rowNodes(viewer) {
   return [...findByClass(viewer.root, 'wwc-candidate-diff-body').children]
 }
 
+test('the Diff search label uses its canonical presentation class', () => {
+  const { viewer } = mountViewer()
+  const searchLabel = findByClass(viewer.root, 'wwc-candidate-diff-search-label')
+  assert.notEqual(searchLabel, null,
+    'the existing Diff search-label CSS must match the rendered label')
+  assert.equal(findByClass(searchLabel, 'wwc-candidate-diff-search').tagName, 'INPUT')
+})
+
 test('the viewer renders hunk headers, line numbers, and added or removed markers', () => {
   const { viewer } = mountViewer()
   const rows = rowNodes(viewer)
