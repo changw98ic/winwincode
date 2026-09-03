@@ -151,11 +151,24 @@ function projection() {
       type: 'test',
       sourceRef: `artifact:test:${String(value)}`,
       candidateRef,
+      createdAt: '2026-08-27T01:00:04.000Z',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      sessionBindingId: 'binding:1',
+      stageRunId: value === 1 ? stageRunId : `run_${String(value).padStart(26, '0')}`,
     })),
     verdict: {
       id: 'verdict:1',
       status: 'pass',
       producedAt: '2026-08-27T01:00:05.000Z',
+      criteria: [{
+        criterionId: 'criterion:1',
+        evaluatedAt: '2026-08-27T01:00:05.000Z',
+        evidenceRefs: ['evidence:1'],
+        explanation: 'The exact check passed.',
+        resultId: 'result:1',
+        verdict: 'pass',
+      }],
     },
     attention: many(5, value => ({
       id: `attention:${String(value)}`,
@@ -397,6 +410,7 @@ function pageEvidenceClient() {
     async query(request) {
       this.queries.push(request)
       if (request.query === 'evidence.get') {
+        const binding = request.parameters
         return {
           schemaVersion: 'winwincode/v1',
           requestId: request.requestId,
@@ -404,7 +418,17 @@ function pageEvidenceClient() {
           result: {
             kind: 'evidence_detail',
             artifactAccess: { state: 'unavailable', reason: 'no_authoritative_link' },
-            evidence: request.parameters,
+            evidence: {
+              candidateRef: binding.candidateRef,
+              createdAt: '2026-08-27T01:00:04.000Z',
+              deliverySpecId: 'spec:1',
+              deliverySpecRevision: 3,
+              id: binding.evidenceId,
+              sessionBindingId: binding.sessionBindingId,
+              sourceRef: binding.sourceRef,
+              stageRunId: binding.stageRunId,
+              type: binding.type,
+            },
             outcome: 'succeeded',
             readCursor: request.parameters.atCursor,
           },
@@ -418,20 +442,36 @@ function pageEvidenceClient() {
 
 function pageEvidenceDeepLink() {
   const state = { hash: `#/strongflow?delivery=${deliveryId}` }
-  return {
-    read: () => new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1)),
-    replace(hash) { state.hash = hash },
+  const link = {
+    get route() {
+      const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
+      const tab = parameters.get('tab')
+      return {
+        tab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
+        evidenceId: parameters.get('evidence'),
+      }
+    },
+    onRouteChange(route) {
+      const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
+      parameters.set('tab', route.tab)
+      if (route.evidenceId === null) parameters.delete('evidence')
+      else parameters.set('evidence', route.evidenceId)
+      state.hash = `#/strongflow?${parameters.toString()}`
+    },
     state,
   }
+  return link
 }
 
 function pageEvidenceOptions(overrides = {}) {
+  const link = pageEvidenceDeepLink()
   return {
     client: pageEvidenceClient(),
     actor: pageActor,
     scope: pageScope,
     nextRequestId: () => 'req_00000000000000000000000001',
-    deepLink: pageEvidenceDeepLink(),
+    route: link.route,
+    onRouteChange: link.onRouteChange,
     ...overrides,
   }
 }
@@ -532,6 +572,20 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.equal(evidenceOptions.client.queries.length, 1)
   assert.equal(evidenceOptions.client.queries[0].query, 'evidence.get')
   assert.equal(evidenceOptions.client.queries[0].parameters.evidenceId, 'evidence:1')
+
+  for (const className of [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]) {
+    const entry = findByClass(rootElement, className)
+    assert.notEqual(entry, null, `${className} must expose an exact Evidence entry point`)
+    entry.emit('click')
+  }
+  assert.deepEqual(
+    evidenceOptions.client.queries.slice(-3).map(query => query.parameters.evidenceId),
+    ['evidence:1', 'evidence:1', 'evidence:1'],
+  )
 
   model.publish(state({
     realtime: 'reconnecting',

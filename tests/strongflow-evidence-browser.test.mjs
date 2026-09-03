@@ -62,6 +62,12 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
   })
   await devtools.send('Runtime.enable', {}, sessionId)
   await devtools.send('Page.enable', {}, sessionId)
+  await devtools.send('Emulation.setDeviceMetricsOverride', {
+    width: 1280,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }, sessionId)
   await devtools.send('Page.navigate', {
     url: `https://client.localhost:${String(clientPort)}/#/strongflow`,
   }, sessionId)
@@ -73,6 +79,11 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
   assert.equal(result.initial.selected, 'Evidence')
   assert.deepEqual(result.initial.rowTypes, ['test', 'command', 'runtime_event', 'diff'])
   assert.deepEqual(result.initial.candidateStates, ['current'])
+  assert.deepEqual(result.initial.panels.map(panel => panel.role), ['tabpanel', 'tabpanel', 'tabpanel'])
+  assert.equal(result.initial.panels.filter(panel => !panel.hidden).length, 1)
+  assert.deepEqual(result.initial.entryPoints, { stage: 4, candidate: 4, criterion: 1 })
+  assert.match(result.initial.summary, /1 criteria · 0 passed · 1 failed/u)
+  assert.match(result.initial.criterionJoin, /criterion:browser/u)
 
   assert.deepEqual(result.testsView.rowTypes, ['test'])
   assert.match(result.testsView.hash, /tab=tests/u)
@@ -81,18 +92,56 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
   assert.equal(result.detail.outcome, 'Failed · business')
   assert.equal(result.detail.tone, 'business-fail')
   assert.equal(result.detail.candidate, 'current candidate')
-  assert.match(result.detail.artifact, /not available/u)
+  assert.match(result.detail.artifact, /download-only/u)
   assert.match(result.detail.hash, /evidence=evidence%3A1/u)
   assert.match(result.detail.hash, /tab=tests/u)
+  assert.equal(result.detail.stableNode, true)
+  assert.equal(result.detail.closeFocusedDuringLoad, true)
+  assert.equal(result.detail.busy, 'false')
+  assert.equal(result.detail.artifactSelectors, 2)
+  assert.equal(result.detail.selectedArtifact, 'true')
 
   assert.equal(result.closed.hash.includes('evidence='), false)
+  assert.equal(result.closed.detailRetained, true)
+  assert.equal(result.closed.detailHidden, true)
+  assert.equal(result.closed.openerFocused, true)
+  assert.equal(result.refreshed.staleClearedDuringRefresh, true)
+  assert.equal(result.refreshed.stableNode, true)
+  assert.match(result.refreshed.binding, /revision 3/u)
   assert.equal(result.navigationEntryCount, 1)
 
-  assert.deepEqual(result.evidenceQueries, [{
-    evidenceId: 'evidence:1',
-    readPageLimit: 1,
-    cursorToken: 'cursor_00000000000000000000000000000002',
-    page: { cursor: null, limit: 1 },
-  }])
+  assert.deepEqual(result.evidenceQueries, [
+    {
+      evidenceId: 'evidence:1',
+      readPageLimit: 1,
+      cursorToken: 'cursor_00000000000000000000000000000002',
+      page: { cursor: null, limit: 1 },
+    },
+    {
+      evidenceId: 'evidence:1',
+      readPageLimit: 1,
+      cursorToken: 'cursor_00000000000000000000000000000002',
+      page: { cursor: null, limit: 1 },
+    },
+    {
+      evidenceId: 'evidence:1',
+      readPageLimit: 1,
+      cursorToken: 'cursor_00000000000000000000000000000003',
+      page: { cursor: null, limit: 1 },
+    },
+  ])
   assert.equal(result.contentQueries, 0)
+
+  await devtools.send('Emulation.setDeviceMetricsOverride', {
+    width: 700,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }, sessionId)
+  const compactDisplay = await evaluate(
+    devtools,
+    sessionId,
+    "getComputedStyle(document.querySelector('.wwc-strongflow-evidence-row')).display",
+  )
+  assert.equal(compactDisplay, 'grid')
 })

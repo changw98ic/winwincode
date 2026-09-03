@@ -16,6 +16,7 @@ import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
   mountStrongFlowEvidence,
   type StrongFlowEvidenceOptions,
+  type StrongFlowEvidenceWorkbench,
 } from './strongflow-evidence.js'
 import {
   boundedItems,
@@ -521,9 +522,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
   let lastRuntime: StrongFlowProjection['runtime'] | null = null
   let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
+  let lastCandidateEvidence: StrongFlowProjection['evidence'] | null = null
   let lastVerdict: StrongFlowProjection['verdict'] | null = null
   let lastPublication: StrongFlowProjection['publication'] | null = null
   let solutionDraftKey: string | null = null
+  let evidenceWorkbench: StrongFlowEvidenceWorkbench | null = null
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -653,14 +656,43 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     remove(item) { taskRows.delete(item) },
   })
 
+  const stageRows = new WeakMap<HTMLLIElement, {
+    readonly summary: HTMLElement
+    readonly evidence: HTMLElement
+  }>()
   const stageCollection = mountKeyedCollection({
     parent: stages,
     key: (stage: DeliveryStageProjection) => stage.id,
-    create: () => document.createElement('li'),
-    update(item, stage: DeliveryStageProjection) {
-      item.dataset.status = stage.status
-      item.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
+    create() {
+      const item = document.createElement('li')
+      const summary = document.createElement('span')
+      const evidence = strongFlowElement(document, 'span', 'wwc-strongflow-stage-evidence')
+      item.append(summary, evidence)
+      stageRows.set(item, { summary, evidence })
+      return item
     },
+    update(item, stage: DeliveryStageProjection) {
+      const row = stageRows.get(item)
+      if (row === undefined) return
+      item.dataset.status = stage.status
+      row.summary.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
+      row.evidence.replaceChildren()
+      const stageEvidence = options.model.state.projection?.evidence
+        .filter(record => record.stageRunId === stage.id) ?? []
+      for (const record of stageEvidence) {
+        const open = strongFlowElement(
+          document,
+          'button',
+          'wwc-strongflow-stage-evidence-open',
+        ) as HTMLButtonElement
+        open.type = 'button'
+        open.dataset.evidenceId = record.id
+        open.textContent = `Open Evidence ${record.id}`
+        open.addEventListener('click', () => { void evidenceWorkbench?.openEvidence(record.id) })
+        row.evidence.append(open)
+      }
+    },
+    remove(item) { stageRows.delete(item) },
   })
 
   const attentionCollection = mountKeyedCollection({
@@ -937,6 +969,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       lastSolutionReview = null
       lastRuntime = null
       lastCandidate = null
+      lastCandidateEvidence = null
       lastVerdict = null
       lastPublication = null
       return
@@ -972,13 +1005,17 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     if (
       candidateNode === null
       || lastCandidate !== projection.currentCandidate
+      || lastCandidateEvidence !== projection.evidence
       || lastVerdict !== projection.verdict
       || lastPublication !== projection.publication
     ) {
       candidateNode?.remove()
-      candidateNode = renderStrongFlowCandidate(document, projection)
+      candidateNode = renderStrongFlowCandidate(document, projection, {
+        onOpenEvidence(evidenceId) { void evidenceWorkbench?.openEvidence(evidenceId) },
+      })
       candidateHost.append(candidateNode)
       lastCandidate = projection.currentCandidate
+      lastCandidateEvidence = projection.evidence
       lastVerdict = projection.verdict
       lastPublication = projection.publication
     }
@@ -1053,7 +1090,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   }
 
   const unsubscribe = options.model.subscribe(render)
-  const evidenceWorkbench = mountStrongFlowEvidence({
+  evidenceWorkbench = mountStrongFlowEvidence({
     ...options.evidence,
     root: evidenceHost,
     model: options.model,
@@ -1082,7 +1119,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       deliveryCollection.close()
       diagramsNode?.remove()
       candidateNode?.remove()
-      evidenceWorkbench.close()
+      evidenceWorkbench?.close()
       options.model.close()
       options.root.replaceChildren()
     },

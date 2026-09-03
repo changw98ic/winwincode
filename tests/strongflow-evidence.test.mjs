@@ -310,6 +310,51 @@ test('detail identity mismatch is rejected and every facade read receives a canc
   assert.equal(client.queryOptions[0].signal instanceof AbortSignal, true)
 })
 
+test('detail rejects foreign Evidence, Candidate, StageRun, SessionBinding, cursor, and Artifact provenance', async () => {
+  const baseDescriptor = artifactDescriptor({
+    previewMode: 'download_only',
+    provenance: {
+      ...artifactDescriptor().provenance,
+      evidenceId: 'evidence:1',
+    },
+  })
+  const cases = [
+    { evidence: { ...evidenceRow(1), id: 'evidence:foreign' } },
+    { evidence: { ...evidenceRow(1), candidateRef: supersededCandidateRef } },
+    { evidence: { ...evidenceRow(1), stageRunId: 'run_foreign' } },
+    { evidence: { ...evidenceRow(1), sessionBindingId: 'binding:foreign' } },
+    { readCursor: readCursor({ token: 'cursor-token-foreign' }) },
+    {
+      artifactAccess: {
+        state: 'available',
+        items: [{
+          ...baseDescriptor,
+          provenance: { ...baseDescriptor.provenance, deliveryId: 'delivery:foreign' },
+        }],
+      },
+    },
+    {
+      artifactAccess: {
+        state: 'available',
+        items: [{
+          ...baseDescriptor,
+          provenance: { ...baseDescriptor.provenance, evidenceId: 'evidence:foreign' },
+        }],
+      },
+    },
+  ]
+  for (const overrides of cases) {
+    const client = new FakeControlPlaneClient(request => evidenceGetResponse(
+      request,
+      evidenceDetailResult(overrides),
+    ))
+    const { created } = viewModel({ client })
+    await created.openEvidence('evidence:1')
+    assert.equal(created.state.detail.status, 'error')
+    assert.equal(created.state.detail.error.code, 'STRONGFLOW_EVIDENCE_IDENTITY_MISMATCH')
+  }
+})
+
 test('a changed snapshot identity clears stale bytes synchronously, aborts the old read, and reloads', async () => {
   let resolveFirst
   const first = new Promise(resolve => { resolveFirst = resolve })
@@ -343,24 +388,122 @@ test('a changed snapshot identity clears stale bytes synchronously, aborts the o
   assert.equal(created.state.detail.status, 'ready')
 })
 
-test('content validates exact descriptor, provenance, cursor and requested byte range', async () => {
+test('a transient StrongFlow refresh reopens the selected Evidence only under the new cursor', async () => {
+  const nextCursor = readCursor({ token: 'cursor-token-2', deliveryRevision: 7 })
+  const client = new FakeControlPlaneClient((request, count) => evidenceGetResponse(
+    request,
+    evidenceDetailResult(count === 1 ? {} : { readCursor: nextCursor }),
+  ))
+  const { created, model } = viewModel({ client })
+  await created.openEvidence('evidence:1')
+
+  model.publish(modelState({ status: 'refreshing', projection: null }))
+  assert.equal(created.state.selected, null)
+  assert.equal(created.state.detail, null)
+  assert.equal(created.state.content, null)
+
+  model.publish(modelState({
+    projection: projection({
+      delivery: { ...projection().delivery, deliveryRevision: 7 },
+      metadata: {
+        ...projection().metadata,
+        revisions: { ...projection().metadata.revisions, delivery: 7 },
+        readCursor: nextCursor,
+      },
+    }),
+  }))
+  await new Promise(resolve => { setImmediate(resolve) })
+
+  assert.equal(client.queries.length, 2)
+  assert.equal(created.state.selected.binding.atCursor.token, nextCursor.token)
+  assert.equal(created.state.detail.status, 'ready')
+})
+
+test('content rejects foreign Evidence, cursor, Artifact id, digest, and provenance', async () => {
   const descriptor = artifactDescriptor({ sizeBytes: 26 })
-  const client = new FakeControlPlaneClient(request => {
-    if (request.query === QueryName.EvidenceGet) {
-      return evidenceGetResponse(request, evidenceDetailResult({
-        evidence: { ...evidenceRow(2), type: 'command' },
-        artifactAccess: { state: 'available', items: [descriptor] },
-      }))
-    }
-    return artifactChunkResponse(request, {
-      artifact: { ...descriptor, digest: `sha256:${'d'.repeat(64)}` },
-      totalBytes: 26,
+  const cases = [
+    { evidence: { ...evidenceRow(2), type: 'command', id: 'evidence:foreign' } },
+    { readCursor: readCursor({ token: 'cursor-token-foreign' }) },
+    { artifact: { ...descriptor, artifactId: 'artifact:foreign' } },
+    { artifact: { ...descriptor, digest: `sha256:${'d'.repeat(64)}` } },
+    {
+      artifact: {
+        ...descriptor,
+        provenance: { ...descriptor.provenance, stageRunId: 'run_foreign' },
+      },
+    },
+  ]
+  for (const overrides of cases) {
+    const client = new FakeControlPlaneClient(request => {
+      if (request.query === QueryName.EvidenceGet) {
+        return evidenceGetResponse(request, evidenceDetailResult({
+          evidence: { ...evidenceRow(2), type: 'command' },
+          artifactAccess: { state: 'available', items: [descriptor] },
+        }))
+      }
+      return artifactChunkResponse(request, { artifact: descriptor, ...overrides })
     })
-  })
+    const { created } = viewModel({ client })
+    await created.openEvidence('evidence:2')
+    assert.equal(created.state.content.status, 'error')
+    assert.equal(created.state.content.error.code, 'STRONGFLOW_EVIDENCE_CONTENT_IDENTITY_MISMATCH')
+    assert.equal(client.queryOptions.at(-1).signal instanceof AbortSignal, true)
+  }
+})
+
+test('content rejects repeated, backward, oversized, and inconsistent continuation ranges', async () => {
+  const cases = [
+    { offset: 1 },
+    { nextOffset: 0 },
+    { nextOffset: 30 },
+    { totalBytes: 27 },
+    { returnedBytes: 25 },
+  ]
+  for (const overrides of cases) {
+    const descriptor = artifactDescriptor({ sizeBytes: 26 })
+    const client = new FakeControlPlaneClient(request => {
+      if (request.query === QueryName.EvidenceGet) return evidenceGetResponse(
+        request,
+        evidenceDetailResult({
+          evidence: { ...evidenceRow(2), type: 'command' },
+          artifactAccess: { state: 'available', items: [descriptor] },
+        }),
+      )
+      return artifactChunkResponse(request, { artifact: descriptor, ...overrides })
+    })
+    const { created } = viewModel({ client })
+    await created.openEvidence('evidence:2')
+    assert.equal(created.state.content.status, 'error')
+    assert.equal(created.state.content.error.code, 'STRONGFLOW_EVIDENCE_CONTENT_RANGE_INVALID')
+  }
+})
+
+test('opening a replacement and closing the Drawer abort their in-flight facade reads', async () => {
+  const pending = []
+  const client = new FakeControlPlaneClient(request => new Promise(resolve => {
+    pending.push({ request, resolve })
+  }))
   const { created } = viewModel({ client })
-  await created.openEvidence('evidence:2')
-  assert.equal(created.state.content.status, 'error')
-  assert.equal(created.state.content.error.code, 'STRONGFLOW_EVIDENCE_CONTENT_IDENTITY_MISMATCH')
+  const first = created.openEvidence('evidence:1')
+  await new Promise(resolve => { setImmediate(resolve) })
+  const firstSignal = client.queryOptions[0].signal
+  const second = created.openEvidence('evidence:2')
+  await new Promise(resolve => { setImmediate(resolve) })
+  const secondSignal = client.queryOptions[1].signal
+  assert.equal(firstSignal.aborted, true)
+  created.closeEvidence()
+  assert.equal(secondSignal.aborted, true)
+  pending[0].resolve(evidenceGetResponse(
+    pending[0].request,
+    evidenceDetailResult(),
+  ))
+  pending[1].resolve(evidenceGetResponse(
+    pending[1].request,
+    evidenceDetailResult({ evidence: { ...evidenceRow(2), type: 'command' } }),
+  ))
+  await Promise.all([first, second])
+  assert.equal(created.state.selected, null)
+  assert.equal(created.state.detail, null)
 })
 
 test('streaming UTF-8 preserves a code point split across bounded chunks', async () => {
@@ -430,13 +573,15 @@ function nextRequestId() {
 function viewModel(overrides = {}) {
   const model = new FakeStrongFlowModel()
   const client = overrides.client ?? new FakeControlPlaneClient()
+  const link = overrides.deepLink ?? deepLink()
   const created = createStrongFlowEvidenceViewModel({
     client,
     actor,
     scope,
     nextRequestId,
     model,
-    deepLink: overrides.deepLink ?? deepLink(),
+    route: link.route,
+    onRouteChange: link.onRouteChange,
     ...(overrides.options ?? {}),
   })
   return { created, client, model }
@@ -889,20 +1034,32 @@ function findAllByClass(node, className, matches = []) {
 
 function deepLink() {
   const state = { hash: '#/strongflow?delivery=' + deliveryId, replaced: [] }
-  return {
-    read: () => new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1)),
-    replace: hash => {
-      state.replaced.push(hash)
-      state.hash = hash
+  const link = {
+    get route() {
+      const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
+      const tab = parameters.get('tab')
+      return {
+        tab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
+        evidenceId: parameters.get('evidence'),
+      }
+    },
+    onRouteChange: route => {
+      const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
+      parameters.set('tab', route.tab)
+      if (route.evidenceId === null) parameters.delete('evidence')
+      else parameters.set('evidence', route.evidenceId)
+      state.hash = `#/strongflow?${parameters.toString()}`
+      state.replaced.push(state.hash)
     },
     state,
   }
+  return link
 }
 
 function mountedWorkbench(overrides = {}) {
   const document = new FakeDocument()
   const rootElement = document.createElement('section')
-  const model = new FakeStrongFlowModel()
+  const model = overrides.model ?? new FakeStrongFlowModel()
   const client = overrides.client ?? new FakeControlPlaneClient(request => evidenceGetResponse(
     request,
     evidenceDetailResult(),
@@ -915,7 +1072,8 @@ function mountedWorkbench(overrides = {}) {
     actor,
     scope,
     nextRequestId,
-    deepLink: link,
+    route: link.route,
+    onRouteChange: link.onRouteChange,
     ...(overrides.limits === undefined ? {} : { limits: overrides.limits }),
     ...(overrides.downloader === undefined ? {} : { downloader: overrides.downloader }),
   })
@@ -933,7 +1091,68 @@ test('the workbench renders tab navigation, bounded rows, and candidate binding 
   assert.equal(rows.length, 2)
   const omitted = findAllByClass(rootElement, 'wwc-strongflow-omitted')
   assert.equal(omitted.length > 0, true)
-  assert.match(omitted[0].textContent, /3 more evidence records/u)
+  assert.equal(omitted.some(node => /3 more evidence records/u.test(node.textContent)), true)
+})
+
+test('tabs own real panels and the keyed Drawer keeps one detail node with accessible state', async () => {
+  const client = new FakeControlPlaneClient(request => evidenceGetResponse(
+    request,
+    evidenceDetailResult({ evidence: { ...evidenceRow(1), stageRunId: 'run_foreign' } }),
+  ))
+  const { rootElement, mounted } = mountedWorkbench({ client })
+  const tabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs').children
+  const panels = findAllByClass(rootElement, 'wwc-strongflow-evidence-panel')
+  assert.equal(panels.length, 3)
+  assert.deepEqual(panels.map(panel => panel.getAttribute('role')), ['tabpanel', 'tabpanel', 'tabpanel'])
+  assert.deepEqual(tabs.map(tab => tab.getAttribute('aria-controls')), panels.map(panel => panel.id))
+  assert.equal(panels.filter(panel => !panel.hidden).length, 1)
+  const row = findAllByClass(rootElement, 'wwc-strongflow-evidence-row')[0]
+  row.emit('click')
+  const detailBefore = findByClass(rootElement, 'wwc-strongflow-evidence-detail')
+  assert.equal(detailBefore.getAttribute('aria-busy'), 'true')
+  await new Promise(resolve => { setImmediate(resolve) })
+  const detailAfter = findByClass(rootElement, 'wwc-strongflow-evidence-detail')
+  assert.equal(detailAfter, detailBefore)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-error').getAttribute('role'), 'alert')
+  mounted.close()
+})
+
+test('workbench shows bounded Verdict failures, criterion joins, and every Artifact selector', async () => {
+  const descriptorA = artifactDescriptor({ artifactId: 'artifact:a' })
+  const descriptorB = artifactDescriptor({ artifactId: 'artifact:b', digest: `sha256:${'e'.repeat(64)}` })
+  const currentProjection = projection({
+    verdict: {
+      criteria: [{
+        criterionId: 'criterion:failure',
+        resultId: 'result:1',
+        verdict: 'fail',
+        evidenceRefs: ['evidence:2'],
+        explanation: 'failed exact check',
+        evaluatedAt: '2026-09-02T02:00:00.000Z',
+      }],
+    },
+  })
+  const client = new FakeControlPlaneClient(request => {
+    if (request.query === QueryName.EvidenceGet) return evidenceGetResponse(request, evidenceDetailResult({
+      evidence: { ...evidenceRow(2), type: 'command' },
+      artifactAccess: { state: 'available', items: [descriptorA, descriptorB] },
+    }))
+    return artifactChunkResponse(request, {
+      artifact: request.parameters.artifactId === descriptorA.artifactId ? descriptorA : descriptorB,
+    })
+  })
+  const { rootElement, mounted } = mountedWorkbench({
+    client,
+    model: new FakeStrongFlowModel(modelState({ projection: currentProjection })),
+  })
+  assert.match(findByClass(rootElement, 'wwc-strongflow-evidence-summary-counts').textContent, /1 failed/u)
+  const row = findAllByClass(rootElement, 'wwc-strongflow-evidence-row')
+    .find(candidate => candidate.dataset.evidenceId === 'evidence:2')
+  assert.match(findByClass(row, 'wwc-strongflow-evidence-criteria').textContent, /criterion:failure/u)
+  row.emit('click')
+  await new Promise(resolve => { setImmediate(resolve) })
+  assert.equal(findAllByClass(rootElement, 'wwc-strongflow-evidence-artifact-select').length, 2)
+  mounted.close()
 })
 
 test('tab selection moves with the keyboard, filters rows, and writes a bounded deep link', () => {
@@ -978,7 +1197,7 @@ test('opening a row from the list opens the detail drawer with sanitized provena
   assert.match(artifact.textContent, /not available/u)
   assert.equal(client.queries.length, 1)
   findByClass(rootElement, 'wwc-drawer-close').emit('click')
-  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-detail'), null)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-detail').hidden, true)
   assert.equal(link.state.hash.includes('evidence='), false)
   mounted.close()
 })

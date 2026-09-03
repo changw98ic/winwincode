@@ -30,9 +30,16 @@ import type {
   ProductSessionId,
   RepositoryScope,
   RequestId,
-  StageRunId,
 } from './generated/contracts.js'
 import { QueryName } from './generated/contracts.js'
+import {
+  parseStrongFlowRouteHash,
+  strongFlowRouteHash,
+} from './strongflow-route.js'
+import type { StrongFlowRoute } from './strongflow-route.js'
+
+export { parseStrongFlowRouteHash, strongFlowRouteHash } from './strongflow-route.js'
+export type { StrongFlowEvidenceRouteState, StrongFlowRoute } from './strongflow-route.js'
 
 export type ClientSurfaceId =
   | 'chat'
@@ -147,16 +154,6 @@ function contractId(
 function routeParameters(hash: string): URLSearchParams {
   const query = hash.indexOf('?')
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
-}
-
-export function strongFlowRouteHash(
-  deliveryId: DeliveryId,
-  productSessionId: ProductSessionId,
-  stageRunId: StageRunId,
-): string {
-  return `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
-    + `&session=${encodeURIComponent(productSessionId)}`
-    + `&stageRun=${encodeURIComponent(stageRunId)}`
 }
 
 function repositoryScope(
@@ -593,7 +590,7 @@ export function mountWinWinCodeClient(
     featureController = controller
     routeLoading('Loading StrongFlow…')
     try {
-      const parameters = routeParameters(browser.location.hash)
+      const route = parseStrongFlowRouteHash(browser.location.hash)
       const deliveriesValue = await controlPlane.query({
         schemaVersion: 'winwincode/v1',
         requestId: contractId('req', browser.crypto) as RequestId,
@@ -607,9 +604,7 @@ export function mountWinWinCodeClient(
         throw new Error('The StrongFlow route received another list response.')
       }
       const deliveries = (deliveriesValue as DeliveryListResultResponse).result.items
-      const deliveryId = (
-        parameters.get('delivery') as DeliveryId | null
-      ) ?? deliveries[0]?.deliveryId ?? null
+      const deliveryId = route.deliveryId ?? deliveries[0]?.deliveryId ?? null
       if (deliveryId === null) {
         const [{ createStrongFlowCreateViewModel }, { mountStrongFlowCreatePage }] = await Promise.all([
           import('./strongflow-view-model.js'),
@@ -648,25 +643,35 @@ export function mountWinWinCodeClient(
         throw new Error('The StrongFlow route received another detail response.')
       }
       const detail = (detailValue as DeliveryGetResultResponse).result
-      const requestedStageRunId = parameters.get('stageRun') as StageRunId | null
+      const requestedStageRunId = route.stageRunId
       const stage = requestedStageRunId === null
         ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
         : detail.stages.find(candidate => candidate.id === requestedStageRunId)
-      const productSessionId = (
-        parameters.get('session') as ProductSessionId | null
-      ) ?? stage?.sessionBinding?.productSessionId ?? null
+      const productSessionId = route.productSessionId
+        ?? stage?.sessionBinding?.productSessionId ?? null
       if (stage === undefined || stage.sessionBinding === null || productSessionId === null) {
         routeUnavailable('This Delivery does not have an executable StrongFlow stage yet.')
         return
       }
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
       if (
-        parameters.get('delivery') === null
-        || parameters.get('session') === null
-        || parameters.get('stageRun') === null
+        route.deliveryId === null
+        || route.productSessionId === null
+        || route.stageRunId === null
       ) {
-        replaceHash(strongFlowRouteHash(deliveryId, productSessionId, stage.id))
+        replaceHash(strongFlowRouteHash({
+          ...route,
+          deliveryId,
+          productSessionId,
+          stageRunId: stage.id,
+        }))
       }
+      let currentRoute: StrongFlowRoute = Object.freeze({
+        ...route,
+        deliveryId,
+        productSessionId,
+        stageRunId: stage.id,
+      })
       const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
         import('./strongflow-view-model.js'),
         import('./strongflow-page.js'),
@@ -686,11 +691,13 @@ export function mountWinWinCodeClient(
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         onStageBindingChange(binding) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          replaceHash(strongFlowRouteHash(
-            deliveryId,
-            binding.productSessionId,
-            binding.stageRunId,
-          ))
+          currentRoute = Object.freeze({
+            ...currentRoute,
+            productSessionId: binding.productSessionId,
+            stageRunId: binding.stageRunId,
+            evidenceId: null,
+          })
+          replaceHash(strongFlowRouteHash(currentRoute))
         },
       })
       activeFeature = mountStrongFlowPage({
@@ -702,6 +709,19 @@ export function mountWinWinCodeClient(
           actor: context.actor,
           scope: context.scope,
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+          route: Object.freeze({
+            tab: currentRoute.evidenceTab,
+            evidenceId: currentRoute.evidenceId,
+          }),
+          onRouteChange(nextEvidenceRoute) {
+            if (closed || generation !== renderGeneration || controller.signal.aborted) return
+            currentRoute = Object.freeze({
+              ...currentRoute,
+              evidenceTab: nextEvidenceRoute.tab,
+              evidenceId: nextEvidenceRoute.evidenceId,
+            })
+            replaceHash(strongFlowRouteHash(currentRoute))
+          },
         },
       })
     } catch (error) {

@@ -34,6 +34,8 @@ const browserSession = {
   authorizedScopes: [scope],
 }
 const calls = { commands: [], queries: [], subscriptions: [] }
+let deliveryRevision = 2
+let realtimeOptions = null
 
 function page() {
   return { hasMore: false, nextCursor: null }
@@ -86,18 +88,18 @@ function ownership() {
 
 function readCursor() {
   return {
-    token: 'cursor_00000000000000000000000000000002',
+    token: `cursor_${String(deliveryRevision).padStart(32, '0')}`,
     scope,
     deliveryId,
-    deliveryRevision: 2,
+    deliveryRevision,
     runtimeLedgerRevision: 1,
     runtimeAcceptedSequence: 0,
     publicationRevision: 0,
     eventCursor: {
       scope,
       stream: { kind: 'delivery', deliveryId },
-      sequence: 2,
-      eventId: 'evt_00000000000000000000000002',
+      sequence: deliveryRevision,
+      eventId: `evt_${String(deliveryRevision).padStart(26, '0')}`,
     },
   }
 }
@@ -138,7 +140,7 @@ function summary() {
   return {
     schemaVersion,
     deliveryId,
-    revision: 2,
+    revision: deliveryRevision,
     status: 'clarifying',
     title: 'Evidence workbench browser fixture',
     updatedAt: '2026-09-02T01:00:00.000Z',
@@ -162,7 +164,7 @@ function detail() {
     kind: 'delivery_detail',
     schemaVersion,
     deliveryId,
-    deliveryRevision: 2,
+    deliveryRevision,
     readCursor: readCursor(),
     ownership: ownership(),
     status: 'clarifying',
@@ -208,7 +210,23 @@ function detail() {
       producerSessionBindingId: sessionBindingId,
       producerStageRunId: stageRunId,
     },
-    verdict: null,
+    verdict: {
+      id: 'verdict:evidence-browser',
+      candidateRef,
+      criteria: [{
+        criterionId: 'criterion:browser',
+        evaluatedAt: '2026-09-02T01:00:03.000Z',
+        evidenceRefs: ['evidence:1'],
+        explanation: 'The browser evidence check failed.',
+        resultId: 'result:browser',
+        verdict: 'fail',
+      }],
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 1,
+      producedAt: '2026-09-02T01:00:03.000Z',
+      status: 'fail',
+      unresolvedFindings: [],
+    },
     publication: null,
   }
 }
@@ -280,9 +298,26 @@ function evidenceDetail(request) {
   ) {
     throw new Error('evidence.get binding does not match the snapshot row')
   }
+  const artifacts = [1, 2].map(value => ({
+    artifactId: `art_${String(value).padStart(26, '0')}`,
+    digest: `sha256:${String(value).repeat(64)}`,
+    fileName: `evidence-${String(value)}.bin`,
+    kind: 'report',
+    mediaType: 'application/octet-stream',
+    previewMode: 'download_only',
+    provenance: {
+      candidateRef: row.candidateRef,
+      deliveryId,
+      deliveryRevision,
+      evidenceId: row.id,
+      sessionBindingId: row.sessionBindingId,
+      stageRunId: row.stageRunId,
+    },
+    sizeBytes: 26,
+  }))
   return response(request, {
     kind: 'evidence_detail',
-    artifactAccess: { state: 'unavailable', reason: 'no_authoritative_link' },
+    artifactAccess: { state: 'available', items: artifacts },
     evidence: row,
     outcome: row.type === 'test' ? 'failed' : 'succeeded',
     readCursor: readCursor(),
@@ -352,6 +387,7 @@ const controlPlane = {
     throw new Error(`unexpected command: ${request.command}`)
   },
   subscribe(options) {
+    realtimeOptions = options
     calls.subscriptions.push(structuredClone({
       subscriptionId: options.subscriptionId,
       subscription: options.subscription,
@@ -365,6 +401,20 @@ const controlPlane = {
     }
   },
   close() {},
+}
+
+async function advanceDeliverySnapshot() {
+  if (realtimeOptions === null) throw new Error('StrongFlow subscription is not active')
+  deliveryRevision += 1
+  await realtimeOptions.onEvent({
+    sequence: deliveryRevision,
+    event: {
+      type: 'delivery.changed.v1',
+      deliveryId,
+      revision: deliveryRevision,
+      changeKind: 'advanced',
+    },
+  })
 }
 
 const root = document.querySelector('[data-winwincode-client-root]')
@@ -404,6 +454,21 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
       [...document.querySelectorAll('.wwc-strongflow-evidence-row')]
         .map(row => row.dataset.candidateState),
     )],
+    panels: [...document.querySelectorAll('.wwc-strongflow-evidence-panel')].map(panel => ({
+      id: panel.id,
+      role: panel.getAttribute('role'),
+      labelledBy: panel.getAttribute('aria-labelledby'),
+      hidden: panel.hidden,
+    })),
+    entryPoints: {
+      stage: document.querySelectorAll('.wwc-strongflow-stage-evidence-open').length,
+      candidate: document.querySelectorAll('.wwc-strongflow-candidate-evidence-open').length,
+      criterion: document.querySelectorAll('.wwc-strongflow-criterion-evidence-open').length,
+    },
+    summary: document.querySelector('.wwc-strongflow-evidence-summary-counts').textContent,
+    criterionJoin: document.querySelector(
+      '[data-evidence-id="evidence:1"] .wwc-strongflow-evidence-criteria',
+    ).textContent,
   }
 
   tabs.find(tab => tab.textContent === 'Tests').click()
@@ -418,7 +483,11 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
   }
 
   const row = document.querySelector('.wwc-strongflow-evidence-row .wwc-strongflow-evidence-open')
+  row.focus()
   row.click()
+  const detailDuringLoad = document.querySelector('.wwc-strongflow-evidence-detail')
+  const closeFocusedDuringLoad = document.activeElement
+    === document.querySelector('.wwc-drawer-close')
   await waitFor(
     () => document.querySelector('.wwc-strongflow-evidence-detail')?.dataset.status === 'ready',
     'evidence detail drawer',
@@ -429,7 +498,18 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     candidate: document.querySelector('.wwc-strongflow-evidence-detail-candidate').textContent,
     artifact: document.querySelector('.wwc-strongflow-evidence-artifact').textContent,
     hash: location.hash,
+    stableNode: detailDuringLoad === document.querySelector('.wwc-strongflow-evidence-detail'),
+    closeFocusedDuringLoad,
+    busy: document.querySelector('.wwc-strongflow-evidence-detail').getAttribute('aria-busy'),
+    artifactSelectors: document.querySelectorAll(
+      '.wwc-strongflow-evidence-artifact-select',
+    ).length,
   }
+  const artifactSelectors = [...document.querySelectorAll(
+    '.wwc-strongflow-evidence-artifact-select',
+  )]
+  artifactSelectors[1].click()
+  detail.selectedArtifact = artifactSelectors[1].getAttribute('aria-pressed')
 
   const closeEvents = []
   const drawer = document.querySelector('.wwc-strongflow-evidence-drawer')
@@ -437,13 +517,16 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     if (event.key === 'Escape') closeEvents.push('escape')
   })
   drawer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-  const drawerClose = document.querySelector('.wwc-drawer-close')
-  drawerClose.click()
   await waitFor(
-    () => document.querySelector('.wwc-strongflow-evidence-detail') === null,
+    () => document.querySelector('.wwc-strongflow-evidence-drawer').hidden,
     'closed evidence detail',
   )
-  const closed = { hash: location.hash }
+  const closed = {
+    hash: location.hash,
+    detailRetained: document.querySelector('.wwc-strongflow-evidence-detail') === detailDuringLoad,
+    detailHidden: document.querySelector('.wwc-strongflow-evidence-detail').hidden,
+    openerFocused: document.activeElement === row,
+  }
 
   const selectedTab = document.querySelector('.wwc-strongflow-evidence-tabs [aria-selected="true"]')
   selectedTab.focus()
@@ -456,11 +539,34 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     'keyboard tab navigation back to Evidence',
   )
 
+  row.focus()
+  row.click()
+  await waitFor(
+    () => document.querySelector('.wwc-strongflow-evidence-detail')?.dataset.status === 'ready',
+    'second Evidence detail open',
+  )
+  const staleDetail = document.querySelector('.wwc-strongflow-evidence-detail')
+  const refresh = advanceDeliverySnapshot()
+  const staleClearedDuringRefresh = staleDetail.hidden
+    && document.querySelector('.wwc-strongflow-evidence-drawer').hidden
+  await refresh
+  await waitFor(
+    () => document.querySelector('.wwc-strongflow-evidence-detail')?.dataset.status === 'ready'
+      && !document.querySelector('.wwc-strongflow-evidence-drawer').hidden,
+    'Evidence detail reopened under the new cursor',
+  )
+  const refreshed = {
+    staleClearedDuringRefresh,
+    stableNode: staleDetail === document.querySelector('.wwc-strongflow-evidence-detail'),
+    binding: document.querySelector('.wwc-strongflow-evidence-detail-summary dd').textContent,
+  }
+
   return {
     initial,
     testsView,
     detail,
     closed,
+    refreshed,
     evidenceQueries: calls.queries
       .filter(query => query.query === 'evidence.get')
       .map(query => ({

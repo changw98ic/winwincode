@@ -215,6 +215,30 @@
   margin-bottom: var(--wwc-space-3);
 }
 
+.wwc-strongflow-evidence-summary {
+  margin-bottom: var(--wwc-space-3);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-strongflow-evidence-summary-counts {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-strongflow-evidence-failures,
+.wwc-strongflow-evidence-artifacts,
+.wwc-strongflow-criterion-results {
+  margin: var(--wwc-space-0);
+  padding-left: var(--wwc-space-6);
+}
+
+.wwc-strongflow-evidence-panel[hidden] {
+  display: none;
+}
+
 .wwc-strongflow-evidence-row {
   flex-wrap: wrap;
   cursor: pointer;
@@ -223,6 +247,10 @@
 .wwc-strongflow-evidence-row span {
   color: var(--wwc-color-text-muted);
   font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-evidence-criteria {
+  flex-basis: 100%;
 }
 
 .wwc-strongflow-evidence-row[data-candidate-state='superseded'] span {
@@ -283,13 +311,13 @@
 }
 
 .wwc-strongflow-evidence-content-text {
-  max-height: 24rem;
+  max-height: var(--wwc-log-preview-max-height);
   margin: var(--wwc-space-2) var(--wwc-space-0);
   padding: var(--wwc-space-3);
   border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
   border-radius: var(--wwc-radius-md);
   overflow: auto;
-  font-family: monospace;
+  font-family: var(--wwc-font-family-mono);
   font-size: var(--wwc-font-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -297,7 +325,11 @@
 
 .wwc-strongflow-evidence-download,
 .wwc-strongflow-evidence-retry,
-.wwc-strongflow-evidence-load-more {
+.wwc-strongflow-evidence-load-more,
+.wwc-strongflow-evidence-artifact-select,
+.wwc-strongflow-stage-evidence-open,
+.wwc-strongflow-candidate-evidence-open,
+.wwc-strongflow-criterion-evidence-open {
   margin: var(--wwc-space-2) var(--wwc-space-1) var(--wwc-space-2) var(--wwc-space-0);
   padding: var(--wwc-space-2) var(--wwc-space-3);
   border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
