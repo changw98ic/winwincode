@@ -5,11 +5,11 @@
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     application::stage::SessionBindingAuthority,
     domain::{Delivery, StageRunStatus},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ExecutionAckSequence, ExecutionSequence, SchemaVersion, SessionIdentity};
 use winwincode_execution_port::generated::{
     ArtifactAckMessage, ArtifactAckMessageKind, ArtifactChunkMessage, ArtifactKind,

@@ -331,7 +331,7 @@ pub(crate) fn execute_at(
 
 struct BindingContext {
     scope_key: ReceiptScopeKey,
-    repository_scope: winwincode_api::generated::RepositoryScope,
+    repository_scope: winwincode_domain::RepositoryScope,
     delivery_id: DeliveryId,
     identity: SessionBindingIdentity,
     job_revision: u64,

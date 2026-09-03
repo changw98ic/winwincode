@@ -14,12 +14,10 @@ use std::fmt;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{
-    ModelRoute, ProjectScope, ProjectScopeKind, RepositoryScope, RepositoryScopeKind,
-};
+use winwincode_api::generated::ModelRoute;
+use winwincode_domain::RepositoryScopeKind;
 use winwincode_domain::{
-    CredentialReferenceId, ModelExchangeId, OrganizationId, ProjectId, RepositoryId, RequestId,
-    WorkspaceId,
+    CredentialReferenceId, ModelExchangeId, OrganizationId, ProjectId, RequestId,
 };
 
 use crate::{
@@ -29,7 +27,7 @@ use crate::{
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const DURABLE_POOL_SCHEMA: &str = "winwincode.model-request-pool-exchange.v1";
-const DURABLE_POOL_AUTHORITY_SCHEMA: &str = "winwincode.model-request-pool-authority.v2";
+const DURABLE_POOL_AUTHORITY_SCHEMA: &str = "winwincode.model-request-pool-authority.v1";
 
 /// Immutable partition key derived from the trusted Provider Gateway identity
 /// and its resolved route.
@@ -39,9 +37,7 @@ pub struct ModelRequestRouteKey {
     model: String,
     credential_reference: CredentialReferenceId,
     organization: OrganizationId,
-    workspace: WorkspaceId,
     project: ProjectId,
-    repository: RepositoryId,
 }
 
 impl ModelRequestRouteKey {
@@ -70,13 +66,6 @@ impl ModelRequestRouteKey {
                 "model request pool requires a ProductSession Gateway identity",
             ));
         };
-        Self::from_repository_scope(repository_scope, route)
-    }
-
-    pub(crate) fn from_repository_scope(
-        repository_scope: &RepositoryScope,
-        route: &ModelRoute,
-    ) -> Result<Self, ModelRequestPoolError> {
         if repository_scope.kind != RepositoryScopeKind::Repository {
             return Err(pool_error(
                 ModelRequestPoolErrorCode::IdentityMismatch,
@@ -95,17 +84,13 @@ impl ModelRequestRouteKey {
             "org_",
             "organizationId",
         )?;
-        validate_prefixed_id(&repository_scope.workspace_id.0, "wsp_", "workspaceId")?;
         validate_prefixed_id(&repository_scope.project_id.0, "prj_", "projectId")?;
-        validate_prefixed_id(&repository_scope.repository_id.0, "rep_", "repositoryId")?;
         Ok(Self {
             provider: route.provider_id.clone(),
             model: route.model_id.clone(),
             credential_reference: route.credential_reference_id.clone(),
             organization: repository_scope.organization_id.clone(),
-            workspace: repository_scope.workspace_id.clone(),
             project: repository_scope.project_id.clone(),
-            repository: repository_scope.repository_id.clone(),
         })
     }
 
@@ -130,47 +115,14 @@ impl ModelRequestRouteKey {
     }
 
     #[must_use]
-    pub const fn workspace_id(&self) -> &WorkspaceId {
-        &self.workspace
-    }
-
-    #[must_use]
     pub const fn project_id(&self) -> &ProjectId {
         &self.project
     }
 
-    #[must_use]
-    pub const fn repository_id(&self) -> &RepositoryId {
-        &self.repository
-    }
-
-    #[must_use]
-    pub fn project_scope(&self) -> ProjectScope {
-        ProjectScope {
-            kind: ProjectScopeKind::Project,
-            organization_id: self.organization.clone(),
-            workspace_id: self.workspace.clone(),
-            project_id: self.project.clone(),
-        }
-    }
-
-    #[must_use]
-    pub fn repository_scope(&self) -> RepositoryScope {
-        RepositoryScope {
-            kind: RepositoryScopeKind::Repository,
-            organization_id: self.organization.clone(),
-            workspace_id: self.workspace.clone(),
-            project_id: self.project.clone(),
-            repository_id: self.repository.clone(),
-        }
-    }
-
-    fn sort_tuple(&self) -> (&str, &str, &str, &str, &str, &str, &str) {
+    fn sort_tuple(&self) -> (&str, &str, &str, &str, &str) {
         (
             &self.organization.0,
-            &self.workspace.0,
             &self.project.0,
-            &self.repository.0,
             &self.provider,
             &self.model,
             &self.credential_reference.0,
@@ -617,9 +569,7 @@ struct DurablePoolRoute {
     model: String,
     credential_reference_id: CredentialReferenceId,
     organization_id: OrganizationId,
-    workspace_id: WorkspaceId,
     project_id: ProjectId,
-    repository_id: RepositoryId,
     waiting: Vec<ModelExchangeId>,
     exchanges: Vec<DurablePoolExchange>,
 }
@@ -716,7 +666,7 @@ impl ModelRequestPool {
             });
         }
         if !self.routes.contains_key(&admission.route)
-            && self.project_route_count(&admission.route) >= self.config.max_routes
+            && self.routes.len() >= self.config.max_routes
         {
             return Err(pool_error(
                 ModelRequestPoolErrorCode::RouteLimit,
@@ -1123,9 +1073,7 @@ impl ModelRequestPool {
                 model: route.model.clone(),
                 credential_reference_id: route.credential_reference.clone(),
                 organization_id: route.organization.clone(),
-                workspace_id: route.workspace.clone(),
                 project_id: route.project.clone(),
-                repository_id: route.repository.clone(),
                 waiting: partition
                     .waiting
                     .iter()
@@ -1165,6 +1113,7 @@ impl ModelRequestPool {
         if serde_json::to_vec(&durable).map_err(|_| pool_corrupt())? != bytes
             || durable.schema != DURABLE_POOL_AUTHORITY_SCHEMA
             || durable.config != DurablePoolConfig::from(self.config)
+            || durable.routes.len() > self.config.max_routes
         {
             return Err(pool_corrupt());
         }
@@ -1180,29 +1129,6 @@ impl ModelRequestPool {
         self.routes.is_empty() && self.exchange_routes.is_empty()
     }
 
-    /// Reports whether one trusted route can start or enter its bounded queue.
-    /// Internal pool limits and occupancy remain private to the runtime.
-    #[must_use]
-    pub(crate) fn is_route_ready(&self, route: &ModelRequestRouteKey) -> bool {
-        let Some(partition) = self.routes.get(route) else {
-            return self.project_route_count(route) < self.config.max_routes;
-        };
-        partition.records.len() < self.config.max_exchange_records_per_route
-            && (partition.active_count() < self.config.max_active_per_route
-                || partition.waiting.len() < self.config.max_waiting_per_route)
-    }
-
-    fn project_route_count(&self, route: &ModelRequestRouteKey) -> usize {
-        self.routes
-            .keys()
-            .filter(|candidate| {
-                candidate.organization == route.organization
-                    && candidate.workspace == route.workspace
-                    && candidate.project == route.project
-            })
-            .count()
-    }
-
     /// Returns the stable identities of exchanges that still own unacknowledged
     /// frames. Payloads remain inside the bounded pool authority.
     #[must_use]
@@ -1216,14 +1142,6 @@ impl ModelRequestPool {
             .collect::<Vec<_>>();
         exchange_ids.sort_by(|left, right| left.0.cmp(&right.0));
         exchange_ids
-    }
-
-    pub(crate) fn project_scope_for_exchange(
-        &self,
-        model_exchange_id: &ModelExchangeId,
-    ) -> Result<ProjectScope, ModelRequestPoolError> {
-        self.route_for(model_exchange_id)
-            .map(ModelRequestRouteKey::project_scope)
     }
 
     /// Returns capacity use for one route without exposing buffered payloads.
@@ -1308,9 +1226,7 @@ fn validate_route_key(route: &ModelRequestRouteKey) -> Result<(), ModelRequestPo
         "credentialReferenceId",
     )?;
     validate_prefixed_id(&route.organization.0, "org_", "organizationId")?;
-    validate_prefixed_id(&route.workspace.0, "wsp_", "workspaceId")?;
-    validate_prefixed_id(&route.project.0, "prj_", "projectId")?;
-    validate_prefixed_id(&route.repository.0, "rep_", "repositoryId")
+    validate_prefixed_id(&route.project.0, "prj_", "projectId")
 }
 
 fn validate_frame(frame: &ModelStreamFrame) -> Result<(), ModelRequestPoolError> {
@@ -1495,9 +1411,7 @@ fn restored_authority(
             model: durable_route.model.clone(),
             credential_reference: durable_route.credential_reference_id.clone(),
             organization: durable_route.organization_id.clone(),
-            workspace: durable_route.workspace_id.clone(),
             project: durable_route.project_id.clone(),
-            repository: durable_route.repository_id.clone(),
         };
         validate_route_key(&route)?;
         if durable_route.exchanges.len() > config.max_exchange_records_per_route {
@@ -1541,20 +1455,6 @@ fn restored_authority(
             return Err(pool_corrupt());
         }
     }
-    let mut project_counts = BTreeMap::new();
-    for route in routes.keys() {
-        let count = project_counts
-            .entry((
-                route.organization.0.clone(),
-                route.workspace.0.clone(),
-                route.project.0.clone(),
-            ))
-            .or_insert(0usize);
-        *count = count.checked_add(1).ok_or_else(pool_corrupt)?;
-        if *count > config.max_routes {
-            return Err(pool_corrupt());
-        }
-    }
     Ok((routes, exchange_routes))
 }
 
@@ -1563,9 +1463,7 @@ fn route_fingerprint(route: &ModelRequestRouteKey) -> String {
     digest.update(b"winwincode.model-request-route.v1\0");
     for value in [
         route.organization.0.as_str(),
-        route.workspace.0.as_str(),
         route.project.0.as_str(),
-        route.repository.0.as_str(),
         route.provider.as_str(),
         route.model.as_str(),
         route.credential_reference.0.as_str(),

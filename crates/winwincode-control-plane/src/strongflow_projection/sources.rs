@@ -6,11 +6,11 @@ use std::{error::Error, fmt};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     domain::{Delivery, FrozenDeliveryCandidate},
     projection::runtime::{RuntimeFoldSnapshot, RuntimeProjection, RuntimeSessionProjection},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     CodexThreadId, DeliveryId, ExecutionEventId, ExecutionJobId, FencingToken, Instant, LeaseId,
     ProductSessionId, Revision, Sha256Digest, WorkerSessionId,
@@ -1265,7 +1265,7 @@ fn portable(value: &str, max: usize) -> bool {
 }
 
 fn canonical_repository_scope(scope: &RepositoryScope) -> bool {
-    scope.kind == winwincode_api::generated::RepositoryScopeKind::Repository
+    scope.kind == winwincode_domain::RepositoryScopeKind::Repository
         && portable_scope_id(&scope.organization_id.0)
         && portable_scope_id(&scope.workspace_id.0)
         && portable_scope_id(&scope.project_id.0)
@@ -1319,7 +1319,7 @@ mod tests {
 
     fn scope() -> RepositoryScope {
         RepositoryScope {
-            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            kind: winwincode_domain::RepositoryScopeKind::Repository,
             organization_id: winwincode_domain::OrganizationId("org_fixture".into()),
             workspace_id: winwincode_domain::WorkspaceId("wsp_fixture".into()),
             project_id: winwincode_domain::ProjectId("prj_fixture".into()),
@@ -1329,7 +1329,7 @@ mod tests {
 
     fn canonical_source_scope() -> RepositoryScope {
         RepositoryScope {
-            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            kind: winwincode_domain::RepositoryScopeKind::Repository,
             organization_id: winwincode_domain::OrganizationId(
                 "org_01J00000000000000000000000".into(),
             ),

@@ -8,30 +8,27 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, ActorId, CommandEnvelope, CommandName, PageInfo, PublicationCancelCommand,
     PublicationCancelCompletedResponse, PublicationCancelCompletedResponseCommand,
-    PublicationCancelCompletedResponseOutcome, PublicationCancellationProjection,
-    PublicationDetailProjection, PublicationDetailProjectionKind, PublicationGetQuery,
-    PublicationGetResultResponse, PublicationGetResultResponseQuery, PublicationListQuery,
-    PublicationListResultResponse, PublicationListResultResponseQuery, PublicationPage,
-    PublicationPageKind, PublicationProjection, PublicationProjectionVerdictStatus,
+    PublicationCancelCompletedResponseOutcome, PublicationGetQuery, PublicationGetResultResponse,
+    PublicationGetResultResponseQuery, PublicationListQuery, PublicationListResultResponse,
+    PublicationListResultResponseQuery, PublicationPage, PublicationPageKind,
+    PublicationProjection, PublicationProjectionVerdictStatus,
     PublicationResourceKind as ApiPublicationResourceKind, PublicationResourceRef,
-    PublicationStatusHistoryProjection, PublicationStepProjection, PublicationStepStateProjection,
-    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, RepositoryScope, Scope,
+    PublicationTarget as ApiPublicationTarget, PublicationTargetProvider, Scope,
 };
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
     AuditState, AuditSubject,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     GitHubRepositorySlug, OpaqueCursor, PublicationId, Revision, SchemaVersion, Sha256Digest,
     UserId,
 };
 use winwincode_publication::{
     Publication, PublicationCancelCommand as DomainCancelCommand, PublicationCommandContext,
-    PublicationCoordinator, PublicationDetail as DomainPublicationDetail, PublicationLedger,
-    PublicationOperation, PublicationOperationKind, PublicationPolicyAudit,
+    PublicationCoordinator, PublicationLedger, PublicationOperation, PublicationPolicyAudit,
     PublicationPolicyAuditError, PublicationPolicyOrigin, PublicationPort, PublicationPortError,
-    PublicationPortMutation, PublicationPortObservation, PublicationReadLedger,
-    PublicationResourceFact, PublicationResourceKind, PublicationState, PublicationStepDetail,
+    PublicationPortMutation, PublicationPortObservation, PublicationResourceKind, PublicationState,
     RepositoryPolicyScope,
 };
 use winwincode_storage::{ProductStateStorage, StorageError};
@@ -192,11 +189,11 @@ impl ControlPlane {
                 "publication.get does not accept a page cursor".to_owned(),
             ));
         }
-        let publication = load_publication_detail(
-            self.storage_ref().map_err(publication_storage_error)?,
+        let publication = load_publication(
+            self.storage_mut().map_err(publication_storage_error)?,
             &query.parameters.publication_id,
         )?;
-        ensure_scope(&query.scope, publication.publication())?;
+        ensure_scope(&query.scope, &publication)?;
         checked_response(PublicationGetResultResponse {
             page: PageInfo {
                 has_more: false,
@@ -204,7 +201,7 @@ impl ControlPlane {
             },
             query: PublicationGetResultResponseQuery::PublicationGet,
             request_id: query.request_id.clone(),
-            result: publication_detail_projection(&publication)?,
+            result: publication_projection(&publication)?,
             schema_version: SchemaVersion::WinwincodeV1,
         })
     }
@@ -576,16 +573,6 @@ fn load_publication(
         .map_err(PublicationCommandError::from)
 }
 
-fn load_publication_detail(
-    storage: &dyn ProductStateStorage,
-    publication_id: &PublicationId,
-) -> Result<DomainPublicationDetail, PublicationCommandError> {
-    validate_publication_id(publication_id)?;
-    PublicationReadLedger::new(storage)
-        .detail(publication_id)
-        .map_err(PublicationCommandError::from)
-}
-
 fn cancel_publication(
     storage: &mut dyn ProductStateStorage,
     context: &PublicationCommandContext,
@@ -651,7 +638,27 @@ pub(crate) fn publication_projection(
     }
     let resource_ref = fact
         .resource()
-        .map(|resource| publication_resource_ref(resource, target.repository()))
+        .map(|resource| {
+            if resource.repository() != target.repository() {
+                return Err(publication_storage_error(StorageError::adapter(
+                    "publication resource is outside its target",
+                )));
+            }
+            Ok(PublicationResourceRef {
+                kind: match resource.kind() {
+                    PublicationResourceKind::GitHubIssue => ApiPublicationResourceKind::GithubIssue,
+                    PublicationResourceKind::GitHubPullRequest => {
+                        ApiPublicationResourceKind::GithubPullRequest
+                    }
+                },
+                number: i64::try_from(resource.number()).map_err(|_| {
+                    publication_storage_error(StorageError::adapter(
+                        "publication resource number exceeds the public range",
+                    ))
+                })?,
+                repository: GitHubRepositorySlug(resource.repository().to_owned()),
+            })
+        })
         .transpose()?;
     Ok(PublicationProjection {
         approval_attention_item_id: binding.approval_id().clone(),
@@ -676,137 +683,6 @@ pub(crate) fn publication_projection(
         },
         updated_at: fact.updated_at().clone(),
         verdict_status: PublicationProjectionVerdictStatus::Pass,
-    })
-}
-
-fn publication_detail_projection(
-    detail: &DomainPublicationDetail,
-) -> Result<PublicationDetailProjection, PublicationCommandError> {
-    let publication = detail.publication();
-    let summary = publication_projection(publication)?;
-    let steps = publication
-        .steps()
-        .iter()
-        .map(|step| publication_step_projection(step, publication.target().repository()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let history = detail
-        .history()
-        .iter()
-        .map(|entry| {
-            let revision = public_revision(entry.revision())?;
-            let updated_at = instant_from_millis(entry.updated_at_millis())
-                .map_err(publication_storage_error)?;
-            Ok(PublicationStatusHistoryProjection {
-                cancellable: entry.cancellable(),
-                retryable: entry.retryable(),
-                revision,
-                state: entry.state().as_str().to_owned(),
-                step_states: entry
-                    .steps()
-                    .iter()
-                    .map(|step| PublicationStepStateProjection {
-                        kind: publication_step_kind(step.kind()).to_owned(),
-                        state: step.state().as_str().to_owned(),
-                    })
-                    .collect(),
-                updated_at,
-            })
-        })
-        .collect::<Result<Vec<_>, PublicationCommandError>>()?;
-    if history
-        .last()
-        .is_none_or(|entry| entry.revision != summary.revision)
-    {
-        return Err(publication_storage_error(StorageError::adapter(
-            "publication detail history does not end at the current revision",
-        )));
-    }
-    let cancellation =
-        publication
-            .cancellation_reason()
-            .map(|reason| PublicationCancellationProjection {
-                cancelled_at: summary.updated_at.clone(),
-                reason: reason.to_owned(),
-                revision: summary.revision.clone(),
-            });
-    Ok(PublicationDetailProjection {
-        cancellable: publication.cancellable(),
-        cancellation,
-        history,
-        history_truncated: detail.history_truncated(),
-        kind: PublicationDetailProjectionKind::PublicationDetail,
-        retryable: publication.retryable(),
-        steps,
-        summary,
-    })
-}
-
-fn publication_step_projection(
-    step: &PublicationStepDetail,
-    target_repository: &str,
-) -> Result<PublicationStepProjection, PublicationCommandError> {
-    Ok(PublicationStepProjection {
-        kind: publication_step_kind(step.kind()).to_owned(),
-        outcome_code: step.outcome_code().and_then(secret_safe_outcome_code),
-        remote_write_performed: step.remote_write_performed(),
-        resource_ref: step
-            .resource()
-            .map(|resource| publication_resource_ref(resource, target_repository))
-            .transpose()?,
-        retryable: step.retryable(),
-        state: step.state().as_str().to_owned(),
-    })
-}
-
-fn secret_safe_outcome_code(code: &str) -> Option<String> {
-    (!code.is_empty()
-        && code.len() <= 100
-        && code.as_bytes()[0].is_ascii_alphanumeric()
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
-    .then(|| code.to_owned())
-}
-
-const fn publication_step_kind(kind: PublicationOperationKind) -> &'static str {
-    match kind {
-        PublicationOperationKind::Branch => "branch",
-        PublicationOperationKind::PullRequest => "pull_request",
-        PublicationOperationKind::IssueComment => "issue_comment",
-        PublicationOperationKind::CommitStatus => "commit_status",
-    }
-}
-
-fn publication_resource_ref(
-    resource: &PublicationResourceFact,
-    target_repository: &str,
-) -> Result<PublicationResourceRef, PublicationCommandError> {
-    if resource.repository() != target_repository {
-        return Err(publication_storage_error(StorageError::adapter(
-            "publication resource is outside its target",
-        )));
-    }
-    Ok(PublicationResourceRef {
-        kind: match resource.kind() {
-            PublicationResourceKind::GitHubIssue => ApiPublicationResourceKind::GithubIssue,
-            PublicationResourceKind::GitHubPullRequest => {
-                ApiPublicationResourceKind::GithubPullRequest
-            }
-        },
-        number: i64::try_from(resource.number()).map_err(|_| {
-            publication_storage_error(StorageError::adapter(
-                "publication resource number exceeds the public range",
-            ))
-        })?,
-        repository: GitHubRepositorySlug(resource.repository().to_owned()),
-    })
-}
-
-fn public_revision(revision: u64) -> Result<Revision, PublicationCommandError> {
-    i64::try_from(revision).map(Revision).map_err(|_| {
-        publication_storage_error(StorageError::adapter(
-            "publication history revision exceeds the generated contract",
-        ))
     })
 }
 

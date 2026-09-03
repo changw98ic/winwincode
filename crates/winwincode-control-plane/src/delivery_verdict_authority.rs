@@ -5,7 +5,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::from_slice;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     application::stage::DeliveryTerminalOutcomeFacts,
     domain::{
@@ -17,6 +16,7 @@ use winwincode_delivery::{
         },
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ExecutionJobId, Sha256Digest};
 use winwincode_execution_port::generated::{EncodedPayload, ExecutionEventCategory};
 use winwincode_storage::{

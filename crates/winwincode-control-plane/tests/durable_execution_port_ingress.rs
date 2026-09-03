@@ -9,10 +9,7 @@ use std::sync::{
 
 use serde_json::{Value, from_value};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, OrganizationId, ProjectId, RepositoryId, RepositoryScope,
-    RepositoryScopeKind, Scope, UserActor, WorkspaceId,
-};
+use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DurableExecutionPortContext, DurableExecutionPortDelegate,
     DurableExecutionPortError, DurableExecutionPortIngress, DurableExecutionPortSupplement,
@@ -31,6 +28,10 @@ use winwincode_domain::{
     ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId, ProductSessionId,
     RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, UserId,
     WorkerSessionId,
+};
+use winwincode_domain::{
+    OrganizationId, ProjectId, RepositoryId, RepositoryScope, RepositoryScopeKind, UserActor,
+    WorkspaceId,
 };
 use winwincode_execution_port::generated::{
     DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionEventCategory,
@@ -332,7 +333,7 @@ fn install_product_dispatch(fixture: &mut Fixture, seed: u64) -> ProductDispatch
             &CommandEnvelope {
                 actor: Actor::UserActor(UserActor {
                     id: UserId(canonical_id("usr", seed)),
-                    kind: winwincode_api::generated::UserActorKind::User,
+                    kind: winwincode_domain::UserActorKind::User,
                 }),
                 command: CommandName::SessionCancel,
                 expected_revision: Revision(0),
@@ -520,7 +521,7 @@ fn seed_delivery_job(
     };
     let actor = Actor::UserActor(UserActor {
         id: UserId(canonical_id("usr", 8_000)),
-        kind: winwincode_api::generated::UserActorKind::User,
+        kind: winwincode_domain::UserActorKind::User,
     });
     let request_id = RequestId(canonical_id("req", 8_001));
     let identity = winwincode_control_plane::command_receipt_identity(
@@ -1307,7 +1308,7 @@ fn accepted_dispatch_seals_product_session_runtime_and_replays_exactly() {
             &CommandEnvelope {
                 actor: Actor::UserActor(UserActor {
                     id: UserId(canonical_id("usr", seed)),
-                    kind: winwincode_api::generated::UserActorKind::User,
+                    kind: winwincode_domain::UserActorKind::User,
                 }),
                 command: CommandName::SessionCancel,
                 expected_revision: Revision(0),

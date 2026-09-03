@@ -25,8 +25,7 @@ use rustls::{
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, DurableProviderGatewayIdentitySource, HttpsSseProviderConfig,
@@ -39,7 +38,7 @@ use winwincode_control_plane::{
     ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
     ProviderGatewayIdentityPort, ProviderGatewayOpenReceipt, ProviderTokenPricing, ResolvedSecret,
     StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
-    local_loopback_retry_policy,
+    StructuredOutputSupport, local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, DeliveryId, EnterprisePolicyId, ExecutionAckSequence,
@@ -48,6 +47,7 @@ use winwincode_domain::{
     Revision, SchemaVersion, SessionIdentity, Sha256Digest, StageRunId, UserId, WorkerId,
     WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::{
     generated::{
         DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, EncodedPayload, ExecutionJob,
@@ -368,6 +368,7 @@ fn model_capability(model_id: &str) -> ModelCapability {
         context_window_tokens: 128_000,
         max_output_tokens: 16_000,
         tool_support: ModelToolSupport::Parallel,
+        structured_output_support: StructuredOutputSupport::Unsupported,
         reasoning_efforts: vec!["high".to_owned()],
     }
 }

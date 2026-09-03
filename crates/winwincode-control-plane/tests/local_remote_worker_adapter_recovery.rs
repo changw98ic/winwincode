@@ -11,7 +11,7 @@ use std::{
 use serde_json::{Value, from_value};
 use winwincode_api::generated::{
     Actor, EnterpriseFleetListParameters, EnterpriseFleetListQuery, EnterpriseFleetListQueryQuery,
-    PageRequest, RepositoryScope, RepositoryScopeKind, Scope, SystemActor, SystemActorKind,
+    PageRequest, Scope, SystemActor, SystemActorKind,
 };
 use winwincode_control_plane::{
     ExecutionPortService, RemoteWorkerAuthenticationError, RemoteWorkerAuthenticator,
@@ -23,6 +23,7 @@ use winwincode_domain::{
     RepositoryId, RequestId, SchemaVersion, Sha256Digest, SystemActorId, WorkerInstanceId,
     WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 use winwincode_execution_port::{
     generated::{
         ExecutionPortErrorCode, ExecutionPortMessage, ExecutionScope, JobDispatchMessage,

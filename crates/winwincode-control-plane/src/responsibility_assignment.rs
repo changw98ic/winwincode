@@ -15,13 +15,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{Actor, RepositoryScope, Scope, UserActor};
+use winwincode_api::generated::{Actor, Scope};
 use winwincode_audit::{
     AuditAction, AuditActor, AuditEvent, AuditEventId, AuditOrigin, AuditRetention, AuditScope,
     AuditState, AuditSubject,
 };
 use winwincode_delivery::domain::DeliveryStage;
 use winwincode_domain::{DeliveryId, ProductSessionId, RequestId, Sha256Digest, UserId};
+use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, PendingAuditEvent, ProductStateStorage, PublicEventScope,
     StateCommit, StateRevisionGuard, StorageError, StorageErrorKind, receipt_scope_key,

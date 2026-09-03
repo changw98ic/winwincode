@@ -7,7 +7,8 @@ use std::{collections::BTreeMap, fmt};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{RepositoryScope, RepositoryScopeKind};
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
+
 use winwincode_delivery::application::stage::seal_session_binding_authority;
 use winwincode_domain::{
     ControlPlaneEventId, ExecutionJobId, ExecutionMessageId, Instant, ModelExchangeId,

@@ -6,9 +6,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
-use winwincode_api::generated::{Actor, RepositoryScope, Scope, UserActor, UserActorKind};
+use winwincode_api::generated::{Actor, Scope};
 use winwincode_delivery::domain::{AttentionItemStatus, AttentionItemType};
 use winwincode_domain::{Instant, Sha256Digest};
+use winwincode_domain::{RepositoryScope, UserActor, UserActorKind};
 
 use crate::{
     ActiveTeamContext, CollaborationCandidateIdentity, CollaborationInboxAudience,

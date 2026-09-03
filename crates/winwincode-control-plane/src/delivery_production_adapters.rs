@@ -18,7 +18,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandName, DeliveryAdvancePayload, DeliveryCreatePayload,
-    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, RepositoryScope, Scope,
+    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, Scope,
 };
 use winwincode_delivery::{
     application::{
@@ -33,12 +33,14 @@ use winwincode_delivery::{
         RepositoryKind, RepositoryRef, SessionBindingId, StageRunStatus,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     AttentionItemId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLimits, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
 };
+use winwincode_execution_port::runtime_trace_outbox::ExecutionMode;
 use winwincode_repository_context::{
     CommandPurpose, RepositoryContext, RepositoryContextPort, RepositoryContextQuery,
     RepositoryContextScanner,
@@ -68,6 +70,7 @@ const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub struct LocalDeliveryAdapterConfig {
     repository_root: PathBuf,
     repository_scope: RepositoryScope,
+    execution_mode: ExecutionMode,
     max_rework_attempts: u64,
     max_runtime_seconds: i64,
     max_artifact_bytes: i64,
@@ -79,6 +82,7 @@ impl LocalDeliveryAdapterConfig {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
             repository_scope,
+            execution_mode: ExecutionMode::React,
             max_rework_attempts: DEFAULT_MAX_REWORK_ATTEMPTS,
             max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
             max_artifact_bytes: DEFAULT_MAX_ARTIFACT_BYTES,
@@ -101,6 +105,13 @@ impl LocalDeliveryAdapterConfig {
     #[must_use]
     pub const fn with_max_rework_attempts(mut self, max_rework_attempts: u64) -> Self {
         self.max_rework_attempts = max_rework_attempts;
+        self
+    }
+
+    /// Selects the process execution strategy used to shape new immutable jobs.
+    #[must_use]
+    pub const fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
         self
     }
 
@@ -383,17 +394,20 @@ impl LocalDeliveryAuthority {
             }
             _ => (None, delivery.snapshot().spec.base_revision.clone()),
         };
+        let write_mode = if self.config.execution_mode == ExecutionMode::DelegatedPatch {
+            ExecutionWorkspaceWriteMode::ReadOnly
+        } else if matches!(intent.role.as_str(), "executor" | "remediator") {
+            ExecutionWorkspaceWriteMode::Candidate
+        } else {
+            ExecutionWorkspaceWriteMode::ReadOnly
+        };
         Ok(Some(DeliveryExecutionConfig {
             payload_digest: Sha256Digest(format!("sha256:{:x}", Sha256::digest(payload))),
             candidate_ref,
             workspace: ExecutionWorkspace {
                 checkout_revision,
                 repository_id: self.config.repository_scope.repository_id.clone(),
-                write_mode: if matches!(intent.role.as_str(), "executor" | "remediator") {
-                    ExecutionWorkspaceWriteMode::Candidate
-                } else {
-                    ExecutionWorkspaceWriteMode::ReadOnly
-                },
+                write_mode,
             },
             limits: ExecutionLimits {
                 deadline_at: crate::instant_from_millis(deadline_millis)

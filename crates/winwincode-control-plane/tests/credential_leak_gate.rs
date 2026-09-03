@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, OrganizationScope, OrganizationScopeKind, Scope, UserActor,
-    UserActorKind,
+    CredentialReferenceCreatePayload, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialLeakErrorKind, CredentialLeakGate, CredentialOutputBoundary,
@@ -17,6 +16,7 @@ use winwincode_control_plane::{
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, RequestId, Revision, SchemaVersion, UserId,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 const EXACT_SECRET: &[u8] = b"fixture exact secret with no recognized token syntax";

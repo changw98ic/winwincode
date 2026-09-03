@@ -13,16 +13,14 @@ use std::fmt::{self, Write as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
-    Actor, ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource, ModelRoute,
-    OrganizationScope, OrganizationScopeKind, PageInfo, ProjectScope, ProjectScopeKind,
-    RepositoryScope, Scope, SettingsGetQuery, SettingsGetResultResponse,
+    Actor, ModelRoute, OrganizationScope, OrganizationScopeKind, PageInfo, ProjectScope,
+    ProjectScopeKind, Scope, SettingsGetQuery, SettingsGetResultResponse,
     SettingsGetResultResponseQuery, SettingsProjection, SettingsUpdateCommand,
     SettingsUpdateCompletedResponse, SettingsUpdateCompletedResponseCommand,
     SettingsUpdateCompletedResponseOutcome,
 };
-use winwincode_domain::{
-    Instant, ProductSessionId, RequestId, Revision, SchemaVersion, Sha256Digest,
-};
+use winwincode_domain::RepositoryScope;
+use winwincode_domain::{ProductSessionId, RequestId, Revision, SchemaVersion, Sha256Digest};
 use winwincode_storage::{
     CommitReceipt, NewOutboxEvent, ProductStateStorage, ReceiptIdentity, ReceiptScopeKey,
     StateCommit, StorageError, StorageErrorKind, StoredState,
@@ -34,10 +32,7 @@ use crate::credential_leak_gate::{
 use crate::provider_catalog::{
     ProviderCatalogError, ProviderCatalogErrorKind, ProviderCatalogService,
 };
-use crate::{
-    model_route_availability::model_route_availability_invalidated_event, receipt_actor_key,
-    receipt_scope_key,
-};
+use crate::{receipt_actor_key, receipt_scope_key};
 
 const STATE_SCHEMA: &str = "winwincode.model-settings.v1";
 const STREAM_PREFIX: &str = "model-settings:";
@@ -91,21 +86,6 @@ pub struct ModelSettingsProjection {
     pub default_model_route: Option<ModelRoute>,
     pub worker_concurrency_limit: u64,
     pub revision: u64,
-}
-
-/// Durable settings facts read without catalog resolution.
-///
-/// The stored selection may be temporarily unresolved (for example right
-/// after the catalog dropped the previously selected model), so this read
-/// carries only what is durably stored instead of a resolved route.
-#[derive(Clone, Debug, PartialEq)]
-pub struct StoredModelSettings {
-    /// Durable optimistic-concurrency revision of the target.
-    pub revision: u64,
-    /// Stored Provider/model override, resolved only on demand.
-    pub selection: Option<ModelSelection>,
-    /// Durable Worker concurrency limit.
-    pub worker_concurrency_limit: u64,
 }
 
 /// Scoped idempotency identity and optimistic settings revision.
@@ -361,7 +341,6 @@ impl<'a> ModelSettingsService<'a> {
         &mut self,
         request: &ModelSettingsRequest,
         values: ModelSettingsValues,
-        occurred_at: Instant,
     ) -> Result<ModelSettingsMutationReceipt, ModelSettingsError> {
         validate_request(request)?;
         let (values, selection) = canonical_values(values)?;
@@ -388,13 +367,7 @@ impl<'a> ModelSettingsService<'a> {
         state.selection = selection;
         state.worker_concurrency_limit = values.worker_concurrency_limit;
         state.legacy_migration_completed = true;
-        self.commit(
-            request,
-            command,
-            state,
-            ModelSettingsChange::Updated,
-            occurred_at,
-        )
+        self.commit(request, command, state, ModelSettingsChange::Updated)
     }
 
     /// Applies the one generated `settings.update` contract as a complete
@@ -407,7 +380,6 @@ impl<'a> ModelSettingsService<'a> {
     pub fn update_generated(
         &mut self,
         command: &SettingsUpdateCommand,
-        occurred_at: Instant,
     ) -> Result<SettingsUpdateCompletedResponse, ModelSettingsError> {
         let target = target_from_scope(&command.scope)?;
         let request = ModelSettingsRequest {
@@ -426,7 +398,6 @@ impl<'a> ModelSettingsService<'a> {
                 )
                 .map_err(|_| ModelSettingsError::invalid())?,
             },
-            occurred_at,
         )?;
         checked_http_response(SettingsUpdateCompletedResponse {
             command: SettingsUpdateCompletedResponseCommand::SettingsUpdate,
@@ -464,34 +435,6 @@ impl<'a> ModelSettingsService<'a> {
         CredentialLeakGate::default()
             .inspect_serializable(CredentialOutputBoundary::Serialization, &projection)?;
         Ok(projection)
-    }
-
-    /// Returns one target's durable revision, stored selection, and
-    /// concurrency limit without resolving the stored selection through the
-    /// current Provider catalog.
-    ///
-    /// This bounded read exists for converge-style callers, such as the
-    /// Server startup model authority, that must observe the current revision
-    /// even when the stored selection is temporarily unresolved after a
-    /// catalog change. Unlike [`Self::project`], an unresolved selection is
-    /// returned as stored instead of failing the read; serving paths keep
-    /// using [`Self::project`] so an invalid default stays a hard error.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an unsupported target or durable state that belongs to
-    /// another target.
-    pub fn stored_configuration(
-        &mut self,
-        target: &ModelSettingsTarget,
-    ) -> Result<StoredModelSettings, ModelSettingsError> {
-        validate_target(target)?;
-        let state = self.load_or_empty(target)?;
-        Ok(StoredModelSettings {
-            revision: state.revision,
-            selection: state.selection,
-            worker_concurrency_limit: state.worker_concurrency_limit,
-        })
     }
 
     /// Serves the generated `settings.get` response from one service-owned
@@ -537,7 +480,6 @@ impl<'a> ModelSettingsService<'a> {
         &mut self,
         request: &ModelSettingsRequest,
         legacy_route: Option<&ModelRoute>,
-        occurred_at: Instant,
     ) -> Result<ModelSettingsMutationReceipt, ModelSettingsError> {
         validate_request(request)?;
         let selection = legacy_route.map(legacy_selection).transpose()?;
@@ -563,13 +505,7 @@ impl<'a> ModelSettingsService<'a> {
         }
         state.selection = selection;
         state.legacy_migration_completed = true;
-        self.commit(
-            request,
-            command,
-            state,
-            ModelSettingsChange::LegacyMigrated,
-            occurred_at,
-        )
+        self.commit(request, command, state, ModelSettingsChange::LegacyMigrated)
     }
 
     /// Resolves the most-specific configured override to the generated route.
@@ -597,39 +533,6 @@ impl<'a> ModelSettingsService<'a> {
     ) -> Result<(ModelRoute, Scope), ModelSettingsError> {
         self.resolve_effective_optional(target)?
             .ok_or_else(ModelSettingsError::no_route)
-    }
-
-    /// Returns the first configured selection and its durable settings source
-    /// without resolving it through the current Provider catalog.
-    ///
-    /// This read exists for the server-owned `ModelRoute` availability join: an
-    /// invalid default must remain visible as `default_route_invalid` instead
-    /// of making the whole bounded route list unavailable.
-    pub(crate) fn effective_selection_source(
-        &mut self,
-        target: &ModelSettingsTarget,
-    ) -> Result<Option<(ModelSelection, Scope, u64)>, ModelSettingsError> {
-        validate_target(target)?;
-        for candidate in setting_chain(target) {
-            let state = self.load_or_empty(&candidate)?;
-            if let Some(selection) = state.selection {
-                return Ok(Some((
-                    selection,
-                    settings_target_scope(&candidate),
-                    state.revision,
-                )));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Returns the exact most-specific-to-broadest Catalog source chain used
-    /// by route resolution.
-    pub(crate) fn effective_catalog_scopes(
-        target: &ModelSettingsTarget,
-    ) -> Result<Vec<Scope>, ModelSettingsError> {
-        validate_target(target)?;
-        Ok(catalog_chain(target))
     }
 
     fn resolve_effective_optional(
@@ -743,7 +646,6 @@ impl<'a> ModelSettingsService<'a> {
         command: CommandReceipt,
         mut state: ModelSettingsState,
         change: ModelSettingsChange,
-        occurred_at: Instant,
     ) -> Result<ModelSettingsMutationReceipt, ModelSettingsError> {
         let previous_revision = state.revision;
         state.revision = next_revision(previous_revision)?;
@@ -765,24 +667,17 @@ impl<'a> ModelSettingsService<'a> {
         CredentialLeakGate::default()
             .inspect_json_bytes(CredentialOutputBoundary::Event, &event_payload)?;
         let event_id = settings_event_id(request, &event)?;
-        let invalidation = model_route_availability_invalidated_event(
-            &request.actor,
-            &settings_target_scope(&request.target),
-            ControlPlaneWebSocketModelRouteAvailabilityInvalidationSource::Settings,
-            state.revision,
-            occurred_at,
-            request.request_id.0.as_bytes(),
-        )?;
         let commit = StateCommit::new(
             command.identity,
             command.digest,
             settings_stream_id(&request.target)?,
             request.expected_revision,
             state_payload,
-            vec![
-                NewOutboxEvent::internal(event_id, EVENT_TOPIC, event_payload),
-                invalidation,
-            ],
+            vec![NewOutboxEvent::internal(
+                event_id,
+                EVENT_TOPIC,
+                event_payload,
+            )],
         );
         let receipt = self.storage.commit(&commit)?;
         let durable = event_from_receipt(&receipt)?;
@@ -925,18 +820,6 @@ fn catalog_chain(target: &ModelSettingsTarget) -> Vec<Scope> {
     }
 }
 
-fn settings_target_scope(target: &ModelSettingsTarget) -> Scope {
-    match target {
-        ModelSettingsTarget::Organization { scope } => Scope::OrganizationScope(scope.clone()),
-        ModelSettingsTarget::Project { scope } => Scope::ProjectScope(scope.clone()),
-        ModelSettingsTarget::Repository { scope }
-        | ModelSettingsTarget::ProductSession {
-            repository_scope: scope,
-            ..
-        } => Scope::RepositoryScope(scope.clone()),
-    }
-}
-
 fn project_from_repository(scope: &RepositoryScope) -> ProjectScope {
     ProjectScope {
         kind: ProjectScopeKind::Project,
@@ -1073,7 +956,8 @@ fn settings_stream_id(target: &ModelSettingsTarget) -> Result<String, ModelSetti
 fn target_receipt_scope_key(
     target: &ModelSettingsTarget,
 ) -> Result<ReceiptScopeKey, ModelSettingsError> {
-    receipt_scope_key(&settings_target_scope(target)).map_err(Into::into)
+    let digest = target_digest(b"winwincode.model-settings-receipt-scope.v1\0", target)?;
+    ReceiptScopeKey::from_encoded(digest.to_vec()).map_err(Into::into)
 }
 
 fn target_digest(

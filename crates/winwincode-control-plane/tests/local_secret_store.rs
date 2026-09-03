@@ -12,7 +12,7 @@ use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
     CredentialReferenceCreatePayload, CredentialReferenceRotateCommand,
     CredentialReferenceRotateCommandCommand, CredentialReferenceRotatePayload, OrganizationScope,
-    OrganizationScopeKind, Scope, UserActor, UserActorKind,
+    OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceResolution, CredentialReferenceService, LocalSecretStoreAdapter,
@@ -21,6 +21,7 @@ use winwincode_control_plane::{
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, RequestId, Revision, SchemaVersion, UserId,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 const INITIAL_SECRET: &[u8] = b"INITIAL_PROVIDER_SECRET_MATERIAL";

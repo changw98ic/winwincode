@@ -15,14 +15,14 @@ use winwincode_api::generated::{
     ControlPlaneWebSocketApprovalChangedEvent, ControlPlaneWebSocketApprovalChangedEventTypeValue,
     ControlPlaneWebSocketChatInteractionsInvalidatedEvent, InputRespondCommand,
     InputRespondCompletedResponse, InputRespondCompletedResponseCommand,
-    InputRespondCompletedResponseOutcome, ProductSessionProjection, RepositoryScope,
-    ServiceAccountActor, ServiceAccountActorKind, SystemActor, SystemActorKind, UserActor,
-    UserActorKind,
+    InputRespondCompletedResponseOutcome, ProductSessionProjection, ServiceAccountActor,
+    ServiceAccountActorKind, SystemActor, SystemActorKind,
 };
 use winwincode_domain::{
     ControlPlaneEventId, ExecutionMessageId, Instant, ProductSessionId, RequestId, Revision,
     SchemaVersion, Sha256Digest, SystemActorId,
 };
+use winwincode_domain::{RepositoryScope, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     ApprovalDecisionMessage, ApprovalDecisionMessageDecision, ApprovalDecisionMessageKind,
     ApprovalDecisionMessageScope, ApprovalRequestMessage, ExecutionLeaseStamp,

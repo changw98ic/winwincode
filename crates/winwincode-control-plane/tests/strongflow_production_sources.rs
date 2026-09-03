@@ -11,21 +11,18 @@ use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
     DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
     DeliveryCreatePayload, DeliveryGetParameters, DeliveryGetQuery, DeliveryGetQueryQuery,
-    DeliverySpecInput, ModelRoute, PageRequest, QueryResultResponse, RepositoryScope,
-    RepositoryScopeKind, UserActor, UserActorKind,
+    DeliverySpecInput, PageRequest, QueryResultResponse,
 };
 use winwincode_control_plane::{
-    ControlPlane, ControlPlaneConfig, CreateProductSessionCommand, EventPublishError,
-    EventPublisher, LocalDeliveryAdapterConfig, OutboxEvent, ProductSessionService,
-    product_session_command_context,
+    ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
+    LocalDeliveryAdapterConfig, OutboxEvent,
     strongflow_projection::{StrongFlowProjectionError, StrongFlowProjectionQueryPort},
 };
 use winwincode_domain::{
-    ControlPlaneEventId, CredentialReferenceId, DeliveryId, Instant, OrganizationId,
-    ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, UserId,
-    WorkspaceId,
+    DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
+    UserId, WorkspaceId,
 };
-use winwincode_storage::SqliteStorage;
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -44,14 +41,8 @@ fn startup_installs_restart_stable_empty_publication_and_rejects_corrupt_facts()
     let data = root.join("data");
     let baseline = initialize_repository(&repository);
     let scope = repository_scope(41);
-    let source_product_session_id = seed_product_session(&data, &scope);
     let delivery_id = DeliveryId(canonical_id("dlv", 41));
-    let create = create_command(
-        &scope,
-        &delivery_id,
-        baseline,
-        source_product_session_id.clone(),
-    );
+    let create = create_command(&scope, &delivery_id, baseline);
     let advance = advance_command(&scope, &delivery_id);
 
     let mut first = start(&data, &repository, &scope);
@@ -66,25 +57,6 @@ fn startup_installs_restart_stable_empty_publication_and_rejects_corrupt_facts()
     assert_eq!(current_response.result.delivery_revision, Revision(2));
     assert!(current_response.result.current_candidate.is_none());
     assert!(current_response.result.publication.is_none());
-    assert_eq!(
-        current_response.result.requirements.scope,
-        vec!["src".to_owned()]
-    );
-    assert_eq!(
-        current_response.result.requirements.out_of_scope,
-        vec!["target".to_owned()]
-    );
-    assert_eq!(
-        current_response.result.requirements.constraints,
-        vec!["tests pass".to_owned()]
-    );
-    assert_eq!(
-        current_response
-            .result
-            .requirements
-            .source_product_session_id,
-        Some(source_product_session_id)
-    );
     let cursor = current_response.result.read_cursor.clone();
     let expected_bytes = serde_json::to_vec(&current).expect("current response JSON");
     first.shutdown().expect("first shutdown");
@@ -149,7 +121,6 @@ fn create_command(
     scope: &RepositoryScope,
     delivery_id: &DeliveryId,
     baseline: String,
-    source_product_session_id: ProductSessionId,
 ) -> DeliveryCreateCommand {
     DeliveryCreateCommand {
         actor: Actor::UserActor(UserActor {
@@ -168,10 +139,6 @@ fn create_command(
                 }],
                 base_revision: baseline,
                 goal: "Preserve durable StrongFlow authority".to_owned(),
-                scope: vec!["src".to_owned()],
-                out_of_scope: vec!["target".to_owned()],
-                constraints: vec!["tests pass".to_owned()],
-                source_product_session_id: Some(source_product_session_id),
                 publication_target: None,
                 repository_id: scope.repository_id.clone(),
                 title: "Production StrongFlow sources".to_owned(),
@@ -182,39 +149,6 @@ fn create_command(
         schema_version: SchemaVersion::WinwincodeV1,
         scope: scope.clone(),
     }
-}
-
-fn seed_product_session(data: &Path, scope: &RepositoryScope) -> ProductSessionId {
-    let product_session_id = ProductSessionId(canonical_id("psn", 41));
-    let actor = Actor::UserActor(UserActor {
-        id: UserId(canonical_id("usr", 41)),
-        kind: UserActorKind::User,
-    });
-    let context = product_session_command_context(
-        &actor,
-        scope,
-        RequestId(canonical_id("req", 40)),
-        &Revision(0),
-        ControlPlaneEventId(canonical_id("evt", 40)),
-        Instant("2027-01-15T08:00:00.000Z".to_owned()),
-    )
-    .expect("ProductSession context");
-    let mut storage = SqliteStorage::open(data).expect("open ProductSession storage");
-    ProductSessionService::new(&mut storage)
-        .create(&CreateProductSessionCommand {
-            context,
-            product_session_id: product_session_id.clone(),
-            project_id: scope.project_id.clone(),
-            repository_id: scope.repository_id.clone(),
-            title: "Confirmed StrongFlow requirements".to_owned(),
-            model_route: ModelRoute {
-                credential_reference_id: CredentialReferenceId(canonical_id("crd", 41)),
-                model_id: "fixture-model".to_owned(),
-                provider_id: "fixture-provider".to_owned(),
-            },
-        })
-        .expect("seed ProductSession");
-    product_session_id
 }
 
 fn advance_command(scope: &RepositoryScope, delivery_id: &DeliveryId) -> DeliveryAdvanceCommand {

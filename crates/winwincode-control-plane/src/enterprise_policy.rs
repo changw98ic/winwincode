@@ -14,11 +14,11 @@ use winwincode_api::generated::{
     EnterprisePolicyUpdateCompletedResponseCommand, EnterprisePolicyUpdateCompletedResponseOutcome,
     EnterprisePolicyVersionReference as ApiVersionReference,
     EnterprisePolicyVersionSource as ApiVersionSource, OrganizationScope, OrganizationScopeKind,
-    PageInfo, ProjectScope, ProjectScopeKind, RepositoryScope, RepositoryScopeKind, Scope,
-    ServiceAccountActor, ServiceAccountActorKind, SystemActor, SystemActorKind, UserActor,
-    UserActorKind, WorkspaceScope, WorkspaceScopeKind,
+    PageInfo, ProjectScope, ProjectScopeKind, Scope, ServiceAccountActor, ServiceAccountActorKind,
+    SystemActor, SystemActorKind, WorkspaceScope, WorkspaceScopeKind,
 };
 use winwincode_domain::{Instant, OpaqueCursor, Revision};
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     EnterprisePolicyActor, EnterprisePolicyChildOverrideMode, EnterprisePolicyCursor,
     EnterprisePolicyDefinition, EnterprisePolicyEffect, EnterprisePolicyError,

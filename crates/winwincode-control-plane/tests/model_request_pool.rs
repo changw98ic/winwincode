@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use winwincode_api::generated::{ModelRoute, RepositoryScope, RepositoryScopeKind};
+use winwincode_api::generated::ModelRoute;
 use winwincode_control_plane::{
     ModelFrameWriteStatus, ModelRequestAdmission, ModelRequestAdmissionStatus, ModelRequestPool,
     ModelRequestPoolConfig, ModelRequestPoolErrorCode, ModelRequestState,
@@ -10,6 +10,7 @@ use winwincode_domain::{
     CredentialReferenceId, ModelExchangeId, OrganizationId, ProductSessionId, ProjectId,
     RepositoryId, RequestId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
 fn id(prefix: &str, value: u64) -> String {
     format!("{prefix}_{value:026}")

@@ -4,9 +4,10 @@
 
 use std::sync::Arc;
 
-use winwincode_api::generated::{Actor, EnterprisePermission, Scope, UserActor, UserActorKind};
+use winwincode_api::generated::{Actor, EnterprisePermission, Scope};
 use winwincode_delivery::domain::DeliveryStage;
 use winwincode_domain::{Revision, Sha256Digest};
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::{
     ProductStateStorage, PublicEventScope, StateRevisionGuard, receipt_scope_key,
 };
@@ -41,7 +42,7 @@ pub trait ResponsibilityTargetAuthorityPort: Send {
     /// corrupt or inaccessible canonical state.
     fn target_authority(
         &mut self,
-        scope: &winwincode_api::generated::RepositoryScope,
+        scope: &winwincode_domain::RepositoryScope,
         target: &ResponsibilityTarget,
     ) -> Result<ResponsibilityTargetAuthoritySeal, ResponsibilityAuthorityError>;
 }
@@ -62,7 +63,7 @@ impl DurableResponsibilityTargetAuthority {
 impl ResponsibilityTargetAuthorityPort for DurableResponsibilityTargetAuthority {
     fn target_authority(
         &mut self,
-        scope: &winwincode_api::generated::RepositoryScope,
+        scope: &winwincode_domain::RepositoryScope,
         target: &ResponsibilityTarget,
     ) -> Result<ResponsibilityTargetAuthoritySeal, ResponsibilityAuthorityError> {
         match target {

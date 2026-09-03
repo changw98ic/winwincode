@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, DeliveryEventReadCursor, DeliveryEventReadStream, DeliveryEventReadStreamKind,
     ProductSessionEventReadCursor, ProductSessionEventReadStream,
-    ProductSessionEventReadStreamKind, RepositoryScope, RepositoryScopeKind, StrongFlowReadCursor,
+    ProductSessionEventReadStreamKind, StrongFlowReadCursor,
 };
 use winwincode_delivery::{
     domain::{
@@ -22,6 +22,7 @@ use winwincode_delivery::{
     },
 };
 use winwincode_domain::{DeliveryId, EventReadPosition, OpaqueCursor, Revision, Sha256Digest};
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind};
 
 use super::{
     DeliveryRuntimeReadRequest, ProductSessionRuntimeReadRequest, PublicationFactBinding,

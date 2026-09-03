@@ -10,11 +10,11 @@
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::application::stage::{
     DeliveryTerminalOutcomeFacts, TerminalArtifactReference, TerminalOutcomeStatus,
     WorkerTerminalOutcomeReport, seal_dispatch_terminal_outcome, seal_session_binding_authority,
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ExecutionMessageId, Instant, SchemaVersion};
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionLeaseStamp, ExecutionOutcomeStatus, ExecutionPortError,
