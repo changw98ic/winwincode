@@ -70,6 +70,12 @@
   --wwc-readable-max: 48rem;
   --wwc-drawer-width: 28rem;
   --wwc-control-min-height: 2.75rem;
+  --wwc-graph-viewport-max-height: 28rem;
+  --wwc-graph-viewport-narrow-max-height: 20rem;
+  --wwc-graph-node-width: 11rem;
+  --wwc-graph-node-narrow-width: 9rem;
+  --wwc-graph-overview-width: 12rem;
+  --wwc-graph-overview-height: 6rem;
   --wwc-shadow-dialog: 0 1.5rem 4rem rgb(15 23 42 / 22%);
   --wwc-transition-fast: 120ms ease;
   --wwc-opacity-disabled: 0.58;

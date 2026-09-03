@@ -635,6 +635,7 @@ export function mountStrongFlowCandidate(
       title.textContent = `${item.type} · ${item.id}`
       source.textContent = item.sourceRef
       row.dataset.candidateRef = item.candidateRef
+      row.dataset.evidenceRefId = item.id
       row.append(title, source)
       return row
     }))

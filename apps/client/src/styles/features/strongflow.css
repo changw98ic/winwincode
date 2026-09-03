@@ -369,7 +369,7 @@
 .wwc-strongflow-graph-viewport {
   position: relative;
   overflow: auto;
-  max-height: 28rem;
+  max-height: var(--wwc-graph-viewport-max-height);
   padding: var(--wwc-space-2);
   border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
   border-radius: var(--wwc-radius-md);
@@ -392,7 +392,7 @@
   position: absolute;
   display: grid;
   gap: var(--wwc-space-1);
-  width: 11rem;
+  width: var(--wwc-graph-node-width);
   padding: var(--wwc-space-2);
   border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
   border-radius: var(--wwc-radius-md);
@@ -420,6 +420,18 @@
   background: var(--wwc-color-danger-surface);
 }
 
+.wwc-strongflow-graph-node[data-execution-state='affected-live'],
+.wwc-strongflow-graph-list-node[data-execution-state='affected-live'] {
+  border-color: var(--wwc-color-warning-border);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-strongflow-graph-node[data-execution-state='affected-finished'],
+.wwc-strongflow-graph-list-node[data-execution-state='affected-finished'] {
+  border-color: var(--wwc-color-success-border);
+  background: var(--wwc-color-success-surface);
+}
+
 .wwc-strongflow-graph-node-icon {
   font-size: var(--wwc-font-size-lg);
 }
@@ -436,24 +448,93 @@
   font-size: var(--wwc-font-size-xs);
 }
 
-.wwc-strongflow-graph-edge {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  padding: var(--wwc-space-0) var(--wwc-space-1);
+.wwc-strongflow-graph-node-execution {
   color: var(--wwc-color-text-secondary);
   font-size: var(--wwc-font-size-xs);
-  transform: translate(-50%, -50%);
+  font-weight: var(--wwc-font-weight-strong);
 }
 
-.wwc-strongflow-graph-edge::before {
-  content: '→';
-  margin-right: var(--wwc-space-1);
+.wwc-strongflow-graph-edge {
+  position: absolute;
+  pointer-events: none;
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-graph-edge-line {
+  position: absolute;
+  height: var(--wwc-border-width);
+  background: var(--wwc-color-border-strong);
+  transform-origin: left center;
+}
+
+.wwc-strongflow-graph-edge-line::after {
+  position: absolute;
+  top: 50%;
+  right: var(--wwc-space-0);
+  color: var(--wwc-color-text-secondary);
+  content: '▶';
+  font-size: var(--wwc-font-size-xs);
+  transform: translate(50%, -50%);
+}
+
+.wwc-strongflow-graph-edge-label {
+  position: absolute;
+  padding: var(--wwc-space-0) var(--wwc-space-1);
+  background: var(--wwc-color-surface);
+  transform: translate(-50%, -50%);
 }
 
 .wwc-strongflow-graph-group {
   background: var(--wwc-color-selection);
   font-style: italic;
+}
+
+.wwc-strongflow-graph-overview {
+  display: block;
+  width: min(100%, var(--wwc-graph-overview-width));
+  height: var(--wwc-graph-overview-height);
+  margin-top: var(--wwc-space-2);
+  margin-left: auto;
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-strong);
+  border-radius: var(--wwc-radius-md);
+  color: inherit;
+  background: var(--wwc-color-surface);
+}
+
+.wwc-strongflow-graph-overview-canvas,
+.wwc-strongflow-graph-overview-edges {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.wwc-strongflow-graph-overview-edges {
+  position: absolute;
+  inset: var(--wwc-space-0);
+}
+
+.wwc-strongflow-graph-overview-node {
+  position: absolute;
+  width: var(--wwc-space-2);
+  height: var(--wwc-space-2);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-action);
+  transform: translate(-50%, -50%);
+}
+
+.wwc-strongflow-graph-overview-edge {
+  position: absolute;
+  height: var(--wwc-border-width);
+  background: var(--wwc-color-border-strong);
+  transform-origin: left center;
+}
+
+.wwc-strongflow [data-diagram-linked='true'] {
+  outline: var(--wwc-focus-width) solid var(--wwc-color-focus);
+  outline-offset: var(--wwc-focus-offset);
 }
 
 .wwc-strongflow-graph-detail {
@@ -832,12 +913,12 @@
   }
 
   .wwc-strongflow-graph-viewport[data-viewport='narrow'] {
-    max-height: 20rem;
+    max-height: var(--wwc-graph-viewport-narrow-max-height);
   }
 
   .wwc-strongflow-graph-node,
   .wwc-strongflow-graph-group {
-    width: 9rem;
+    width: var(--wwc-graph-node-narrow-width);
   }
 
   .wwc-candidate-technical-details {

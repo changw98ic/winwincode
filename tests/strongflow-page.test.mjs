@@ -121,6 +121,7 @@ function projection() {
       architectureDiagram: diagram('system-architecture'),
       processDiagram: diagram('process-flow'),
     },
+    diagramExecution: null,
     stage: { id: stageRunId },
     runtime: {
       stageRunId,

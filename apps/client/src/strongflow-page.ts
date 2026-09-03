@@ -20,7 +20,10 @@ import {
   type EditableDraft,
 } from './editable-draft.js'
 import { mountStrongFlowCandidate } from './strongflow-candidate.js'
-import { mountStrongFlowDiagrams } from './strongflow-diagrams.js'
+import {
+  mountStrongFlowDiagrams,
+  type StrongFlowDiagramSelection,
+} from './strongflow-diagrams.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -509,6 +512,7 @@ function renderEvidencePanel(
     title.textContent = `${item.type} · ${item.id}`
     source.textContent = item.sourceRef
     row.dataset.candidateRef = item.candidateRef
+    row.dataset.evidenceRefId = item.id
     row.append(title, source)
     return row
   }))
@@ -856,6 +860,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
    */
   let historicalReviewOpen = false
   let candidateViewMode: CandidateDiffViewMode = options.candidateView ?? 'unified'
+  let diagramSelection: StrongFlowDiagramSelection | null = null
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -872,6 +877,50 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   function selectArtifactTab(id: string): void {
     if (!STRONGFLOW_ARTIFACTS_TABS.includes(id as StrongFlowArtifactsTab)) return
     persist({ ...preferences, artifactsTab: id as StrongFlowArtifactsTab })
+  }
+
+  function descendantElements(parent: HTMLElement): readonly HTMLElement[] {
+    const descendants: HTMLElement[] = []
+    const pending = Array.from(parent.children) as HTMLElement[]
+    while (pending.length > 0) {
+      const element = pending.shift()!
+      descendants.push(element)
+      pending.push(...Array.from(element.children) as HTMLElement[])
+    }
+    return descendants
+  }
+
+  function applyDiagramSelection(selection: StrongFlowDiagramSelection | null): void {
+    diagramSelection = selection
+    if (selection === null) delete diagramsHost.dataset.selectedNodeId
+    else diagramsHost.dataset.selectedNodeId = selection.nodeId
+    const taskIds = new Set(selection?.taskId === null || selection?.taskId === undefined
+      ? []
+      : [selection.taskId])
+    const attentionIds = new Set(selection?.attentionItemIds ?? [])
+    const evidenceIds = new Set(selection?.evidenceRefIds ?? [])
+    for (const item of Array.from(tasks.children) as HTMLElement[]) {
+      item.dataset.diagramLinked = String(taskIds.has(item.dataset.deliveryTaskId ?? ''))
+    }
+    for (const item of Array.from(attention.children) as HTMLElement[]) {
+      item.dataset.diagramLinked = String(attentionIds.has(item.dataset.attentionItemId ?? ''))
+    }
+    for (const host of [candidateHost, contextEvidenceHost, artifactEvidenceHost]) {
+      host.dataset.diagramLinked = String(
+        (selection?.diffPaths.length ?? 0) > 0 || evidenceIds.size > 0,
+      )
+      if (selection === null || selection.diffPaths.length === 0) {
+        delete host.dataset.diagramDiffPaths
+      } else {
+        host.dataset.diagramDiffPaths = selection.diffPaths.join('\n')
+      }
+      for (const element of descendantElements(host)) {
+        const evidenceId = element.dataset.evidenceRefId
+        if (evidenceId !== undefined) {
+          element.dataset.diagramLinked = String(evidenceIds.has(evidenceId))
+        }
+      }
+    }
   }
 
   status.setAttribute('role', 'status')
@@ -951,7 +1000,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   artifactPanels.get('evidence')?.append(artifactEvidenceHost)
   artifacts.append(artifactsHeading, artifactTabs.root, ...artifactPanels.values())
 
-  const diagrams = mountStrongFlowDiagrams({ document, limits })
+  const diagrams = mountStrongFlowDiagrams({
+    document,
+    limits,
+    onSelectNode: applyDiagramSelection,
+  })
   diagramsHost.append(diagrams.root)
 
   const innerSplit = mountSplitPane({
@@ -1216,6 +1269,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     create: () => document.createElement('li'),
     update(item, record: DeliveryAttentionProjection) {
       item.dataset.status = record.status
+      item.dataset.attentionItemId = record.id
       item.textContent = `${record.title} · ${record.status}`
     },
   })
@@ -1671,6 +1725,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       artifactEvidenceNode = null
       lastEvidenceKey = null
       candidateView.update({ projection: null, candidateFiles, viewMode: candidateViewMode })
+      applyDiagramSelection(null)
       return
     }
 
@@ -1711,6 +1766,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       artifactEvidenceHost.append(artifactEvidenceNode)
     }
     lastEvidenceKey = evidenceKey
+    applyDiagramSelection(diagramSelection)
   }
 
   function renderActions(state: StrongFlowViewModelState): void {

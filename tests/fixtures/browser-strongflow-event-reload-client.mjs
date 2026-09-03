@@ -48,6 +48,7 @@ function createProjection({ candidateDigest = '3', runtimeSource = '1' } = {}) {
       architectureDiagram: diagram('system-architecture'),
       processDiagram: diagram('process-flow'),
     },
+    diagramExecution: null,
     stage: { id: stageRunId },
     runtime: {
       stageRunId,

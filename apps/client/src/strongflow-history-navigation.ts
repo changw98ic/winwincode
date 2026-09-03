@@ -200,6 +200,7 @@ export function mountStrongFlowHistoryNavigation(
     if (state === undefined) return
     state.node = node
     item.dataset.status = node.task.status
+    item.dataset.deliveryTaskId = node.task.id
     state.toggle.textContent = node.task.title
     state.status.textContent = node.task.status
     const expanded = expandedTasks.has(node.task.id) || selection.taskId === node.task.id
