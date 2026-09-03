@@ -184,6 +184,26 @@ function state(overrides = {}) {
     status: 'ready',
     realtime: 'subscribed',
     projection: projection(),
+    candidateFiles: {
+      status: 'idle',
+      items: [],
+      hasMore: false,
+      previewLimited: false,
+      selectedPath: null,
+      diff: {
+        status: 'idle',
+        path: null,
+        content: '',
+        loadedBytes: 0,
+        totalBytes: null,
+        hasMore: false,
+        previewLimited: false,
+        fileDiffSha256: null,
+        unavailableReason: null,
+        error: null,
+      },
+      error: null,
+    },
     interaction: { status: 'idle', error: null },
     error: null,
     ...overrides,
@@ -218,6 +238,7 @@ class FakeElement {
   id = ''
   href = ''
   tabIndex = 0
+  value = ''
   #textContent = ''
 
   get textContent() {
@@ -341,6 +362,7 @@ class FakeStrongFlowViewModel {
   }
 
   calls = []
+  draftScope = '["strongflow-workbench-test-actor","strongflow-workbench-test-scope"]'
   listener = null
 
   subscribe(listener) {
@@ -356,6 +378,10 @@ class FakeStrongFlowViewModel {
 
   async start() { this.calls.push(['start']) }
   async refresh() { this.calls.push(['refresh']) }
+  async loadCandidateFiles() { this.calls.push(['loadCandidateFiles']) }
+  async loadMoreCandidateFiles() { this.calls.push(['loadMoreCandidateFiles']) }
+  async selectCandidateFile(path) { this.calls.push(['selectCandidateFile', path]) }
+  async loadMoreCandidateDiff() { this.calls.push(['loadMoreCandidateDiff']) }
   async decideSolutionReview(input) { this.calls.push(['decideSolutionReview', input]) }
   async approveTaskBreakdown() { this.calls.push(['approveTaskBreakdown']) }
   async resolveAttention(input) { this.calls.push(['resolveAttention', input]) }

@@ -57,6 +57,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/strongflow-candidate-files.test.mjs',
   'tests/strongflow-delivery-advance-contract.test.mjs',
   'tests/strongflow-delivery-api.test.mjs',
+  'tests/strongflow-history.test.mjs',
   'tests/strongflow-page.test.mjs',
   'tests/strongflow-projection-contract.test.mjs',
   'tests/strongflow-role.test.mjs',

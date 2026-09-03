@@ -392,11 +392,12 @@ class FakeClient {
     this.queues.set(query, queue)
   }
 
-  async query(request) {
+  async query(request, options) {
     this.calls.push(structuredClone(request))
     const queue = this.queues.get(request.query)
     const value = queue?.shift() ?? this.responses.get(request.query)
     if (value instanceof Error) throw value
+    if (typeof value === 'function') return value(request, options)
     return structuredClone(value)
   }
 
@@ -2231,4 +2232,283 @@ test('StrongFlow view-model uses only the facade and never infers state from log
     source,
     /\bfetch\s*\(|new\s+WebSocket|@deepseek-ai|dsh-typert|remote\.|console\.|readFile|log\b/iu,
   )
+})
+
+test('historical review reads go through the canonical facade at the snapshot cursor', async () => {
+  const olderRunId = 'run_00000000000000000000000009'
+  const olderProductSessionId = 'psn_00000000000000000000000009'
+  const humanRunId = 'run_00000000000000000000000008'
+  const olderCandidateRef = 'refs/winwincode/candidate/9'
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  deliveryValue.stages.unshift(
+    {
+      id: humanRunId,
+      actorType: 'human',
+      attempt: 1,
+      deliveryTaskId: null,
+      finishedAt: '2026-08-27T00:59:00.000Z',
+      role: 'reviewer',
+      sessionBinding: null,
+      stage: 'plan-review',
+      startedAt: '2026-08-27T00:58:00.000Z',
+      status: 'succeeded',
+    },
+    {
+      id: olderRunId,
+      actorType: 'codex',
+      attempt: 1,
+      deliveryTaskId: 'tsk_00000000000000000000000001',
+      finishedAt: '2026-08-27T00:57:00.000Z',
+      role: 'implementer',
+      sessionBinding: sessionBinding(olderProductSessionId, olderRunId, '09'),
+      stage: 'executing',
+      startedAt: '2026-08-27T00:50:00.000Z',
+      status: 'failed',
+    },
+  )
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+  assert.equal(model.state.status, 'ready')
+
+  client.enqueue(
+    'runtime.projection.get',
+    response('runtime.projection.get', runtime(deliveryValue, olderProductSessionId, olderRunId)),
+  )
+  const snapshot = await model.loadStageRunRuntime(olderRunId)
+  assert.equal(snapshot.stageRunId, olderRunId)
+  assert.equal(snapshot.productSessionId, olderProductSessionId)
+  const runtimeCall = client.calls.at(-1)
+  assert.equal(runtimeCall.query, 'runtime.projection.get')
+  assert.deepEqual(runtimeCall.parameters, {
+    kind: 'delivery-stage',
+    productSessionId: olderProductSessionId,
+    deliveryId,
+    stageRunId: olderRunId,
+    atCursor: deliveryValue.readCursor,
+  })
+  assert.deepEqual(runtimeCall.scope, scope)
+
+  // Human and unknown runs resolve to null without any facade request.
+  const callsBefore = client.calls.length
+  assert.equal(await model.loadStageRunRuntime(humanRunId), null)
+  assert.equal(await model.loadStageRunRuntime('run_00000000000000000000000077'), null)
+  assert.equal(client.calls.length, callsBefore)
+
+  const olderCandidate = {
+    availability: 'released',
+    candidate: {
+      candidateCommitId: '4444444444444444444444444444444444444444',
+      candidateRef: olderCandidateRef,
+      candidateTreeId: '5555555555555555555555555555555555555555',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      diffSha256: `sha256:${'9'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:56:00.000Z',
+      producerSessionBindingId: 'binding:strongflow:09',
+      producerStageRunId: olderRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: false,
+    lastSeenDeliveryRevision: 1,
+    reviewDeliveryRevision: null,
+  }
+  const currentCandidateItem = {
+    ...olderCandidate,
+    candidate: {
+      ...olderCandidate.candidate,
+      candidateRef: 'refs/winwincode/candidate/1',
+      producerSessionBindingId: 'binding:strongflow:1',
+      producerStageRunId: stageRunId,
+    },
+    isCurrentAtReadCursor: true,
+  }
+  client.enqueue('candidate.list', response('candidate.list', {
+    kind: 'candidate_history_page',
+    items: [currentCandidateItem, olderCandidate],
+    readCursor: deliveryValue.readCursor,
+  }))
+  const items = await model.loadStageRunCandidates(olderRunId)
+  assert.deepEqual(items.map(item => item.candidate.candidateRef), [olderCandidateRef])
+  const listCall = client.calls.at(-1)
+  assert.equal(listCall.query, 'candidate.list')
+  assert.equal(
+    listCall.parameters.readPageLimit,
+    1,
+    'readPageLimit must match the delivery.get limit sealed into atCursor',
+  )
+  assert.equal(listCall.page.limit, 50)
+  assert.deepEqual(listCall.parameters.atCursor, deliveryValue.readCursor)
+
+  const identity = {
+    candidateRef: olderCandidateRef,
+    candidateTreeId: olderCandidate.candidate.candidateTreeId,
+    diffSha256: olderCandidate.candidate.diffSha256,
+  }
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'released',
+    candidate: olderCandidate.candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: 1,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: 1,
+    readCursor: deliveryValue.readCursor,
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+  const review = await model.loadCandidateHistoricalReview(identity)
+  assert.equal(review.kind, 'candidate_historical_review')
+  assert.equal(review.displayOnly, true)
+  assert.equal(review.currentAuthorization, false)
+  assert.equal(client.calls.at(-1).query, 'candidate.review.get')
+  assert.equal(client.calls.at(-1).parameters.readPageLimit, 1)
+
+  // A response naming another Candidate fails closed instead of rendering it.
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'released',
+    candidate: currentCandidateItem.candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: 1,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: 1,
+    readCursor: deliveryValue.readCursor,
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+  await assert.rejects(
+    model.loadCandidateHistoricalReview(identity),
+    error => error.code === 'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+  )
+
+  model.close()
+})
+
+test('a historical Candidate review from another read cut fails closed', async () => {
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+  const candidate = deliveryValue.currentCandidate
+  const identity = {
+    candidateRef: candidate.candidateRef,
+    candidateTreeId: candidate.candidateTreeId,
+    diffSha256: candidate.diffSha256,
+  }
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'available',
+    candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: deliveryValue.deliveryRevision,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: deliveryValue.deliveryRevision,
+    readCursor: {
+      ...deliveryValue.readCursor,
+      token: `${deliveryValue.readCursor.token}-another-cut`,
+    },
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+
+  await assert.rejects(
+    model.loadCandidateHistoricalReview(identity),
+    error => error.code === 'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+  )
+  model.close()
+})
+
+test('historical Candidate lookup follows canonical pages before reporting a run empty', async () => {
+  const selectedRunId = 'run_00000000000000000000000009'
+  const selectedSessionId = 'psn_00000000000000000000000009'
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  deliveryValue.stages.unshift({
+    id: selectedRunId,
+    actorType: 'codex',
+    attempt: 1,
+    deliveryTaskId: 'tsk_00000000000000000000000001',
+    finishedAt: '2026-08-27T00:57:00.000Z',
+    role: 'implementer',
+    sessionBinding: sessionBinding(selectedSessionId, selectedRunId, '09'),
+    stage: 'executing',
+    startedAt: '2026-08-27T00:50:00.000Z',
+    status: 'failed',
+  })
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+
+  const item = {
+    availability: 'released',
+    candidate: {
+      candidateCommitId: '4444444444444444444444444444444444444444',
+      candidateRef: 'refs/winwincode/candidate/9',
+      candidateTreeId: '5555555555555555555555555555555555555555',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      diffSha256: `sha256:${'9'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:56:00.000Z',
+      producerSessionBindingId: 'binding:strongflow:09',
+      producerStageRunId: selectedRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: false,
+    lastSeenDeliveryRevision: 1,
+    reviewDeliveryRevision: null,
+  }
+  client.enqueue('candidate.list', {
+    ...response('candidate.list', {
+      kind: 'candidate_history_page',
+      items: [],
+      readCursor: deliveryValue.readCursor,
+    }),
+    page: { hasMore: true, nextCursor: 'candidate-page-2' },
+  })
+  client.enqueue('candidate.list', {
+    ...response('candidate.list', {
+      kind: 'candidate_history_page',
+      items: [item],
+      readCursor: deliveryValue.readCursor,
+    }),
+    page: page(),
+  })
+
+  const items = await model.loadStageRunCandidates(selectedRunId)
+  assert.deepEqual(items.map(entry => entry.candidate.candidateRef), [
+    item.candidate.candidateRef,
+  ])
+  assert.deepEqual(
+    client.calls.filter(call => call.query === 'candidate.list').map(call => call.page.cursor),
+    [null, 'candidate-page-2'],
+  )
+  model.close()
+})
+
+test('historical facade reads propagate selection cancellation to the generated client', async () => {
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+
+  let receivedSignal
+  client.enqueue('candidate.list', (_request, options) => new Promise((_resolve, reject) => {
+    receivedSignal = options.signal
+    const timeout = setTimeout(() => reject(new Error('historical request was not aborted')), 50)
+    receivedSignal.addEventListener('abort', () => {
+      clearTimeout(timeout)
+      reject(new DOMException('historical request aborted', 'AbortError'))
+    }, { once: true })
+  }))
+  const selection = new AbortController()
+  const pending = model.loadStageRunCandidates(stageRunId, selection.signal)
+  await Promise.resolve()
+  selection.abort()
+
+  await assert.rejects(pending, error => error.name === 'AbortError')
+  assert.equal(receivedSignal.aborted, true)
+  model.close()
 })

@@ -12,6 +12,10 @@ import type {
   CandidateFileProjection,
   CandidateDiffGetResultResponse,
   CandidateFilesListResultResponse,
+  CandidateHistoricalReviewGetResultResponse,
+  CandidateHistoricalReviewProjection,
+  CandidateHistoryItemProjection,
+  CandidateHistoryListResultResponse,
   CommandAcceptedResponse,
   CommandCompletedResponse,
   ControlPlaneWebSocketEventFrame,
@@ -55,11 +59,13 @@ const SNAPSHOT_CONSISTENCY_RETRY_DELAY_MILLIS = 50
 const MAX_TRUSTED_FACTS_COMMAND_RETRIES = 400
 const TRUSTED_FACTS_COMMAND_RETRY_DEADLINE_MILLIS = 20_000
 const TRUSTED_FACTS_COMMAND_RETRY_DELAY_MILLIS = 50
-const STRONGFLOW_DETAIL_PAGE_LIMIT = 1
+const DELIVERY_READ_PAGE_LIMIT = 1
 const CANDIDATE_FILE_PAGE_LIMIT = 200
 const MAX_CANDIDATE_FILE_PREVIEW_ITEMS = 2_000
 const CANDIDATE_DIFF_CHUNK_BYTES = 65_536
 const MAX_CANDIDATE_DIFF_PREVIEW_BYTES = 524_288
+const HISTORICAL_CANDIDATE_PAGE_LIMIT = 50
+const MAX_HISTORICAL_CANDIDATE_PAGES = 20
 
 export type StrongFlowViewStatus =
   | 'idle'
@@ -205,6 +211,13 @@ export interface StrongFlowAttentionDecisionInput {
   readonly remediation: StrongFlowAttentionRemediationInput | null
 }
 
+/** Exact server identity of one historical Candidate opened for read-only review. */
+export interface StrongFlowHistoricalCandidateIdentity {
+  readonly candidateRef: string
+  readonly candidateTreeId: string
+  readonly diffSha256: string
+}
+
 export interface StrongFlowViewModel {
   readonly state: StrongFlowViewModelState
   /** Browser draft owner; changes with the authenticated Actor or exact Scope. */
@@ -221,6 +234,25 @@ export interface StrongFlowViewModel {
   resolveAttention(input: StrongFlowAttentionDecisionInput): Promise<void>
   submitVerdict(): Promise<void>
   advanceDelivery(): Promise<void>
+  /**
+   * Read the exact RuntimeProjection of one historical StageRun at the current
+   * snapshot's read cursor. Human review runs have no runtime binding and
+   * resolve to null instead of a projection.
+   */
+  loadStageRunRuntime(
+    stageRunId: StageRunId,
+    signal?: AbortSignal,
+  ): Promise<RuntimeProjectionSnapshot | null>
+  /** Read the exact Candidates a historical StageRun produced, from candidate.list. */
+  loadStageRunCandidates(
+    stageRunId: StageRunId,
+    signal?: AbortSignal,
+  ): Promise<readonly CandidateHistoryItemProjection[]>
+  /** Open one exact historical Candidate review (candidate.review.get), display-only. */
+  loadCandidateHistoricalReview(
+    candidate: StrongFlowHistoricalCandidateIdentity,
+    signal?: AbortSignal,
+  ): Promise<CandidateHistoricalReviewProjection | null>
   cancelPending(): void
   reconnect(): void
   close(): void
@@ -244,6 +276,8 @@ interface StrongFlowSnapshotMinimum {
 interface StrongFlowQueryResponses {
   readonly [QueryName.DeliveryGet]: DeliveryGetResultResponse
   readonly [QueryName.RuntimeProjectionGet]: RuntimeProjectionGetResultResponse
+  readonly [QueryName.CandidateList]: CandidateHistoryListResultResponse
+  readonly [QueryName.CandidateReviewGet]: CandidateHistoricalReviewGetResultResponse
 }
 
 interface StrongFlowCommandResponses {
@@ -348,7 +382,7 @@ function frozenInteraction(
 }
 
 function requestPage() {
-  return Object.freeze({ cursor: null, limit: STRONGFLOW_DETAIL_PAGE_LIMIT })
+  return Object.freeze({ cursor: null, limit: DELIVERY_READ_PAGE_LIMIT })
 }
 
 function candidateIdentity(candidate: FrozenCandidateSummaryProjection): string {
@@ -430,7 +464,7 @@ function statusForError(error: ControlPlaneClientError): StrongFlowViewStatus {
   return 'error'
 }
 
-function expectResponse<Query extends keyof StrongFlowQueryResponses>(
+function expectQueryResponse<Query extends keyof StrongFlowQueryResponses>(
   response: QueryResultResponse,
   query: Query,
 ): StrongFlowQueryResponses[Query] {
@@ -438,11 +472,19 @@ function expectResponse<Query extends keyof StrongFlowQueryResponses>(
     'STRONGFLOW_QUERY_MISMATCH',
     'The Control Plane returned another StrongFlow query result.',
   )
+  return response as StrongFlowQueryResponses[Query]
+}
+
+function expectResponse<Query extends keyof StrongFlowQueryResponses>(
+  response: QueryResultResponse,
+  query: Query,
+): StrongFlowQueryResponses[Query] {
+  const expected = expectQueryResponse(response, query)
   if (response.page.hasMore || response.page.nextCursor !== null) throw clientFailure(
     'STRONGFLOW_PAGE_INVALID',
     'A StrongFlow detail query returned an unexpected page cursor.',
   )
-  return response as StrongFlowQueryResponses[Query]
+  return expected
 }
 
 function expectCompletedCommand<Command extends keyof StrongFlowCommandResponses>(
@@ -1077,8 +1119,13 @@ export function createStrongFlowViewModel(
   options: StrongFlowViewModelOptions,
 ): StrongFlowViewModel {
   const listeners = new Set<StrongFlowViewModelListener>()
-  const controllers = new Set<AbortController>()
   const queryCache = createQueryCacheLifecycle(options)
+  const operationControllers = new Set<AbortController>()
+  const historicalControllers = new Set<AbortController>()
+  const parentSignals = new Map<AbortController, {
+    readonly signal: AbortSignal
+    readonly onAbort: () => void
+  }>()
   let currentState = initialState()
   let desiredCandidatePath = options.selectedCandidatePath === undefined
     || options.selectedCandidatePath === null
@@ -1246,7 +1293,7 @@ export function createStrongFlowViewModel(
         parameters: {
           deliveryId: options.deliveryId,
           atCursor: projection.metadata.readCursor,
-          readPageLimit: STRONGFLOW_DETAIL_PAGE_LIMIT,
+          readPageLimit: DELIVERY_READ_PAGE_LIMIT,
           candidateRef: candidate.candidateRef,
           candidateTreeId: candidate.candidateTreeId,
           diffSha256: candidate.diffSha256,
@@ -1401,7 +1448,7 @@ export function createStrongFlowViewModel(
         parameters: {
           deliveryId: options.deliveryId,
           atCursor: projection.metadata.readCursor,
-          readPageLimit: STRONGFLOW_DETAIL_PAGE_LIMIT,
+          readPageLimit: DELIVERY_READ_PAGE_LIMIT,
           candidateRef: candidate.candidateRef,
           candidateTreeId: candidate.candidateTreeId,
           diffSha256: candidate.diffSha256,
@@ -1467,19 +1514,44 @@ export function createStrongFlowViewModel(
     await loadCandidateDiff(false)
   }
 
-  function controller(): AbortController {
+  function controller(
+    parentSignal?: AbortSignal,
+    owner: 'operation' | 'historical' = 'operation',
+  ): AbortController {
     const value = new AbortController()
-    controllers.add(value)
+    const ownedControllers = owner === 'historical'
+      ? historicalControllers
+      : operationControllers
+    ownedControllers.add(value)
+    if (parentSignal !== undefined) {
+      const onAbort = () => { value.abort(parentSignal.reason) }
+      if (parentSignal.aborted) value.abort(parentSignal.reason)
+      else {
+        parentSignal.addEventListener('abort', onAbort, { once: true })
+        parentSignals.set(value, { signal: parentSignal, onAbort })
+      }
+    }
     return value
   }
 
   function releaseController(value: AbortController): void {
-    controllers.delete(value)
+    const parent = parentSignals.get(value)
+    if (parent !== undefined) {
+      parent.signal.removeEventListener('abort', parent.onAbort)
+      parentSignals.delete(value)
+    }
+    operationControllers.delete(value)
+    historicalControllers.delete(value)
   }
 
   function abortRequests(): void {
-    for (const active of controllers) active.abort()
-    controllers.clear()
+    for (const active of operationControllers) active.abort()
+    for (const active of [...operationControllers]) releaseController(active)
+  }
+
+  function abortHistoricalRequests(): void {
+    for (const active of historicalControllers) active.abort()
+    for (const active of [...historicalControllers]) releaseController(active)
   }
 
   function closeRealtime(): void {
@@ -1783,6 +1855,7 @@ export function createStrongFlowViewModel(
     generation += 1
     supersedingGeneration = null
     abortRequests()
+    abortHistoricalRequests()
     closeRealtime()
     clearCandidateFileResources()
     publish({
@@ -2140,6 +2213,173 @@ export function createStrongFlowViewModel(
     }))
   }
 
+  /** Guard shared by the read-only historical review queries. */
+  function requireOpenViewModel(): void {
+    if (closed) throw clientFailure(
+      'STRONGFLOW_VIEW_MODEL_CLOSED',
+      'The StrongFlow view-model is closed.',
+    )
+  }
+
+  function historicalStage(
+    requestedStageRunId: StageRunId,
+  ): StrongFlowProjection['delivery']['stages'][number] | undefined {
+    const projection = currentState.projection
+    if (projection === null) return undefined
+    return projection.delivery.stages.find(stage => stage.id === requestedStageRunId)
+  }
+
+  async function loadStageRunRuntime(
+    requestedStageRunId: StageRunId,
+    signal?: AbortSignal,
+  ): Promise<RuntimeProjectionSnapshot | null> {
+    requireOpenViewModel()
+    const projection = currentState.projection
+    if (projection === null) return null
+    const stage = historicalStage(requestedStageRunId)
+    if (stage === undefined || stage.actorType !== 'codex' || stage.sessionBinding === null) {
+      return null
+    }
+    const binding = Object.freeze({
+      productSessionId: stage.sessionBinding.productSessionId,
+      stageRunId: stage.id,
+    })
+    const active = controller(signal, 'historical')
+    try {
+      const response = expectResponse(await options.client.query({
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.RuntimeProjectionGet,
+        parameters: {
+          kind: 'delivery-stage',
+          productSessionId: binding.productSessionId,
+          deliveryId: options.deliveryId,
+          stageRunId: binding.stageRunId,
+          atCursor: projection.delivery.readCursor,
+        },
+        page: requestPage(),
+      }, { signal: active.signal }), QueryName.RuntimeProjectionGet)
+      assertRuntime(response.result, projection.delivery.readCursor, options, binding)
+      return response.result
+    } finally {
+      releaseController(active)
+    }
+  }
+
+  async function loadStageRunCandidates(
+    requestedStageRunId: StageRunId,
+    signal?: AbortSignal,
+  ): Promise<readonly CandidateHistoryItemProjection[]> {
+    requireOpenViewModel()
+    const projection = currentState.projection
+    if (projection === null) return []
+    const active = controller(signal, 'historical')
+    try {
+      const items: CandidateHistoryItemProjection[] = []
+      const seenPageCursors = new Set<string | null>()
+      let pageCursor: string | null = null
+      for (
+        let pageIndex = 0;
+        pageIndex < MAX_HISTORICAL_CANDIDATE_PAGES;
+        pageIndex += 1
+      ) {
+        if (seenPageCursors.has(pageCursor)) throw clientFailure(
+          'STRONGFLOW_PAGE_INVALID',
+          'The Candidate history repeated a page cursor.',
+        )
+        seenPageCursors.add(pageCursor)
+        const response: CandidateHistoryListResultResponse = expectQueryResponse(
+          await options.client.query({
+            ...requestBase(),
+            requestId: options.nextRequestId(),
+            query: QueryName.CandidateList,
+            parameters: {
+              deliveryId: options.deliveryId,
+              atCursor: projection.delivery.readCursor,
+              readPageLimit: DELIVERY_READ_PAGE_LIMIT,
+            },
+            page: { cursor: pageCursor, limit: HISTORICAL_CANDIDATE_PAGE_LIMIT },
+          }, { signal: active.signal }),
+          QueryName.CandidateList,
+        )
+        const result = response.result
+        if (
+          result.kind !== 'candidate_history_page'
+          || !sameReadCursor(result.readCursor, projection.delivery.readCursor)
+        ) throw clientFailure(
+          'STRONGFLOW_CANDIDATE_HISTORY_MISMATCH',
+          'The Candidate history does not match the current Delivery read cursor.',
+        )
+        items.push(...result.items.filter(
+          item => item.candidate.producerStageRunId === requestedStageRunId,
+        ))
+        if (!response.page.hasMore) {
+          if (response.page.nextCursor !== null) throw clientFailure(
+            'STRONGFLOW_PAGE_INVALID',
+            'The final Candidate history page returned another cursor.',
+          )
+          return items
+        }
+        if (
+          response.page.nextCursor === null
+          || seenPageCursors.has(response.page.nextCursor)
+        ) throw clientFailure(
+          'STRONGFLOW_PAGE_INVALID',
+          'The Candidate history returned an invalid next page cursor.',
+        )
+        pageCursor = response.page.nextCursor
+      }
+      throw clientFailure(
+        'STRONGFLOW_CANDIDATE_PAGE_LIMIT_EXCEEDED',
+        'The Candidate history exceeded the bounded page limit.',
+      )
+    } finally {
+      releaseController(active)
+    }
+  }
+
+  async function loadCandidateHistoricalReview(
+    candidate: StrongFlowHistoricalCandidateIdentity,
+    signal?: AbortSignal,
+  ): Promise<CandidateHistoricalReviewProjection | null> {
+    requireOpenViewModel()
+    const projection = currentState.projection
+    if (projection === null) return null
+    const active = controller(signal, 'historical')
+    try {
+      const response = expectResponse(await options.client.query({
+        ...requestBase(),
+        requestId: options.nextRequestId(),
+        query: QueryName.CandidateReviewGet,
+        parameters: {
+          deliveryId: options.deliveryId,
+          atCursor: projection.delivery.readCursor,
+          candidateRef: candidate.candidateRef,
+          candidateTreeId: candidate.candidateTreeId,
+          diffSha256: candidate.diffSha256,
+          readPageLimit: DELIVERY_READ_PAGE_LIMIT,
+        },
+        page: requestPage(),
+      }, { signal: active.signal }), QueryName.CandidateReviewGet)
+      const result = response.result
+      if (
+        result.kind !== 'candidate_historical_review'
+        || !sameReadCursor(result.readCursor, projection.delivery.readCursor)
+        || result.candidate.candidateRef !== candidate.candidateRef
+        || result.candidate.candidateTreeId !== candidate.candidateTreeId
+        || result.candidate.diffSha256 !== candidate.diffSha256
+        || result.displayOnly !== true
+        || result.currentAuthorization !== false
+      ) throw clientFailure(
+        'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+        'The Control Plane returned another historical Candidate review.',
+      )
+      return result
+    } finally {
+      releaseController(active)
+    }
+  }
+
   return {
     get state() {
       return currentState
@@ -2183,11 +2423,21 @@ export function createStrongFlowViewModel(
     async advanceDelivery() {
       await advanceDelivery()
     },
+    async loadStageRunRuntime(stageRunId, signal) {
+      return loadStageRunRuntime(stageRunId, signal)
+    },
+    async loadStageRunCandidates(stageRunId, signal) {
+      return loadStageRunCandidates(stageRunId, signal)
+    },
+    async loadCandidateHistoricalReview(candidate, signal) {
+      return loadCandidateHistoricalReview(candidate, signal)
+    },
     cancelPending() {
       if (closed) return
       generation += 1
       supersedingGeneration = null
       abortRequests()
+      abortHistoricalRequests()
       closeRealtime()
       clearCandidateFileResources()
       publish({
@@ -2232,6 +2482,7 @@ export function createStrongFlowViewModel(
       supersedingGeneration = null
       clearCandidateFileResources()
       abortRequests()
+      abortHistoricalRequests()
       closeRealtime()
       publish({
         status: 'closed',

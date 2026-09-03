@@ -3,7 +3,6 @@
 import type {
   DeliveryAttentionProjection,
   DeliveryProjection,
-  DeliveryStageProjection,
   DeliveryTaskDetailProjection,
   RepositoryScope,
 } from './generated/contracts.js'
@@ -21,6 +20,17 @@ import {
 } from './editable-draft.js'
 import { mountStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
+import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
+import {
+  strongFlowHistoryHashWithSelection,
+  strongFlowHistorySelectionFromHash,
+  type StrongFlowHistoryLocation,
+} from './strongflow-history-selection.js'
+import {
+  strongFlowHistoryTree,
+  type StrongFlowHistoryTree,
+} from './strongflow-history-tree.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -53,6 +63,11 @@ export interface StrongFlowPageOptions {
   readonly limits?: StrongFlowRenderLimits
   readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
   readonly viewport?: StrongFlowLayoutViewport
+  /**
+   * Browser history seam for the presentation-only Task/StageRun history
+   * selection. Defaults to the page window; injection keeps tests hermetic.
+   */
+  readonly historyLocation?: StrongFlowHistoryLocation | null
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -640,6 +655,20 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       return browserWindow?.innerWidth ?? STRONGFLOW_NARROW_VIEWPORT_WIDTH + 1
     },
   }
+  const historyLocation = options.historyLocation !== undefined
+    ? options.historyLocation
+    : browserWindow === null
+      ? null
+      : {
+          hash: () => browserWindow.location.hash,
+          replaceHash(next: string) {
+            browserWindow.history.replaceState(
+              null,
+              '',
+              `${browserWindow.location.pathname}${browserWindow.location.search}${next}`,
+            )
+          },
+        }
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
   const error = strongFlowElement(document, 'div', 'wwc-strongflow-error')
@@ -695,10 +724,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const tasksHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const tasks = strongFlowElement(document, 'ul', 'wwc-strongflow-task-list')
   const tasksOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const tasksEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-tasks-empty')
   const stagesSection = strongFlowElement(document, 'section', 'wwc-strongflow-stages')
   const stagesHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const stages = strongFlowElement(document, 'ol', 'wwc-strongflow-stage-list')
   const stagesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
+  const stagesEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-stages-empty')
+  const historyHost = strongFlowElement(document, 'div', 'wwc-strongflow-history-host')
   const attentionSection = strongFlowElement(document, 'section', 'wwc-strongflow-attention')
   const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
@@ -782,6 +814,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'button',
     'wwc-strongflow-advance-delivery',
   ) as HTMLButtonElement
+  const historyBlockedNote = strongFlowElement(
+    document,
+    'p',
+    'wwc-strongflow-history-blocked',
+  )
   let closed = false
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
   if (options.model.state.candidateFiles.selectedPath !== null) {
@@ -798,12 +835,22 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let diagramsFingerprint: string | null = null
   let lastEvidenceKey: string | null = null
   let lastLayoutKey: string | null = null
+  // One shared history tree per snapshot: navigation and the run detail must
+  // never each re-derive their own copy of the same business display state.
+  let historyTree: StrongFlowHistoryTree | null = null
+  let historyTreeSource: StrongFlowProjection | null = null
   let activeDeliveryId: string | null = null
   type ReviewDraftValues = {
     readonly comments: string
     readonly requestedChanges: string
   }
   const reviewDraft = createEditableDraft<ReviewDraftValues>({ revisionSensitive: true })
+  /**
+   * True while a historical (non-current) StageRun is under review. Every
+   * current-Delivery mutation control must fail closed in that state; the
+   * Server stays the sole mutation authority for the live run.
+   */
+  let historicalReviewOpen = false
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -1029,12 +1076,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   error.append(errorText, retry, reconnect)
   deliveriesRoot.append(deliveriesHeading, deliveries, deliveriesOmitted)
   overview.append(heading, goal, metadata)
-  tasksSection.append(tasksHeading, tasks, tasksOmitted)
-  stagesSection.append(stagesHeading, stages, stagesOmitted)
+  tasksSection.append(tasksHeading, tasks, tasksEmpty, tasksOmitted)
+  stagesSection.append(stagesHeading, stages, stagesEmpty, stagesOmitted)
   attentionSection.append(attentionHeading, attention, attentionOmitted)
   details.append(empty, overview)
+  historyBlockedNote.setAttribute('role', 'status')
+  historyBlockedNote.textContent = 'History review is open. Return to the current StageRun to act on this Delivery.'
+  historyBlockedNote.hidden = true
   actions.append(
     actionsHeading,
+    historyBlockedNote,
     solutionActions,
     approveTasks,
     submitVerdict,
@@ -1043,7 +1094,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     advanceDelivery,
   )
   navigation.append(deliveriesRoot, tasksSection, stagesSection)
-  mainRegion.append(details, actions)
+  mainRegion.append(details, historyHost, actions)
   context.append(attentionSection, contextEvidenceHost)
   outerSplit.root.replaceChildren(
     outerSplit.primary,
@@ -1103,38 +1154,43 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     remove(item) { deliveryRows.delete(item) },
   })
 
-  const taskRows = new WeakMap<HTMLLIElement, {
-    readonly title: HTMLElement
-    readonly status: HTMLElement
-  }>()
-  const taskCollection = mountKeyedCollection({
-    parent: tasks,
-    key: (task: DeliveryTaskDetailProjection) => task.id,
-    create() {
-      const item = document.createElement('li')
-      const title = document.createElement('strong')
-      const taskStatus = document.createElement('span')
-      item.append(title, taskStatus)
-      taskRows.set(item, { title, status: taskStatus })
-      return item
+  const runDetail = mountStrongFlowRunDetail({
+    document,
+    limits,
+    loaders: {
+      loadRuntime: (stageRunId, signal) => (
+        options.model.loadStageRunRuntime(stageRunId, signal)
+      ),
+      loadCandidates: (stageRunId, signal) => (
+        options.model.loadStageRunCandidates(stageRunId, signal)
+      ),
+      loadCandidateReview: (candidate, signal) => options.model.loadCandidateHistoricalReview(
+        {
+          candidateRef: candidate.candidateRef,
+          candidateTreeId: candidate.candidateTreeId,
+          diffSha256: candidate.diffSha256,
+        },
+        signal,
+      ),
     },
-    update(item, task: DeliveryTaskDetailProjection) {
-      const row = taskRows.get(item)
-      if (row === undefined) return
-      item.dataset.status = task.status
-      row.title.textContent = task.title
-      row.status.textContent = task.status
-    },
-    remove(item) { taskRows.delete(item) },
   })
-
-  const stageCollection = mountKeyedCollection({
-    parent: stages,
-    key: (stage: DeliveryStageProjection) => stage.id,
-    create: () => document.createElement('li'),
-    update(item, stage: DeliveryStageProjection) {
-      item.dataset.status = stage.status
-      item.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
+  historyHost.append(runDetail.root)
+  const historyNavigation = mountStrongFlowHistoryNavigation({
+    document,
+    tasksParent: tasks,
+    stagesParent: stages,
+    tasksOmitted,
+    stagesOmitted,
+    tasksEmpty,
+    stagesEmpty,
+    initialSelection: strongFlowHistorySelectionFromHash(historyLocation?.hash() ?? ''),
+    onSelect(selection) {
+      if (historyLocation !== null) {
+        historyLocation.replaceHash(
+          strongFlowHistoryHashWithSelection(historyLocation.hash(), selection),
+        )
+      }
+      render(options.model.state)
     },
   })
 
@@ -1295,7 +1351,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         },
       })
       const decide = (decision: 'resolve' | 'dismiss', remediation: boolean) => {
-        if (readOnly) return
+        if (readOnly || historicalReviewOpen) return
         const row = attentionActionRows.get(group)
         if (row === undefined) return
         row.draft.edit('resolution', row.resolution.value)
@@ -1413,6 +1469,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         || item.busy
         || row.draft.state.revisionConflict
         || decisionInFlight
+        || historicalReviewOpen
       row.resolve.disabled = decisionDisabled
       row.dismiss.disabled = decisionDisabled
       row.rework.disabled = decisionDisabled
@@ -1429,18 +1486,18 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       if (row.instructions.value !== draftValues.instructions) {
         row.instructions.value = draftValues.instructions
       }
-      row.resolution.disabled = readOnly || item.busy || decisionInFlight
-      row.task.disabled = readOnly || item.busy || decisionInFlight
-      row.node.disabled = readOnly || item.busy || decisionInFlight
-      row.instructions.disabled = readOnly || item.busy || decisionInFlight
+      row.resolution.disabled = readOnly || item.busy || decisionInFlight || historicalReviewOpen
+      row.task.disabled = readOnly || item.busy || decisionInFlight || historicalReviewOpen
+      row.node.disabled = readOnly || item.busy || decisionInFlight || historicalReviewOpen
+      row.instructions.disabled = readOnly || item.busy || decisionInFlight || historicalReviewOpen
       row.conflict.hidden = !row.draft.state.revisionConflict
       row.conflictText.textContent = row.draft.state.revisionConflict
         ? `This Attention draft started at Delivery revision ${String(
             row.draft.state.baseRevision,
           )}; the server is now at revision ${String(row.draft.state.serverRevision)}.`
         : ''
-      row.keepDraft.disabled = readOnly || item.busy || decisionInFlight
-      row.useServer.disabled = readOnly || item.busy || decisionInFlight
+      row.keepDraft.disabled = readOnly || item.busy || decisionInFlight || historicalReviewOpen
+      row.useServer.disabled = readOnly || item.busy || decisionInFlight || historicalReviewOpen
     },
     remove(group) {
       const row = attentionActionRows.get(group)
@@ -1464,7 +1521,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   })
 
   const onApproveSolution = () => {
-    if (readOnly) return
+    if (readOnly || historicalReviewOpen) return
     reviewDraft.edit('comments', comments.value)
     reviewDraft.edit('requestedChanges', changes.value)
     const submission = reviewDraft.beginSubmission()
@@ -1476,7 +1533,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
   const onRequestChanges = () => {
-    if (readOnly) return
+    if (readOnly || historicalReviewOpen) return
     reviewDraft.edit('comments', comments.value)
     reviewDraft.edit('requestedChanges', changes.value)
     const submission = reviewDraft.beginSubmission()
@@ -1488,7 +1545,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     })
   }
   const onRejectSolution = () => {
-    if (readOnly) return
+    if (readOnly || historicalReviewOpen) return
     reviewDraft.edit('comments', comments.value)
     reviewDraft.edit('requestedChanges', changes.value)
     const submission = reviewDraft.beginSubmission()
@@ -1499,9 +1556,15 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       requestedChanges: [],
     })
   }
-  const onApproveTasks = () => { if (!readOnly) void options.model.approveTaskBreakdown() }
-  const onSubmitVerdict = () => { if (!readOnly) void options.model.submitVerdict() }
-  const onAdvanceDelivery = () => { if (!readOnly) void options.model.advanceDelivery() }
+  const onApproveTasks = () => {
+    if (!readOnly && !historicalReviewOpen) void options.model.approveTaskBreakdown()
+  }
+  const onSubmitVerdict = () => {
+    if (!readOnly && !historicalReviewOpen) void options.model.submitVerdict()
+  }
+  const onAdvanceDelivery = () => {
+    if (!readOnly && !historicalReviewOpen) void options.model.advanceDelivery()
+  }
   const onRetry = () => { void options.model.refresh() }
   const onReconnect = () => { options.model.reconnect() }
   const onReviewCommentsInput = () => { reviewDraft.edit('comments', comments.value) }
@@ -1578,11 +1641,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
         ? 'Loading the exact Delivery snapshot…'
         : 'Select a Delivery to open StrongFlow.'
-      taskCollection.update([])
-      stageCollection.update([])
+      historicalReviewOpen = false
+      historyTree = null
+      historyTreeSource = null
+      historyNavigation.update(null)
+      runDetail.update({ tree: null, selection: historyNavigation.selection() })
       attentionCollection.update([])
-      updateOmitted(tasksOmitted, 0, 'tasks')
-      updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
       if (diagramsNode !== null) diagramsNode.remove()
       if (contextEvidenceNode !== null) contextEvidenceNode.remove()
@@ -1601,14 +1665,17 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     metadata.textContent = `Delivery r${String(
       projection.metadata.revisions.delivery,
     )} · Runtime r${String(projection.metadata.revisions.runtime)} · updated ${projection.metadata.updatedAt}`
-    const boundedTasks = boundedItems(projection.delivery.tasks, limits.tasks)
-    const boundedStages = boundedItems(projection.delivery.stages, limits.stages)
+    if (projection !== historyTreeSource) {
+      historyTree = strongFlowHistoryTree(projection, limits)
+      historyTreeSource = projection
+    }
+    historyNavigation.update(historyTree)
+    const historySelection = historyNavigation.selection()
+    historicalReviewOpen = historySelection.stageRunId !== null
+      && projection.stage.id !== historySelection.stageRunId
+    runDetail.update({ tree: historyTree, selection: historySelection })
     const boundedAttention = boundedItems(projection.attention, limits.attention)
-    taskCollection.update(boundedTasks.items)
-    stageCollection.update(boundedStages.items)
     attentionCollection.update(boundedAttention.items)
-    updateOmitted(tasksOmitted, boundedTasks.omitted, 'tasks')
-    updateOmitted(stagesOmitted, boundedStages.omitted, 'stages')
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
 
     const evidenceKey = JSON.stringify(projection.evidence)
@@ -1694,25 +1761,27 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       || busy
       || reviewDraft.state.revisionConflict
       || reviewInFlight
-    comments.disabled = readOnly || busy || reviewInFlight
-    changes.disabled = readOnly || busy || reviewInFlight
+      || historicalReviewOpen
+    historyBlockedNote.hidden = !historicalReviewOpen
+    comments.disabled = readOnly || busy || reviewInFlight || historicalReviewOpen
+    changes.disabled = readOnly || busy || reviewInFlight || historicalReviewOpen
     approveSolution.disabled = reviewDisabled
     requestChanges.disabled = reviewDisabled
     rejectSolution.disabled = reviewDisabled
-    keepReviewDraft.disabled = readOnly || busy || reviewInFlight
-    useServerReview.disabled = readOnly || busy || reviewInFlight
+    keepReviewDraft.disabled = readOnly || busy || reviewInFlight || historicalReviewOpen
+    useServerReview.disabled = readOnly || busy || reviewInFlight || historicalReviewOpen
     approveTasks.hidden = review?.reviewStatus !== 'approved'
       || (projection?.delivery.tasks.length ?? 0) > 0
-    approveTasks.disabled = readOnly || busy
+    approveTasks.disabled = readOnly || busy || historicalReviewOpen
     const verdictVisible = projection !== null && canSubmitStrongFlowVerdict(projection)
     if (verdictVisible && submitVerdict.parentNode === null) {
       actions.insertBefore(submitVerdict, attentionActions)
     } else if (!verdictVisible) {
       submitVerdict.remove()
     }
-    submitVerdict.disabled = readOnly || busy
+    submitVerdict.disabled = readOnly || busy || historicalReviewOpen
     advanceDelivery.hidden = projection?.delivery.status !== 'ready-to-deliver'
-    advanceDelivery.disabled = readOnly || busy
+    advanceDelivery.disabled = readOnly || busy || historicalReviewOpen
     const nodes: readonly ReviewNode[] = review === null
       ? []
       : boundedItems(
@@ -1978,8 +2047,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       reviewDraft.reset()
       attentionActionCollection.close()
       attentionCollection.close()
-      stageCollection.close()
-      taskCollection.close()
+      historyNavigation.close()
+      runDetail.close()
       deliveryCollection.close()
       diagramsNode?.remove()
       candidateView.close()
