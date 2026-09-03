@@ -118,6 +118,106 @@ pub enum WorkerRuntimeTraceState {
     Stopped,
 }
 
+/// Process-level execution strategy selected before a Job starts.
+///
+/// PR0 keeps [`Self::React`] as the default. The delegated variants are
+/// feature gates only until their deterministic executors are introduced by
+/// later changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    React,
+    DelegatedPatchShadow,
+    DelegatedPatch,
+}
+
+impl ExecutionMode {
+    /// Parses the canonical configuration spelling.
+    #[must_use]
+    pub fn from_config(value: &str) -> Option<Self> {
+        match value {
+            "react" => Some(Self::React),
+            "delegated_patch_shadow" => Some(Self::DelegatedPatchShadow),
+            "delegated_patch" => Some(Self::DelegatedPatch),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical configuration spelling.
+    #[must_use]
+    pub const fn as_config(self) -> &'static str {
+        match self {
+            Self::React => "react",
+            Self::DelegatedPatchShadow => "delegated_patch_shadow",
+            Self::DelegatedPatch => "delegated_patch",
+        }
+    }
+}
+
+/// Policy controlling when the optional one-shot Observer may run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObserverMode {
+    #[default]
+    Off,
+    Shadow,
+    AmbiguousOnly,
+    Always,
+}
+
+impl ObserverMode {
+    /// Parses the canonical configuration spelling.
+    #[must_use]
+    pub fn from_config(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "shadow" => Some(Self::Shadow),
+            "ambiguous_only" => Some(Self::AmbiguousOnly),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical configuration spelling.
+    #[must_use]
+    pub const fn as_config(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::AmbiguousOnly => "ambiguous_only",
+            Self::Always => "always",
+        }
+    }
+}
+
+/// Secret-safe aggregate used to compare one execution attempt with another.
+///
+/// Only bounded counters and durations are retained. Provider content, tool
+/// arguments, commands, paths, patches, source and logs are deliberately
+/// absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PerformanceBaselineReport {
+    pub execution_mode: ExecutionMode,
+    pub observer_mode: ObserverMode,
+    pub primary_model_call_count: i64,
+    pub primary_model_input_tokens: i64,
+    pub primary_model_cached_tokens: i64,
+    pub primary_model_output_tokens: i64,
+    pub primary_model_wait_ms: i64,
+    pub tool_call_count: i64,
+    pub patch_call_count: i64,
+    pub patch_apply_ms: i64,
+    pub files_changed: i64,
+    pub validation_ms: i64,
+    pub observer_call_count: i64,
+    pub observer_wait_ms: i64,
+    pub repair_rounds: i64,
+    pub turn_count: i64,
+    pub total_runtime_ms: i64,
+}
+
 /// Stable gate outcome retained without free-form policy details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,6 +286,9 @@ pub enum RuntimeTraceFact {
     },
     Runtime {
         state: WorkerRuntimeTraceState,
+    },
+    PerformanceBaseline {
+        report: PerformanceBaselineReport,
     },
 }
 
@@ -537,9 +640,36 @@ fn validate_trace_fact(fact: &RuntimeTraceFact) -> Result<(), RuntimeTraceInputE
         RuntimeTraceFact::Candidate { digest } if !sha256_digest(&digest.0) => {
             return Err(RuntimeTraceInputError::InvalidCandidateDigest);
         }
+        RuntimeTraceFact::PerformanceBaseline { report }
+            if performance_values(report)
+                .any(|value| !(0..=MAX_SAFE_SEQUENCE).contains(&value)) =>
+        {
+            return Err(RuntimeTraceInputError::InvalidIdentity);
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn performance_values(report: &PerformanceBaselineReport) -> impl Iterator<Item = i64> {
+    [
+        report.primary_model_call_count,
+        report.primary_model_input_tokens,
+        report.primary_model_cached_tokens,
+        report.primary_model_output_tokens,
+        report.primary_model_wait_ms,
+        report.tool_call_count,
+        report.patch_call_count,
+        report.patch_apply_ms,
+        report.files_changed,
+        report.validation_ms,
+        report.observer_call_count,
+        report.observer_wait_ms,
+        report.repair_rounds,
+        report.turn_count,
+        report.total_runtime_ms,
+    ]
+    .into_iter()
 }
 
 fn normalize_artifact_references(

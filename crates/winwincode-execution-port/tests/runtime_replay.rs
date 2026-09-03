@@ -487,6 +487,22 @@ fn worker_ack_advances_only_the_control_plane_watermark_and_gap_replays() {
     assert_eq!(duplicate_receipt.ack_sequence, ExecutionAckSequence(1));
     assert_eq!(store.writes, writes_before_duplicate);
 
+    let later = runtime_ack(&third, LeaseWriteStatus::Accepted, 3, None);
+    let later_receipt = responder
+        .acknowledge(&mut store, &authority, &later)
+        .expect("later acknowledgement advances the contiguous watermark");
+    assert_eq!(later_receipt.ack_sequence, ExecutionAckSequence(3));
+    let writes_before_stale_duplicate = store.writes;
+    let stale_duplicate = runtime_ack(&first, LeaseWriteStatus::Duplicate, 1, None);
+    let stale_duplicate_receipt = responder
+        .acknowledge(&mut store, &authority, &stale_duplicate)
+        .expect("older duplicate response keeps the durable watermark");
+    assert_eq!(
+        stale_duplicate_receipt.ack_sequence,
+        ExecutionAckSequence(3)
+    );
+    assert_eq!(store.writes, writes_before_stale_duplicate);
+
     let regression = runtime_ack(&first, LeaseWriteStatus::Accepted, 0, None);
     assert!(matches!(
         responder.acknowledge(&mut store, &authority, &regression),

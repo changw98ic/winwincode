@@ -26,12 +26,13 @@ use winwincode_execution_port::replay::{
 };
 use winwincode_execution_port::runtime_replay::RuntimeReplayIdentity;
 use winwincode_execution_port::runtime_trace_outbox::{
-    FencedArtifactWrite, RuntimeTraceActionJournal, RuntimeTraceDraft, RuntimeTraceFact,
-    RuntimeTraceIdentity, RuntimeTraceIdentitySource, RuntimeTraceInputError, RuntimeTracePayload,
-    RuntimeTraceRetention, SecretSafeTraceSummary, StageTraceState, ToolTraceOutcome,
-    TraceGateOutcome, WorkerArtifactCache, WorkerArtifactDraft, WorkerArtifactReferenceError,
-    WorkerRuntimeTraceOutbox, WorkerRuntimeTraceState, persist_artifact_reference,
-    traced_envelope_token,
+    ExecutionMode, FencedArtifactWrite, ObserverMode, PerformanceBaselineReport,
+    RuntimeTraceActionJournal, RuntimeTraceDraft, RuntimeTraceFact, RuntimeTraceIdentity,
+    RuntimeTraceIdentitySource, RuntimeTraceInputError, RuntimeTraceOutboxError,
+    RuntimeTracePayload, RuntimeTraceRetention, SecretSafeTraceSummary, StageTraceState,
+    ToolTraceOutcome, TraceGateOutcome, WorkerArtifactCache, WorkerArtifactDraft,
+    WorkerArtifactReferenceError, WorkerRuntimeTraceOutbox, WorkerRuntimeTraceState,
+    persist_artifact_reference, traced_envelope_token,
 };
 
 const NOW: &str = "2027-01-15T08:00:02.000Z";
@@ -484,6 +485,85 @@ fn duplicate_retry_and_restart_replay_return_the_original_message() {
         )
         .expect("restart replay");
     assert_eq!(replay.events, [*original]);
+}
+
+#[test]
+fn performance_baseline_is_bounded_secret_safe_and_replayable() {
+    assert_eq!(ExecutionMode::default(), ExecutionMode::React);
+    assert_eq!(ObserverMode::default(), ObserverMode::Off);
+    assert_eq!(
+        ExecutionMode::from_config("delegated_patch_shadow"),
+        Some(ExecutionMode::DelegatedPatchShadow)
+    );
+    assert_eq!(
+        ObserverMode::from_config("ambiguous_only"),
+        Some(ObserverMode::AmbiguousOnly)
+    );
+    assert_eq!(ExecutionMode::from_config("unknown"), None);
+    assert_eq!(ObserverMode::from_config("unknown"), None);
+    let report = PerformanceBaselineReport {
+        execution_mode: ExecutionMode::React,
+        observer_mode: ObserverMode::Off,
+        primary_model_call_count: 2,
+        primary_model_input_tokens: 100,
+        primary_model_cached_tokens: 25,
+        primary_model_output_tokens: 30,
+        primary_model_wait_ms: 900,
+        tool_call_count: 3,
+        patch_call_count: 1,
+        patch_apply_ms: 40,
+        files_changed: 2,
+        validation_ms: 80,
+        observer_call_count: 0,
+        observer_wait_ms: 0,
+        repair_rounds: 0,
+        turn_count: 2,
+        total_runtime_ms: 1_500,
+    };
+    let outbox = WorkerRuntimeTraceOutbox::new();
+    let mut store = MemoryStore::default();
+    let retained = outbox
+        .retain(
+            &mut store,
+            &authority(),
+            draft(
+                1,
+                RuntimeTraceFact::PerformanceBaseline {
+                    report: report.clone(),
+                },
+            ),
+        )
+        .expect("retain performance baseline");
+    let RuntimeTraceRetention::Ready { message, .. } = retained else {
+        panic!("performance baseline must be ready");
+    };
+    let encoded = message.event.payload.expect("performance payload");
+    let decoded = decode_base64(&encoded.data_base64);
+    let payload: RuntimeTracePayload = serde_json::from_slice(&decoded).expect("typed payload");
+    assert_eq!(
+        payload.fact,
+        RuntimeTraceFact::PerformanceBaseline {
+            report: report.clone()
+        }
+    );
+    let json = String::from_utf8(decoded).expect("JSON payload");
+    assert!(!json.contains("Authorization"));
+    assert!(!json.contains("sourceCode"));
+    assert!(!json.contains("patchContent"));
+
+    let mut invalid = report;
+    invalid.primary_model_cached_tokens = -1;
+    let error = outbox
+        .retain(
+            &mut MemoryStore::default(),
+            &authority(),
+            draft(1, RuntimeTraceFact::PerformanceBaseline { report: invalid }),
+        )
+        .expect_err("negative metric must be rejected");
+    assert!(matches!(
+        error,
+        RuntimeTraceOutboxError::Input(RuntimeTraceInputError::InvalidIdentity)
+    ));
 }
 
 #[test]
