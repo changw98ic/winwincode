@@ -16,13 +16,12 @@ import {
   DELIVERY_FIXTURE_BASE_TIME,
   DELIVERY_FIXTURE_UI_PROOF,
   DeliveryServiceFixtureTestkit,
-  ScriptedDshFixtureRuntime,
   assertForeignDeliveryProjection,
   assertMalformedFixtureProjection,
   exerciseFixturePolicyDenial,
   keylessFixtureEnvironment,
-  renderFixtureDeliveryProjection,
 } from './fixtures/delivery-service-testkit.mjs'
+import { RuntimeSessionLedger } from './fixtures/dsh-profile/index.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
@@ -78,42 +77,35 @@ function childAtCheckpoint(directory) {
   })
 }
 
-test('testkit drives a scripted DSH role through the real embedded Codex kernel', async t => {
+test('testkit drives a scripted planner role through the repository runtime-event ledger', async t => {
   const kit = await DeliveryServiceFixtureTestkit.create({
     deliveryId: 'dlv_6PGC8PSH5XNSGV6Q4ASXTH9AEX',
   })
   t.after(() => kit.cleanup())
-  const runtime = await ScriptedDshFixtureRuntime.create({
-    owner: kit,
-    home: kit.home,
-    workspace: kit.repository,
-    script: [{
-      text: 'The fixture requirements remain separate from the solution.',
-      usage: { inputTokens: 16, outputTokens: 9 },
-    }],
-  })
-  const result = await runtime.runRole({
-    sessionId: 'dsh-testkit-requirements',
-    roleId: 'requirements',
-    prompt: 'Record the deterministic Delivery requirements.',
-    maxTokens: 96,
-  })
+  const review = await kit.preparePlanReview()
 
-  assert.equal(result.roleId, 'requirements')
-  assert.match(result.codexSessionId, /^[A-Za-z0-9-]+$/u)
-  assert.deepEqual(result.assistantMessages, [
-    'The fixture requirements remain separate from the solution.',
+  const stored = await RuntimeSessionLedger.open(kit.home, 'dsh-fixture-planner')
+    .then(ledger => ledger.read())
+  assert.equal(stored.manifest.roleId, 'planner')
+  assert.equal(stored.manifest.kernelSessionId, 'codex-fixture-planner')
+  assert.equal(stored.manifest.provider, 'fixture')
+  assert.equal(stored.manifest.model, 'fixture-coder')
+  assert.match(stored.manifest.rolloutPath, /fixture-rollouts\/dsh-fixture-planner\.jsonl$/u)
+  assert.deepEqual(stored.events.map(event => event.kind), [
+    'turn.started',
+    'plan.updated',
+    'turn.completed',
   ])
-  assert.ok(result.events.some(event => event.kind === 'turn.started'))
-  assert.ok(result.events.some(event => event.kind === 'message.completed'))
-  assert.ok(result.events.some(event => event.kind === 'turn.completed'))
-  assert.equal(result.configuredMaxTokens, 96)
-  assert.deepEqual(runtime.calls.map(call => ({
-    provider: call.provider,
-    model: call.model,
-    maxTokens: call.maxTokens,
-  })), [{ provider: 'fixture', model: 'fixture-coder', maxTokens: null }])
-  assert.equal(runtime.remainingResponses, 0)
+  assert.deepEqual(stored.events.map(event => event.source.roleId), [
+    'planner',
+    'planner',
+    'planner',
+  ])
+  assert.equal(review.delivery.sessionBindings.some(binding => (
+    binding.stageRunId === 'stage-fixture-planning'
+    && binding.dshSessionId === 'dsh-fixture-planner'
+    && binding.codexSessionId === 'codex-fixture-planner'
+  )), true)
   assert.deepEqual(Object.keys(process.env).filter(name => (
     /(?:API_KEY|CREDENTIAL|SECRET|TOKEN)/iu.test(name)
     && Object.hasOwn(keylessFixtureEnvironment(), name)
@@ -124,9 +116,9 @@ test('testkit drives a scripted DSH role through the real embedded Codex kernel'
     'utf8',
   )
   assert.doesNotMatch(source, /packages\/(?:contracts|dsh-profile|native|strongflow)\/src\//u)
+  assert.doesNotMatch(source, /@deepseek-ai\//u)
   const ownedRoot = kit.root
   await kit.cleanup()
-  assert.equal(runtime.closed, true)
   await assert.rejects(access(ownedRoot), error => error?.code === 'ENOENT')
 })
 
@@ -142,16 +134,14 @@ test('testkit covers every Delivery mutation, human gate, projection, evidence, 
   assert.equal(review.delivery.stageRuns.at(-1).status, 'waiting')
   assert.equal(review.delivery.stageRuns.some(run => run.stage === 'executing'), false)
 
-  const reviewProjection = await kit.service.getDeliveryProjection(kit.deliveryId)
-  const reviewMarkup = await renderFixtureDeliveryProjection({
-    ...reviewProjection,
-    sessionId: 'dsh-fixture-plan-review',
-  })
-  assert.ok(reviewMarkup.indexOf('DeliverySpec') < reviewMarkup.indexOf('Solution Review Set'))
-  assert.equal((reviewMarkup.match(/<figure /gu) ?? []).length, 2)
-  assert.match(reviewMarkup, /批准执行/u)
-  assert.match(reviewMarkup, /系统架构图/u)
-  assert.match(reviewMarkup, /交付流程图/u)
+  const reviewContext = parseStrongFlowPlanReviewContextText(review.attention.context)
+  assert.equal(reviewContext.deliverySpecId, review.delivery.spec.id)
+  assert.ok(reviewContext.solution.summary.length > 0)
+  assert.equal(reviewContext.architectureDiagram.title, '系统架构图')
+  assert.equal(reviewContext.processDiagram.title, '交付流程图')
+  assert.equal(review.attention.options.some(option => (
+    option.id === 'approve' && option.label === '批准执行'
+  )), true)
 
   const staleDecision = {
     ...review.decision,
@@ -171,27 +161,27 @@ test('testkit covers every Delivery mutation, human gate, projection, evidence, 
   assert.equal(approval.ok, true)
   assert.equal(approval.result.delivery.status, 'executing')
   const prepared = await kit.prepareVerification(approval.result.delivery)
-  assert.equal(prepared.executingProjection.diagramExecution.state, 'executing')
-  assert.equal(prepared.executingProjection.diagramExecution.details, null)
-  assert.equal(prepared.finishedProjection.diagramExecution.state, 'execution-finished')
-  assert.equal(prepared.finishedProjection.diagramExecution.details.candidate.candidateRef,
-    prepared.candidate.candidateRef)
+  const executingDiagram = prepared.executingProjection.diagramExecution
+  assert.equal(executingDiagram.state, 'executing')
+  assert.equal(executingDiagram.details, null)
+  assert.equal(executingDiagram.architecture.nodes.some(node => (
+    node.state === 'affected-live'
+  )), true)
+  assert.equal(executingDiagram.process.nodes.some(node => (
+    node.state === 'affected-live'
+  )), true)
+  assert.doesNotMatch(JSON.stringify(executingDiagram), /src\/value\.mjs/u)
 
-  const executingMarkup = await renderFixtureDeliveryProjection({
-    ...prepared.executingProjection,
-    sessionId: 'dsh-fixture-executor',
-  })
-  assert.match(executingMarkup, /执行中状态/u)
-  assert.match(executingMarkup, /data-execution-state="affected-live"/u)
-  assert.doesNotMatch(executingMarkup, /src\/value\.mjs/u)
-
-  const finishedMarkup = await renderFixtureDeliveryProjection({
-    ...prepared.finishedProjection,
-    sessionId: 'dsh-fixture-plan-review',
-  })
-  assert.match(finishedMarkup, /执行结束状态/u)
-  assert.match(finishedMarkup, /data-execution-state="affected-finished"/u)
-  assert.match(finishedMarkup, /Frozen Candidate Diff/u)
+  const finishedDiagram = prepared.finishedProjection.diagramExecution
+  assert.equal(finishedDiagram.state, 'execution-finished')
+  assert.equal(finishedDiagram.details.candidate.candidateRef, prepared.candidate.candidateRef)
+  assert.equal(finishedDiagram.details.diffSha256, prepared.candidate.diffSha256)
+  assert.equal(finishedDiagram.architecture.nodes.some(node => (
+    node.state === 'affected-finished' && node.fileIds.length > 0
+  )), true)
+  assert.equal(finishedDiagram.details.files.some(file => (
+    file.path === 'src/value.mjs'
+  )), true)
 
   const runtimeEvents = await kit.verificationEvents(prepared)
   const invalidEvidence = runtimeEvents.filter(event => (

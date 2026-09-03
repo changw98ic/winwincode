@@ -4,21 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { Context } from '@deepseek-ai/cordis'
-import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
-import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
-import { TypertRegistry } from '@deepseek-ai/dsh-typert-registry'
-
 import {
   DELIVERY_SCHEMA_VERSION,
-  materializeStrongFlowDeliveryAdvanceRequest,
   materializeStrongFlowDeliveryRequest,
   parseDelivery,
   parseStrongFlowPlanReviewContextText,
 } from '../packages/contracts/dist/index.js'
 import {
   DeliveryStore,
-  StrongFlowDeliveryRemoteService,
   StrongFlowService,
   StrongFlowServiceInvoker,
   createStrongFlowPlanReviewAttention,
@@ -71,14 +64,6 @@ function authenticator() {
   })
 }
 
-function unusedCoordinator() {
-  return Object.freeze({
-    async advance() {
-      throw new Error('stage coordinator is not used by this adapter fixture')
-    },
-  })
-}
-
 function planReviewSolution() {
   return {
     id: 'solution-adapter-review',
@@ -126,112 +111,26 @@ async function treeContainsBytes(root, wanted) {
   return false
 }
 
-test('DSH Remote and CLI read and create through one durable Delivery service', async t => {
+test('CLI and service invoker read and create through one durable Delivery service', async t => {
   const current = await fixture(t, 'shared')
-  const ctx = new Context()
-  await ctx.plugin(TypertRegistry)
-  await ctx.plugin(TypertGatewayService)
-  const remoteAgent = Object.freeze({
-    id: 'dsh-remote-fixture',
-    options: Object.freeze({
-      provider: 'fixture-provider',
-      model: 'fixture-model',
-      maxTokens: 4_096,
+
+  const invokerDeliveryId = 'dlv_01J00000000000000000000005'
+  const invokerCreate = await current.invoker.invoke(
+    materializeStrongFlowDeliveryRequest('createDelivery', 'invoker-create', {
+      spec: spec(invokerDeliveryId),
+      tasks: [],
     }),
-  })
-  ctx.typert.lookups.register('agent', {
-    parameter: 'agent',
-    wire: 'agentId',
-    hostTypeSymbol: '@deepseek-ai/dsh-agent#Agent',
-    wireTypeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
-    resolve: sessionId => sessionId === remoteAgent.id ? remoteAgent : undefined,
-  })
-  let remote
-  const advanceCalls = []
-  const coordinator = {
-    async advance(request, caller) {
-      advanceCalls.push({ request, caller })
-      return {
-        delivery: (await current.service.getDeliveryProjection(request.deliveryId)).delivery,
-        outcome: {
-          kind: 'stage-busy',
-          message: 'fixture stage remains active',
-          stageRunId: null,
-          dshSessionId: caller.dshSessionId,
-        },
-      }
-    },
-  }
-  const plugin = pluginContext => {
-    remote = new StrongFlowDeliveryRemoteService(pluginContext, current.invoker, {
-      localSessionProof: uiProof,
-      coordinator,
-    })
-  }
-  await ctx.plugin(plugin)
-  t.after(() => ctx.fiber.dispose())
-  assert.ok(remote)
-  assert.deepEqual(remoteMethods(remote), [
-    { method: 'advance', invocation: { kind: 'direct' } },
-    { method: 'invoke', invocation: { kind: 'direct' } },
-  ])
-
-  const invalidRemote = await remote.invoke(
-    remoteAgent,
-    {},
-    new AbortController().signal,
   )
-  assert.equal(invalidRemote.ok, false)
-  assert.equal(invalidRemote.error.code, 'INVALID_REQUEST')
-  assert.equal(invalidRemote.requestId, null)
-
-  const remoteDeliveryId = 'dlv_01J00000000000000000000005'
-  const remoteCreate = await ctx.typertGateway.invoke({
-    namespace: 'strongflow',
-    method: 'invoke',
-    args: {
-      agentId: 'dsh-remote-fixture',
-      request: materializeStrongFlowDeliveryRequest('createDelivery', 'remote-create', {
-        spec: spec(remoteDeliveryId),
-        tasks: [],
-      }),
-    },
-    signal: new AbortController().signal,
-  })
-  assert.equal(remoteCreate.ok, true, JSON.stringify(remoteCreate))
-
-  const advanced = await ctx.typertGateway.invoke({
-    namespace: 'strongflow',
-    method: 'advance',
-    args: {
-      agentId: remoteAgent.id,
-      request: materializeStrongFlowDeliveryAdvanceRequest(
-        'remote-advance',
-        remoteDeliveryId,
-        remoteCreate.result.delivery.revision,
-      ),
-    },
-    signal: new AbortController().signal,
-  })
-  assert.equal(advanced.ok, true, JSON.stringify(advanced))
-  assert.equal(advanced.result.outcome.kind, 'stage-busy')
-  assert.deepEqual(advanceCalls[0].caller, {
-    dshSessionId: remoteAgent.id,
-    modelRoute: {
-      provider: 'fixture-provider',
-      model: 'fixture-model',
-      maxTokens: 4_096,
-    },
-  })
+  assert.equal(invokerCreate.ok, true, JSON.stringify(invokerCreate))
 
   const cliStdout = []
   const cliStderr = []
   const cliShowCode = await runStrongFlowCli([
     'delivery',
     'show',
-    remoteDeliveryId,
+    invokerDeliveryId,
     '--request-id',
-    'cli-show-remote-delivery',
+    'cli-show-invoker-delivery',
     '--json',
   ], current.invoker, {
     stdout: text => cliStdout.push(text),
@@ -239,7 +138,11 @@ test('DSH Remote and CLI read and create through one durable Delivery service', 
   })
   assert.equal(cliShowCode, 0)
   assert.equal(cliStderr.length, 0)
-  assert.equal(JSON.parse(cliStdout.join('')).result.delivery.id, remoteDeliveryId)
+  assert.equal(JSON.parse(cliStdout.join('')).result.delivery.id, invokerDeliveryId)
+  assert.equal(
+    JSON.parse(cliStdout.join('')).result.delivery.revision,
+    invokerCreate.result.delivery.revision,
+  )
 
   const cliDeliveryId = 'dlv_01J00000000000000000000006'
   const cliCreateOutput = []
@@ -262,15 +165,13 @@ test('DSH Remote and CLI read and create through one durable Delivery service', 
   assert.equal(cliCreateCode, 0)
   assert.equal(JSON.parse(cliCreateOutput.join('')).result.delivery.id, cliDeliveryId)
 
-  const remoteShow = await remote.invoke(
-    remoteAgent,
-    materializeStrongFlowDeliveryRequest('getDeliveryProjection', 'remote-show-cli', {
+  const invokerShow = await current.invoker.invoke(
+    materializeStrongFlowDeliveryRequest('getDeliveryProjection', 'invoker-show-cli', {
       deliveryId: cliDeliveryId,
     }),
-    new AbortController().signal,
   )
-  assert.equal(remoteShow.ok, true)
-  assert.equal(remoteShow.result.delivery.id, cliDeliveryId)
+  assert.equal(invokerShow.ok, true)
+  assert.equal(invokerShow.result.delivery.id, cliDeliveryId)
 })
 
 test('Attention resolution authenticates the human and never stores the proof', async t => {
@@ -425,7 +326,7 @@ test('Attention resolution authenticates the human and never stores the proof', 
   assert.equal(await treeContainsBytes(current.home, Buffer.from(cliProof, 'utf8')), false)
 })
 
-test('local UI plan review accepts only the bound DSH Session and current revision', async t => {
+test('local UI plan review accepts only the bound reviewer proof and current revision', async t => {
   const current = await fixture(t, 'local-ui-review')
   const deliveryId = 'dlv_2C7MVKWY2TXECXN58QT2830AF0'
   const currentSpec = spec(deliveryId)
@@ -527,29 +428,6 @@ test('local UI plan review accepts only the bound DSH Session and current revisi
     }),
   })
 
-  const ctx = new Context()
-  await ctx.plugin(TypertRegistry)
-  await ctx.plugin(TypertGatewayService)
-  const agents = new Map([
-    ['dsh-local-ui-reviewer', Object.freeze({ id: 'dsh-local-ui-reviewer' })],
-    ['dsh-local-ui-observer', Object.freeze({ id: 'dsh-local-ui-observer' })],
-  ])
-  ctx.typert.lookups.register('agent', {
-    parameter: 'agent',
-    wire: 'agentId',
-    hostTypeSymbol: '@deepseek-ai/dsh-agent#Agent',
-    wireTypeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
-    resolve: sessionId => agents.get(sessionId),
-  })
-  const plugin = pluginContext => {
-    new StrongFlowDeliveryRemoteService(pluginContext, current.invoker, {
-      localSessionProof: uiProof,
-      coordinator: unusedCoordinator(),
-    })
-  }
-  await ctx.plugin(plugin)
-  t.after(() => ctx.fiber.dispose())
-
   const decisionRequest = (requestId, expectedRevision) => (
     materializeStrongFlowDeliveryRequest('resolveAttention', requestId, {
       deliveryId,
@@ -561,32 +439,12 @@ test('local UI plan review accepts only the bound DSH Session and current revisi
       channel: 'local-ui',
       authentication: {
         scheme: 'local-session',
-        proof: 'dsh-reference-only',
+        proof: uiProof,
       },
     })
   )
-  const invokeAs = (agentId, request) => ctx.typertGateway.invoke({
-    namespace: 'strongflow',
-    method: 'invoke',
-    args: { agentId, request },
-    signal: new AbortController().signal,
-  })
 
-  const wrongSession = await invokeAs(
-    'dsh-local-ui-observer',
-    decisionRequest('local-ui-wrong-session', 1),
-  )
-  assert.equal(wrongSession.ok, false)
-  assert.equal(wrongSession.error.code, 'AUTHENTICATION_FAILED')
-  assert.equal(
-    (await current.service.getDeliveryProjection(deliveryId)).delivery.status,
-    'needs-attention',
-  )
-
-  const stale = await invokeAs(
-    'dsh-local-ui-reviewer',
-    decisionRequest('local-ui-stale-screen', 2),
-  )
+  const stale = await current.invoker.invoke(decisionRequest('local-ui-stale-screen', 2))
   assert.equal(stale.ok, false)
   assert.equal(stale.error.code, 'REVISION_CONFLICT')
   assert.equal(stale.error.currentRevision, 1)
@@ -595,10 +453,7 @@ test('local UI plan review accepts only the bound DSH Session and current revisi
     'needs-attention',
   )
 
-  const approved = await invokeAs(
-    'dsh-local-ui-reviewer',
-    decisionRequest('local-ui-current-review', 1),
-  )
+  const approved = await current.invoker.invoke(decisionRequest('local-ui-current-review', 1))
   assert.equal(approved.ok, true)
   assert.equal(approved.result.delivery.status, 'executing')
   assert.equal(approved.result.delivery.attentionItems[0].resolvedBy, 'reviewer-ui')
