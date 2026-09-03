@@ -1149,7 +1149,7 @@ export function createStrongFlowViewModel(
       expectCompletedCommand(response, command, requestId)
       patch({ interaction: frozenInteraction('waiting') })
     } catch (error) {
-      if (!operationIsCurrent(ownGeneration)) return
+      if (active.signal.aborted) return
       patch({ interaction: frozenInteraction('error', normalizedError(error, active.signal)) })
     } finally {
       releaseCommandController(active)

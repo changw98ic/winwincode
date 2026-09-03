@@ -1033,6 +1033,99 @@ test('a higher Delivery event leaves an in-flight command untouched and the publ
   assert.equal(model.state.interaction.error, null)
 })
 
+test('a command server failure is still exposed after an unrelated event reload', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let failCommand = () => {}
+  client.command = async () => {
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      failCommand = () => reject(new ControlPlaneClientError({
+        kind: 'terminal',
+        code: 'REVISION_CONFLICT',
+        message: 'The Delivery revision changed.',
+        requestId: null,
+        retryable: false,
+      }))
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+  await client.subscription.onEvent({
+    sequence: 2,
+    event: {
+      type: 'delivery.changed.v1',
+      deliveryId,
+      revision: 2,
+      changeKind: 'advanced',
+    },
+  })
+  failCommand()
+  await commandPending
+
+  assert.equal(model.state.status, 'ready')
+  assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
+})
+
+test('closing during an unrelated reload keeps an in-flight command settlement silent', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let commandSignal = null
+  client.command = async (_request, options) => {
+    commandSignal = options.signal
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new ControlPlaneClientError({
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'The command request was cancelled.',
+        requestId: null,
+        retryable: false,
+      })), { once: true })
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+  await client.subscription.onEvent({
+    sequence: 2,
+    event: {
+      type: 'delivery.changed.v1',
+      deliveryId,
+      revision: 2,
+      changeKind: 'advanced',
+    },
+  })
+  model.close()
+  await commandPending
+
+  assert.equal(commandSignal.aborted, true)
+  assert.equal(model.state.status, 'closed')
+  assert.equal(model.state.interaction.status, 'idle')
+  assert.equal(model.state.interaction.error, null)
+})
+
 test('cancelPending aborts an in-flight command and reports the cancellation', async () => {
   const client = new FakeClient()
   let commandStartedResolve
