@@ -40,6 +40,7 @@ class BrowserSettingsModel {
   draftScope = '["browser-settings-actor","browser-settings-scope"]'
   state = state()
   calls = []
+  deferRoute = false
 
   subscribe(listener) {
     this.listener = listener
@@ -56,6 +57,13 @@ class BrowserSettingsModel {
   async refresh() {}
   async updateSettings(input) {
     this.calls.push(['updateSettings', structuredClone(input)])
+    if (this.deferRoute) {
+      this.publish({
+        ...this.state,
+        interaction: { status: 'waiting', operation: 'settings.update', error: null },
+      })
+      return
+    }
     this.publish(state({
       revision: 5,
       provider: 'server-provider-b',
@@ -162,6 +170,42 @@ globalThis.runSettingsDraftStateScenario = () => {
     model: document.querySelector('.wwc-settings-model').value,
     provider: provider.value,
   }
+
+  model.deferRoute = true
+  const deferredRouteModel = input('.wwc-settings-model', 'deferred-browser-model')
+  document.querySelector('.wwc-settings-route-form').requestSubmit()
+  const deferredRouteCall = model.calls.at(-1)
+  model.publish({
+    ...model.state,
+    status: 'refreshing',
+    realtime: 'reloading',
+    interaction: { status: 'idle', operation: null, error: null },
+  })
+  model.publish(state({
+    revision: 6,
+    provider: 'server-provider-c',
+    model: 'server-model-c',
+    concurrency: 4,
+  }))
+  document.querySelector('.wwc-settings-route-form').requestSubmit()
+  const routeDuringStaleSnapshot = {
+    callCount: model.calls.filter(([name]) => name === 'updateSettings').length,
+    disabled: document.querySelector('.wwc-settings-save-route').disabled,
+    model: deferredRouteModel.value,
+  }
+  model.publish(state({
+    revision: 7,
+    provider: 'server-provider-c',
+    model: 'deferred-browser-model',
+    concurrency: 4,
+  }))
+  const routeConfirmed = {
+    callCount: model.calls.filter(([name]) => name === 'updateSettings').length,
+    deferredCall: deferredRouteCall,
+    disabled: document.querySelector('.wwc-settings-save-route').disabled,
+    model: deferredRouteModel.value,
+  }
+  model.deferRoute = false
 
   input('.wwc-settings-create-id', 'crd_00000000000000000000000002')
   input('.wwc-settings-create-name', 'Browser new Credential')
@@ -305,6 +349,8 @@ globalThis.runSettingsDraftStateScenario = () => {
     failure,
     rotationConfirmed,
     rotationDuringStaleSnapshot,
+    routeConfirmed,
+    routeDuringStaleSnapshot,
     secret: {
       afterCancel: secretAfterCancel,
       afterFailure: secretAfterFailure,

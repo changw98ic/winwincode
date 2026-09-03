@@ -19,6 +19,7 @@ import {
 
 const root = resolve(import.meta.dirname, '..')
 const fixturePath = 'tests/fixtures/browser-settings-draft-state-client.mjs'
+const credentialId = 'crd_00000000000000000000000001'
 
 test('real Chrome keeps Settings drafts separate from live server snapshots', async t => {
   const chromePath = chromeBinary()
@@ -83,6 +84,24 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
     concurrency: '4',
     model: 'server-model-c',
     provider: 'server-provider-c',
+  })
+  assert.deepEqual(result.routeDuringStaleSnapshot, {
+    callCount: 2,
+    disabled: true,
+    model: 'deferred-browser-model',
+  })
+  assert.deepEqual(result.routeConfirmed, {
+    callCount: 2,
+    deferredCall: ['updateSettings', {
+      defaultModelRoute: {
+        credentialReferenceId: credentialId,
+        modelId: 'deferred-browser-model',
+        providerId: 'server-provider-c',
+      },
+      workerConcurrencyLimit: 4,
+    }],
+    disabled: false,
+    model: 'deferred-browser-model',
   })
   assert.equal(result.secret.afterFailure, 'BROWSER_ONLY_SECRET')
   assert.equal(result.secret.afterCancel, '')

@@ -746,7 +746,10 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
         ),
       cancelled: state.interaction.error?.kind === 'cancelled',
       confirmed: routeSubmissionSucceeded,
-      refuted: !routeSubmissionSucceeded,
+      refuted: submittedRoute !== null
+        && state.settings !== null
+        && state.settings.revision > submittedRoute.revision
+        && !routeSubmissionSucceeded,
     })
     if (routeOutcome !== 'in-flight') routeDraft.finishSubmission(routeOutcome)
     const tone: StatusTone = presentation.errorText !== null
@@ -802,16 +805,20 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
           + `server “${conflict.serverValue}”; your draft “${conflict.draftValue}”.`
         )).join(' ')}`
     const mutationsDisabled = options.readOnly === true || presentation.mutationsDisabled
-    provider.input.disabled = mutationsDisabled
-    model.input.disabled = mutationsDisabled
-    credential.disabled = mutationsDisabled
-    concurrency.input.disabled = mutationsDisabled
-    saveRoute.disabled = mutationsDisabled || routeDraft.state.revisionConflict
+    const routeSubmissionPending = routeDraft.state.submission !== null
+    provider.input.disabled = mutationsDisabled || routeSubmissionPending
+    model.input.disabled = mutationsDisabled || routeSubmissionPending
+    credential.disabled = mutationsDisabled || routeSubmissionPending
+    concurrency.input.disabled = mutationsDisabled || routeSubmissionPending
+    saveRoute.disabled = mutationsDisabled
+      || routeSubmissionPending
+      || routeDraft.state.revisionConflict
     clearRoute.disabled = mutationsDisabled
+      || routeSubmissionPending
       || route === null
       || routeDraft.state.revisionConflict
-    keepRouteDraft.disabled = mutationsDisabled
-    useServerRoute.disabled = mutationsDisabled
+    keepRouteDraft.disabled = mutationsDisabled || routeSubmissionPending
+    useServerRoute.disabled = mutationsDisabled || routeSubmissionPending
     const createSubmissionPending = createDraft.state.submission !== null
     createId.input.disabled = mutationsDisabled || createSubmissionPending
     createName.input.disabled = mutationsDisabled || createSubmissionPending

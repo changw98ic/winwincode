@@ -182,6 +182,7 @@ function contractFake(options = {}) {
   }
   const credentials = new Map()
   const deferredCreates = new Map()
+  let deferredSettings = null
 
   async function fetch(input, init) {
     const request = JSON.parse(init.body)
@@ -201,10 +202,22 @@ function contractFake(options = {}) {
       if (request.expectedRevision !== settings.revision) {
         return response(409, terminalError(request, 'REVISION_CONFLICT', 'Settings changed.'))
       }
-      settings = {
+      const updated = {
         ...request.payload.patch,
         revision: settings.revision + 1,
       }
+      if (options.deferSettings === true) {
+        deferredSettings = updated
+        return response(200, {
+          schemaVersion,
+          requestId: request.requestId,
+          command: request.command,
+          outcome: 'accepted',
+          acceptedAt: '2026-08-27T01:00:01.000Z',
+          currentRevision: settings.revision,
+        })
+      }
+      settings = updated
       return response(200, commandResponse(request, settings))
     }
     if (request.command === 'credential.reference.create') {
@@ -279,6 +292,11 @@ function contractFake(options = {}) {
     applyDeferredCreates() {
       for (const [id, created] of deferredCreates) credentials.set(id, created)
       deferredCreates.clear()
+    },
+    applyDeferredSettings() {
+      assert.notEqual(deferredSettings, null)
+      settings = deferredSettings
+      deferredSettings = null
     },
     get settings() { return settings },
     set settings(value) { settings = value },
@@ -729,6 +747,112 @@ test('read-only Settings disables mutation controls and ignores synthetic submit
   mounted.close()
 })
 
+test('an accepted model route stays pending across a completed stale settings snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings(input) { calls.push(input) },
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const routeModel = byClass(rootElement, 'wwc-settings-model')
+  const credentialChoice = byClass(rootElement, 'wwc-settings-credential')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const routeForm = byClass(rootElement, 'wwc-settings-route-form')
+  const saveRoute = byClass(rootElement, 'wwc-settings-save-route')
+
+  provider.value = 'openai-compatible'
+  provider.dispatch('input')
+  routeModel.value = 'gpt-test'
+  routeModel.dispatch('input')
+  credentialChoice.value = credentialId
+  credentialChoice.dispatch('change')
+  concurrency.value = '3'
+  concurrency.dispatch('input')
+  routeForm.dispatch('submit')
+
+  current = pageState({
+    interaction: { status: 'waiting', operation: 'settings.update', error: null },
+  })
+  listener(current)
+  current = pageState({ status: 'refreshing', realtime: 'reloading' })
+  listener(current)
+  current = pageState()
+  listener(current)
+  routeForm.dispatch('submit')
+
+  assert.deepEqual({ calls: calls.length, disabled: saveRoute.disabled }, {
+    calls: 1,
+    disabled: true,
+  })
+
+  current = pageState({
+    settings: {
+      revision: 2,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+  assert.equal(saveRoute.disabled, false)
+
+  routeModel.value = 'gpt-next'
+  routeModel.dispatch('input')
+  routeForm.dispatch('submit')
+  assert.equal(calls.length, 2)
+  current = pageState({
+    settings: {
+      revision: 2,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+    interaction: { status: 'waiting', operation: 'settings.update', error: null },
+  })
+  listener(current)
+  current = pageState({
+    settings: {
+      revision: 3,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+  assert.equal(saveRoute.disabled, false)
+  routeForm.dispatch('submit')
+  assert.equal(calls.length, 3)
+  mounted.close()
+})
+
 test('an accepted Credential create keeps its submission until the refreshed snapshot confirms success', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
@@ -888,6 +1012,117 @@ test('an accepted Credential rotation keeps its row submission until the refresh
   listener(current)
   assert.equal(rotateSecret.value, '')
   assert.equal((rotateSecret.listeners.get('input') ?? []).length, 0)
+  mounted.close()
+})
+
+test('an accepted model route keeps one request identity until the production reload confirms it', async () => {
+  const fake = contractFake({ deferSettings: true })
+  fake.credentials.set(credentialId, credential())
+  const client = createControlPlaneClient({
+    serverUrl: 'https://control.example/local',
+    maxNetworkRetries: 0,
+    reconnectDelayMillis: 0,
+    transport: { fetch: fake.fetch, createSocket: fake.createSocket },
+  })
+  let nextRequest = 0
+  const model = createSettingsViewModel({
+    client,
+    actor,
+    scope,
+    subscriptionId,
+    nextRequestId() {
+      nextRequest += 1
+      return requestId(nextRequest)
+    },
+  })
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  await model.start()
+  const socket = fake.sockets[0]
+  socket.open()
+  socket.receive({
+    type: 'transport.subscription-accepted.v1',
+    subscriptionId,
+    cursor: scopeCursor(),
+    authorizationEpoch: 1,
+    limits: transportLimits(),
+  })
+
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const routeModel = byClass(rootElement, 'wwc-settings-model')
+  const credentialChoice = byClass(rootElement, 'wwc-settings-credential')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const routeForm = byClass(rootElement, 'wwc-settings-route-form')
+  provider.value = 'openai-compatible'
+  provider.dispatch('input')
+  routeModel.value = 'deferred-model'
+  routeModel.dispatch('input')
+  credentialChoice.value = credentialId
+  credentialChoice.dispatch('change')
+  concurrency.value = '3'
+  concurrency.dispatch('input')
+  routeForm.dispatch('submit')
+  await flush()
+
+  const initialRequests = fake.requests.filter(({ request }) => request.command === 'settings.update')
+  assert.equal(initialRequests.length, 1)
+  const submittedRequestId = initialRequests[0].request.requestId
+  assert.equal(initialRequests[0].request.expectedRevision, 1)
+  assert.equal(model.state.interaction.status, 'waiting')
+
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(1),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 1,
+    occurredAt: '2026-08-27T01:00:05.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Unrelated settings activity.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.settings.revision, 1)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, true)
+  routeForm.dispatch('submit')
+  await flush()
+  const requestsAfterRepeat = fake.requests.filter(({ request }) => (
+    request.command === 'settings.update'
+  ))
+  assert.equal(requestsAfterRepeat.length, 1)
+  assert.equal(requestsAfterRepeat[0].request.requestId, submittedRequestId)
+
+  fake.applyDeferredSettings()
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(2),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 2,
+    occurredAt: '2026-08-27T01:00:06.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Model route applied.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.settings.revision, 2)
+  assert.equal(byClass(rootElement, 'wwc-settings-save-route').disabled, false)
+  assert.equal(routeModel.value, 'deferred-model')
   mounted.close()
 })
 
