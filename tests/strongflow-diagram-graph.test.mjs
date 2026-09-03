@@ -38,12 +38,17 @@ const diagramsModule = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/strongflow-diagrams.js',
 )).href}`)
+const renderingModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/strongflow-rendering.js',
+)).href}`)
 const {
   mountStrongFlowDiagramGraph,
   strongFlowDiagramGraphLayout,
 } = graphModule
 const { mountStrongFlowPage } = page
 const { mountStrongFlowDiagrams } = diagramsModule
+const { DEFAULT_STRONGFLOW_RENDER_LIMITS } = renderingModule
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
@@ -299,6 +304,25 @@ test('keyed graph updates reject duplicate edge identities', () => {
     })
     view.close()
   }, /duplicate.*edge|edge.*duplicate/iu, 'winwincode-met: duplicate edges must fail fast')
+})
+
+test('the graph boundary still rejects edges joining unknown nodes', () => {
+  const document = new FakeDocument()
+  assert.throws(() => {
+    const view = mountStrongFlowDiagramGraph({
+      document,
+      props: graphProps({
+        edges: [...solutionDiagramEdges(), {
+          id: 'edge:dangling',
+          from: 'platform:dsh',
+          to: 'node:missing',
+          label: 'dangling',
+        }],
+      }),
+    })
+    view.close()
+  }, /diagram edge edge:dangling must join known nodes/u,
+  'winwincode-plc: bounding upstream must not loosen the graph boundary')
 })
 
 test('fresh mounts use the same graph and list order for reordered snapshots', () => {
@@ -687,6 +711,36 @@ function diagram(kind) {
   }
 }
 
+function largeContractDiagram(kind) {
+  return {
+    id: `diagram:${kind}`,
+    kind,
+    title: `${kind} diagram`,
+    nodes: many(120, value => ({
+      id: `node:${String(value)}`,
+      label: `Node ${String(value)}`,
+      description: `Description ${String(value)}`,
+      kind: 'component',
+      trustBoundary: null,
+      unresolved: false,
+    })),
+    edges: [
+      ...many(130, value => ({
+        id: `edge:window:${String(value)}`,
+        from: `node:${String(((value - 1) % 100) + 1)}`,
+        to: `node:${String((value % 100) + 1)}`,
+        label: `Window ${String(value)}`,
+      })),
+      ...many(20, value => ({
+        id: `edge:beyond:${String(value)}`,
+        from: `node:${String(100 + value)}`,
+        to: `node:${String(100 + (value % 20) + 1)}`,
+        label: `Beyond ${String(value)}`,
+      })),
+    ],
+  }
+}
+
 function projection(overrides = {}) {
   return {
     delivery: {
@@ -874,6 +928,41 @@ test('the page mounts both solution graphs with state chips inside the solution 
   assert.equal(stateLine.dataset.reviewStatus, 'pending')
 
   assert.notEqual(findByClass(rootElement, 'wwc-strongflow-view-execution'), null)
+  mounted.close()
+})
+
+test('contract-bounded diagrams over the node render limit keep only in-window edges', () => {
+  const document = new FakeDocument()
+  const current = projection()
+  current.solutionReview.architectureDiagram = largeContractDiagram('system-architecture')
+  const mounted = mountStrongFlowDiagrams({
+    document,
+    limits: DEFAULT_STRONGFLOW_RENDER_LIMITS,
+  })
+  mounted.update({ projection: current, narrow: false })
+
+  const architecture = findAllByClass(mounted.root, 'wwc-strongflow-graph')[0]
+  const renderedNodes = findAllByClass(architecture, 'wwc-strongflow-graph-node')
+  assert.equal(renderedNodes.length, 100)
+  const renderedIds = new Set(renderedNodes.map(node => node.dataset.id))
+  assert.equal(renderedIds.size, 100)
+  assert.equal(
+    [...renderedIds].every(id => {
+      const index = Number(id.slice('node:'.length))
+      return Number.isInteger(index) && index >= 1 && index <= 100
+    }),
+    true,
+  )
+  const renderedEdges = findAllByClass(architecture, 'wwc-strongflow-graph-edge')
+  assert.equal(renderedEdges.length, 130)
+  const omitted = findAllByClass(architecture, 'wwc-strongflow-omitted')
+    .map(note => note.textContent)
+  assert.equal(omitted.includes('20 more diagram nodes not rendered.'), true)
+  assert.equal(
+    omitted.includes('20 more diagram connections not rendered.'),
+    true,
+    'winwincode-plc: edges leaving the node window must be reported as omitted connections',
+  )
   mounted.close()
 })
 

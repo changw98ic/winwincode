@@ -6,6 +6,7 @@ import {
 } from './strongflow-diagram-graph.js'
 import {
   appendOmittedCount,
+  boundedEdgesForNodes,
   boundedItems,
   strongFlowElement,
   type StrongFlowRenderLimits,
@@ -300,7 +301,11 @@ export function mountStrongFlowDiagrams(
       diagramNodes(projection, 'architecture'),
       limits.graphNodes,
     )
-    const architectureEdges = boundedItems(review.architectureDiagram.edges, limits.graphEdges)
+    const architectureEdges = boundedEdgesForNodes(
+      review.architectureDiagram.edges,
+      new Set(architectureNodes.items.map(node => node.id)),
+      limits.graphEdges,
+    )
     architectureGraph.update({
       id: review.architectureDiagram.id,
       title: 'Architecture',
@@ -312,7 +317,11 @@ export function mountStrongFlowDiagrams(
     updateGraphOmitted(architectureNodesOmitted, architectureNodes.omitted, 'diagram nodes')
     updateGraphOmitted(architectureEdgesOmitted, architectureEdges.omitted, 'diagram connections')
     const processNodes = boundedItems(diagramNodes(projection, 'process'), limits.graphNodes)
-    const processEdges = boundedItems(review.processDiagram.edges, limits.graphEdges)
+    const processEdges = boundedEdgesForNodes(
+      review.processDiagram.edges,
+      new Set(processNodes.items.map(node => node.id)),
+      limits.graphEdges,
+    )
     processGraph.update({
       id: review.processDiagram.id,
       title: 'Process',
