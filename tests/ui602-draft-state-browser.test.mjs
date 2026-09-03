@@ -98,6 +98,11 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
     createDisabled: true,
     secretRetained: 'DEFERRED_BROWSER_SECRET',
   })
+  assert.deepEqual(result.acceptedDuringStaleSnapshot, {
+    createCalls: 2,
+    createDisabled: true,
+    secretRetained: 'DEFERRED_BROWSER_SECRET',
+  })
   assert.deepEqual(result.acceptedConfirmed, {
     createCalls: 2,
     deferredCall: ['createCredentialReference', {
@@ -108,6 +113,15 @@ test('real Chrome keeps Settings drafts separate from live server snapshots', as
     }],
     secretCleared: true,
     storageClean: true,
+  })
+  assert.deepEqual(result.rotationDuringStaleSnapshot, {
+    rotateCalls: 1,
+    rotateDisabled: true,
+    secretRetained: 'DEFERRED_ROTATE_SECRET',
+  })
+  assert.deepEqual(result.rotationConfirmed, {
+    rotateCalls: 1,
+    secretCleared: true,
   })
   assert.equal(exceptions.length, 0, JSON.stringify(exceptions))
 })

@@ -78,7 +78,17 @@ class BrowserSettingsModel {
       },
     }))
   }
-  async rotateCredentialReference() {}
+  async rotateCredentialReference(input) {
+    this.calls.push(['rotateCredentialReference', structuredClone(input)])
+    this.publish({
+      ...this.state,
+      interaction: {
+        status: 'waiting',
+        operation: 'credential.reference.rotate',
+        error: null,
+      },
+    })
+  }
   async revokeCredentialReference() {}
   cancelPending() {}
   reconnect() {}
@@ -215,6 +225,18 @@ globalThis.runSettingsDraftStateScenario = () => {
     createDisabled: document.querySelector('.wwc-settings-create-submit').disabled,
     secretRetained: deferredSecret.value,
   }
+  model.publish(state({
+    revision: 6,
+    provider: 'server-provider-c',
+    model: 'server-model-c',
+    concurrency: 4,
+  }))
+  document.querySelector('.wwc-settings-create-form').requestSubmit()
+  const acceptedDuringStaleSnapshot = {
+    createCalls: model.calls.filter(([name]) => name === 'createCredentialReference').length,
+    createDisabled: document.querySelector('.wwc-settings-create-submit').disabled,
+    secretRetained: deferredSecret.value,
+  }
   const deferredReference = {
     ...reference,
     id: 'crd_00000000000000000000000003',
@@ -237,12 +259,52 @@ globalThis.runSettingsDraftStateScenario = () => {
     storageClean: JSON.stringify(localStorage).includes('DEFERRED_BROWSER_SECRET') === false
       && JSON.stringify(sessionStorage).includes('DEFERRED_BROWSER_SECRET') === false,
   }
+
+  const rotateSecret = input(`#wwc-settings-rotate-${credentialId}`, 'DEFERRED_ROTATE_SECRET')
+  rotateSecret.closest('form').requestSubmit()
+  model.publish({
+    ...model.state,
+    status: 'refreshing',
+    realtime: 'reloading',
+    interaction: { status: 'idle', operation: null, error: null },
+  })
+  model.publish({
+    ...model.state,
+    status: 'ready',
+    realtime: 'subscribed',
+  })
+  rotateSecret.closest('form').requestSubmit()
+  const rotationDuringStaleSnapshot = {
+    rotateCalls: model.calls.filter(([name]) => name === 'rotateCredentialReference').length,
+    rotateDisabled: rotateSecret.closest('form').querySelector('.wwc-settings-rotate').disabled,
+    secretRetained: rotateSecret.value,
+  }
+  model.publish({
+    ...model.state,
+    credentials: model.state.credentials.map(item => item.id === credentialId
+      ? {
+          ...item,
+          revision: item.revision + 1,
+          rotationVersion: item.rotationVersion + 1,
+          lastRotatedAt: '2026-09-02T12:00:03.000Z',
+          updatedAt: '2026-09-02T12:00:03.000Z',
+        }
+      : item),
+    interaction: { status: 'idle', operation: null, error: null },
+  })
+  const rotationConfirmed = {
+    rotateCalls: model.calls.filter(([name]) => name === 'rotateCredentialReference').length,
+    secretCleared: rotateSecret.value === '',
+  }
   return {
     acceptedConfirmed,
     acceptedDuringReload,
+    acceptedDuringStaleSnapshot,
     conflict,
     discarded,
     failure,
+    rotationConfirmed,
+    rotationDuringStaleSnapshot,
     secret: {
       afterCancel: secretAfterCancel,
       afterFailure: secretAfterFailure,

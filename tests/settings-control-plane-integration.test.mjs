@@ -729,9 +729,85 @@ test('read-only Settings disables mutation controls and ignores synthetic submit
   mounted.close()
 })
 
+test('an accepted Credential create keeps its submission until the refreshed snapshot confirms success', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings() {},
+    async createCredentialReference(input) { calls.push(input) },
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const createSecret = byClass(rootElement, 'wwc-settings-create-secret')
+  byClass(rootElement, 'wwc-settings-create-id').value = externalCredentialId
+  byClass(rootElement, 'wwc-settings-create-name').value = 'Async Credential'
+  byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
+  createSecret.value = 'ASYNC_CREATE_SECRET'
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+
+  current = pageState({
+    interaction: {
+      status: 'waiting',
+      operation: 'credential.reference.create',
+      error: null,
+    },
+  })
+  listener(current)
+  current = pageState({ status: 'refreshing', realtime: 'reloading' })
+  listener(current)
+  current = pageState()
+  listener(current)
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  assert.deepEqual({
+    calls: calls.length,
+    disabled: byClass(rootElement, 'wwc-settings-create-submit').disabled,
+    secret: createSecret.value,
+  }, {
+    calls: 1,
+    disabled: true,
+    secret: 'ASYNC_CREATE_SECRET',
+  })
+  current = pageState({
+    credentials: [credential(), credential({
+      id: externalCredentialId,
+      displayName: 'Async Credential',
+    })],
+  })
+  listener(current)
+
+  assert.equal(createSecret.value, '')
+  assert.equal(byClass(rootElement, 'wwc-settings-create-submit').disabled, false)
+
+  byClass(rootElement, 'wwc-settings-create-id').value = credentialId
+  byClass(rootElement, 'wwc-settings-create-name').value = 'Unmounted Credential'
+  byClass(rootElement, 'wwc-settings-create-provider').value = 'openai-compatible'
+  createSecret.value = 'UNMOUNTED_CREATE_SECRET'
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  assert.equal(calls.length, 2)
+  mounted.close()
+  assert.equal(createSecret.value, '')
+})
+
 test('an accepted Credential rotation keeps its row submission until the refreshed rotationVersion confirms', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
+  const calls = []
   let current = pageState()
   let listener = () => {}
   const model = {
@@ -746,7 +822,7 @@ test('an accepted Credential rotation keeps its row submission until the refresh
     async refresh() {},
     async updateSettings() {},
     async createCredentialReference() {},
-    async rotateCredentialReference() {},
+    async rotateCredentialReference(input) { calls.push(input) },
     async revokeCredentialReference() {},
     cancelPending() {},
     reconnect() {},
@@ -783,7 +859,18 @@ test('an accepted Credential rotation keeps its row submission until the refresh
     credentials: [credential({ revision: 2 })],
   })
   listener(current)
-  assert.equal(rotateSecret.value, 'ASYNC_ROTATE_SECRET')
+  current = pageState({ credentials: [credential({ revision: 2 })] })
+  listener(current)
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+  assert.deepEqual({
+    calls: calls.length,
+    disabled: byClass(rootElement, 'wwc-settings-rotate').disabled,
+    secret: rotateSecret.value,
+  }, {
+    calls: 1,
+    disabled: true,
+    secret: 'ASYNC_ROTATE_SECRET',
+  })
 
   current = pageState({
     credentials: [credential({ revision: 3, rotationVersion: 2 })],
@@ -791,6 +878,16 @@ test('an accepted Credential rotation keeps its row submission until the refresh
   listener(current)
 
   assert.equal(rotateSecret.value, '')
+  assert.equal(byClass(rootElement, 'wwc-settings-rotate').disabled, false)
+
+  rotateSecret.value = 'REMOVED_ROTATE_SECRET'
+  rotateSecret.dispatch('input')
+  byClass(rootElement, 'wwc-settings-rotate-form').dispatch('submit')
+  assert.equal(calls.length, 2)
+  current = pageState({ credentials: [] })
+  listener(current)
+  assert.equal(rotateSecret.value, '')
+  assert.equal((rotateSecret.listeners.get('input') ?? []).length, 0)
   mounted.close()
 })
 
@@ -839,7 +936,6 @@ test('an accepted Credential create settles from the production event reload exa
   assert.equal(model.state.credentials.length, 0)
   assert.equal(createSecret.value, 'DEFERRED_CREATE_SECRET')
 
-  fake.applyDeferredCreates()
   socket.receive({
     type: 'event.v1',
     subscriptionId,
@@ -855,6 +951,37 @@ test('an accepted Credential create settles from the production event reload exa
       actor,
       category: 'security',
       summary: 'Credential reference created.',
+    },
+  })
+  await flush()
+
+  assert.equal(model.state.status, 'ready')
+  assert.equal(model.state.interaction.status, 'idle')
+  assert.equal(model.state.credentials.length, 0)
+  assert.equal(createSecret.value, 'DEFERRED_CREATE_SECRET')
+  assert.equal(byClass(rootElement, 'wwc-settings-create-submit').disabled, true)
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  await flush()
+  assert.equal(fake.requests.filter(({ request }) => (
+    request.command === 'credential.reference.create'
+  )).length, 1)
+
+  fake.applyDeferredCreates()
+  socket.receive({
+    type: 'event.v1',
+    subscriptionId,
+    eventId: eventId(2),
+    scope,
+    stream: { kind: 'scope' },
+    sequence: 2,
+    occurredAt: '2026-08-27T01:00:06.000Z',
+    authorizationEpoch: 1,
+    source: { kind: 'control-plane', component: 'settings-contract-fake', actor },
+    event: {
+      type: 'activity.recorded.v1',
+      actor,
+      category: 'security',
+      summary: 'Credential reference snapshot published.',
     },
   })
   await flush()

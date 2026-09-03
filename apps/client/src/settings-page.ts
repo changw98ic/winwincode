@@ -599,16 +599,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const rotateSubmission = row.draft.state.submission
       const rotateConfirmed = rotateSubmission !== null
         && reference.rotationVersion > Number(rotateSubmission.values.rotationVersion)
+      const rotateRefuted = rotateSubmission !== null
+        && reference.secretState === 'revoked'
       const rotateOutcome = settleDraftSubmission(rotateSubmission, {
         busy: settingsPagePresentation(state).busy,
         failed: state.interaction.status === 'error'
           && (
             state.interaction.operation === 'credential.reference.rotate'
             || state.interaction.operation === null
-          ),
+        ),
         cancelled: state.interaction.error?.kind === 'cancelled',
         confirmed: rotateConfirmed,
-        refuted: !rotateConfirmed,
+        refuted: rotateRefuted,
       })
       if (rotateOutcome !== 'in-flight') {
         row.draft.finishSubmission(rotateOutcome)
@@ -633,17 +635,18 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       const disabled = options.readOnly === true
         || settingsPagePresentation(options.model.state).mutationsDisabled
         || reference.secretState === 'revoked'
-      row.rotate.disabled = disabled || row.draft.state.revisionConflict
-      row.rotateSecret.disabled = disabled
-      row.revoke.disabled = disabled
+      const submissionPending = row.draft.state.submission !== null
+      row.rotate.disabled = disabled || submissionPending || row.draft.state.revisionConflict
+      row.rotateSecret.disabled = disabled || submissionPending
+      row.revoke.disabled = disabled || submissionPending
       row.conflict.hidden = !row.draft.state.revisionConflict
       row.conflictText.textContent = row.draft.state.revisionConflict
         ? `This Credential reference changed from revision ${String(
             row.draft.state.baseRevision,
           )} to revision ${String(row.draft.state.serverRevision)}.`
         : ''
-      row.keepDraft.disabled = disabled
-      row.useServer.disabled = disabled
+      row.keepDraft.disabled = disabled || submissionPending
+      row.useServer.disabled = disabled || submissionPending
     },
     remove(item) {
       const row = credentialRows.get(item)
@@ -683,22 +686,31 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
           },
         })
     const createSubmission = createDraft.state.submission
+    const submittedReference = createSubmission === null
+      ? undefined
+      : state.credentials.find(reference => (
+          reference.id === createSubmission.values.credentialReferenceId
+        ))
     const createConfirmed = createSubmission !== null
-      && state.credentials.some(reference => (
-        reference.id === createSubmission.values.credentialReferenceId
-        && reference.displayName === createSubmission.values.displayName.trim()
-        && reference.providerId === createSubmission.values.providerId.trim()
-      ))
+      && submittedReference !== undefined
+      && (
+        submittedReference.id === createSubmission.values.credentialReferenceId
+        && submittedReference.displayName === createSubmission.values.displayName.trim()
+        && submittedReference.providerId === createSubmission.values.providerId.trim()
+      )
+    const createRefuted = createSubmission !== null
+      && submittedReference !== undefined
+      && !createConfirmed
     const createOutcome = settleDraftSubmission(createSubmission, {
       busy: presentation.busy,
       failed: state.interaction.status === 'error'
         && (
           state.interaction.operation === 'credential.reference.create'
           || state.interaction.operation === null
-        ),
+      ),
       cancelled: state.interaction.error?.kind === 'cancelled',
       confirmed: createConfirmed,
-      refuted: !createConfirmed,
+      refuted: createRefuted,
     })
     if (createOutcome !== 'in-flight') {
       createDraft.finishSubmission(createOutcome)
@@ -800,11 +812,12 @@ export function mountSettingsPage(options: SettingsPageOptions): SettingsPage {
       || routeDraft.state.revisionConflict
     keepRouteDraft.disabled = mutationsDisabled
     useServerRoute.disabled = mutationsDisabled
-    createId.input.disabled = mutationsDisabled
-    createName.input.disabled = mutationsDisabled
-    createProvider.input.disabled = mutationsDisabled
-    createSecret.input.disabled = mutationsDisabled
-    createButton.disabled = mutationsDisabled
+    const createSubmissionPending = createDraft.state.submission !== null
+    createId.input.disabled = mutationsDisabled || createSubmissionPending
+    createName.input.disabled = mutationsDisabled || createSubmissionPending
+    createProvider.input.disabled = mutationsDisabled || createSubmissionPending
+    createSecret.input.disabled = mutationsDisabled || createSubmissionPending
+    createButton.disabled = mutationsDisabled || createSubmissionPending
     const createValues = createDraft.state.values
     if (createId.input.value !== (createValues.credentialReferenceId ?? '')) {
       createId.input.value = createValues.credentialReferenceId ?? ''
