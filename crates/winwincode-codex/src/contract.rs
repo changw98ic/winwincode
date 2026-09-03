@@ -5,13 +5,18 @@
 use std::{fmt, future::Future, path::Path, sync::Arc};
 
 use sha2::{Digest as _, Sha256};
-use winwincode_domain::{CodexThreadId, Instant, WorkerId, WorkerInstanceId, WorkerSessionId};
+use winwincode_domain::{
+    CodexThreadId, Instant, Sha256Digest, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceRevision,
+};
 use winwincode_execution_port::{
     generated::{
         ActionEnforcementReceiptMessage, ApprovalDecisionMessage, ArtifactAckMessage,
-        ArtifactReference, ExecutionJob, ExecutionLeaseStamp, ExecutionOutcomeUsage,
-        ExecutionPortMessage, InputResponseMessage, JobDispatchMessage, JobOutcomeMessage,
-        ModelChunkMessage, RuntimeEventMessage, RuntimeReplayRequestMessage,
+        ArtifactReference, ChangeBatchProgressEvent, ChangeBatchProposalEvent, ExecutionJob,
+        ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionPortMessage, FinalCandidateFreezeFact,
+        InputResponseMessage, JobDispatchMessage, JobOutcomeMessage, ModelChunkMessage,
+        RepairEnvelope, RepairLoopBudget, RepairLoopContextPack, RepairLoopCounters,
+        RepairLoopStopReason, RuntimeEventMessage, RuntimeReplayRequestMessage,
     },
     runtime_trace_outbox::{RuntimeTraceInputError, SecretSafeTraceSummary},
 };
@@ -27,7 +32,7 @@ pub struct CodexRunKey {
     pub job_id: winwincode_domain::ExecutionJobId,
     pub attempt: i64,
     pub fencing_token: winwincode_domain::FencingToken,
-    pub payload_digest: winwincode_domain::Sha256Digest,
+    pub payload_digest: Sha256Digest,
 }
 
 impl CodexRunKey {
@@ -56,6 +61,19 @@ impl CodexRunKey {
         )))
     }
 
+    /// Returns the sole canonical digest used to persist and compare this run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an opaque contract error when the run identity cannot be
+    /// canonically encoded.
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, CodexRunKeyError> {
+        Ok(Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(self.canonical_bytes()?)
+        )))
+    }
+
     pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, CodexRunKeyError> {
         serde_json::to_vec(&(
             &self.job_id,
@@ -79,6 +97,37 @@ impl fmt::Display for CodexRunKeyError {
 
 impl std::error::Error for CodexRunKeyError {}
 
+#[cfg(test)]
+mod tests {
+    use winwincode_domain::{ExecutionJobId, FencingToken, Sha256Digest};
+
+    use super::CodexRunKey;
+
+    #[test]
+    fn canonical_digest_has_one_stable_full_length_vector() {
+        let key = CodexRunKey {
+            job_id: ExecutionJobId("job_00000000000000000000000000".to_owned()),
+            attempt: 1,
+            fencing_token: FencingToken("7".to_owned()),
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        };
+
+        assert_eq!(
+            key.canonical_digest().expect("canonical run digest"),
+            Sha256Digest(
+                "sha256:809025db6972e3dfc1f4e61b3e908e79f70871e62e29bebf615c3656a6adc6ac"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            key.canonical_thread_id()
+                .expect("canonical thread identity")
+                .0,
+            "cdx_809025DB6972E3DFC1F4E61B3E"
+        );
+    }
+}
+
 /// Start data passed to the sole embedded Codex adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct CodexThreadStart<'job> {
@@ -88,6 +137,8 @@ pub struct CodexThreadStart<'job> {
     pub worker_session_id: &'job WorkerSessionId,
     /// Exact detached checkout sealed to this Job before Kernel session open.
     pub workspace: &'job Path,
+    /// Exact source tree sealed by the Worker, never a branch or commit expression.
+    pub workspace_revision: &'job WorkspaceRevision,
 }
 
 /// Secret-safe terminal result emitted by Codex Core.
@@ -98,12 +149,121 @@ pub struct CodexTurnCompletion {
     pub usage: ExecutionOutcomeUsage,
 }
 
+/// Follow-up phase chosen from one accepted or repair-required `ChangeBatch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedLoopPhase {
+    Continue,
+    Repair,
+}
+
+impl DelegatedLoopPhase {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Repair => "repair",
+        }
+    }
+}
+
+/// One sealed, bounded transition from a settled `ChangeBatch` to an exact
+/// embedded-Core turn. The immutable budget and cumulative Worker counters
+/// are persisted together with the turn intent before Core can be called.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DelegatedLoopTransition {
+    pub phase: DelegatedLoopPhase,
+    pub repair_round: i64,
+    pub context: RepairLoopContextPack,
+    pub budget: RepairLoopBudget,
+    pub worker_counters: RepairLoopCounters,
+    pub observed_at: Instant,
+}
+
+/// Durable reconciliation result for one exact delegated follow-up turn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DelegatedLoopTransitionOutcome {
+    Submitted {
+        turn_id: String,
+        counters: RepairLoopCounters,
+    },
+    Completed {
+        turn_id: String,
+        counters: RepairLoopCounters,
+    },
+    Stopped {
+        reason: RepairLoopStopReason,
+        counters: RepairLoopCounters,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DelegatedObserverPreflight {
+    pub batch_id: winwincode_domain::ChangeBatchId,
+    pub budget: RepairLoopBudget,
+    pub worker_counters: RepairLoopCounters,
+    pub observed_at: Instant,
+}
+
+/// Internal durable accounting for one terminal Observer call. A missing usage
+/// means the Provider terminal charge was not proven and must fail closed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DelegatedObserverSettlement {
+    pub batch_id: winwincode_domain::ChangeBatchId,
+    pub completed_at: Instant,
+    pub usage: Option<ExecutionOutcomeUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DelegatedObserverPreflightOutcome {
+    Allowed {
+        counters: RepairLoopCounters,
+    },
+    Stopped {
+        reason: RepairLoopStopReason,
+        counters: RepairLoopCounters,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DelegatedLoopStopFact {
+    pub batch_id: winwincode_domain::ChangeBatchId,
+    pub reason: RepairLoopStopReason,
+    pub counters: RepairLoopCounters,
+    pub stopped_at: Instant,
+}
+
+/// Derives the sole follow-up turn identity. The inputs are ordered exactly as
+/// run key, phase, source batch id, and repair round.
+#[must_use]
+pub fn delegated_loop_turn_id(transition: &DelegatedLoopTransition) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"winwincode.delegated-loop-turn.v1\0");
+    for part in [
+        transition.context.identity.run_key.as_bytes(),
+        transition.phase.as_str().as_bytes(),
+        transition.context.identity.batch_id.0.as_bytes(),
+        transition.repair_round.to_string().as_bytes(),
+    ] {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    format!("trn_{}", &digest[..26].to_ascii_uppercase())
+}
+
 /// One result from polling the embedded Codex adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodexPoll {
     Pending,
     RuntimeTrace(Box<RuntimeEventMessage>),
+    ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
+    ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
+    RepairRequired(Box<RepairEnvelope>),
     Completed(CodexTurnCompletion),
+    Inconclusive(SecretSafeTraceSummary),
     Failed(SecretSafeTraceSummary),
     Cancelled(SecretSafeTraceSummary),
     InfrastructureFailed(SecretSafeTraceSummary),
@@ -160,6 +320,79 @@ pub trait CodexCoreAdapter {
         thread_id: &CodexThreadId,
         goal: &str,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Persists and reconciles one bounded delegated follow-up. Lightweight
+    /// adapters fail closed without scheduling a model call.
+    fn reconcile_delegated_transition(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        transition: DelegatedLoopTransition,
+    ) -> impl Future<Output = Result<DelegatedLoopTransitionOutcome, Self::Error>> + Send {
+        async move {
+            Ok(DelegatedLoopTransitionOutcome::Stopped {
+                reason: RepairLoopStopReason::InfrastructureError,
+                counters: transition.worker_counters,
+            })
+        }
+    }
+
+    /// Reserves one durable Observer call before its Provider open is sent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a conflicting thread, budget, counter, or terminal authority.
+    fn preflight_delegated_observer(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        preflight: DelegatedObserverPreflight,
+    ) -> Result<DelegatedObserverPreflightOutcome, Self::Error> {
+        Ok(DelegatedObserverPreflightOutcome::Stopped {
+            reason: RepairLoopStopReason::InfrastructureError,
+            counters: preflight.worker_counters,
+        })
+    }
+
+    /// Retains the terminal Observer charge independently from the public
+    /// observation receipt. Exact terminal replay is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects conflicting run, batch, or metric authority.
+    fn retain_delegated_observer_settlement(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        _settlement: DelegatedObserverSettlement,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Retains the exact terminal stop fact for a delegated loop.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stop fact which conflicts with durable run authority.
+    fn retain_delegated_loop_stop(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        fact: &DelegatedLoopStopFact,
+    ) -> Result<DelegatedLoopStopFact, Self::Error> {
+        Ok(fact.clone())
+    }
+
+    /// Returns the exact durable delegated-loop stop, when one already owns
+    /// the thread terminal path. Production Workers use this before polling
+    /// Core so a crash between retaining the stop and retaining the Job
+    /// outcome cannot schedule another turn.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown or conflicting thread authority.
+    fn delegated_loop_stop(
+        &mut self,
+        _thread_id: &CodexThreadId,
+    ) -> Result<Option<DelegatedLoopStopFact>, Self::Error> {
+        Ok(None)
+    }
 
     fn poll(
         &mut self,
@@ -290,6 +523,32 @@ pub trait CodexCoreAdapter {
         &mut self,
         authority: &CandidateArtifactAuthority,
     ) -> Result<Option<ArtifactReference>, Self::Error>;
+
+    /// Retains the canonical accepted-final freeze fact after the exact
+    /// candidate Artifact acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a freeze fact which conflicts with durable candidate authority.
+    fn retain_final_candidate_freeze(
+        &mut self,
+        _thread_id: &CodexThreadId,
+        fact: &FinalCandidateFreezeFact,
+    ) -> Result<FinalCandidateFreezeFact, Self::Error> {
+        Ok(fact.clone())
+    }
+
+    /// Returns the canonical accepted-final freeze after a process restart.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown or conflicting thread authority.
+    fn final_candidate_freeze(
+        &mut self,
+        _thread_id: &CodexThreadId,
+    ) -> Result<Option<FinalCandidateFreezeFact>, Self::Error> {
+        Ok(None)
+    }
 
     /// Commits a cancellation intent before candidate frames are removed.
     ///
