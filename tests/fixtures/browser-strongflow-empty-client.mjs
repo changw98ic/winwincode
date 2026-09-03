@@ -192,6 +192,7 @@ function detail() {
       maxReworkAttempts: 2,
     },
     solutionReview: null,
+    diagramExecution: null,
     stages: [{
       id: stageRunId,
       actorType: 'codex',

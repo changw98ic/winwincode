@@ -4,6 +4,7 @@ import { mountStrongFlowDiagramGraph } from '/module/strongflow-diagram-graph.js
 const root = document.querySelector('[data-winwincode-client-root]')
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const reviewSetSha256 = `sha256:${'a'.repeat(64)}`
 
 function solutionNodes() {
   return [
@@ -96,11 +97,47 @@ const projection = {
     }],
   },
   solutionReview: {
+    deliveryId,
+    deliverySpecId: 'spec:browser',
+    deliverySpecRevision: 3,
     reviewStatus: 'pending',
+    reviewSetSha256,
     architectureDiagram: solutionDiagram('system-architecture'),
     processDiagram: solutionDiagram('process-flow'),
   },
-  diagramExecution: null,
+  diagramExecution: {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId,
+    deliveryRevision: 4,
+    reviewSetSha256,
+    state: 'executing',
+    architecture: {
+      diagramId: 'diagram:system-architecture',
+      kind: 'system-architecture',
+      nodes: solutionNodes().map(node => ({
+        nodeId: node.id,
+        state: node.id === 'platform:dsh'
+          ? 'affected-live'
+          : node.id === 'platform:strongflow' ? 'affected-finished' : 'normal',
+        affectedFileCount: node.id === 'platform:dsh' || node.id === 'platform:strongflow' ? 1 : 0,
+        fileIds: [],
+      })),
+    },
+    process: {
+      diagramId: 'diagram:process-flow',
+      kind: 'process-flow',
+      nodes: solutionNodes().map(node => ({
+        nodeId: node.id,
+        state: 'normal',
+        affectedFileCount: 0,
+        fileIds: [],
+      })),
+    },
+    affectedFileCount: 1,
+    details: null,
+    updatedAt: '2026-09-02T08:00:00.000Z',
+  },
   stage: { id: stageRunId },
   runtime: {
     stageRunId,
@@ -260,6 +297,45 @@ globalThis.measureDiagramEdgeGeometry = () => {
   return connected
 }
 
+globalThis.measureLargeGraphFit = () => {
+  const nodes = Array.from({ length: 24 }, (_, index) => ({
+    id: `large:${String(index).padStart(2, '0')}`,
+    label: `Large ${String(index + 1)}`,
+    description: 'Bounded large-graph fit probe.',
+    kind: 'component',
+    trustBoundary: null,
+    unresolved: false,
+  }))
+  const probe = mountStrongFlowDiagramGraph({
+    document,
+    props: {
+      id: 'diagram:large-fit-probe',
+      title: 'Large fit probe',
+      narrow: window.innerWidth <= 420,
+      nodes,
+      edges: nodes.slice(1).map((node, index) => ({
+        id: `large-edge:${String(index).padStart(2, '0')}`,
+        from: nodes[index].id,
+        to: node.id,
+        label: 'next',
+      })),
+    },
+  })
+  document.body.append(probe.root)
+  const viewport = probe.root.querySelector('.wwc-strongflow-graph-viewport')
+  const canvas = probe.root.querySelector('.wwc-strongflow-graph-canvas')
+  probe.root.querySelector('.wwc-strongflow-graph-fit').click()
+  const zoom = Number(viewport.getAttribute('data-zoom'))
+  const result = {
+    fits: canvas.scrollWidth * zoom <= viewport.clientWidth + 1
+      && canvas.scrollHeight * zoom <= viewport.clientHeight + 1,
+    positiveFinite: Number.isFinite(zoom) && zoom > 0,
+    zoom,
+  }
+  probe.close()
+  return result
+}
+
 globalThis.runDiagramGraphScenario = () => {
   const graph = architectureGraph()
   const viewport = graph.querySelector('.wwc-strongflow-graph-viewport')
@@ -267,6 +343,12 @@ globalThis.runDiagramGraphScenario = () => {
   const edges = [...graph.querySelectorAll('.wwc-strongflow-graph-edge')]
   const unresolvedNode = graph.querySelector(
     '.wwc-strongflow-graph-node[data-id="component:delivery-api"]',
+  )
+  const liveNode = graph.querySelector(
+    '.wwc-strongflow-graph-node[data-id="platform:dsh"]',
+  )
+  const finishedNode = graph.querySelector(
+    '.wwc-strongflow-graph-node[data-id="platform:strongflow"]',
   )
   const firstNode = nodes[0]
   firstNode.focus()
@@ -330,6 +412,18 @@ globalThis.runDiagramGraphScenario = () => {
         icon: unresolvedNode.querySelector('.wwc-strongflow-graph-node-icon')?.textContent ?? null,
       },
     },
+    statusSignals: [
+      unresolvedNode.querySelector('.wwc-strongflow-graph-node-badge'),
+      liveNode.querySelector('.wwc-strongflow-graph-node-execution'),
+      finishedNode.querySelector('.wwc-strongflow-graph-node-execution'),
+    ].map(signal => {
+      const icon = signal.querySelector('.wwc-strongflow-graph-status-icon')
+      return {
+        iconHidden: icon.getAttribute('aria-hidden'),
+        iconText: icon.textContent,
+        text: signal.textContent,
+      }
+    }),
     selection: {
       ariaPressed: unresolvedNode.getAttribute('aria-pressed'),
       label: unresolvedNode.getAttribute('aria-label'),

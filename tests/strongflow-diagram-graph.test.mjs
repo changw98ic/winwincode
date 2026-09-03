@@ -34,11 +34,16 @@ const page = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/strongflow-page.js',
 )).href}`)
+const diagramsModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/strongflow-diagrams.js',
+)).href}`)
 const {
   mountStrongFlowDiagramGraph,
   strongFlowDiagramGraphLayout,
 } = graphModule
 const { mountStrongFlowPage } = page
+const { mountStrongFlowDiagrams } = diagramsModule
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
@@ -189,7 +194,7 @@ test('graph renders keyed nodes and labelled edges with multi-signal node states
   const unresolvedNode = nodeButtons.find(node => node.dataset.id === 'component:api')
   assert.equal(unresolvedNode.dataset.unresolved, 'true')
   const unresolvedBadge = findByClass(unresolvedNode, 'wwc-strongflow-graph-node-badge')
-  assert.equal(unresolvedBadge.textContent, 'Unresolved')
+  assert.match(textContentOf(unresolvedBadge), /Unresolved/u)
   const icon = findByClass(unresolvedNode, 'wwc-strongflow-graph-node-icon')
   assert.ok(icon.textContent.length > 0)
   const resolvedNode = nodeButtons.find(node => node.dataset.id === 'platform:dsh')
@@ -243,6 +248,44 @@ test('decorative node-kind icons stay out of the accessible name', () => {
     true,
     'winwincode-ec6: decorative status glyphs must be hidden from assistive technology',
   )
+  view.close()
+})
+
+test('unresolved and execution status signals use their own hidden icons', () => {
+  const document = new FakeDocument()
+  const nodes = solutionDiagramNodes().map(node => ({
+    ...node,
+    executionState: node.id === 'platform:dsh'
+      ? 'affected-live'
+      : node.id === 'platform:strongflow' ? 'affected-finished' : 'normal',
+    affectedFileCount: node.id === 'platform:dsh' || node.id === 'platform:strongflow' ? 1 : 0,
+  }))
+  const view = mountStrongFlowDiagramGraph({
+    document,
+    props: graphProps({ nodes }),
+  })
+  const graphNodes = findAllByClass(view.root, 'wwc-strongflow-graph-node')
+  const unresolved = graphNodes.find(node => node.dataset.id === 'component:api')
+  const affectedLive = graphNodes.find(node => node.dataset.id === 'platform:dsh')
+  const affectedFinished = graphNodes.find(node => node.dataset.id === 'platform:strongflow')
+  const statusBadges = [
+    findByClass(unresolved, 'wwc-strongflow-graph-node-badge'),
+    findByClass(affectedLive, 'wwc-strongflow-graph-node-execution'),
+    findByClass(affectedFinished, 'wwc-strongflow-graph-node-execution'),
+  ]
+  for (const badge of statusBadges) {
+    assert.ok(badge)
+    assert.equal(
+      badge.children.some(child => (
+        child.getAttribute('aria-hidden') === 'true' && child.textContent.length > 0
+      )),
+      true,
+      'each status needs its own decorative icon, hidden from assistive technology',
+    )
+  }
+  assert.match(textContentOf(unresolved), /Unresolved/u)
+  assert.match(textContentOf(affectedLive), /Affected live/u)
+  assert.match(textContentOf(affectedFinished), /Affected finished/u)
   view.close()
 })
 
@@ -387,6 +430,28 @@ test('zoom buttons and viewport keys scale the graph and fit restores it', () =>
   findByClass(view.root, 'wwc-strongflow-graph-zoom-in').emit('click')
   findByClass(view.root, 'wwc-strongflow-graph-overview').emit('click')
   assert.equal(viewport.getAttribute('data-zoom'), '0.6')
+  view.close()
+})
+
+test('fit shows a large bounded graph below the manual zoom minimum', () => {
+  const document = new FakeDocument()
+  const view = mountStrongFlowDiagramGraph({ document, props: graphProps() })
+  const viewport = findByClass(view.root, 'wwc-strongflow-graph-viewport')
+  const canvas = findByClass(view.root, 'wwc-strongflow-graph-canvas')
+  viewport.clientWidth = 300
+  viewport.clientHeight = 240
+  canvas.scrollWidth = 1_500
+  canvas.scrollHeight = 800
+
+  findByClass(view.root, 'wwc-strongflow-graph-fit').emit('click')
+
+  assert.equal(
+    viewport.getAttribute('data-zoom'),
+    '0.2',
+    'the full measured canvas must fit instead of stopping at the manual 0.5 limit',
+  )
+  assert.equal(viewport.scrollLeft, 0)
+  assert.equal(viewport.scrollTop, 0)
   view.close()
 })
 
@@ -652,6 +717,7 @@ function projection(overrides = {}) {
       })),
       attention: [{
         id: 'attention:1',
+        deliverySpecId: 'spec:1',
         title: 'Attention 1',
         status: 'open',
       }],
@@ -690,6 +756,7 @@ function projection(overrides = {}) {
     verdict: null,
     attention: [{
       id: 'attention:1',
+      deliverySpecId: 'spec:1',
       title: 'Attention 1',
       status: 'open',
     }],
@@ -814,8 +881,8 @@ test('canonical diagram execution state reaches matching graph nodes as a text s
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const current = projection()
-  const reviewSetSha256 = 'a'.repeat(64)
-  current.solutionReview.reviewSetSha256 = `sha256:${reviewSetSha256}`
+  const reviewSetSha256 = `sha256:${'a'.repeat(64)}`
+  current.solutionReview.reviewSetSha256 = reviewSetSha256
   current.diagramExecution = {
     schemaVersion: 1,
     protocol: 'winwincode.diagram-execution-projection.v1',
@@ -845,7 +912,7 @@ test('canonical diagram execution state reaches matching graph nodes as a text s
       })),
     },
     details: null,
-    updatedAtMillis: 1,
+    updatedAt: '2026-09-02T08:00:01.000Z',
   }
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
   const mounted = mountStrongFlowPage({
@@ -891,11 +958,31 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
   const current = projection()
   const fileId = 'diagram-file:1'
   const evidenceId = 'evidence:1'
+  const candidateRef = `git-candidate:sha256:${'c'.repeat(64)}`
+  const candidateCommitId = 'd'.repeat(40)
+  const candidateTreeId = 'e'.repeat(40)
+  const diffSha256 = `sha256:${'f'.repeat(64)}`
+  current.currentCandidate = {
+    candidateRef,
+    deliverySpecId: 'spec:1',
+    deliverySpecRevision: 3,
+    producerStageRunId: stageRunId,
+    producerSessionBindingId: 'bind:1',
+    candidateCommitId,
+    candidateTreeId,
+    diffSha256,
+    frozenAt: '2026-09-02T08:00:00.000Z',
+  }
+  current.delivery.tasks[0].stageRunIds = [stageRunId]
   current.evidence = [{
     id: evidenceId,
     type: 'diff',
     sourceRef: 'candidate.diff:1',
-    candidateRef: 'git-candidate:1',
+    candidateRef,
+    deliverySpecId: 'spec:1',
+    deliverySpecRevision: 3,
+    stageRunId,
+    sessionBindingId: 'bind:1',
   }]
   const executionNode = node => ({
     nodeId: node.id,
@@ -908,7 +995,7 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
     protocol: 'winwincode.diagram-execution-projection.v1',
     deliveryId: current.delivery.deliveryId,
     deliveryRevision: current.delivery.deliveryRevision,
-    reviewSetSha256: 'a'.repeat(64),
+    reviewSetSha256: `sha256:${'a'.repeat(64)}`,
     state: 'execution-finished',
     architecture: {
       diagramId: current.solutionReview.architectureDiagram.id,
@@ -927,10 +1014,27 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
     },
     affectedFileCount: 1,
     details: {
-      files: [{ id: fileId, path: 'src/linked.ts', nodeIds: ['node:1'] }],
-      provenance: { deliveryTaskId: 'task:1', evidenceRefIds: [evidenceId] },
+      candidate: {
+        candidateRef,
+        deliverySpecId: 'spec:1',
+        deliverySpecRevision: 3,
+        producerStageRunId: stageRunId,
+        producerSessionBindingId: 'bind:1',
+        candidateCommitId,
+        candidateTreeId,
+        diffSha256,
+        frozenAt: '2026-09-02T08:00:00.000Z',
+      },
+      diffSha256,
+      files: [{ id: fileId, path: 'src/linked.ts', state: 'present', nodeIds: ['node:1'] }],
+      provenance: {
+        stageRunId,
+        sessionBindingId: 'bind:1',
+        deliveryTaskId: 'task:1',
+        evidenceRefIds: [evidenceId],
+      },
     },
-    updatedAtMillis: 2,
+    updatedAt: '2026-09-02T08:00:02.000Z',
   }
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
   const mounted = mountStrongFlowPage({
@@ -972,6 +1076,95 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
     findByClass(architecture, 'wwc-strongflow-graph-detail').textContent,
     /Task task:1.*Attention attention:1.*Diff src\/linked\.ts.*Evidence evidence:1/u,
   )
+  mounted.close()
+})
+
+test('node selection omits canonical identities absent from the current delivery cut', () => {
+  const document = new FakeDocument()
+  const current = projection()
+  const fileId = 'diagram-file:missing'
+  const candidateRef = `git-candidate:sha256:${'c'.repeat(64)}`
+  const diffSha256 = `sha256:${'f'.repeat(64)}`
+  const executionNode = node => ({
+    nodeId: node.id,
+    state: node.id === 'node:1' ? 'affected-finished' : 'normal',
+    affectedFileCount: node.id === 'node:1' ? 1 : 0,
+    fileIds: node.id === 'node:1' ? [fileId] : [],
+  })
+  current.delivery.tasks = []
+  current.delivery.attention = []
+  current.attention = []
+  current.solutionReview.attentionItemId = 'attention:missing'
+  current.diagramExecution = {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId: current.delivery.deliveryId,
+    deliveryRevision: current.delivery.deliveryRevision,
+    reviewSetSha256: `sha256:${'a'.repeat(64)}`,
+    state: 'execution-finished',
+    architecture: {
+      diagramId: current.solutionReview.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: current.solutionReview.architectureDiagram.nodes.map(executionNode),
+    },
+    process: {
+      diagramId: current.solutionReview.processDiagram.id,
+      kind: 'process-flow',
+      nodes: current.solutionReview.processDiagram.nodes.map(node => ({
+        nodeId: node.id,
+        state: 'normal',
+        affectedFileCount: 0,
+        fileIds: [],
+      })),
+    },
+    affectedFileCount: 1,
+    details: {
+      candidate: {
+        candidateRef,
+        deliverySpecId: 'spec:1',
+        deliverySpecRevision: 3,
+        producerStageRunId: stageRunId,
+        producerSessionBindingId: 'bind:missing',
+        candidateCommitId: 'd'.repeat(40),
+        candidateTreeId: 'e'.repeat(40),
+        diffSha256,
+        frozenAt: '2026-09-02T08:00:00.000Z',
+      },
+      diffSha256,
+      files: [{
+        id: fileId,
+        path: 'src/missing.ts',
+        state: 'present',
+        nodeIds: ['node:1'],
+      }],
+      provenance: {
+        stageRunId,
+        sessionBindingId: 'bind:missing',
+        deliveryTaskId: 'task:missing',
+        evidenceRefIds: ['evidence:missing'],
+      },
+    },
+    updatedAt: '2026-09-02T08:00:02.000Z',
+  }
+  let selected = null
+  const mounted = mountStrongFlowDiagrams({
+    document,
+    limits,
+    onSelectNode: value => { selected = value },
+  })
+  mounted.update({ projection: current, narrow: false })
+
+  findAllByClass(mounted.root, 'wwc-strongflow-graph-node')
+    .find(node => node.dataset.id === 'node:1')
+    .emit('click')
+  assert.deepEqual(selected, {
+    diagramId: current.solutionReview.architectureDiagram.id,
+    nodeId: 'node:1',
+    taskId: null,
+    attentionItemIds: [],
+    diffPaths: [],
+    evidenceRefIds: [],
+  })
   mounted.close()
 })
 

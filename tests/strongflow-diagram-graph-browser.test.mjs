@@ -90,10 +90,15 @@ test('real Chrome renders interactive solution graphs that survive runtime snaps
     )
   }
   assert.deepEqual(scenario.nodes.unresolved, {
-    badge: 'Unresolved',
+    badge: '!Unresolved',
     color: 'rgb(254, 242, 242)',
     icon: '▣',
   })
+  assert.deepEqual(scenario.statusSignals, [
+    { iconHidden: 'true', iconText: '!', text: '!Unresolved' },
+    { iconHidden: 'true', iconText: '●', text: '●Affected live · 1 file' },
+    { iconHidden: 'true', iconText: '✓', text: '✓Affected finished · 1 file' },
+  ])
 
   assert.deepEqual(scenario.edges.map(edge => edge.id), [
     'edge:dsh-submit',
@@ -141,6 +146,11 @@ test('real Chrome renders interactive solution graphs that survive runtime snaps
     zoomKept: '1.25',
   })
 
+  const wideFit = await evaluate(devtools, sessionId, 'measureLargeGraphFit()')
+  assert.equal(wideFit.positiveFinite, true)
+  assert.equal(wideFit.fits, true)
+  assert.ok(wideFit.zoom < 0.5, `wide bounded graph fit used ${String(wideFit.zoom)}`)
+
   await devtools.send('Emulation.setDeviceMetricsOverride', {
     width: 420,
     height: 900,
@@ -165,5 +175,9 @@ test('real Chrome renders interactive solution graphs that survive runtime snaps
     'document.documentElement.scrollWidth <= window.innerWidth',
   )
   assert.equal(narrowPageFits, true, 'narrow graph controls must not overflow the page')
+  const narrowFit = await evaluate(devtools, sessionId, 'measureLargeGraphFit()')
+  assert.equal(narrowFit.positiveFinite, true)
+  assert.equal(narrowFit.fits, true)
+  assert.ok(narrowFit.zoom < 0.5, `narrow bounded graph fit used ${String(narrowFit.zoom)}`)
   assert.equal(exceptions.length, 0, JSON.stringify(exceptions))
 })

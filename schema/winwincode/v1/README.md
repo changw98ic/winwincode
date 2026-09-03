@@ -90,7 +90,9 @@ schema。生成文件带统一来源摘要，重复生成相同输入不会改�
 成功响应按原始 `command` 或 `query` 组成判别联合。每个操作只允许自己的结果投影；例如
 `delivery.get` 只能返回 `DeliveryDetailProjection`，`runtime.projection.get` 只能返回
 `RuntimeProjectionSnapshot`。调用方或服务端不能把同一结果改写 discriminator 后当作另一项
-操作的响应。
+操作的响应。`DeliveryDetailProjection.diagramExecution` 是同一读取截面的有界图执行事实：
+它只携带当前 Candidate 摘要、节点、路径状态和 Task/Evidence 引用，不携带 diff 字节或 hunk
+内容。
 
 ## 查询与 cursor
 

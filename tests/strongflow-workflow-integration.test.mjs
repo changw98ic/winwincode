@@ -314,6 +314,7 @@ function deliveryDetail(state) {
       maxReworkAttempts: 2,
     },
     solutionReview: review(state),
+    diagramExecution: null,
     stages: [{
       id: stageRunId,
       actorType: 'codex',

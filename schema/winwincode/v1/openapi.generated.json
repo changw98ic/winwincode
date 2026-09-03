@@ -5507,6 +5507,16 @@
           "deliveryRevision": {
             "$ref": "#/components/schemas/Revision"
           },
+          "diagramExecution": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StrongFlowDiagramExecutionProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "evidence": {
             "items": {
               "$ref": "#/components/schemas/DeliveryEvidenceProjection"
@@ -5587,6 +5597,7 @@
           "status",
           "requirements",
           "solutionReview",
+          "diagramExecution",
           "stages",
           "tasks",
           "attention",
@@ -16866,6 +16877,255 @@
         "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
         "type": "string"
       },
+      "StrongFlowDiagramDiffFileProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+            "type": "string"
+          },
+          "nodeIds": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "path": {
+            "description": "Normalized repository-relative path from the exact current Candidate.",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "present",
+              "deleted"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "state",
+          "nodeIds"
+        ],
+        "type": "object"
+      },
+      "StrongFlowDiagramExecutionDetailsProjection": {
+        "additionalProperties": false,
+        "description": "Bounded current Candidate and cross-panel identities. Diff bytes and hunk content remain on authorized detail endpoints.",
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/FrozenCandidateSummaryProjection"
+          },
+          "diffSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/StrongFlowDiagramDiffFileProjection"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/StrongFlowDiagramExecutionProvenanceProjection"
+          }
+        },
+        "required": [
+          "candidate",
+          "diffSha256",
+          "files",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "StrongFlowDiagramExecutionDiagramProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "diagramId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "system-architecture",
+              "process-flow"
+            ],
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/StrongFlowDiagramExecutionNodeProjection"
+            },
+            "maxItems": 200,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "diagramId",
+          "kind",
+          "nodes"
+        ],
+        "type": "object"
+      },
+      "StrongFlowDiagramExecutionNodeProjection": {
+        "additionalProperties": false,
+        "description": "Execution state for one exact node in the current approved diagram.",
+        "properties": {
+          "affectedFileCount": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "fileIds": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "nodeId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "normal",
+              "affected-live",
+              "affected-finished"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "nodeId",
+          "state",
+          "affectedFileCount",
+          "fileIds"
+        ],
+        "type": "object"
+      },
+      "StrongFlowDiagramExecutionProjection": {
+        "additionalProperties": false,
+        "description": "Same-cut execution impact and exact current cross-panel links for the approved StrongFlow diagrams.",
+        "properties": {
+          "affectedFileCount": {
+            "$ref": "#/components/schemas/Count"
+          },
+          "architecture": {
+            "$ref": "#/components/schemas/StrongFlowDiagramExecutionDiagramProjection"
+          },
+          "deliveryId": {
+            "$ref": "#/components/schemas/DeliveryId"
+          },
+          "deliveryRevision": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "details": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StrongFlowDiagramExecutionDetailsProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "process": {
+            "$ref": "#/components/schemas/StrongFlowDiagramExecutionDiagramProjection"
+          },
+          "protocol": {
+            "const": "winwincode.diagram-execution-projection.v1"
+          },
+          "reviewSetSha256": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "schemaVersion": {
+            "const": 1
+          },
+          "state": {
+            "enum": [
+              "before-execution",
+              "executing",
+              "execution-finished"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "protocol",
+          "deliveryId",
+          "deliveryRevision",
+          "reviewSetSha256",
+          "state",
+          "architecture",
+          "process",
+          "affectedFileCount",
+          "details",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "StrongFlowDiagramExecutionProvenanceProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveryTaskId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryTaskId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidenceRefIds": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceId"
+            },
+            "maxItems": 1000,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "sessionBindingId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+            "type": "string"
+          },
+          "stageRunId": {
+            "$ref": "#/components/schemas/StageRunId"
+          }
+        },
+        "required": [
+          "stageRunId",
+          "sessionBindingId",
+          "deliveryTaskId",
+          "evidenceRefIds"
+        ],
+        "type": "object"
+      },
       "StrongFlowReadCursor": {
         "additionalProperties": false,
         "description": "Server-issued, fully comparable StrongFlow read cut. Its authenticated token seals every field including eventCursor. Revision zero is the explicit no-publication ledger state; wall-clock generation time is never a cursor coordinate.",
@@ -18096,7 +18356,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:665f3dce2ef77dd33acc8ceea72034cd4bf9966145bc51dcab33f8cd253fc3c2",
+  "x-source-digest": "sha256:93122025a3365c4f846e4caa1c0391cdcf3919ae2f19cac545467adc40d28860",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

@@ -7,6 +7,7 @@ import {
   createControlPlaneWebSocketClient,
   createProductSessionRuntimeProjectionSubscription,
   createStrongFlowProjectionSubscription,
+  matchesCanonicalSchema,
 } from '../apps/client/src/generated/control-plane-client.ts'
 
 const schemaVersion = 'winwincode/v1'
@@ -209,6 +210,7 @@ function deliveryProjection(cursor) {
       maxReworkAttempts: 2,
     },
     solutionReview: null,
+    diagramExecution: null,
     stages: [],
     tasks: [],
     attention: [],
@@ -216,6 +218,88 @@ function deliveryProjection(cursor) {
     currentCandidate: null,
     verdict: null,
     publication: null,
+  }
+}
+
+function diagram(id, kind) {
+  return {
+    id,
+    kind,
+    title: `${kind} diagram`,
+    nodes: [{
+      id: 'process:executing',
+      label: 'Execute',
+      description: 'Runs the exact current Delivery cut.',
+      kind: 'stage',
+      trustBoundary: null,
+      unresolved: false,
+    }],
+    edges: [],
+  }
+}
+
+function solutionReviewProjection() {
+  return {
+    deliveryId,
+    deliverySpecId: 'spec:current',
+    deliverySpecRevision: 1,
+    planningStageRunId: stageRunId,
+    planningSessionBindingId: 'binding:planner',
+    reviewStageRunId: stageRunId,
+    attentionItemId: canonicalId('att', 1),
+    reviewSetSha256: `sha256:${'a'.repeat(64)}`,
+    reviewStatus: 'approved',
+    decision: 'approve',
+    comments: null,
+    requestedChanges: null,
+    reviewerId: actor.id,
+    reviewedAt: '2026-08-25T00:00:00.000Z',
+    solutionId: 'solution:current',
+    summary: 'Use one generated delivery.get result.',
+    approach: ['Project the current cut.'],
+    components: [],
+    connections: [],
+    architectureDiagram: diagram('diagram:architecture', 'system-architecture'),
+    processDiagram: diagram('diagram:process', 'process-flow'),
+    risks: [],
+    unresolvedItems: [],
+    taskProposals: [{
+      id: canonicalId('dtk', 1),
+      title: 'Project execution',
+      goal: 'Keep browser facts on the generated contract.',
+      acceptanceCriterionIds: ['criterion:client'],
+      blockedByTaskIds: [],
+    }],
+  }
+}
+
+function diagramExecutionProjection(delivery) {
+  const node = {
+    nodeId: 'process:executing',
+    state: 'affected-live',
+    affectedFileCount: 1,
+    fileIds: [],
+  }
+  return {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId,
+    deliveryRevision: delivery.deliveryRevision,
+    reviewSetSha256: delivery.solutionReview.reviewSetSha256,
+    state: 'executing',
+    architecture: {
+      diagramId: delivery.solutionReview.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: [node],
+    },
+    process: {
+      diagramId: delivery.solutionReview.processDiagram.id,
+      kind: 'process-flow',
+      nodes: [node],
+    },
+    affectedFileCount: 1,
+    details: null,
+    updatedAt: '2026-08-25T00:00:00.000Z',
   }
 }
 
@@ -578,6 +662,42 @@ test('HTTP queries preserve opaque cursors and malformed errors stay bounded', a
       assert.doesNotMatch(JSON.stringify(error), /do-not-copy|provider payload leaked/u)
       return true
     },
+  )
+})
+
+test('generated HTTP client validates diagram execution on delivery.get', async () => {
+  const cursor = readCursor('1')
+  const delivery = deliveryProjection(cursor)
+  delivery.solutionReview = solutionReviewProjection()
+  delivery.diagramExecution = diagramExecutionProjection(delivery)
+  const client = createControlPlaneHttpClient({
+    async fetch(_input, init) {
+      const request = JSON.parse(init.body)
+      return response(200, queryResponse(request, delivery))
+    },
+  })
+
+  assert.equal(matchesCanonicalSchema('SolutionReviewProjection', delivery.solutionReview), true)
+  assert.equal(
+    matchesCanonicalSchema('StrongFlowDiagramExecutionProjection', delivery.diagramExecution),
+    true,
+  )
+  assert.equal(matchesCanonicalSchema('DeliveryDetailProjection', delivery), true)
+
+  const result = await client.submitQuery({
+    schemaVersion,
+    requestId: requestId(28),
+    actor,
+    scope,
+    query: 'delivery.get',
+    parameters: { deliveryId },
+    page: { cursor: null, limit: 20 },
+  })
+
+  assert.equal(result.result.diagramExecution.state, 'executing')
+  assert.equal(
+    result.result.diagramExecution.reviewSetSha256,
+    result.result.solutionReview.reviewSetSha256,
   )
 })
 

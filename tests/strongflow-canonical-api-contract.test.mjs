@@ -83,6 +83,7 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'status',
     'requirements',
     'solutionReview',
+    'diagramExecution',
     'stages',
     'tasks',
     'attention',
@@ -94,6 +95,7 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
   for (const name of [
     'DeliveryRequirementsProjection',
     'SolutionReviewProjection',
+    'StrongFlowDiagramExecutionProjection',
     'DeliveryStageProjection',
     'DeliveryTaskDetailProjection',
     'DeliveryAttentionProjection',
@@ -102,6 +104,35 @@ test('delivery.get has one closed StrongFlow detail while DeliveryPage stays com
     'DeliveryVerdictProjection',
     'PublicationProjection',
   ]) assert.ok(http.$defs[name], name)
+
+  assert.deepEqual(detail.properties.diagramExecution.oneOf, [
+    { $ref: '#/$defs/StrongFlowDiagramExecutionProjection' },
+    { type: 'null' },
+  ])
+  const diagramExecution = http.$defs.StrongFlowDiagramExecutionProjection
+  assert.equal(diagramExecution.additionalProperties, false)
+  assert.deepEqual(diagramExecution.required, [
+    'schemaVersion',
+    'protocol',
+    'deliveryId',
+    'deliveryRevision',
+    'reviewSetSha256',
+    'state',
+    'architecture',
+    'process',
+    'affectedFileCount',
+    'details',
+    'updatedAt',
+  ])
+  const details = http.$defs.StrongFlowDiagramExecutionDetailsProjection
+  assert.deepEqual(details.required, [
+    'candidate',
+    'diffSha256',
+    'files',
+    'provenance',
+  ])
+  assert.equal(details.properties.hunks, undefined)
+  assert.equal(details.properties.diffContent, undefined)
 
   const binding = http.$defs.DeliveryStageSessionBindingProjection
   assert.ok(binding.required.includes('workerSessionId'))
@@ -1013,6 +1044,7 @@ test('canonical schemas carry generated-client route and event metadata', () => 
   assert.match(generated, /"runtime-projection\.invalidated\.v1"/u)
   assert.match(generated, /"DeliveryDetailProjection"/u)
   assert.match(generated, /export type SolutionReviewProjection =/u)
+  assert.match(generated, /export type StrongFlowDiagramExecutionProjection =/u)
   assert.match(generated, /export type StrongFlowReadCursor =/u)
   assert.match(generated, /export type EventReadCursor =/u)
   assert.match(

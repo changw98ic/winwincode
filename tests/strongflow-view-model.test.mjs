@@ -232,6 +232,7 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
       maxReworkAttempts: 2,
     },
     solutionReview: solutionReview(),
+    diagramExecution: null,
     stages: [{
       id: stageRunId,
       actorType: 'codex',
@@ -317,6 +318,37 @@ function delivery(revision = 1, candidateRef = 'refs/winwincode/candidate/1') {
       resourceRef: null,
       updatedAt: '2026-08-27T01:00:06.000Z',
     },
+  }
+}
+
+function diagramExecution(deliveryValue) {
+  const review = deliveryValue.solutionReview
+  const nodes = diagramValue => diagramValue.nodes.map(node => ({
+    nodeId: node.id,
+    state: 'affected-live',
+    affectedFileCount: 1,
+    fileIds: [],
+  }))
+  return {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId: deliveryValue.deliveryId,
+    deliveryRevision: deliveryValue.deliveryRevision,
+    reviewSetSha256: review.reviewSetSha256,
+    state: 'executing',
+    architecture: {
+      diagramId: review.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: nodes(review.architectureDiagram),
+    },
+    process: {
+      diagramId: review.processDiagram.id,
+      kind: 'process-flow',
+      nodes: nodes(review.processDiagram),
+    },
+    affectedFileCount: 1,
+    details: null,
+    updatedAt: '2026-08-27T01:00:05.500Z',
   }
 }
 
@@ -475,6 +507,22 @@ test('initial bounded pair composes the complete StrongFlow projection and sourc
     'attention.changed.v1',
     'runtime-projection.invalidated.v1',
   ])
+})
+
+test('generated delivery.get diagram execution reaches the public StrongFlow projection', async () => {
+  const client = new FakeClient()
+  const deliveryResponse = client.responses.get('delivery.get')
+  deliveryResponse.result.diagramExecution = diagramExecution(deliveryResponse.result)
+  const { model } = view(client)
+
+  await model.start()
+
+  assert.equal(model.state.status, 'ready')
+  assert.deepEqual(
+    model.state.projection.diagramExecution,
+    deliveryResponse.result.diagramExecution,
+  )
+  assert.equal(model.state.projection.diagramExecution.state, 'executing')
 })
 
 test('Candidate files load progressively from the exact current Candidate read cut', async () => {
