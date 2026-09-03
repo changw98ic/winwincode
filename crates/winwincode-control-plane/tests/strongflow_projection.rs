@@ -1429,6 +1429,49 @@ fn delivery_projection_is_owned_by_delivery_and_maps_to_generated_dto() {
 }
 
 #[test]
+fn delivery_get_projects_current_diagram_execution_through_the_generated_contract() {
+    let (delivery, candidate) = approved_ready_to_deliver_fixture();
+    let f = fixture_with_delivery_and_candidate(delivery, candidate.clone());
+    let (detail, _) = detail_and_cursor(&f);
+    let current_candidate = detail.current_candidate.expect("current Candidate summary");
+    let execution = detail
+        .diagram_execution
+        .expect("approved solution review has diagram execution facts");
+    let details = execution
+        .details
+        .expect("finished execution has bounded current Candidate details");
+
+    assert_eq!(execution.delivery_id, detail.delivery_id);
+    assert_eq!(execution.delivery_revision, detail.delivery_revision);
+    assert_eq!(execution.state, "execution-finished");
+    assert_eq!(
+        execution.review_set_sha256,
+        detail.solution_review.unwrap().review_set_sha256
+    );
+    assert_eq!(details.candidate, current_candidate);
+    assert_eq!(
+        details.diff_sha256.0,
+        format!("sha256:{}", candidate.diff_sha256())
+    );
+    assert_eq!(details.files.len(), 1);
+    assert_eq!(details.files[0].path, "src/invitation.rs");
+    assert_eq!(details.files[0].state, "present");
+    assert_eq!(
+        details.provenance.stage_run_id,
+        *candidate.producer_stage_run_id()
+    );
+    assert_eq!(
+        details.provenance.session_binding_id,
+        candidate.producer_session_binding_id().0
+    );
+    assert_eq!(
+        details.provenance.delivery_task_id.as_ref(),
+        candidate.producer_delivery_task_id()
+    );
+    assert_eq!(execution.affected_file_count.0, 1);
+}
+
+#[test]
 fn approved_solution_review_remains_visible_in_execution_and_verification_successors() {
     let approved = fixture_with_delivery(
         approved_solution_review_fixture(DeliveryStatus::Executing),

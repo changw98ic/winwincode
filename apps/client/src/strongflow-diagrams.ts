@@ -115,19 +115,37 @@ export function mountStrongFlowDiagrams(
     const execution = projection.diagramExecution
     const review = projection.solutionReview
     if (execution === null || review === null) return null
-    const reviewDigest = review.reviewSetSha256.replace(/^sha256:/u, '')
     if (execution.schemaVersion !== 1
       || execution.protocol !== 'winwincode.diagram-execution-projection.v1'
       || execution.architecture.kind !== 'system-architecture'
       || execution.process.kind !== 'process-flow'
       || String(execution.deliveryId) !== String(projection.delivery.deliveryId)
       || execution.deliveryRevision !== projection.delivery.deliveryRevision
-      || execution.reviewSetSha256 !== reviewDigest
+      || execution.reviewSetSha256 !== review.reviewSetSha256
       || execution.architecture.diagramId !== review.architectureDiagram.id
       || execution.process.diagramId !== review.processDiagram.id) {
       throw new Error('StrongFlow diagram execution facts do not match the current review cut.')
     }
     return execution
+  }
+
+  function currentExecutionDetails(projection: StrongFlowProjection) {
+    const execution = executionProjection(projection)
+    const details = execution?.details
+    const candidate = projection.currentCandidate
+    if (details === null || details === undefined || candidate === null) return null
+    const source = details.candidate
+    if (source.candidateRef !== candidate.candidateRef
+      || source.deliverySpecId !== candidate.deliverySpecId
+      || source.deliverySpecRevision !== candidate.deliverySpecRevision
+      || source.candidateCommitId !== candidate.candidateCommitId
+      || source.candidateTreeId !== candidate.candidateTreeId
+      || source.diffSha256 !== candidate.diffSha256
+      || source.frozenAt !== candidate.frozenAt
+      || details.diffSha256 !== source.diffSha256
+      || source.producerStageRunId !== details.provenance.stageRunId
+      || source.producerSessionBindingId !== details.provenance.sessionBindingId) return null
+    return details
   }
 
   function publishSelection(selection: StrongFlowDiagramSelection | null): void {
@@ -149,6 +167,7 @@ export function mountStrongFlowDiagrams(
     const executionDiagram = execution === null
       ? null
       : kind === 'architecture' ? execution.architecture : execution.process
+    const details = currentExecutionDetails(projection)
     const stateByNode = new Map(executionDiagram?.nodes.map(node => [node.nodeId, node]) ?? [])
     if (executionDiagram !== null) {
       const reviewIds = new Set(diagram.nodes.map(node => node.id))
@@ -160,14 +179,43 @@ export function mountStrongFlowDiagrams(
         throw new Error('StrongFlow diagram execution nodes do not match the current review.')
       }
     }
-    const files = new Map(execution?.details?.files.map(file => [file.id, file]) ?? [])
+    const executionFiles = execution?.details?.files ?? []
+    const files = new Map(executionFiles.map(file => [file.id, file]))
+    if (files.size !== executionFiles.length) {
+      throw new Error('StrongFlow diagram execution file identities are not unique.')
+    }
+    const linkedAttentionItemIds = projection.attention.some(item => (
+      item.id === review.attentionItemId
+      && item.deliverySpecId === review.deliverySpecId
+    )) ? [review.attentionItemId] : []
+    const provenance = details?.provenance ?? null
+    const linkedTaskId = provenance?.deliveryTaskId ?? null
+    const currentTaskId = linkedTaskId !== null && provenance !== null
+      && projection.delivery.tasks.some(task => (
+        String(task.id) === String(linkedTaskId)
+        && task.stageRunIds.some(stageRunId => (
+          String(stageRunId) === String(provenance.stageRunId)
+        ))
+      )) ? linkedTaskId : null
+    const linkedEvidenceRefIds = provenance?.evidenceRefIds.filter(evidenceRefId => (
+      projection.evidence.some(evidence => (
+        String(evidence.id) === String(evidenceRefId)
+        && evidence.candidateRef === projection.currentCandidate?.candidateRef
+        && evidence.deliverySpecId === projection.currentCandidate.deliverySpecId
+        && evidence.deliverySpecRevision === projection.currentCandidate.deliverySpecRevision
+        && String(evidence.stageRunId) === String(provenance.stageRunId)
+        && evidence.sessionBindingId === provenance.sessionBindingId
+      ))
+    )) ?? []
     return diagram.nodes.map(node => {
       const state = stateByNode.get(node.id)
       const linkedFiles = (state?.fileIds ?? []).map(fileId => files.get(fileId)).filter(
         (file): file is NonNullable<typeof file> => file !== undefined,
       )
-      if (execution !== null && execution.details !== null
-        && linkedFiles.length !== (state?.fileIds.length ?? 0)) {
+      if (execution !== null && execution.details !== null && (
+        linkedFiles.length !== (state?.fileIds.length ?? 0)
+        || linkedFiles.some(file => !file.nodeIds.includes(node.id))
+      )) {
         throw new Error('StrongFlow diagram execution file identities are not current.')
       }
       const affected = state !== undefined && state.state !== 'normal'
@@ -176,14 +224,10 @@ export function mountStrongFlowDiagrams(
         executionState: state?.state ?? 'normal' as const,
         affectedFileCount: state?.affectedFileCount ?? 0,
         fileIds: state?.fileIds ?? [],
-        linkedTaskId: affected
-          ? execution?.details?.provenance.deliveryTaskId ?? null
-          : null,
-        linkedAttentionItemIds: [review.attentionItemId],
-        linkedDiffPaths: linkedFiles.map(file => file.path),
-        linkedEvidenceRefIds: affected
-          ? execution?.details?.provenance.evidenceRefIds ?? []
-          : [],
+        linkedTaskId: affected ? currentTaskId : null,
+        linkedAttentionItemIds,
+        linkedDiffPaths: details === null ? [] : linkedFiles.map(file => file.path),
+        linkedEvidenceRefIds: affected ? linkedEvidenceRefIds : [],
       }
     })
   }

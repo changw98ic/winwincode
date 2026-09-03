@@ -24,8 +24,5 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --pretty false"
-  },
-  "dependencies": {
-    "@winwincode/contracts": "workspace:*"
   }
 }

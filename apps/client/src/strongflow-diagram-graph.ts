@@ -10,6 +10,8 @@ export const STRONGFLOW_DIAGRAM_GRAPH_ORIGIN_OFFSET = 100
 export const STRONGFLOW_DIAGRAM_GRAPH_ZOOM_STEP = 0.25
 export const STRONGFLOW_DIAGRAM_GRAPH_ZOOM_MIN = 0.5
 export const STRONGFLOW_DIAGRAM_GRAPH_ZOOM_MAX = 2.5
+/** Fitted graphs stay visible and finite across the schema-bounded 200-node graph. */
+export const STRONGFLOW_DIAGRAM_GRAPH_FIT_ZOOM_MIN = 0.000001
 
 const NODE_KIND_ICONS: Readonly<Record<string, string>> = Object.freeze({
   interaction: '◉',
@@ -253,7 +255,7 @@ function graphFingerprint(props: Readonly<StrongFlowDiagramGraphProps>): string 
 }
 
 function formatZoom(zoom: number): string {
-  return String(Number(zoom.toFixed(2)))
+  return String(Number(zoom.toFixed(6)))
 }
 
 function applyStyle(
@@ -440,10 +442,17 @@ export function mountStrongFlowDiagramGraph(
     return nodeById(nodeId)?.trustBoundary ?? null
   }
 
-  function applyZoom(next: number): void {
+  function applyZoom(
+    next: number,
+    minimum = STRONGFLOW_DIAGRAM_GRAPH_ZOOM_MIN,
+    rounding: 'nearest' | 'floor' = 'nearest',
+  ): void {
+    const scale = rounding === 'floor' ? 1_000_000 : 100
+    const rounded = (rounding === 'floor' ? Math.floor(next * scale) : Math.round(next * scale))
+      / scale
     zoom = Math.min(
       STRONGFLOW_DIAGRAM_GRAPH_ZOOM_MAX,
-      Math.max(STRONGFLOW_DIAGRAM_GRAPH_ZOOM_MIN, Number(next.toFixed(2))),
+      Math.max(minimum, Number.isFinite(rounded) ? rounded : 1),
     )
     viewport.setAttribute('data-zoom', formatZoom(zoom))
     applyStyle(canvas, { transform: `scale(${formatZoom(zoom)})` })
@@ -458,7 +467,7 @@ export function mountStrongFlowDiagramGraph(
         viewport.clientHeight / canvas.scrollHeight,
       )
       : 1
-    applyZoom(fittedZoom)
+    applyZoom(fittedZoom, STRONGFLOW_DIAGRAM_GRAPH_FIT_ZOOM_MIN, 'floor')
     viewport.scrollTop = 0
     viewport.scrollLeft = 0
   }
@@ -488,7 +497,13 @@ export function mountStrongFlowDiagramGraph(
     if (node.unresolved && view.badge === null) {
       const badge = document.createElement('span')
       badge.className = 'wwc-strongflow-graph-node-badge'
-      badge.textContent = 'Unresolved'
+      const icon = document.createElement('span')
+      icon.className = 'wwc-strongflow-graph-status-icon'
+      icon.setAttribute('aria-hidden', 'true')
+      icon.textContent = '!'
+      const text = document.createElement('span')
+      text.textContent = 'Unresolved'
+      badge.append(icon, text)
       view.root.append(badge)
       view.badge = badge
     } else if (!node.unresolved && view.badge !== null) {
@@ -513,9 +528,15 @@ export function mountStrongFlowDiagramGraph(
       view.root.append(badge)
       view.executionBadge = badge
     }
-    const prefix = state === 'affected-live' ? '● Affected live' : '✓ Affected finished'
     const count = node.affectedFileCount ?? 0
-    view.executionBadge.textContent = `${prefix} · ${String(count)} ${count === 1 ? 'file' : 'files'}`
+    const icon = document.createElement('span')
+    icon.className = 'wwc-strongflow-graph-status-icon'
+    icon.setAttribute('aria-hidden', 'true')
+    icon.textContent = state === 'affected-live' ? '●' : '✓'
+    const text = document.createElement('span')
+    const label = state === 'affected-live' ? 'Affected live' : 'Affected finished'
+    text.textContent = `${label} · ${String(count)} ${count === 1 ? 'file' : 'files'}`
+    view.executionBadge.replaceChildren(icon, text)
   }
 
   function syncNode(node: StrongFlowDiagramGraphNode): MountedNode {

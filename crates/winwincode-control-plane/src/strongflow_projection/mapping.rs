@@ -6,10 +6,11 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
     domain::{
-        AttentionItemStatus, AttentionItemType, CriterionVerdict, DeliveryStage,
-        DeliveryStatus as DomainDeliveryStatus, DeliveryTaskStatus as DomainTaskStatus,
-        DeliveryVerdict, EvidenceRef, EvidenceRefType, FrozenDeliveryCandidate, RepositoryKind,
-        SessionBindingSourceKind, StageRunActorType, StageRunStatus,
+        AttentionItemStatus, AttentionItemType, CandidatePathState, CriterionVerdict,
+        DeliveryStage, DeliveryStatus as DomainDeliveryStatus,
+        DeliveryTaskStatus as DomainTaskStatus, DeliveryVerdict, EvidenceRef, EvidenceRefType,
+        FrozenDeliveryCandidate, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
+        StageRunStatus,
     },
     projection::{self as delivery_projection, runtime as runtime_projection},
 };
@@ -47,6 +48,7 @@ pub(super) fn delivery_detail(
         status: delivery_status(source.status()),
         requirements: requirements(source.requirements())?,
         solution_review: source.solution_review().map(solution_review).transpose()?,
+        diagram_execution: diagram_execution(read)?,
         stages: source
             .stages()
             .iter()
@@ -67,6 +69,180 @@ pub(super) fn delivery_detail(
         verdict: source.verdict().map(verdict).transpose()?,
         publication,
     })
+}
+
+const MAX_DIAGRAM_LINK_FILES: usize = 1_000;
+
+fn diagram_execution(
+    read: &EstablishedDeliveryRead,
+) -> Result<Option<api::StrongFlowDiagramExecutionProjection>, StrongFlowProjectionError> {
+    let delivery = &read.detail;
+    let Some(review) = delivery.solution_review() else {
+        return Ok(None);
+    };
+    let reentering_execution = matches!(
+        delivery.status(),
+        DomainDeliveryStatus::Executing | DomainDeliveryStatus::Reworking
+    );
+    let candidate = read.publication.candidate();
+    let finished_candidate = (!reentering_execution).then_some(candidate).flatten();
+    let state = if reentering_execution {
+        "executing"
+    } else if finished_candidate.is_some() {
+        "execution-finished"
+    } else {
+        "before-execution"
+    };
+    let process_node_id = if candidate
+        .is_some_and(|value| value.producer_stage() == DeliveryStage::Reworking)
+        || delivery.status() == DomainDeliveryStatus::Reworking
+    {
+        "process:reworking"
+    } else {
+        "process:executing"
+    };
+    let files = finished_candidate.map_or_else(Vec::new, |value| {
+        value
+            .changed_paths()
+            .iter()
+            .take(MAX_DIAGRAM_LINK_FILES)
+            .map(|path| {
+                let mut node_ids = Vec::new();
+                if review
+                    .architecture_diagram()
+                    .nodes()
+                    .iter()
+                    .any(|node| node.id() == "platform:repository")
+                {
+                    node_ids.push("platform:repository".to_owned());
+                }
+                node_ids.extend(review.components().iter().filter_map(|component| {
+                    component
+                        .repository_path_prefixes()
+                        .iter()
+                        .any(|prefix| {
+                            path.path == *prefix
+                                || path
+                                    .path
+                                    .strip_prefix(prefix)
+                                    .is_some_and(|tail| tail.starts_with('/'))
+                        })
+                        .then(|| component.id().to_owned())
+                }));
+                if review
+                    .process_diagram()
+                    .nodes()
+                    .iter()
+                    .any(|node| node.id() == process_node_id)
+                {
+                    node_ids.push(process_node_id.to_owned());
+                }
+                let identity = format!("{}\0{}", value.candidate_ref(), path.path);
+                api::StrongFlowDiagramDiffFileProjection {
+                    id: format!(
+                        "diagram-file:sha256:{:x}",
+                        Sha256::digest(identity.as_bytes())
+                    ),
+                    node_ids,
+                    path: path.path.clone(),
+                    state: match path.state {
+                        CandidatePathState::Present => "present",
+                        CandidatePathState::Deleted => "deleted",
+                    }
+                    .to_owned(),
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let diagram = |source: &delivery_projection::DiagramProjection,
+                   kind: &str|
+     -> Result<
+        api::StrongFlowDiagramExecutionDiagramProjection,
+        StrongFlowProjectionError,
+    > {
+        Ok(api::StrongFlowDiagramExecutionDiagramProjection {
+            diagram_id: source.id().to_owned(),
+            kind: kind.to_owned(),
+            nodes: source
+                .nodes()
+                .iter()
+                .map(|node| {
+                    let file_ids = files
+                        .iter()
+                        .filter(|file| file.node_ids.iter().any(|id| id == node.id()))
+                        .map(|file| file.id.clone())
+                        .collect::<Vec<_>>();
+                    let live = state == "executing" && node.id() == process_node_id;
+                    let affected = live || !file_ids.is_empty();
+                    Ok(api::StrongFlowDiagramExecutionNodeProjection {
+                        affected_file_count: count(
+                            if live { 1 } else { file_ids.len() as u64 },
+                            "diagram node affected file count",
+                        )?,
+                        file_ids,
+                        node_id: node.id().to_owned(),
+                        state: if affected {
+                            if state == "executing" {
+                                "affected-live"
+                            } else {
+                                "affected-finished"
+                            }
+                        } else {
+                            "normal"
+                        }
+                        .to_owned(),
+                    })
+                })
+                .collect::<Result<Vec<_>, StrongFlowProjectionError>>()?,
+        })
+    };
+    let details = finished_candidate
+        .map(|value| {
+            let evidence_ref_ids = delivery
+                .evidence()
+                .iter()
+                .filter(|evidence| {
+                    evidence.candidate_ref() == value.candidate_ref()
+                        && evidence.delivery_spec_id() == value.delivery_spec_id()
+                        && evidence.delivery_spec_revision() == value.delivery_spec_revision()
+                        && evidence.stage_run_id() == value.producer_stage_run_id()
+                        && evidence.session_binding_id() == value.producer_session_binding_id()
+                })
+                .map(|evidence| public_evidence_id(evidence.id()))
+                .collect();
+            Ok::<_, StrongFlowProjectionError>(api::StrongFlowDiagramExecutionDetailsProjection {
+                candidate: frozen_candidate(value)?,
+                diff_sha256: digest(value.diff_sha256())?,
+                files: files.clone(),
+                provenance: api::StrongFlowDiagramExecutionProvenanceProjection {
+                    stage_run_id: value.producer_stage_run_id().clone(),
+                    session_binding_id: value.producer_session_binding_id().0.clone(),
+                    delivery_task_id: value.producer_delivery_task_id().cloned(),
+                    evidence_ref_ids,
+                },
+            })
+        })
+        .transpose()?;
+    let updated_at = finished_candidate
+        .map(|value| millis_to_instant(value.producer_finished_at_millis()))
+        .transpose()?
+        .unwrap_or_else(|| read.runtime.rebuilt_at().clone());
+    Ok(Some(api::StrongFlowDiagramExecutionProjection {
+        affected_file_count: count(
+            finished_candidate.map_or(0, |value| value.changed_paths().len() as u64),
+            "diagram affected file count",
+        )?,
+        architecture: diagram(review.architecture_diagram(), "system-architecture")?,
+        delivery_id: delivery.delivery_id().clone(),
+        delivery_revision: revision(delivery.delivery_revision(), "diagram delivery revision")?,
+        details,
+        process: diagram(review.process_diagram(), "process-flow")?,
+        protocol: api::StrongFlowDiagramExecutionProjectionProtocol::WinwincodeDiagramExecutionProjectionV1,
+        review_set_sha256: digest(review.review_set_sha256())?,
+        schema_version: 1.0,
+        state: state.to_owned(),
+        updated_at,
+    }))
 }
 
 fn ownership(scope: &api::RepositoryScope) -> api::DeliveryOwnershipProjection {

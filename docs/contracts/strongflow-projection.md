@@ -152,6 +152,9 @@ Web 只使用生成的 HTTP 和 WebSocket 客户端。页面代码可以负责�
   `StrongFlowReadCursor`。该 cursor 还签名覆盖 Delivery 流的 `eventCursor`；
   `delivery.get` 建立截面，`runtime.projection.get` 只重放该截面，Web 随后从该 eventCursor
   订阅，不拼接两个独立的 latest 结果。
+- `DeliveryDetailProjection.diagramExecution` 在同一截面中绑定 Delivery revision、已审核图、
+  当前 Candidate、Task、Evidence 和有界文件路径。Web 只消费生成 DTO，并再次按这些身份做
+  精确关联；字段不包含 diff 字节、hunk 内容或内部执行对象。
 - product-session `RuntimeProjectionSnapshot` 不使用 StrongFlow read cursor，但必须返回
   自己流的 `eventCursor`，作为 HTTP 快照到 WebSocket 的唯一连续起点。
 - Publication summary 与当前 Delivery、Spec、候选、通过 Verdict、人工批准和目标在同一个

@@ -747,6 +747,7 @@
             }
           ]
         },
+        "diagramExecution": null,
         "stages": [
           {
             "id": "run_00000000000000000000000000",

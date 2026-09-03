@@ -33,11 +33,9 @@ import type {
   RuntimeProjectionGetResultResponse,
   RuntimeProjectionSnapshot,
   StageRunId,
+  StrongFlowDiagramExecutionProjection,
   StrongFlowReadCursor,
 } from './generated/contracts.js'
-import type {
-  StrongFlowDiagramExecutionProjection,
-} from '@winwincode/contracts'
 import {
   CommandName,
   ControlPlaneWebSocketEventType,
@@ -663,6 +661,7 @@ function projectionUpdatedAt(snapshot: StrongFlowSnapshot): string {
     delivery.publication?.approvedAt,
     delivery.publication?.updatedAt,
     delivery.solutionReview?.reviewedAt,
+    delivery.diagramExecution?.updatedAt,
     ...delivery.stages.flatMap(stage => [stage.startedAt, stage.finishedAt]),
     ...delivery.evidence.map(item => item.createdAt),
     ...delivery.attention.flatMap(item => [item.createdAt, item.resolvedAt]),
@@ -692,7 +691,7 @@ function projectionFromSnapshot(snapshot: StrongFlowSnapshot): StrongFlowProject
     attention: Object.freeze([...delivery.attention]),
     publication: delivery.publication,
     currentCandidate: delivery.currentCandidate,
-    diagramExecution: null,
+    diagramExecution: delivery.diagramExecution,
     metadata: Object.freeze({
       source: 'control-plane-snapshot',
       updatedAt: projectionUpdatedAt(snapshot),
