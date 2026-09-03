@@ -282,6 +282,28 @@ globalThis.runReliabilityScenario = async () => {
   await application.authSession.restore()
   await globalThis.inspectFeatureRoute('settings')
 
+  async function failureState(mode, expectedStatus) {
+    failureMode = mode
+    location.hash = `#/settings/runtime?fixture=${mode}`
+    await waitFor(
+      () => document.querySelector('.wwc-connection-bar')?.dataset.connectionStatus
+        === expectedStatus,
+      `${mode} global status`,
+    )
+    return connectionSnapshot()
+  }
+
+  const network = await failureState('network', 'reconnecting')
+  const version = await failureState('version', 'version-mismatch')
+  const authentication = await failureState('authentication', 'authentication-required')
+
+  failureMode = null
+  location.hash = '#/settings'
+  await application.authSession.restore()
+  await globalThis.inspectFeatureRoute('settings')
+  const permission = await failureState('authorization', 'permission-denied')
+  failureMode = null
+
   await subscriptionCallbacks.at(-1).onAuthorizationRevoked({
     secret: 'SECRET_TOKEN',
     path: '/private/repository',
@@ -295,26 +317,7 @@ globalThis.runReliabilityScenario = async () => {
   document.querySelector('.wwc-connection-copy').click()
   await Promise.resolve()
   const revokedDiagnostic = calls.copiedDiagnostics.at(-1) ?? ''
-  application.connection.reset()
-  await application.controlPlane.restore()
 
-  async function failureState(mode, expectedStatus) {
-    failureMode = mode
-    location.hash = `#/settings/runtime?fixture=${mode}`
-    await waitFor(
-      () => document.querySelector('.wwc-connection-bar')?.dataset.connectionStatus
-        === expectedStatus,
-      `${mode} global status`,
-    )
-    return connectionSnapshot()
-  }
-
-  const network = await failureState('network', 'reconnecting')
-  const permission = await failureState('authorization', 'permission-denied')
-  const version = await failureState('version', 'version-mismatch')
-  const authentication = await failureState('authentication', 'authentication-required')
-
-  failureMode = null
   const rawFailure = new Error('SECRET_TOKEN /private/repository raw render payload')
   dispatchEvent(new ErrorEvent('error', { error: rawFailure, message: rawFailure.message }))
   await waitFor(
