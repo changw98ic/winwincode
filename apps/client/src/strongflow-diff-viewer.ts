@@ -185,6 +185,7 @@ export function mountCandidateDiffViewer(
   sideBySideOption.dataset.mode = 'side-by-side'
   sideBySideOption.textContent = 'Side by side'
   viewToggle.append(unifiedOption, sideBySideOption)
+  searchLabel.className = 'wwc-candidate-diff-search-label'
   searchLabel.textContent = 'Search in Diff'
   search.type = 'search'
   search.className = 'wwc-candidate-diff-search'
@@ -259,9 +260,6 @@ export function mountCandidateDiffViewer(
       row.dataset.type = current.type
       row.dataset.hunkKey = current.hunkKey
       row.dataset.match = matchKeys.includes(current.key) ? 'true' : 'false'
-      const columns: readonly ('old' | 'new')[] = effectiveMode === 'side-by-side'
-        ? ['old', 'new']
-        : ['old']
       const cells: HTMLTableCellElement[] = []
       if (effectiveMode === 'unified') {
         cells.push(numberCell('old', current.oldLine))
@@ -274,7 +272,6 @@ export function mountCandidateDiffViewer(
         cells.push(sourceCell('new', current.type, current.newText))
       }
       row.replaceChildren(...cells)
-      void columns
     },
   })
 

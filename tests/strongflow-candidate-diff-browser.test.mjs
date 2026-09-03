@@ -63,6 +63,21 @@ const route = 'https://client.localhost:PORT/#/strongflow'
   + '&session=psn_00000000000000000000000001'
   + '&stageRun=run_00000000000000000000000001'
   + '&file=src%2Frenamed.ts&view=unified'
+  + '&organizationId=org_00000000000000000000000001'
+  + '&workspaceId=wsp_00000000000000000000000001'
+  + '&projectId=prj_00000000000000000000000001'
+  + '&repositoryId=rep_00000000000000000000000001'
+  + '&task=task%3Ahistory'
+  + '&run=run_00000000000000000000000004'
+
+const routeContext = {
+  organizationId: 'org_00000000000000000000000001',
+  workspaceId: 'wsp_00000000000000000000000001',
+  projectId: 'prj_00000000000000000000000001',
+  repositoryId: 'rep_00000000000000000000000001',
+  task: 'task:history',
+  run: 'run_00000000000000000000000004',
+}
 
 test('real Chrome reviews the Candidate Diff in both layouts with keyboard and search', async t => {
   const { devtools, sessionId, clientPort } = await launch(
@@ -88,7 +103,12 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
   assert.match(result.initial.status, /first 320 of 640 Diff bytes/u)
   assert.match(result.initial.fileSummary, /3 files loaded/u)
   assert.equal(result.initial.selectedPath, 'src/renamed.ts')
-  assert.match(result.initial.hash, /&file=src%2Frenamed\.ts&view=unified$/u)
+  assert.equal(result.initial.route.file, 'src/renamed.ts')
+  assert.equal(result.initial.route.view, 'unified')
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(routeContext).map(key => [key, result.initial.route[key]])),
+    routeContext,
+  )
   assert.equal(result.mainRegionCount, 1)
 
   assert.match(result.search.matchStatus, /Match 1 of 1/u)
@@ -104,7 +124,13 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
   assert.match(result.switched.modifiedLine, /\+const beta = 22/u)
   assert.equal(result.switched.searchDraft, 'kappa', 'the search draft survives a layout change')
   assert.equal(result.switched.selectedPath, 'src/renamed.ts', 'the file selection is unchanged')
-  assert.match(result.switched.hash, /&file=src%2Frenamed\.ts&view=side-by-side$/u)
+  assert.equal(result.switched.route.file, 'src/renamed.ts')
+  assert.equal(result.switched.route.view, 'side-by-side')
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(routeContext).map(key => [key, result.switched.route[key]])),
+    routeContext,
+    'layout changes preserve the historical selection and exact Scope',
+  )
   assert.deepEqual(result.switched.pressed, ['unified:false', 'side-by-side:true'])
   assert.deepEqual(result.switched.calls, [['viewMode', 'side-by-side']])
   assert.equal(result.switched.stableHeaderPreserved, true,
@@ -123,7 +149,13 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
 
   assert.match(result.binary.status, /Binary file preview is unavailable\./u)
   assert.equal(result.binary.rowCount, 0)
-  assert.match(result.binary.hash, /&file=public%2Flogo\.png&view=unified$/u)
+  assert.equal(result.binary.route.file, 'public/logo.png')
+  assert.equal(result.binary.route.view, 'unified')
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(routeContext).map(key => [key, result.binary.route[key]])),
+    routeContext,
+    'file changes preserve the historical selection and exact Scope',
+  )
 })
 
 test('real Chrome falls back to the unified layout on narrow viewports', async t => {
@@ -144,6 +176,10 @@ test('real Chrome falls back to the unified layout on narrow viewports', async t
   assert.equal(result.columns, '3', 'a narrow viewport renders the unified layout')
   assert.equal(result.disabled, true, 'the side-by-side option is disabled while narrow')
   assert.equal(result.narrow, 'true')
-  assert.match(result.hash, /&view=unified$/u, 'the route keeps the canonical unified value')
+  assert.equal(result.route.view, 'unified', 'the route keeps the canonical unified value')
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(routeContext).map(key => [key, result.route[key]])),
+    routeContext,
+  )
   await devtools.send('Emulation.clearDeviceMetricsOverride', {}, sessionId)
 })

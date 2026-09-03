@@ -43,6 +43,11 @@ import {
 } from './scope-selector-page.js'
 import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
 import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
+import {
+  strongFlowHistoryHashWithSelection,
+  strongFlowHistorySelectionFromHash,
+  type StrongFlowHistorySelection,
+} from './strongflow-history-selection.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
@@ -128,13 +133,17 @@ export function strongFlowRouteHash(
   candidatePath: string | null = null,
   candidateView: CandidateDiffViewMode = 'unified',
   scope?: ScopeRouteSelection,
+  historySelection?: StrongFlowHistorySelection,
 ): string {
   const hash = `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
     + `&session=${encodeURIComponent(productSessionId)}`
     + `&stageRun=${encodeURIComponent(stageRunId)}`
     + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
     + `&view=${encodeURIComponent(candidateView)}`
-  return scope === undefined ? hash : scopeHash(hash, scope)
+  const scopedHash = scope === undefined ? hash : scopeHash(hash, scope)
+  return historySelection === undefined
+    ? scopedHash
+    : strongFlowHistoryHashWithSelection(scopedHash, historySelection)
 }
 
 /** Read the Candidate Diff layout from a route, rejecting everything else. */
@@ -819,6 +828,7 @@ export function mountWinWinCodeClient(
           selectedCandidatePath,
           candidateView,
           scopeSelectionFromHash(browser.location.hash),
+          strongFlowHistorySelectionFromHash(browser.location.hash),
         ))
       }
       const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
@@ -849,6 +859,7 @@ export function mountWinWinCodeClient(
             path,
             candidateView,
             scopeSelectionFromHash(browser.location.hash),
+            strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
         },
         onStageBindingChange(binding) {
@@ -862,6 +873,7 @@ export function mountWinWinCodeClient(
             selectedCandidatePath,
             candidateView,
             scopeSelectionFromHash(browser.location.hash),
+            strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
         },
       })
@@ -880,6 +892,7 @@ export function mountWinWinCodeClient(
             selectedCandidatePath,
             mode,
             scopeSelectionFromHash(browser.location.hash),
+            strongFlowHistorySelectionFromHash(browser.location.hash),
           ))
         },
         routeScope: scopeSelectionFromHash(browser.location.hash),

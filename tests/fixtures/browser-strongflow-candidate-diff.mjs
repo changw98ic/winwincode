@@ -1,4 +1,9 @@
-import { strongFlowRouteHash } from '/module/application.js'
+import {
+  strongFlowCandidateViewFromHash,
+  strongFlowRouteHash,
+} from '/module/application.js'
+import { scopeSelectionFromHash } from '/module/core/scope-context.js'
+import { strongFlowHistorySelectionFromHash } from '/module/strongflow-history-selection.js'
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
 
 const deliveryId = 'dlv_00000000000000000000000001'
@@ -138,6 +143,32 @@ function publish(candidateFilesState) {
   listener?.(state)
 }
 
+function candidateRoute(path, mode = strongFlowCandidateViewFromHash(location.hash) ?? 'unified') {
+  return strongFlowRouteHash(
+    deliveryId,
+    productSessionId,
+    stageRunId,
+    path,
+    mode,
+    scopeSelectionFromHash(location.hash),
+    strongFlowHistorySelectionFromHash(location.hash),
+  )
+}
+
+function routeFacts() {
+  const parameters = new URLSearchParams(location.hash.split('?')[1] ?? '')
+  return Object.fromEntries([
+    'file',
+    'view',
+    'organizationId',
+    'workspaceId',
+    'projectId',
+    'repositoryId',
+    'task',
+    'run',
+  ].map(name => [name, parameters.get(name)]))
+}
+
 const model = {
   get state() { return state },
   subscribe(next) {
@@ -153,7 +184,7 @@ const model = {
     calls.push(['selectCandidateFile', path])
     const file = files.find(item => item.path === path)
     if (file === undefined) return
-    location.hash = strongFlowRouteHash(deliveryId, productSessionId, stageRunId, path)
+    location.hash = candidateRoute(path)
     publish({
       ...state.candidateFiles,
       selectedPath: path,
@@ -192,16 +223,11 @@ const mounted = mountStrongFlowPage({
   root,
   model,
   candidateView: 'unified',
+  historyLocation: null,
   onCandidateViewModeChange(mode) {
     calls.push(['viewMode', mode])
     const parameters = new URLSearchParams(location.hash.split('?')[1] ?? '')
-    location.hash = strongFlowRouteHash(
-      deliveryId,
-      productSessionId,
-      stageRunId,
-      parameters.get('file'),
-      mode,
-    )
+    location.hash = candidateRoute(parameters.get('file'), mode)
   },
 })
 
@@ -233,6 +259,7 @@ globalThis.runCandidateDiffScenario = async () => {
     fileSummary: query('.wwc-candidate-file-summary').textContent,
     selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
     hash: location.hash,
+    route: routeFacts(),
   }
 
   query('.wwc-candidate-diff-search').value = 'kappa'
@@ -269,6 +296,7 @@ globalThis.runCandidateDiffScenario = async () => {
     modifiedLine: lineRows().find(row => row.dataset.type === 'modified')?.textContent ?? null,
     searchDraft: query('.wwc-candidate-diff-search').value,
     hash: location.hash,
+    route: routeFacts(),
     selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
     scrollTop: query('.wwc-candidate-diff-content').scrollTop,
     pressed: [...document.querySelectorAll('.wwc-candidate-diff-view-option')]
@@ -302,6 +330,7 @@ globalThis.runCandidateDiffScenario = async () => {
     status: query('.wwc-candidate-diff-status').textContent,
     rowCount: rows().length,
     hash: location.hash,
+    route: routeFacts(),
   }
 
   return {
@@ -328,6 +357,7 @@ globalThis.runCandidateDiffNarrowScenario = async () => {
     disabled: sideBySide.disabled,
     narrow: query('.wwc-candidate-diff-view-toggle').dataset.narrow,
     hash: location.hash,
+    route: routeFacts(),
   }
 }
 
