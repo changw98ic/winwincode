@@ -2,6 +2,7 @@
 
 import type {
   DeliveryAttentionProjection,
+  EvidenceId,
   DeliveryProjection,
   DeliveryStageProjection,
   DeliveryTaskDetailProjection,
@@ -11,7 +12,10 @@ import { mountButton } from './components/button.js'
 import { mountEmptyState } from './components/empty-state.js'
 import { mountFormField } from './components/form-field.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
-import { renderStrongFlowCandidate } from './strongflow-candidate.js'
+import {
+  mountStrongFlowCandidate,
+  type StrongFlowCandidateView,
+} from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
 import {
   mountStrongFlowEvidence,
@@ -518,13 +522,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   ) as HTMLButtonElement
   let closed = false
   let diagramsNode: HTMLElement | null = null
-  let candidateNode: HTMLElement | null = null
+  let candidateView: StrongFlowCandidateView | null = null
   let lastSolutionReview: StrongFlowProjection['solutionReview'] | null = null
   let lastRuntime: StrongFlowProjection['runtime'] | null = null
-  let lastCandidate: StrongFlowProjection['currentCandidate'] | null = null
-  let lastCandidateEvidence: StrongFlowProjection['evidence'] | null = null
-  let lastVerdict: StrongFlowProjection['verdict'] | null = null
-  let lastPublication: StrongFlowProjection['publication'] | null = null
   let solutionDraftKey: string | null = null
   let evidenceWorkbench: StrongFlowEvidenceWorkbench | null = null
 
@@ -659,6 +659,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const stageRows = new WeakMap<HTMLLIElement, {
     readonly summary: HTMLElement
     readonly evidence: HTMLElement
+    readonly evidenceButtons: KeyedCollectionView<EvidenceId, string, HTMLButtonElement>
   }>()
   const stageCollection = mountKeyedCollection({
     parent: stages,
@@ -667,8 +668,37 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       const item = document.createElement('li')
       const summary = document.createElement('span')
       const evidence = strongFlowElement(document, 'span', 'wwc-strongflow-stage-evidence')
+      const evidenceListeners = new WeakMap<HTMLButtonElement, () => void>()
+      const evidenceButtons = mountKeyedCollection<EvidenceId, string, HTMLButtonElement>({
+        parent: evidence,
+        key: evidenceId => evidenceId,
+        create() {
+          const open = strongFlowElement(
+            document,
+            'button',
+            'wwc-strongflow-stage-evidence-open',
+          ) as HTMLButtonElement
+          const onClick = () => {
+            const evidenceId = open.dataset.evidenceId
+            if (evidenceId !== undefined) void evidenceWorkbench?.openEvidence(evidenceId as EvidenceId)
+          }
+          open.type = 'button'
+          open.addEventListener('click', onClick)
+          evidenceListeners.set(open, onClick)
+          return open
+        },
+        update(open, evidenceId) {
+          open.dataset.evidenceId = evidenceId
+          open.textContent = `Open Evidence ${evidenceId}`
+        },
+        remove(open) {
+          const onClick = evidenceListeners.get(open)
+          if (onClick !== undefined) open.removeEventListener?.('click', onClick)
+          evidenceListeners.delete(open)
+        },
+      })
       item.append(summary, evidence)
-      stageRows.set(item, { summary, evidence })
+      stageRows.set(item, { summary, evidence, evidenceButtons })
       return item
     },
     update(item, stage: DeliveryStageProjection) {
@@ -676,23 +706,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       if (row === undefined) return
       item.dataset.status = stage.status
       row.summary.textContent = `${stage.stage} · ${stage.role} · ${stage.status}`
-      row.evidence.replaceChildren()
       const stageEvidence = options.model.state.projection?.evidence
-        .filter(record => record.stageRunId === stage.id) ?? []
-      for (const record of stageEvidence) {
-        const open = strongFlowElement(
-          document,
-          'button',
-          'wwc-strongflow-stage-evidence-open',
-        ) as HTMLButtonElement
-        open.type = 'button'
-        open.dataset.evidenceId = record.id
-        open.textContent = `Open Evidence ${record.id}`
-        open.addEventListener('click', () => { void evidenceWorkbench?.openEvidence(record.id) })
-        row.evidence.append(open)
-      }
+        .filter(record => record.stageRunId === stage.id)
+        .map(record => record.id) ?? []
+      row.evidenceButtons.update(stageEvidence)
+      row.evidence.hidden = stageEvidence.length === 0
     },
-    remove(item) { stageRows.delete(item) },
+    remove(item) {
+      stageRows.get(item)?.evidenceButtons.close()
+      stageRows.delete(item)
+    },
   })
 
   const attentionCollection = mountKeyedCollection({
@@ -955,23 +978,21 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
         ? 'Loading the exact Delivery snapshot…'
         : 'Select a Delivery to open StrongFlow.'
-      taskCollection.update([])
-      stageCollection.update([])
-      attentionCollection.update([])
       updateOmitted(tasksOmitted, 0, 'tasks')
       updateOmitted(stagesOmitted, 0, 'stages')
       updateOmitted(attentionOmitted, 0, 'Attention records')
       evidenceHost.hidden = true
-      if (diagramsNode !== null) diagramsNode.remove()
-      if (candidateNode !== null) candidateNode.remove()
-      diagramsNode = null
-      candidateNode = null
-      lastSolutionReview = null
-      lastRuntime = null
-      lastCandidate = null
-      lastCandidateEvidence = null
-      lastVerdict = null
-      lastPublication = null
+      if (stateStatus !== 'refreshing') {
+        taskCollection.update([])
+        stageCollection.update([])
+        attentionCollection.update([])
+        if (diagramsNode !== null) diagramsNode.remove()
+        candidateView?.close()
+        diagramsNode = null
+        candidateView = null
+        lastSolutionReview = null
+        lastRuntime = null
+      }
       return
     }
 
@@ -1002,23 +1023,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       lastSolutionReview = projection.solutionReview
       lastRuntime = projection.runtime
     }
-    if (
-      candidateNode === null
-      || lastCandidate !== projection.currentCandidate
-      || lastCandidateEvidence !== projection.evidence
-      || lastVerdict !== projection.verdict
-      || lastPublication !== projection.publication
-    ) {
-      candidateNode?.remove()
-      candidateNode = renderStrongFlowCandidate(document, projection, {
+    if (candidateView === null) {
+      candidateView = mountStrongFlowCandidate(document, projection, {
         onOpenEvidence(evidenceId) { void evidenceWorkbench?.openEvidence(evidenceId) },
       })
-      candidateHost.append(candidateNode)
-      lastCandidate = projection.currentCandidate
-      lastCandidateEvidence = projection.evidence
-      lastVerdict = projection.verdict
-      lastPublication = projection.publication
-    }
+      candidateHost.append(candidateView.root)
+    } else candidateView.update(projection)
   }
 
   function renderActions(state: StrongFlowViewModelState): void {
@@ -1089,13 +1099,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     renderActions(state)
   }
 
-  const unsubscribe = options.model.subscribe(render)
   evidenceWorkbench = mountStrongFlowEvidence({
     ...options.evidence,
     root: evidenceHost,
     model: options.model,
     limits: { evidence: limits.evidence },
   })
+  const unsubscribe = options.model.subscribe(render)
   void options.model.start()
   return {
     close() {
@@ -1118,7 +1128,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       taskCollection.close()
       deliveryCollection.close()
       diagramsNode?.remove()
-      candidateNode?.remove()
+      candidateView?.close()
       evidenceWorkbench?.close()
       options.model.close()
       options.root.replaceChildren()

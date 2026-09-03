@@ -91,6 +91,8 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
 
   assert.equal(result.detail.outcome, 'Failed · business')
   assert.equal(result.detail.tone, 'business-fail')
+  assert.equal(result.detail.statusIcon, '×')
+  assert.equal(result.detail.statusIconHidden, 'true')
   assert.equal(result.detail.candidate, 'current candidate')
   assert.match(result.detail.artifact, /download-only/u)
   assert.match(result.detail.hash, /evidence=evidence%3A1/u)
@@ -107,6 +109,11 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
   assert.equal(result.closed.openerFocused, true)
   assert.equal(result.refreshed.staleClearedDuringRefresh, true)
   assert.equal(result.refreshed.stableNode, true)
+  assert.deepEqual(result.refreshed.stableEntryPoints, {
+    stage: true,
+    candidate: true,
+    criterion: true,
+  })
   assert.match(result.refreshed.binding, /revision 3/u)
   assert.equal(result.navigationEntryCount, 1)
 

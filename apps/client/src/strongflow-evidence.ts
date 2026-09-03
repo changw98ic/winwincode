@@ -29,6 +29,7 @@ import {
 } from './generated/contracts.js'
 import { mountDrawer } from './components/drawer.js'
 import { mountKeyedCollection } from './components/keyed-collection.js'
+import { mountStatusBadge, type StatusTone } from './components/status-badge.js'
 import { mountTabs, type TabsProps } from './components/tabs.js'
 import type {
   StrongFlowEvidenceRouteState,
@@ -1019,6 +1020,13 @@ function candidateStateText(state: StrongFlowEvidenceCandidateState): string {
   return 'no current candidate'
 }
 
+function outcomeStatusTone(tone: StrongFlowEvidenceOutcomeTone): StatusTone {
+  if (tone === 'pass') return 'success'
+  if (tone === 'business-fail') return 'danger'
+  if (tone === 'infra') return 'warning'
+  return 'neutral'
+}
+
 /** Mount the Evidence, Tests, and Logs workbench against one StrongFlow view-model. */
 export function mountStrongFlowEvidence(
   options: StrongFlowEvidenceWorkbenchOptions,
@@ -1045,7 +1053,15 @@ export function mountStrongFlowEvidence(
   const omitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
   const drawerContent = strongFlowElement(document, 'div', 'wwc-strongflow-evidence-drawer-body')
   const detailPanel = strongFlowElement(document, 'section', 'wwc-strongflow-evidence-detail')
-  const outcome = strongFlowElement(document, 'p', 'wwc-strongflow-evidence-detail-outcome')
+  const outcomeView = mountStatusBadge({
+    document,
+    props: {
+      className: 'wwc-strongflow-evidence-detail-outcome',
+      label: 'Outcome not reported',
+      tone: 'neutral',
+    },
+  })
+  const outcome = outcomeView.root
   const candidate = strongFlowElement(document, 'p', 'wwc-strongflow-evidence-detail-candidate')
   const detailSummary = strongFlowElement(document, 'dl', 'wwc-strongflow-evidence-detail-summary')
   const bindingTerm = document.createElement('dt')
@@ -1264,6 +1280,16 @@ export function mountStrongFlowEvidence(
     },
   })
 
+  function renderOutcome(label: string, tone: StrongFlowEvidenceOutcomeTone): void {
+    outcomeView.update({
+      className: 'wwc-strongflow-evidence-detail-outcome',
+      label,
+      tone: outcomeStatusTone(tone),
+    })
+    outcome.dataset.tone = tone
+    outcome.setAttribute('aria-label', `Evidence outcome: ${label}`)
+  }
+
   function renderDetail(state: StrongFlowEvidenceViewModelState): void {
     const selected = state.selected
     drawerProps = {
@@ -1312,15 +1338,16 @@ export function mountStrongFlowEvidence(
     download.hidden = true
     if (detail === null) {
       artifacts.update([])
-      outcome.textContent = 'Loading Evidence detail…'
+      renderOutcome('Loading Evidence detail…', 'neutral')
       return
     }
     const presentation = detail.outcome === null
       ? null
       : strongFlowEvidenceOutcomePresentation.get(detail.outcome) ?? null
-    outcome.textContent = presentation === null ? 'Outcome not reported' : presentation.label
-    outcome.dataset.tone = presentation?.tone ?? 'neutral'
-    outcome.setAttribute('aria-label', `Evidence outcome: ${outcome.textContent}`)
+    renderOutcome(
+      presentation === null ? 'Outcome not reported' : presentation.label,
+      presentation?.tone ?? 'neutral',
+    )
     if (detail.status === 'error' && detail.error !== null) {
       artifacts.update([])
       detailErrorNode.hidden = false
@@ -1449,6 +1476,7 @@ export function mountStrongFlowEvidence(
       loadMore.removeEventListener?.('click', onLoadMore)
       rows.close()
       artifacts.close()
+      outcomeView.close()
       tabs.close()
       drawer.close()
       model.close()

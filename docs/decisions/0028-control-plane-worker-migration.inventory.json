@@ -963,6 +963,7 @@
         "apps/client/src/strongflow-diagrams.ts",
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-rendering.ts",
+        "apps/client/src/strongflow-route.ts",
         "apps/client/src/strongflow-view-model.ts"
       ],
       "entrySymbols": [

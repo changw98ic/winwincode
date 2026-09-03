@@ -261,6 +261,12 @@
   margin-left: auto;
 }
 
+.wwc-strongflow-evidence-detail-outcome {
+  display: inline-flex;
+  gap: var(--wwc-space-2);
+  align-items: center;
+}
+
 .wwc-strongflow-evidence-detail-outcome[data-tone='pass'] {
   color: var(--wwc-color-success-text);
 }

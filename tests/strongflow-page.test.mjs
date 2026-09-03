@@ -49,6 +49,7 @@ const { boundedItems } = rendering
 const { clientSurfaceFromHash, parseStrongFlowRouteHash, strongFlowRouteHash } = application
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const evidenceId = 'evd_00000000000000000000000001'
 
 function many(count, create) {
   return Array.from({ length: count }, (_, index) => create(index + 1))
@@ -315,9 +316,11 @@ class FakeElement {
     for (const listener of this.listeners.get(name) ?? []) listener(values)
   }
 
-  focus() {}
+  focus() { this.ownerDocument.activeElement = this }
 
-  blur() {}
+  blur() {
+    if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null
+  }
 }
 
 class FakeDocument {
@@ -690,12 +693,12 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       productSessionId: 'psn_00000000000000000000000002',
       stageRunId: 'run_00000000000000000000000003',
       evidenceTab: 'logs',
-      evidenceId: 'evidence:1',
+      evidenceId,
     }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
-      + '&tab=logs&evidence=evidence%3A1',
+      + `&tab=logs&evidence=${evidenceId}`,
   )
   assert.deepEqual(
     parseStrongFlowRouteHash(
@@ -712,6 +715,117 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       evidenceId: null,
     },
   )
+})
+
+test('typed StrongFlow routes reject values outside the canonical entity identities', () => {
+  assert.deepEqual(
+    parseStrongFlowRouteHash(
+      '#/strongflow?delivery=../../private&session=%2500'
+        + '&stageRun=not%20valid&evidence=%3Cscript%3E&tab=tests',
+    ),
+    {
+      deliveryId: null,
+      productSessionId: null,
+      stageRunId: null,
+      evidenceTab: 'tests',
+      evidenceId: null,
+    },
+  )
+  assert.equal(
+    parseStrongFlowRouteHash(
+      `#/strongflow?delivery=${deliveryId}&delivery=${deliveryId}`,
+    ).deliveryId,
+    null,
+  )
+})
+
+test('Evidence entry controls preserve keyed identity across equivalent projections', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const classNames = [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]
+  const entries = classNames.map(className => findByClass(rootElement, className))
+
+  model.publish(state())
+
+  for (const [index, className] of classNames.entries()) {
+    assert.equal(
+      findByClass(rootElement, className),
+      entries[index],
+      `${className} must retain its keyed DOM identity`,
+    )
+  }
+  mounted.close()
+})
+
+test('removing entries and closing StrongFlow clean every Evidence entry listener', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const classNames = [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]
+  const removedEntries = classNames.map(className => findByClass(rootElement, className))
+  const withoutEntries = projection()
+  withoutEntries.delivery.stages = []
+  withoutEntries.evidence = []
+  withoutEntries.verdict = { ...withoutEntries.verdict, criteria: [] }
+
+  model.publish(state({ projection: withoutEntries }))
+
+  for (const entry of removedEntries) {
+    assert.deepEqual(entry.listeners.get('click') ?? [], [])
+  }
+
+  model.publish(state())
+  const retainedEntries = classNames.map(className => findByClass(rootElement, className))
+
+  mounted.close()
+
+  for (const entry of retainedEntries) {
+    assert.deepEqual(entry.listeners.get('click') ?? [], [])
+  }
+})
+
+test('Evidence Drawer restores focus to the keyed StageRun opener after an equivalent snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const opener = findByClass(rootElement, 'wwc-strongflow-stage-evidence-open')
+  opener.focus()
+  opener.emit('click')
+  assert.equal(document.activeElement, findByClass(rootElement, 'wwc-drawer-close'))
+
+  model.publish(state())
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-stage-evidence-open'), opener)
+  findByClass(rootElement, 'wwc-drawer-close').emit('click')
+
+  assert.equal(document.activeElement, opener)
+  mounted.close()
 })
 
 test('review controls send only current view-model decisions and disable while waiting', () => {

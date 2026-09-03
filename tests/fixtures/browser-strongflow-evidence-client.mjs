@@ -444,6 +444,11 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     'evidence rows',
   )
   const tabs = [...document.querySelectorAll('.wwc-strongflow-evidence-tabs [role="tab"]')]
+  const entryPointNodes = {
+    stage: document.querySelector('.wwc-strongflow-stage-evidence-open'),
+    candidate: document.querySelector('.wwc-strongflow-candidate-evidence-open'),
+    criterion: document.querySelector('.wwc-strongflow-criterion-evidence-open'),
+  }
   const initial = {
     hash: location.hash,
     tabLabels: tabs.map(tab => tab.textContent),
@@ -493,8 +498,16 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     'evidence detail drawer',
   )
   const detail = {
-    outcome: document.querySelector('.wwc-strongflow-evidence-detail-outcome').textContent,
+    outcome: document.querySelector(
+      '.wwc-strongflow-evidence-detail-outcome .wwc-status-badge-label',
+    ).textContent,
     tone: document.querySelector('.wwc-strongflow-evidence-detail-outcome').dataset.tone,
+    statusIcon: document.querySelector(
+      '.wwc-strongflow-evidence-detail-outcome .wwc-status-badge-icon',
+    ).textContent,
+    statusIconHidden: document.querySelector(
+      '.wwc-strongflow-evidence-detail-outcome .wwc-status-badge-icon',
+    ).getAttribute('aria-hidden'),
     candidate: document.querySelector('.wwc-strongflow-evidence-detail-candidate').textContent,
     artifact: document.querySelector('.wwc-strongflow-evidence-artifact').textContent,
     hash: location.hash,
@@ -558,6 +571,13 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
   const refreshed = {
     staleClearedDuringRefresh,
     stableNode: staleDetail === document.querySelector('.wwc-strongflow-evidence-detail'),
+    stableEntryPoints: {
+      stage: entryPointNodes.stage === document.querySelector('.wwc-strongflow-stage-evidence-open'),
+      candidate: entryPointNodes.candidate
+        === document.querySelector('.wwc-strongflow-candidate-evidence-open'),
+      criterion: entryPointNodes.criterion
+        === document.querySelector('.wwc-strongflow-criterion-evidence-open'),
+    },
     binding: document.querySelector('.wwc-strongflow-evidence-detail-summary dd').textContent,
   }
 

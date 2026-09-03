@@ -1187,7 +1187,11 @@ test('opening a row from the list opens the detail drawer with sanitized provena
   const detail = findByClass(rootElement, 'wwc-strongflow-evidence-detail')
   assert.equal(detail.dataset.status, 'ready')
   assert.equal(detail.dataset.evidenceId, 'evidence:1')
-  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-detail-outcome').textContent, 'Passed')
+  const outcome = findByClass(rootElement, 'wwc-strongflow-evidence-detail-outcome')
+  assert.equal(findByClass(outcome, 'wwc-status-badge-label').textContent, 'Passed')
+  const outcomeIcon = findByClass(outcome, 'wwc-status-badge-icon')
+  assert.notEqual(outcomeIcon, null)
+  assert.equal(outcomeIcon.getAttribute('aria-hidden'), 'true')
   assert.match(
     findByClass(rootElement, 'wwc-strongflow-evidence-detail-candidate').textContent,
     /current candidate/u,

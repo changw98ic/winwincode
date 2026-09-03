@@ -6,6 +6,7 @@ import type {
   ProductSessionId,
   StageRunId,
 } from './generated/contracts.js'
+import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 
 export type StrongFlowEvidenceTabId = 'evidence' | 'tests' | 'logs'
 
@@ -22,9 +23,17 @@ export interface StrongFlowRoute {
   readonly evidenceId: EvidenceId | null
 }
 
-function boundedParameter(parameters: URLSearchParams, name: string): string | null {
-  const value = parameters.get(name)
-  return value === null || value.length === 0 || value.length > 4096 ? null : value
+function canonicalParameter<Identity extends string>(
+  parameters: URLSearchParams,
+  name: string,
+  schema: 'DeliveryId' | 'EvidenceId' | 'ProductSessionId' | 'StageRunId',
+): Identity | null {
+  const values = parameters.getAll(name)
+  if (values.length !== 1) return null
+  const value = values[0]
+  return value !== undefined && matchesCanonicalSchema(schema, value)
+    ? value as Identity
+    : null
 }
 
 /** Parse the complete StrongFlow browser route once at the application boundary. */
@@ -33,11 +42,15 @@ export function parseStrongFlowRouteHash(hash: string): StrongFlowRoute {
   const parameters = new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
   const tab = parameters.get('tab')
   return Object.freeze({
-    deliveryId: boundedParameter(parameters, 'delivery') as DeliveryId | null,
-    productSessionId: boundedParameter(parameters, 'session') as ProductSessionId | null,
-    stageRunId: boundedParameter(parameters, 'stageRun') as StageRunId | null,
+    deliveryId: canonicalParameter<DeliveryId>(parameters, 'delivery', 'DeliveryId'),
+    productSessionId: canonicalParameter<ProductSessionId>(
+      parameters,
+      'session',
+      'ProductSessionId',
+    ),
+    stageRunId: canonicalParameter<StageRunId>(parameters, 'stageRun', 'StageRunId'),
     evidenceTab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
-    evidenceId: boundedParameter(parameters, 'evidence') as EvidenceId | null,
+    evidenceId: canonicalParameter<EvidenceId>(parameters, 'evidence', 'EvidenceId'),
   })
 }
 
