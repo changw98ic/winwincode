@@ -15,6 +15,7 @@ import { mountSplitPane } from './components/split-pane.js'
 import { mountTabs, type TabItem } from './components/tabs.js'
 import { renderStrongFlowCandidate } from './strongflow-candidate.js'
 import { renderStrongFlowDiagrams } from './strongflow-diagrams.js'
+import { mountStrongFlowHeader, strongFlowNextStep } from './strongflow-header.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -122,13 +123,11 @@ export function strongFlowPagePresentation(
               ? 'Update cancelled'
               : state.status === 'error'
                 ? 'StrongFlow unavailable'
-                : state.status === 'closed'
-                  ? 'StrongFlow closed'
-                  : state.projection === null
-                    ? 'No Delivery selected'
-                    : `${state.projection.delivery.status} · revision ${String(
-                        state.projection.metadata.revisions.delivery,
-                      )}`
+                  : state.status === 'closed'
+                    ? 'StrongFlow closed'
+                    : state.projection === null
+                      ? 'No Delivery selected'
+                      : strongFlowNextStep(state.projection).statusLabel
   const errorText = visibleError === null
     ? null
     : visibleError.code === 'REVISION_CONFLICT'
@@ -581,6 +580,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
           },
         }
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
+  const header = mountStrongFlowHeader({ document })
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
   const error = strongFlowElement(document, 'div', 'wwc-strongflow-error')
   const errorText = strongFlowElement(document, 'span', 'wwc-strongflow-error-text')
@@ -985,7 +985,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   narrowBar.append(openNavigation.root, openContext.root)
   workspace.append(desktopControls, narrowBar, outerSplit.root, artifacts)
   content.append(workspace, navigationDrawer.root, contextDrawer.root)
-  layout.append(status, error, content)
+  layout.append(status, error, header.root, content)
   options.root.replaceChildren(layout)
 
   const deliveryRows = new WeakMap<HTMLLIElement, {
@@ -1665,6 +1665,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     if (closed) return
     const presentation = strongFlowPagePresentation(state)
     status.textContent = presentation.statusText
+    header.update(state)
     content.setAttribute('aria-busy', String(presentation.busy))
     error.hidden = presentation.errorText === null
     errorText.textContent = presentation.errorText ?? ''
@@ -1686,6 +1687,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       closed = true
       unsubscribe()
       browserWindow?.removeEventListener('resize', onWindowResize)
+      header.close()
       retry.removeEventListener('click', onRetry)
       reconnect.removeEventListener('click', onReconnect)
       approveSolution.removeEventListener('click', onApproveSolution)
