@@ -1062,9 +1062,20 @@ fn lowercase_sha256(value: &str) -> bool {
 }
 
 fn derived_evidence_id(value: &str) -> bool {
-    value
-        .strip_prefix("evidence:sha256:")
-        .is_some_and(lowercase_sha256)
+    value.strip_prefix("evd_").is_some_and(|suffix| {
+        suffix.len() == 26
+            && suffix.bytes().all(|byte| {
+                matches!(
+                    byte,
+                    b'0'..=b'9'
+                        | b'A'..=b'H'
+                        | b'J'..=b'K'
+                        | b'M'..=b'N'
+                        | b'P'..=b'T'
+                        | b'V'..=b'Z'
+                )
+            })
+    })
 }
 
 fn lowercase_hex(value: &str) -> bool {
@@ -1301,7 +1312,7 @@ mod tests {
             targets: vec![DeliveryReworkTargetScope {
                 delivery_task_id: DeliveryTaskId("dtk_01J00000000000000000000000".into()),
                 diagram_id: "diagram-main".into(),
-                evidence_ref_ids: vec![format!("evidence:sha256:{}", "f".repeat(64))],
+                evidence_ref_ids: vec![format!("evd_{}", "F".repeat(26))],
                 file_path: file_path.into(),
                 node_id: "node-api".into(),
                 source_hunk_sha256: "e".repeat(64),
@@ -1347,7 +1358,7 @@ mod tests {
         assert_eq!(encoded["targets"][0]["nodeId"], "node-api");
         assert_eq!(
             encoded["targets"][0]["evidenceRefIds"][0],
-            format!("evidence:sha256:{}", "f".repeat(64))
+            format!("evd_{}", "F".repeat(26))
         );
 
         let second = authorization_scope("src/foreign.rs");

@@ -483,10 +483,30 @@ fn deterministic_evidence_id(
             format!("failed to encode the canonical Evidence identity: {error}"),
         )
     })?;
-    Ok(EvidenceId(format!(
-        "evidence:sha256:{:x}",
-        Sha256::digest(encoded)
+    Ok(EvidenceId(canonical_evidence_id(
+        Sha256::digest(encoded).into(),
     )))
+}
+
+/// Encodes one sealed Evidence identity digest as the canonical public
+/// Evidence id: `evd_` plus 26 Crockford Base32 characters.
+///
+/// The generated public contract only accepts this exact shape, so resolved
+/// Evidence never transports its internal digest spelling.
+fn canonical_evidence_id(digest: [u8; 32]) -> String {
+    const CROCKFORD_BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut value = u128::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+        digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14],
+        digest[15],
+    ]);
+    let mut encoded = [b'0'; 26];
+    for byte in encoded.iter_mut().rev() {
+        *byte = CROCKFORD_BASE32_ALPHABET[(value & 31) as usize];
+        value >>= 5;
+    }
+    let suffix: String = encoded.into_iter().map(char::from).collect();
+    format!("evd_{suffix}")
 }
 
 fn resolve_direct_candidate_source(
@@ -1482,6 +1502,25 @@ mod tests {
         assert_eq!(evidence.evidence_type, EvidenceRefType::Test);
         assert_eq!(evidence.source_ref, "runtime_event:event-verifier-test-7");
         assert_eq!(resolved.outcome(), VerifiedEvidenceOutcome::Succeeded);
+        // The generated public contract only accepts `evd_` followed by 26
+        // Crockford Base32 characters as a public Evidence identity.
+        let id = &evidence.id.0;
+        assert!(
+            id.len() == 30
+                && id.starts_with("evd_")
+                && id[4..].bytes().all(|byte| {
+                    matches!(
+                        byte,
+                        b'0'..=b'9'
+                            | b'A'..=b'H'
+                            | b'J'..=b'K'
+                            | b'M'..=b'N'
+                            | b'P'..=b'T'
+                            | b'V'..=b'Z'
+                    )
+                }),
+            "canonical public Evidence id is required: {id}"
+        );
     }
 
     #[test]
