@@ -39,6 +39,7 @@ const contracts = await import(`${pathToFileURL(resolve(
 const {
   createStrongFlowEvidenceViewModel,
   mountStrongFlowEvidence,
+  strongFlowEvidenceSummary,
   strongFlowEvidenceErrorText,
   strongFlowEvidenceOutcomePresentation,
   strongFlowEvidenceRowsForTab,
@@ -220,7 +221,7 @@ function artifactDescriptor(overrides = {}) {
       sessionBindingId,
       stageRunId,
     },
-    sizeBytes: 1000,
+    sizeBytes: 26,
     ...overrides,
   }
 }
@@ -235,15 +236,15 @@ function artifactChunkResponse(request, overrides = {}) {
       contentEncoding: 'utf-8',
       dataBase64: Buffer.from('log line one\nlog line two\n', 'utf8').toString('base64'),
       encoding: 'base64',
-      evidence: evidenceRow(2),
+      evidence: { ...evidenceRow(2), type: 'command' },
       kind: 'evidence_artifact_content_chunk',
       nextOffset: null,
       offset: 0,
       previewMode: 'inline_text',
       readCursor: readCursor(),
-      returnedBytes: 24,
+      returnedBytes: 26,
       state: 'available',
-      totalBytes: 24,
+      totalBytes: 26,
       truncated: false,
       ...overrides,
     },
@@ -257,13 +258,168 @@ class FakeControlPlaneClient {
     this.queries = []
   }
 
-  async query(request) {
+  queryOptions = []
+
+  async query(request, options) {
     this.queries.push(structuredClone(request))
+    this.queryOptions.push(options ?? null)
     const response = this.handler(request, this.queries.length)
     if (response === null) throw new Error('unexpected query')
     return response
   }
 }
+
+test('summary joins only verdict-owned criterion evidence and bounds key failures', () => {
+  const rows = [evidenceRow(1), evidenceRow(2), evidenceRow(3)]
+  const value = projection({
+    evidence: rows,
+    verdict: {
+      status: 'fail',
+      producedAt: '2026-09-02T02:00:00.000Z',
+      criteria: [
+        { criterionId: 'criterion:pass', resultId: 'result:1', verdict: 'pass', evidenceRefs: [rows[0].id], explanation: 'passed', evaluatedAt: '2026-09-02T02:00:00.000Z' },
+        { criterionId: 'criterion:fail-a', resultId: 'result:2', verdict: 'fail', evidenceRefs: [rows[1].id], explanation: 'failed a', evaluatedAt: '2026-09-02T02:00:00.000Z' },
+        { criterionId: 'criterion:infra', resultId: 'result:3', verdict: 'infra_error', evidenceRefs: [rows[1].id], explanation: 'infra', evaluatedAt: '2026-09-02T02:00:00.000Z' },
+        { criterionId: 'criterion:fail-b', resultId: 'result:4', verdict: 'fail', evidenceRefs: ['evidence:foreign'], explanation: 'failed b', evaluatedAt: '2026-09-02T02:00:00.000Z' },
+      ],
+    },
+  })
+  const summary = strongFlowEvidenceSummary(value, 2)
+  assert.deepEqual(summary.counts, { total: 4, pass: 1, fail: 2, inconclusive: 0, infraError: 1 })
+  assert.deepEqual(summary.failures.map(failure => failure.criterionId), [
+    'criterion:fail-a',
+    'criterion:infra',
+  ])
+  assert.equal(summary.omittedFailures, 1)
+  assert.deepEqual(summary.criterionIdsByEvidence.get(rows[1].id), [
+    'criterion:fail-a',
+    'criterion:infra',
+  ])
+  assert.equal(summary.criterionIdsByEvidence.has('evidence:foreign'), false)
+})
+
+test('detail identity mismatch is rejected and every facade read receives a cancellable signal', async () => {
+  const client = new FakeControlPlaneClient(request => evidenceGetResponse(
+    request,
+    evidenceDetailResult({ evidence: { ...evidenceRow(1), stageRunId: 'run_foreign' } }),
+  ))
+  const { created } = viewModel({ client })
+  await created.openEvidence('evidence:1')
+  assert.equal(created.state.detail.status, 'error')
+  assert.equal(created.state.detail.error.code, 'STRONGFLOW_EVIDENCE_IDENTITY_MISMATCH')
+  assert.equal(client.queryOptions[0].signal instanceof AbortSignal, true)
+})
+
+test('a changed snapshot identity clears stale bytes synchronously, aborts the old read, and reloads', async () => {
+  let resolveFirst
+  const first = new Promise(resolve => { resolveFirst = resolve })
+  const client = new FakeControlPlaneClient((request, count) => {
+    if (count === 1) return first
+    return evidenceGetResponse(request, evidenceDetailResult({
+      readCursor: readCursor({ token: 'cursor-token-2', deliveryRevision: 7 }),
+    }))
+  })
+  const { created, model } = viewModel({ client })
+  const opening = created.openEvidence('evidence:1')
+  await new Promise(resolve => { setImmediate(resolve) })
+  const firstSignal = client.queryOptions[0].signal
+  model.publish(modelState({
+    projection: projection({
+      delivery: { ...projection().delivery, deliveryRevision: 7 },
+      metadata: {
+        ...projection().metadata,
+        revisions: { ...projection().metadata.revisions, delivery: 7 },
+        readCursor: readCursor({ token: 'cursor-token-2', deliveryRevision: 7 }),
+      },
+    }),
+  }))
+  assert.equal(firstSignal.aborted, true)
+  assert.equal(created.state.detail.status, 'loading')
+  assert.equal(created.state.content, null)
+  resolveFirst(evidenceGetResponse(client.queries[0], evidenceDetailResult()))
+  await opening
+  await new Promise(resolve => { setImmediate(resolve) })
+  assert.equal(client.queries.length, 2)
+  assert.equal(created.state.detail.status, 'ready')
+})
+
+test('content validates exact descriptor, provenance, cursor and requested byte range', async () => {
+  const descriptor = artifactDescriptor({ sizeBytes: 26 })
+  const client = new FakeControlPlaneClient(request => {
+    if (request.query === QueryName.EvidenceGet) {
+      return evidenceGetResponse(request, evidenceDetailResult({
+        evidence: { ...evidenceRow(2), type: 'command' },
+        artifactAccess: { state: 'available', items: [descriptor] },
+      }))
+    }
+    return artifactChunkResponse(request, {
+      artifact: { ...descriptor, digest: `sha256:${'d'.repeat(64)}` },
+      totalBytes: 26,
+    })
+  })
+  const { created } = viewModel({ client })
+  await created.openEvidence('evidence:2')
+  assert.equal(created.state.content.status, 'error')
+  assert.equal(created.state.content.error.code, 'STRONGFLOW_EVIDENCE_CONTENT_IDENTITY_MISMATCH')
+})
+
+test('streaming UTF-8 preserves a code point split across bounded chunks', async () => {
+  const descriptor = artifactDescriptor({ sizeBytes: 4 })
+  const bytes = Buffer.from('🙂', 'utf8')
+  const client = new FakeControlPlaneClient(request => {
+    if (request.query === QueryName.EvidenceGet) {
+      return evidenceGetResponse(request, evidenceDetailResult({
+        evidence: { ...evidenceRow(2), type: 'command' },
+        artifactAccess: { state: 'available', items: [descriptor] },
+      }))
+    }
+    const offset = request.parameters.offset
+    const part = offset === 0 ? bytes.subarray(0, 2) : bytes.subarray(2)
+    return artifactChunkResponse(request, {
+      artifact: descriptor,
+      dataBase64: part.toString('base64'),
+      offset,
+      returnedBytes: 2,
+      totalBytes: 4,
+      nextOffset: offset === 0 ? 2 : null,
+    })
+  })
+  const { created } = viewModel({ client })
+  await created.openEvidence('evidence:2')
+  assert.equal(created.state.content.text, '')
+  await created.loadNextChunk()
+  assert.equal(created.state.content.text, '🙂')
+  assert.equal(created.state.content.complete, true)
+})
+
+test('all bounded Artifact descriptors remain selectable and switch exact content authority', async () => {
+  const first = artifactDescriptor({ artifactId: 'artifact:first', sizeBytes: 26 })
+  const second = artifactDescriptor({
+    artifactId: 'artifact:second',
+    digest: `sha256:${'e'.repeat(64)}`,
+    fileName: 'second.log',
+    sizeBytes: 26,
+  })
+  const client = new FakeControlPlaneClient(request => {
+    if (request.query === QueryName.EvidenceGet) {
+      return evidenceGetResponse(request, evidenceDetailResult({
+        evidence: { ...evidenceRow(2), type: 'command' },
+        artifactAccess: { state: 'available', items: [first, second] },
+      }))
+    }
+    const descriptor = request.parameters.artifactId === first.artifactId ? first : second
+    return artifactChunkResponse(request, { artifact: descriptor })
+  })
+  const { created } = viewModel({ client })
+  await created.openEvidence('evidence:2')
+  assert.deepEqual(created.state.detail.artifactAccess.items.map(item => item.artifactId), [
+    first.artifactId,
+    second.artifactId,
+  ])
+  await created.selectArtifact(second.artifactId)
+  assert.equal(created.state.content.artifact.artifactId, second.artifactId)
+  assert.equal(client.queries.at(-1).parameters.artifactId, second.artifactId)
+})
 
 let requestSequence = 0
 function nextRequestId() {
@@ -415,6 +571,7 @@ test('inline text artifacts load bounded chunks with continuation and dedupe rep
   const client = new FakeControlPlaneClient((request, count) => {
     if (request.query === QueryName.EvidenceGet) {
       return evidenceGetResponse(request, evidenceDetailResult({
+        evidence: { ...evidenceRow(2), type: 'command' },
         artifactAccess: { state: 'available', items: [descriptor] },
       }))
     }
@@ -434,6 +591,7 @@ test('inline text artifacts load bounded chunks with continuation and dedupe rep
       })
       return artifactChunkResponse(request, {
         artifact: descriptor,
+        dataBase64: Buffer.from('x'.repeat(request.parameters.length)).toString('base64'),
         offset: request.parameters.offset,
         nextOffset: count === 2 ? 256 * 1024 : null,
         returnedBytes: request.parameters.length,
@@ -468,6 +626,7 @@ test('binary, unknown-8bit, and download-only artifacts stay download-only witho
     const client = new FakeControlPlaneClient(request => {
       if (request.query === QueryName.EvidenceGet) {
         return evidenceGetResponse(request, evidenceDetailResult({
+          evidence: { ...evidenceRow(2), type: 'command' },
           artifactAccess: { state: 'available', items: [descriptor] },
         }))
       }
@@ -482,6 +641,7 @@ test('binary, unknown-8bit, and download-only artifacts stay download-only witho
   const client = new FakeControlPlaneClient(request => {
     if (request.query === QueryName.EvidenceGet) {
       return evidenceGetResponse(request, evidenceDetailResult({
+        evidence: { ...evidenceRow(2), type: 'command' },
         artifactAccess: { state: 'available', items: [descriptor] },
       }))
     }
@@ -498,6 +658,7 @@ test('downloading an artifact walks bounded ranges once and hands one base64 pay
   const client = new FakeControlPlaneClient((request, count) => {
     if (request.query === QueryName.EvidenceGet) {
       return evidenceGetResponse(request, evidenceDetailResult({
+        evidence: { ...evidenceRow(2), type: 'command' },
         artifactAccess: { state: 'available', items: [descriptor] },
       }))
     }
@@ -853,6 +1014,9 @@ test('log search filters only the loaded text and never claims the whole file', 
     }
     return artifactChunkResponse(request, {
       artifact: descriptor,
+      dataBase64: Buffer.from(
+        'log line one\nlog line two\n'.padEnd(request.parameters.length, 'x'),
+      ).toString('base64'),
       offset: request.parameters.offset,
       nextOffset: count === 2 ? 256 * 1024 : null,
       returnedBytes: request.parameters.length,

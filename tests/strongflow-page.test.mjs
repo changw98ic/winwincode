@@ -46,7 +46,7 @@ const {
   strongFlowPagePresentation,
 } = page
 const { boundedItems } = rendering
-const { clientSurfaceFromHash, strongFlowRouteHash } = application
+const { clientSurfaceFromHash, parseStrongFlowRouteHash, strongFlowRouteHash } = application
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
 
@@ -631,14 +631,32 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/strongflow?delivery=dlv_1').id, 'strongflow')
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      evidenceTab: 'logs',
+      evidenceId: 'evidence:1',
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
-      + '&stageRun=run_00000000000000000000000003',
+      + '&stageRun=run_00000000000000000000000003'
+      + '&tab=logs&evidence=evidence%3A1',
+  )
+  assert.deepEqual(
+    parseStrongFlowRouteHash(
+      `#/strongflow?delivery=${deliveryId}`
+        + '&session=psn_00000000000000000000000002'
+        + '&stageRun=run_00000000000000000000000003'
+        + '&tab=bogus&evidence=',
+    ),
+    {
+      deliveryId,
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    },
   )
 })
 
