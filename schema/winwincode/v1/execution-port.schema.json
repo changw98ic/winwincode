@@ -2732,8 +2732,7 @@
           "maxItems": 1000,
           "uniqueItems": true,
           "items": {
-            "type": "string",
-            "pattern": "^evidence:sha256:[0-9a-f]{64}$"
+            "$ref": "./domain.schema.json#/$defs/EvidenceId"
           }
         }
       },

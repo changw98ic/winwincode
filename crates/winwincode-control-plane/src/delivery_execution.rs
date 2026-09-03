@@ -575,11 +575,7 @@ fn execution_rework_scope(authorization: &ReworkAuthorization) -> DeliveryRework
             .map(|target| DeliveryReworkTargetScope {
                 delivery_task_id: target.delivery_task_id().clone(),
                 diagram_id: target.diagram_id().to_owned(),
-                evidence_ref_ids: target
-                    .evidence_ref_ids()
-                    .iter()
-                    .map(|id| id.0.clone())
-                    .collect(),
+                evidence_ref_ids: target.evidence_ref_ids().iter().cloned().collect(),
                 file_path: target.file_path().to_owned(),
                 node_id: target.node_id().to_owned(),
                 source_hunk_sha256: target.hunk_sha256().to_owned(),
@@ -1038,7 +1034,7 @@ fn delivery_rework_targets_error(
                     && target
                         .evidence_ref_ids
                         .iter()
-                        .all(|id| derived_evidence_id(id) && evidence.insert(id.as_str())),
+                        .all(|id| derived_evidence_id(&id.0) && evidence.insert(id.0.as_str())),
             ),
             (
                 "executionJob.scope.reworkAuthorization.targets",
@@ -1244,7 +1240,7 @@ fn decimal(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winwincode_domain::DeliveryTaskId;
+    use winwincode_domain::{DeliveryTaskId, EvidenceId};
 
     fn prepared_execution_job() -> ExecutionJob {
         serde_json::from_slice(include_bytes!(concat!(
@@ -1312,7 +1308,7 @@ mod tests {
             targets: vec![DeliveryReworkTargetScope {
                 delivery_task_id: DeliveryTaskId("dtk_01J00000000000000000000000".into()),
                 diagram_id: "diagram-main".into(),
-                evidence_ref_ids: vec![format!("evd_{}", "F".repeat(26))],
+                evidence_ref_ids: vec![EvidenceId(format!("evd_{}", "F".repeat(26)))],
                 file_path: file_path.into(),
                 node_id: "node-api".into(),
                 source_hunk_sha256: "e".repeat(64),

@@ -1076,11 +1076,7 @@ fn authorized_rework_commits_exact_structured_scope_and_rejects_cross_delivery_r
     assert_eq!(authorization.targets[0].source_hunk_sha256, "b".repeat(64));
     assert_eq!(
         authorization.targets[0].evidence_ref_ids,
-        fixture
-            .evidence_ref_ids
-            .iter()
-            .map(|id| id.0.clone())
-            .collect::<Vec<_>>()
+        fixture.evidence_ref_ids
     );
     assert!(!pending.job().goal.contains("REWORK_AUTHORIZATION"));
 
