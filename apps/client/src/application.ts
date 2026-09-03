@@ -724,6 +724,7 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        signal: controller.signal,
       })
       await list.start()
       return list

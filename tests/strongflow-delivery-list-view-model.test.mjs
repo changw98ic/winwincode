@@ -684,3 +684,32 @@ test('a superseded rebuild never publishes an older generation over a newer one'
   ])
   model.close()
 })
+
+test('route cancellation rides the caller signal and ends the load as cancelled', async () => {
+  const controller = new AbortController()
+  let observedSignal = null
+  const client = new FakeClient().onQuery('delivery.list', (request, requestOptions) => {
+    observedSignal = requestOptions?.signal ?? null
+    return new Promise((resolveValue, rejectValue) => {
+      requestOptions?.signal?.addEventListener('abort', () => {
+        rejectValue(Object.assign(new Error('cancelled'), {
+          kind: 'cancelled',
+          code: 'REQUEST_CANCELLED',
+          requestId: 'req_abort',
+          retryable: false,
+        }))
+      }, { once: true })
+    })
+  })
+  const { model } = view(client, { signal: controller.signal })
+  const started = model.start()
+  await new Promise(resolveTick => setImmediate(resolveTick))
+  assert.equal(observedSignal?.aborted, false, 'the request carries the route signal')
+
+  controller.abort()
+  await started
+
+  assert.equal(observedSignal.aborted, true)
+  assert.equal(model.state.error?.code, 'REQUEST_CANCELLED')
+  model.close()
+})

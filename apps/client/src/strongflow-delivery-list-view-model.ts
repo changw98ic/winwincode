@@ -70,6 +70,8 @@ export interface StrongFlowDeliveryListViewModelOptions {
   readonly actor: Actor
   readonly scope: RepositoryScope
   readonly nextRequestId: () => RequestId
+  /** Route lifetime signal; aborting it cancels the in-flight list request. */
+  readonly signal?: AbortSignal
   readonly pageLimit?: number
   readonly maxPages?: number
 }
@@ -188,6 +190,7 @@ export function createStrongFlowDeliveryListViewModel(
   }
 
   const { actor, scope } = options
+  const requestOptions = options.signal === undefined ? undefined : { signal: options.signal }
   let closed = false
   let generation = 0
   let listener: ((state: StrongFlowDeliveryListState) => void) | null = null
@@ -271,7 +274,7 @@ export function createStrongFlowDeliveryListViewModel(
       query: QueryName.DeliveryList,
       parameters: { states: Object.freeze([...states]) },
       page,
-    }) as Promise<DeliveryListResultResponse>
+    }, requestOptions) as Promise<DeliveryListResultResponse>
   }
 
   /**
@@ -495,7 +498,7 @@ export function createStrongFlowDeliveryListViewModel(
           command: CommandName.DeliveryAdvance,
           expectedRevision,
           payload: { deliveryId },
-        })
+        }, requestOptions)
       } catch (error) {
         if (superseded(ownGeneration)) return
         advanceFailure = failureOf(error)
