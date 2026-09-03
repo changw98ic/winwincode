@@ -684,13 +684,28 @@ test('Candidate deep links select the exact file after its bounded page arrives'
       kind: 'candidate_file_page',
       candidate: currentCandidate,
       readCursor: readCursor(),
+      items: [{
+        ...file,
+        path: 'src/first-page.ts',
+      }],
+    },
+    page: { hasMore: true, nextCursor: 'candidate-files:deep-link' },
+  })
+  client.enqueue('candidate.files.list', {
+    schemaVersion,
+    requestId: requestId(4),
+    query: 'candidate.files.list',
+    result: {
+      kind: 'candidate_file_page',
+      candidate: currentCandidate,
+      readCursor: readCursor(),
       items: [file],
     },
     page: page(),
   })
   client.enqueue('candidate.diff.get', {
     schemaVersion,
-    requestId: requestId(4),
+    requestId: requestId(5),
     query: 'candidate.diff.get',
     result: {
       kind: 'candidate_diff_chunk',
@@ -723,8 +738,29 @@ test('Candidate deep links select the exact file after its bounded page arrives'
     'delivery.get',
     'runtime.projection.get',
     'candidate.files.list',
+    'candidate.files.list',
     'candidate.diff.get',
   ])
+  assert.equal(client.calls[3].page.cursor, 'candidate-files:deep-link')
+})
+
+test('a pinned Candidate deep link fails closed when refresh replaces that Candidate', async () => {
+  const initial = delivery()
+  let pinnedCandidateRef = null
+  const { client, model } = view(undefined, {
+    expectedCandidateRef: () => pinnedCandidateRef,
+  })
+  await model.start()
+  pinnedCandidateRef = initial.currentCandidate.candidateRef
+
+  const replacement = delivery(2, 'refs/winwincode/candidate/replacement')
+  client.enqueue('delivery.get', response('delivery.get', replacement))
+  await model.refresh()
+
+  assert.equal(model.state.status, 'error')
+  assert.equal(model.state.projection, null)
+  assert.equal(model.state.error.code, 'STRONGFLOW_CANDIDATE_ROUTE_STALE')
+  assert.match(model.state.error.message, /Candidate named by this StrongFlow link/u)
 })
 
 test('binary Candidate files report an unavailable preview without a Diff request', async () => {

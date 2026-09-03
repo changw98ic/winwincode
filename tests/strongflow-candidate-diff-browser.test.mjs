@@ -62,7 +62,8 @@ const route = 'https://client.localhost:PORT/#/strongflow'
   + '?delivery=dlv_00000000000000000000000001'
   + '&session=psn_00000000000000000000000001'
   + '&stageRun=run_00000000000000000000000001'
-  + '&file=src%2Frenamed.ts&view=unified'
+  + `&candidate=${encodeURIComponent(`git-candidate:sha256:${'1'.repeat(64)}`)}`
+  + '&panel=candidate&file=src%2Frenamed.ts&view=unified&line=11'
   + '&organizationId=org_00000000000000000000000001'
   + '&workspaceId=wsp_00000000000000000000000001'
   + '&projectId=prj_00000000000000000000000001'
@@ -92,6 +93,29 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
     deviceScaleFactor: 1,
     mobile: false,
   }, sessionId)
+  const beforeReload = await evaluate(devtools, sessionId, 'globalThis.candidateDeepLinkSnapshot()')
+  await devtools.send('Page.reload', { ignoreCache: true }, sessionId)
+  await waitForGlobal(devtools, sessionId, 'runCandidateDiffScenario')
+  const afterReload = await evaluate(devtools, sessionId, 'globalThis.candidateDeepLinkSnapshot()')
+  assert.deepEqual(afterReload, beforeReload)
+  assert.deepEqual(afterReload, {
+    route: {
+      file: 'src/renamed.ts',
+      view: 'unified',
+      organizationId: routeContext.organizationId,
+      workspaceId: routeContext.workspaceId,
+      projectId: routeContext.projectId,
+      repositoryId: routeContext.repositoryId,
+      task: routeContext.task,
+      run: routeContext.run,
+      candidate: `git-candidate:sha256:${'1'.repeat(64)}`,
+      panel: 'candidate',
+      line: '11',
+    },
+    panel: 'true',
+    file: 'src/renamed.ts',
+    line: '11',
+  })
   const result = await evaluate(devtools, sessionId, 'globalThis.runCandidateDiffScenario()')
 
   assert.equal(result.initial.columns, '3')
@@ -105,6 +129,10 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
   assert.equal(result.initial.selectedPath, 'src/renamed.ts')
   assert.equal(result.initial.route.file, 'src/renamed.ts')
   assert.equal(result.initial.route.view, 'unified')
+  assert.equal(result.initial.route.panel, 'candidate')
+  assert.equal(result.initial.route.candidate, `git-candidate:sha256:${'1'.repeat(64)}`)
+  assert.equal(result.initial.route.line, '11')
+  assert.equal(result.initial.selectedLine, '11')
   assert.deepEqual(
     Object.fromEntries(Object.keys(routeContext).map(key => [key, result.initial.route[key]])),
     routeContext,
@@ -113,6 +141,18 @@ test('real Chrome reviews the Candidate Diff in both layouts with keyboard and s
 
   assert.match(result.search.matchStatus, /Match 1 of 1/u)
   assert.match(result.search.activeText, /\+const kappa = 3/u)
+
+  assert.equal(result.evidencePanel.selected, 'true')
+  assert.equal(result.evidencePanel.route.panel, 'evidence')
+  assert.equal(result.evidencePanel.route.file, 'src/renamed.ts')
+  assert.equal(result.evidencePanel.route.line, '11')
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(routeContext).map(key => [key, result.evidencePanel.route[key]])),
+    routeContext,
+  )
+  assert.equal(result.lineSelection.route.line, '40')
+  assert.equal(result.lineSelection.activeLine, '40')
+  assert.equal(result.lineSelection.currentLine, '40')
 
   assert.equal(result.collapsed.focusedHunk, 'hunk:1')
   assert.match(result.collapsed.hiddenNote, /6 unchanged lines hidden/u)

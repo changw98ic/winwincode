@@ -187,6 +187,8 @@ export interface StrongFlowViewModelOptions {
   readonly subscriptionId: ControlPlaneWebSocketSubscriptionId
   readonly nextRequestId: () => RequestId
   readonly onStageBindingChange?: (binding: StrongFlowStageBinding) => void
+  /** Reads the Candidate identity currently pinned by the canonical route. */
+  readonly expectedCandidateRef?: () => string | null
   readonly selectedCandidatePath?: string | null
   readonly onCandidatePathChange?: (path: string | null) => void
 }
@@ -661,6 +663,14 @@ function assertDelivery(
   if (!stageMatchesBinding(stage, binding)) throw clientFailure(
     'STRONGFLOW_STAGE_BINDING_MISMATCH',
     'The active StageRun has an inconsistent ProductSession binding.',
+  )
+  const expectedCandidateRef = options.expectedCandidateRef?.() ?? null
+  if (
+    expectedCandidateRef !== null
+    && delivery.currentCandidate?.candidateRef !== expectedCandidateRef
+  ) throw clientFailure(
+    'STRONGFLOW_CANDIDATE_ROUTE_STALE',
+    'The Candidate named by this StrongFlow link has expired or is no longer current.',
   )
   if (
     activeIndex < currentIndex
@@ -1330,9 +1340,24 @@ export function createStrongFlowViewModel(
         error: null,
       }) })
       const selectedPath = currentState.candidateFiles.selectedPath
+      if (selectedPath !== null && !items.some(file => file.path === selectedPath)) {
+        if (response.page.hasMore && !previewLimited) {
+          if (candidateFilesController === active) candidateFilesController = null
+          await loadCandidateFilePage(true)
+          return
+        }
+        candidateFilesPatch({
+          status: 'error',
+          hasMore: false,
+          error: clientFailure(
+            'STRONGFLOW_CANDIDATE_FILE_ROUTE_STALE',
+            'The file named by this StrongFlow link is not available in the current Candidate.',
+          ),
+        })
+        return
+      }
       if (
         selectedPath !== null
-        && items.some(file => file.path === selectedPath)
         && currentState.candidateFiles.diff.path !== selectedPath
       ) await loadCandidateDiff(false)
     } catch (error) {

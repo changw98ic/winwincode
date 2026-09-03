@@ -414,8 +414,8 @@ class BrowserStrongFlowModel {
 
 const model = new BrowserStrongFlowModel()
 const baseHash = `#/strongflow?delivery=${deliveryId}&session=psn_00000000000000000000000002&stageRun=${currentRunId}`
-// A deliberately crossed deep link: task:browser2 does not own the failed run.
-history.replaceState(null, '', `/${baseHash}&task=task%3Abrowser2&run=${failedRunId}`)
+// Start from the exact Task association owned by the historical StageRun.
+history.replaceState(null, '', `/${baseHash}&task=task%3Abrowser&run=${failedRunId}`)
 const mounted = mountStrongFlowPage({
   root,
   model,

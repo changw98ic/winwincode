@@ -27,6 +27,8 @@ export interface StrongFlowHistoryNavigationOptions {
   readonly stagesEmpty: HTMLElement
   readonly initialSelection?: StrongFlowHistorySelection
   readonly onSelect: (selection: StrongFlowHistorySelection) => void
+  /** Reports an invalid deep-link selection without rewriting it to another run. */
+  readonly onUnavailable?: (selection: StrongFlowHistorySelection) => void
 }
 
 export interface StrongFlowHistoryNavigationView {
@@ -66,8 +68,8 @@ function runLabel(run: StrongFlowHistoryRun): string {
 /**
  * Mount the clickable Task → StageRun → Attempt navigation for one shared
  * history tree. Rows stay keyed by business identity so repeated snapshots
- * never rebuild unchanged DOM, and the selection is normalized onto the
- * canonical Task→StageRun association of the tree on every update.
+ * never rebuild unchanged DOM. Invalid Task→StageRun associations remain
+ * explicit route failures instead of being rewritten onto another run.
  */
 export function mountStrongFlowHistoryNavigation(
   options: StrongFlowHistoryNavigationOptions,
@@ -75,6 +77,7 @@ export function mountStrongFlowHistoryNavigation(
   const document = options.document
   let closed = false
   let selection = options.initialSelection ?? EMPTY_SELECTION
+  let selectionUnavailable = false
   let currentTree: StrongFlowHistoryTree | null = null
   const expandedTasks = new Set<DeliveryTaskId>()
   const taskRows = new WeakMap<HTMLLIElement, TaskRowState>()
@@ -84,6 +87,7 @@ export function mountStrongFlowHistoryNavigation(
 
   function applySelection(next: StrongFlowHistorySelection): void {
     selection = next
+    selectionUnavailable = false
     update(currentTree)
     options.onSelect(selection)
   }
@@ -357,20 +361,23 @@ export function mountStrongFlowHistoryNavigation(
     currentTree = tree
     if (tree === null) {
       const hadSelection = !sameHistorySelection(selection, EMPTY_SELECTION)
-      selection = EMPTY_SELECTION
       taskCollection.update([])
       timelineCollection.update([])
       noteOmitted(options.tasksOmitted, 0, 'tasks')
       noteOmitted(options.stagesOmitted, 0, 'stages')
       options.tasksEmpty.hidden = true
       options.stagesEmpty.hidden = true
-      // A vanished projection also invalidates the URL selection parameters;
-      // notify once instead of keeping a dead deep link authoritative.
-      if (hadSelection) options.onSelect(selection)
+      if (hadSelection) {
+        selectionUnavailable = true
+        options.onUnavailable?.(selection)
+      }
       return
     }
     const requested = selection
-    selection = strongFlowHistorySelectionForTree(tree, selection)
+    const normalized = strongFlowHistorySelectionForTree(tree, selection)
+    const unavailable = !sameHistorySelection(normalized, requested)
+    selectionUnavailable = unavailable
+    if (!unavailable) selection = normalized
     taskCollection.update(tree.tasks)
     timelineCollection.update(tree.runs)
     noteOmitted(options.tasksOmitted, tree.omittedTasks, 'tasks')
@@ -384,18 +391,15 @@ export function mountStrongFlowHistoryNavigation(
     options.tasksEmpty.hidden = tree.tasks.length !== 0
     options.stagesEmpty.hidden = tree.runs.length !== 0
     updateTabIndices()
-    if (!sameHistorySelection(selection, requested)) {
-      // The tree normalized a crossed or stale selection (for example a
-      // mismatched task/run deep link); let the host sync the URL to the
-      // canonical association.
-      options.onSelect(selection)
+    if (unavailable) {
+      options.onUnavailable?.(requested)
     }
   }
 
   return {
     update,
     selection() {
-      return selection
+      return selectionUnavailable ? EMPTY_SELECTION : selection
     },
     close() {
       if (closed) return

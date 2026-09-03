@@ -1,7 +1,7 @@
 import {
-  strongFlowCandidateViewFromHash,
   strongFlowRouteHash,
-} from '/module/application.js'
+  strongFlowRouteRequestFromHash,
+} from '/module/strongflow-route.js'
 import { scopeSelectionFromHash } from '/module/core/scope-context.js'
 import { strongFlowHistorySelectionFromHash } from '/module/strongflow-history-selection.js'
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
@@ -143,16 +143,25 @@ function publish(candidateFilesState) {
   listener?.(state)
 }
 
-function candidateRoute(path, mode = strongFlowCandidateViewFromHash(location.hash) ?? 'unified') {
-  return strongFlowRouteHash(
+function currentRouteRequest() {
+  const parsed = strongFlowRouteRequestFromHash(location.hash)
+  return parsed.status === 'valid' ? parsed.request : null
+}
+
+function candidateRoute(patch = {}) {
+  const current = currentRouteRequest()
+  return strongFlowRouteHash({
     deliveryId,
     productSessionId,
     stageRunId,
-    path,
-    mode,
-    scopeSelectionFromHash(location.hash),
-    strongFlowHistorySelectionFromHash(location.hash),
-  )
+    historySelection: strongFlowHistorySelectionFromHash(location.hash),
+    candidateRef: current?.candidateRef ?? candidateRef,
+    panel: current?.panel ?? 'candidate',
+    candidatePath: current?.candidatePath ?? null,
+    candidateView: current?.candidateView ?? 'unified',
+    candidateLine: current?.candidateLine ?? null,
+    ...patch,
+  }, scopeSelectionFromHash(location.hash))
 }
 
 function routeFacts() {
@@ -166,6 +175,9 @@ function routeFacts() {
     'repositoryId',
     'task',
     'run',
+    'candidate',
+    'panel',
+    'line',
   ].map(name => [name, parameters.get(name)]))
 }
 
@@ -184,7 +196,11 @@ const model = {
     calls.push(['selectCandidateFile', path])
     const file = files.find(item => item.path === path)
     if (file === undefined) return
-    location.hash = candidateRoute(path)
+    location.hash = candidateRoute({
+      panel: 'candidate',
+      candidatePath: path,
+      candidateLine: null,
+    })
     publish({
       ...state.candidateFiles,
       selectedPath: path,
@@ -222,12 +238,20 @@ const root = document.querySelector('[data-winwincode-client-root]')
 const mounted = mountStrongFlowPage({
   root,
   model,
-  candidateView: 'unified',
+  panel: currentRouteRequest()?.panel ?? 'candidate',
+  candidateView: currentRouteRequest()?.candidateView ?? 'unified',
+  candidateLine: currentRouteRequest()?.candidateLine ?? null,
   historyLocation: null,
+  onPanelChange(panel) {
+    location.hash = candidateRoute({ panel })
+  },
   onCandidateViewModeChange(mode) {
     calls.push(['viewMode', mode])
-    const parameters = new URLSearchParams(location.hash.split('?')[1] ?? '')
-    location.hash = candidateRoute(parameters.get('file'), mode)
+    location.hash = candidateRoute({ candidateView: mode })
+  },
+  onCandidateLineChange(line) {
+    calls.push(['line', line])
+    location.hash = candidateRoute({ candidateLine: line })
   },
 })
 
@@ -241,6 +265,13 @@ function query(selector) { return document.querySelector(selector) }
 function key(node, value, init = {}) {
   node.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, ...init }))
 }
+
+globalThis.candidateDeepLinkSnapshot = () => ({
+  route: routeFacts(),
+  panel: query('[data-artifact-tab="candidate"]')?.getAttribute('aria-selected') ?? null,
+  file: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
+  line: query('.wwc-candidate-diff-row[aria-current="location"]')?.dataset.line ?? null,
+})
 
 globalThis.runCandidateDiffScenario = async () => {
   await new Promise(resolve => { setTimeout(resolve, 0) })
@@ -258,6 +289,7 @@ globalThis.runCandidateDiffScenario = async () => {
     status: query('.wwc-candidate-diff-status').textContent,
     fileSummary: query('.wwc-candidate-file-summary').textContent,
     selectedPath: query('.wwc-candidate-file-row[aria-selected="true"]')?.dataset.path ?? null,
+    selectedLine: query('.wwc-candidate-diff-row[aria-current="location"]')?.dataset.line ?? null,
     hash: location.hash,
     route: routeFacts(),
   }
@@ -268,6 +300,23 @@ globalThis.runCandidateDiffScenario = async () => {
   const search = {
     matchStatus: query('.wwc-candidate-diff-match-status').textContent,
     activeText: document.activeElement?.textContent ?? null,
+  }
+
+  const evidenceTab = query('[data-artifact-tab="evidence"]')
+  evidenceTab.click()
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+  const evidencePanel = { route: routeFacts(), selected: evidenceTab.getAttribute('aria-selected') }
+  query('[data-artifact-tab="candidate"]').click()
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+
+  const routeLine = lineRows().find(row => row.dataset.line === '40')
+  routeLine.focus()
+  key(routeLine, 'Enter')
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+  const lineSelection = {
+    route: routeFacts(),
+    activeLine: document.activeElement?.dataset.line ?? null,
+    currentLine: query('.wwc-candidate-diff-row[aria-current="location"]')?.dataset.line ?? null,
   }
 
   key(query('.wwc-candidate-diff-content'), 'j')
@@ -336,6 +385,8 @@ globalThis.runCandidateDiffScenario = async () => {
   return {
     initial,
     search,
+    evidencePanel,
+    lineSelection,
     collapsed,
     switched,
     backToUnified,

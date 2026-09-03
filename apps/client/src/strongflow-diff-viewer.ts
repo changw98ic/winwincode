@@ -27,6 +27,7 @@ export interface CandidateDiffViewerOptions {
   readonly narrowViewport?: () => boolean
   readonly onLoadMoreDiff: () => void
   readonly onViewModeChange: (mode: CandidateDiffViewMode) => void
+  readonly onLineChange?: (line: number | null) => void
 }
 
 export interface CandidateDiffViewerProps {
@@ -35,6 +36,8 @@ export interface CandidateDiffViewerProps {
   readonly viewMode: CandidateDiffViewMode
   /** Digest of the Candidate the rendered file Diff must belong to. */
   readonly candidateDigest: string | null
+  /** One-based changed-file line selected by the canonical route. */
+  readonly selectedLine: number | null
 }
 
 export interface CandidateDiffViewer {
@@ -112,6 +115,10 @@ function boundedLineText(text: string): {
     return { visible: text, renderTruncated: false }
   }
   return { visible: text.slice(0, MAX_DIFF_ROW_CHARACTERS), renderTruncated: true }
+}
+
+function routeLine(row: CandidateDiffRow): number | null {
+  return row.kind === 'line' ? row.newLine : null
 }
 
 /** Mount the bounded Candidate Diff viewer for the one trusted selected file. */
@@ -224,6 +231,7 @@ export function mountCandidateDiffViewer(
       row.dataset.key = current.key
       row.dataset.kind = current.kind
       row.tabIndex = -1
+      row.removeAttribute('aria-current')
       row.replaceChildren()
       if (current.kind === 'file-header') {
         row.dataset.pathText = current.text
@@ -260,6 +268,13 @@ export function mountCandidateDiffViewer(
       row.dataset.type = current.type
       row.dataset.hunkKey = current.hunkKey
       row.dataset.match = matchKeys.includes(current.key) ? 'true' : 'false'
+      const line = routeLine(current)
+      if (line !== null) row.dataset.line = String(line)
+      else delete row.dataset.line
+      if (line !== null && line === currentProps?.selectedLine) {
+        row.setAttribute('aria-current', 'location')
+        row.tabIndex = 0
+      }
       const cells: HTMLTableCellElement[] = []
       if (effectiveMode === 'unified') {
         cells.push(numberCell('old', current.oldLine))
@@ -488,6 +503,15 @@ export function mountCandidateDiffViewer(
         }
         return
       }
+      if (hasClass(current, 'wwc-candidate-diff-row')) {
+        const line = current.dataset.line
+        if (line !== undefined) {
+          current.tabIndex = 0
+          current.focus()
+          options.onLineChange?.(Number(line))
+        }
+        return
+      }
       current = current.parentNode as HTMLElement | null
     }
   }
@@ -512,6 +536,15 @@ export function mountCandidateDiffViewer(
     }
   }
   const onScrollKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      const active = activeElement()
+      const line = active?.dataset.line
+      if (line !== undefined) {
+        event.preventDefault()
+        options.onLineChange?.(Number(line))
+      }
+      return
+    }
     if (event.key === 'j' || event.key === 'n') {
       event.preventDefault()
       focusHunk(1)
@@ -667,6 +700,7 @@ export function mountCandidateDiffViewer(
     selectedPath: null,
     viewMode: 'unified',
     candidateDigest: null,
+    selectedLine: null,
   })
 
   return {

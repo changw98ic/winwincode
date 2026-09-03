@@ -356,6 +356,50 @@ test('history tree groups StageRuns by Task, keeps Delivery stages, and flags th
   assert.equal(tree.tasks[0].runs[1].producedCurrentCandidate, true)
 })
 
+test('history tree keeps the exact deep-linked Task and StageRun inside bounded navigation', () => {
+  const projection = historyProjection()
+  const deepRunId = 'run_00000000000000000000000005'
+  const deepTaskId = 'task:deep-link-outside-first-page'
+  const deepLinked = {
+    ...projection,
+    delivery: {
+      ...projection.delivery,
+      tasks: [
+        ...projection.delivery.tasks,
+        {
+          ...projection.delivery.tasks[1],
+          id: deepTaskId,
+          title: 'Deep-linked task',
+          stageRunIds: [deepRunId],
+        },
+      ],
+      stages: [
+        ...projection.delivery.stages,
+        {
+          ...projection.delivery.stages[0],
+          id: deepRunId,
+          deliveryTaskId: deepTaskId,
+          sessionBinding: {
+            ...projection.delivery.stages[0].sessionBinding,
+            stageRunId: deepRunId,
+          },
+        },
+      ],
+    },
+  }
+  const tree = strongFlowHistoryTree(
+    deepLinked,
+    { ...limits, tasks: 1, stages: 1 },
+    { taskId: deepTaskId, stageRunId: deepRunId },
+  )
+
+  assert.deepEqual(tree.tasks.map(node => node.task.id), [deepTaskId])
+  assert.deepEqual(tree.tasks[0].runs.map(run => run.stageRunId), [deepRunId])
+  assert.deepEqual(tree.runs.map(run => run.stageRunId), [deepRunId])
+  assert.equal(tree.omittedTasks, 2)
+  assert.equal(tree.omittedRuns, 4)
+})
+
 test('history selection keeps only canonical Task→StageRun associations and drops stale identities', () => {
   const tree = strongFlowHistoryTree(historyProjection(), limits)
   assert.deepEqual(
@@ -1292,7 +1336,7 @@ test('timeline ArrowLeft stays inside the timeline instead of collapsing the Tas
   view.close()
 })
 
-test('a crossed task/run deep link is normalized onto the canonical association and the URL follows', () => {
+test('a crossed task/run deep link stays unchanged and fails closed with an explicit alert', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const initialHash = `#/strongflow?delivery=${deliveryId}&session=psn_2&stageRun=${currentRunId}`
@@ -1318,22 +1362,23 @@ test('a crossed task/run deep link is normalized onto the canonical association 
   const taskRows = findByClass(rootElement, 'wwc-strongflow-task-list').children
   assert.equal(
     findByClass(taskRows[0], 'wwc-strongflow-history-toggle').getAttribute('aria-expanded'),
-    'true',
-    'the canonical Task of the run expands, not the crossed one',
+    'false',
+    'the unrelated canonical Task is not silently opened',
   )
   assert.equal(
     findByClass(taskRows[1], 'wwc-strongflow-history-toggle').getAttribute('aria-expanded'),
-    'false',
+    'true',
   )
   const detail = findByClass(rootElement, 'wwc-strongflow-history')
-  assert.equal(detail.hidden, false)
-  assert.match(allText(detail), new RegExp(failedRunId, 'u'))
-  assert.deepEqual(location.replacements, [
-    `${initialHash}&task=task%3A1&run=${failedRunId}`,
-  ], 'the crossed deep link is rewritten once onto the canonical association')
+  assert.equal(detail.hidden, true)
+  const routeError = findByClass(rootElement, 'wwc-strongflow-history-route-error')
+  assert.equal(routeError.getAttribute('role'), 'alert')
+  assert.equal(routeError.hidden, false)
+  assert.match(allText(routeError), /Task or Attempt/u)
+  assert.deepEqual(location.replacements, [], 'the crossed deep link is never rewritten')
   assert.deepEqual(
     model.calls.filter(([name]) => name === 'loadStageRunRuntime').map(([, id]) => id),
-    [failedRunId],
+    [],
   )
 
   mounted.close()

@@ -999,6 +999,7 @@
         "apps/client/src/strongflow-layout-preferences.ts",
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-rendering.ts",
+        "apps/client/src/strongflow-route.ts",
         "apps/client/src/strongflow-run-detail.ts",
         "apps/client/src/strongflow-view-model.ts"
       ],

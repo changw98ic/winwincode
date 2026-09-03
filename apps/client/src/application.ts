@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  ControlPlaneClientError,
   createControlPlaneClient,
   type ControlPlaneClient,
   type ControlPlaneClientTransport,
@@ -42,12 +43,12 @@ import {
   type ScopeSelectorPage,
 } from './scope-selector-page.js'
 import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
-import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import {
-  strongFlowHistoryHashWithSelection,
-  strongFlowHistorySelectionFromHash,
-  type StrongFlowHistorySelection,
-} from './strongflow-history-selection.js'
+  resolveStrongFlowRoute,
+  strongFlowRouteHash,
+  strongFlowRouteRequestFromHash,
+  type StrongFlowRouteTarget,
+} from './strongflow-route.js'
 import type {
   ControlPlaneWebSocketSubscriptionId,
   DeliveryGetResultResponse,
@@ -123,35 +124,6 @@ function contractId(
 function routeParameters(hash: string): URLSearchParams {
   const query = hash.indexOf('?')
   return new URLSearchParams(query < 0 ? '' : hash.slice(query + 1))
-}
-
-/** The one canonical typed route seam for every StrongFlow deep link. */
-export function strongFlowRouteHash(
-  deliveryId: DeliveryId,
-  productSessionId: ProductSessionId,
-  stageRunId: StageRunId,
-  candidatePath: string | null = null,
-  candidateView: CandidateDiffViewMode = 'unified',
-  scope?: ScopeRouteSelection,
-  historySelection?: StrongFlowHistorySelection,
-): string {
-  const hash = `#/strongflow?delivery=${encodeURIComponent(deliveryId)}`
-    + `&session=${encodeURIComponent(productSessionId)}`
-    + `&stageRun=${encodeURIComponent(stageRunId)}`
-    + (candidatePath === null ? '' : `&file=${encodeURIComponent(candidatePath)}`)
-    + `&view=${encodeURIComponent(candidateView)}`
-  const scopedHash = scope === undefined ? hash : scopeHash(hash, scope)
-  return historySelection === undefined
-    ? scopedHash
-    : strongFlowHistoryHashWithSelection(scopedHash, historySelection)
-}
-
-/** Read the Candidate Diff layout from a route, rejecting everything else. */
-export function strongFlowCandidateViewFromHash(
-  hash: string,
-): CandidateDiffViewMode | null {
-  const value = routeParameters(hash).get('view')
-  return value === 'side-by-side' || value === 'unified' ? value : null
 }
 
 function browserControlPlaneTransport(browser: Window): ControlPlaneClientTransport {
@@ -736,7 +708,14 @@ export function mountWinWinCodeClient(
     featureController = controller
     routeLoading('Loading StrongFlow…')
     try {
-      const parameters = routeParameters(browser.location.hash)
+      const parsedRoute = strongFlowRouteRequestFromHash(browser.location.hash)
+      if (parsedRoute.status === 'invalid') {
+        const unavailable = element(document, 'p', 'wwc-feature-route-unavailable')
+        unavailable.setAttribute('role', 'alert')
+        unavailable.textContent = 'This StrongFlow link is invalid or incomplete.'
+        slot.replaceChildren(unavailable)
+        return
+      }
       const deliveriesValue = await controlPlane.query({
         schemaVersion: 'winwincode/v1',
         requestId: contractId('req', browser.crypto) as RequestId,
@@ -750,9 +729,8 @@ export function mountWinWinCodeClient(
         throw new Error('The StrongFlow route received another list response.')
       }
       const deliveries = (deliveriesValue as DeliveryListResultResponse).result.items
-      const deliveryId = (
-        parameters.get('delivery') as DeliveryId | null
-      ) ?? deliveries[0]?.deliveryId ?? null
+      const requestedDeliveryId = parsedRoute.request.deliveryId
+      const deliveryId = requestedDeliveryId ?? deliveries[0]?.deliveryId ?? null
       if (deliveryId === null) {
         const [{ createStrongFlowCreateViewModel }, { mountStrongFlowCreatePage }] = await Promise.all([
           import('./strongflow-view-model.js'),
@@ -782,55 +760,48 @@ export function mountWinWinCodeClient(
         })
         return
       }
-      const detailValue = await controlPlane.query({
-        schemaVersion: 'winwincode/v1',
-        requestId: contractId('req', browser.crypto) as RequestId,
-        actor: context.actor,
-        scope: context.scope,
-        query: QueryName.DeliveryGet,
-        parameters: { deliveryId },
-        page: { cursor: null, limit: 1 },
-      }, { signal: controller.signal })
+      let detailValue
+      try {
+        detailValue = await controlPlane.query({
+          schemaVersion: 'winwincode/v1',
+          requestId: contractId('req', browser.crypto) as RequestId,
+          actor: context.actor,
+          scope: context.scope,
+          query: QueryName.DeliveryGet,
+          parameters: { deliveryId },
+          page: { cursor: null, limit: 1 },
+        }, { signal: controller.signal })
+      } catch (error) {
+        if (error instanceof ControlPlaneClientError && error.code === 'RESOURCE_NOT_FOUND') {
+          const unavailable = element(document, 'p', 'wwc-feature-route-unavailable')
+          unavailable.setAttribute('role', 'alert')
+          unavailable.textContent = 'This StrongFlow link no longer names an available Delivery.'
+          slot.replaceChildren(unavailable)
+          return
+        }
+        throw error
+      }
       if (detailValue.query !== QueryName.DeliveryGet) {
         throw new Error('The StrongFlow route received another detail response.')
       }
       const detail = (detailValue as DeliveryGetResultResponse).result
-      const requestedStageRunId = parameters.get('stageRun') as StageRunId | null
-      const routeCandidatePath = parameters.get('file')
-      let selectedCandidatePath = routeCandidatePath === null || routeCandidatePath.length === 0
-        ? null
-        : routeCandidatePath
-      const routeCandidateView = strongFlowCandidateViewFromHash(browser.location.hash)
-      let candidateView: CandidateDiffViewMode = routeCandidateView ?? 'unified'
-      const stage = requestedStageRunId === null
-        ? [...detail.stages].reverse().find(candidate => candidate.sessionBinding !== null)
-        : detail.stages.find(candidate => candidate.id === requestedStageRunId)
-      const productSessionId = (
-        parameters.get('session') as ProductSessionId | null
-      ) ?? stage?.sessionBinding?.productSessionId ?? null
-      if (stage === undefined || stage.sessionBinding === null || productSessionId === null) {
-        routeUnavailable('This Delivery does not have an executable StrongFlow stage yet.')
+      const routeResolution = resolveStrongFlowRoute(
+        { ...parsedRoute.request, deliveryId },
+        detail,
+        context.scope,
+      )
+      if (routeResolution.status === 'unavailable') {
+        const unavailable = element(document, 'p', 'wwc-feature-route-unavailable')
+        unavailable.setAttribute('role', 'alert')
+        unavailable.textContent = routeResolution.message
+        slot.replaceChildren(unavailable)
         return
       }
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      let routeProductSessionId = productSessionId
-      let routeStageRunId = stage.id
-      if (
-        parameters.get('delivery') === null
-        || parameters.get('session') === null
-        || parameters.get('stageRun') === null
-        || routeCandidateView === null
-      ) {
-        replaceHash(strongFlowRouteHash(
-          deliveryId,
-          productSessionId,
-          stage.id,
-          selectedCandidatePath,
-          candidateView,
-          scopeSelectionFromHash(browser.location.hash),
-          strongFlowHistorySelectionFromHash(browser.location.hash),
-        ))
-      }
+      let routeTarget: StrongFlowRouteTarget = routeResolution.target
+      const routeScope = scopeSelectionFromHash(browser.location.hash)
+      const canonicalHash = strongFlowRouteHash(routeTarget, routeScope)
+      if (browser.location.hash !== canonicalHash) replaceHash(canonicalHash)
       const [{ createStrongFlowViewModel }, { mountStrongFlowPage }] = await Promise.all([
         import('./strongflow-view-model.js'),
         import('./strongflow-page.js'),
@@ -841,61 +812,72 @@ export function mountWinWinCodeClient(
         actor: context.actor,
         scope: context.scope,
         deliveryId,
-        productSessionId,
-        stageRunId: stage.id,
+        productSessionId: routeTarget.productSessionId,
+        stageRunId: routeTarget.stageRunId,
         subscriptionId: contractId(
           'sub',
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
-        selectedCandidatePath,
+        selectedCandidatePath: routeTarget.candidatePath,
+        expectedCandidateRef: () => routeTarget.candidateRef,
         onCandidatePathChange(path) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          selectedCandidatePath = path
-          replaceHash(strongFlowRouteHash(
-            deliveryId,
-            routeProductSessionId,
-            routeStageRunId,
-            path,
-            candidateView,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
+          routeTarget = Object.freeze({
+            ...routeTarget,
+            panel: 'candidate',
+            candidateRef: routeTarget.candidateRef
+              ?? model.state.projection?.currentCandidate?.candidateRef
+              ?? null,
+            candidatePath: path,
+            candidateLine: null,
+          })
+          replaceHash(strongFlowRouteHash(routeTarget, routeScope))
         },
         onStageBindingChange(binding) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          routeProductSessionId = binding.productSessionId
-          routeStageRunId = binding.stageRunId
-          replaceHash(strongFlowRouteHash(
-            deliveryId,
-            binding.productSessionId,
-            binding.stageRunId,
-            selectedCandidatePath,
-            candidateView,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
+          routeTarget = Object.freeze({
+            ...routeTarget,
+            productSessionId: binding.productSessionId,
+            stageRunId: binding.stageRunId,
+          })
+          replaceHash(strongFlowRouteHash(routeTarget, routeScope))
         },
       })
       activeFeature = mountStrongFlowPage({
         root: slot,
         model,
         deliveries,
-        candidateView,
+        onHistorySelectionChange(historySelection) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          routeTarget = Object.freeze({ ...routeTarget, historySelection })
+          replaceHash(strongFlowRouteHash(routeTarget, routeScope))
+        },
+        panel: routeTarget.panel,
+        onPanelChange(panel) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          routeTarget = Object.freeze({
+            ...routeTarget,
+            panel,
+            candidateRef: panel === 'candidate'
+              ? model.state.projection?.currentCandidate?.candidateRef ?? routeTarget.candidateRef
+              : routeTarget.candidateRef,
+          })
+          replaceHash(strongFlowRouteHash(routeTarget, routeScope))
+        },
+        candidateView: routeTarget.candidateView,
         onCandidateViewModeChange(mode) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
-          candidateView = mode
-          replaceHash(strongFlowRouteHash(
-            deliveryId,
-            routeProductSessionId,
-            routeStageRunId,
-            selectedCandidatePath,
-            mode,
-            scopeSelectionFromHash(browser.location.hash),
-            strongFlowHistorySelectionFromHash(browser.location.hash),
-          ))
+          routeTarget = Object.freeze({ ...routeTarget, candidateView: mode })
+          replaceHash(strongFlowRouteHash(routeTarget, routeScope))
         },
-        routeScope: scopeSelectionFromHash(browser.location.hash),
+        candidateLine: routeTarget.candidateLine,
+        onCandidateLineChange(line) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          routeTarget = Object.freeze({ ...routeTarget, candidateLine: line })
+          replaceHash(strongFlowRouteHash(routeTarget, routeScope))
+        },
+        routeScope,
         readOnly: activeRouteReadOnly,
       })
     } catch (error) {

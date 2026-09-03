@@ -1,4 +1,4 @@
-import { strongFlowRouteHash } from '/module/application.js'
+import { strongFlowRouteHash } from '/module/strongflow-route.js'
 import { mountStrongFlowPage } from '/module/strongflow-page.js'
 
 const deliveryId = 'dlv_00000000000000000000000001'
@@ -146,7 +146,14 @@ const model = {
     calls.push(['selectCandidateFile', path])
     const file = candidateFiles.find(item => item.path === path)
     if (file === undefined) return
-    location.hash = strongFlowRouteHash(deliveryId, productSessionId, stageRunId, path)
+    location.hash = strongFlowRouteHash({
+      deliveryId,
+      productSessionId,
+      stageRunId,
+      candidateRef,
+      panel: 'candidate',
+      candidatePath: path,
+    })
     publish({
       ...state.candidateFiles,
       selectedPath: path,

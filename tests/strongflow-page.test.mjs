@@ -35,9 +35,9 @@ const rendering = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/strongflow-rendering.js',
 )).href}`)
-const application = await import(`${pathToFileURL(resolve(
+const strongFlowRoute = await import(`${pathToFileURL(resolve(
   root,
-  '.cache/strongflow-page-tests/application.js',
+  '.cache/strongflow-page-tests/strongflow-route.js',
 )).href}`)
 const clientSurface = await import(`${pathToFileURL(resolve(
   root,
@@ -50,7 +50,7 @@ const {
   strongFlowPagePresentation,
 } = page
 const { boundedItems } = rendering
-const { strongFlowRouteHash } = application
+const { strongFlowRouteHash } = strongFlowRoute
 const { clientSurfaceFromHash } = clientSurface
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
@@ -687,37 +687,37 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/strongflow?delivery=dlv_1').id, 'strongflow')
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
       + '&view=unified',
   )
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-      'src/current file.ts',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: 'src/current file.ts',
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
-      + '&file=src%2Fcurrent%20file.ts'
+      + '&file=src%2Fcurrent+file.ts'
       + '&view=unified',
   )
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-      'src/app.ts',
-      'side-by-side',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: 'src/app.ts',
+      candidateView: 'side-by-side',
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
@@ -725,19 +725,18 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       + '&view=side-by-side',
   )
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-      'src/current file.ts',
-      'unified',
-      {
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: 'src/current file.ts',
+      candidateView: 'unified',
+    }, {
         organizationId: 'org_00000000000000000000000001',
         workspaceId: 'wsp_00000000000000000000000001',
         projectId: 'prj_00000000000000000000000001',
         repositoryId: 'rep_00000000000000000000000001',
-      },
-    ),
+      }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
@@ -749,23 +748,22 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       + '&repositoryId=rep_00000000000000000000000001',
   )
 
-  const completeRoute = strongFlowRouteHash(
+  const completeRoute = strongFlowRouteHash({
     deliveryId,
-    'psn_00000000000000000000000002',
-    'run_00000000000000000000000003',
-    'src/current file.ts',
-    'side-by-side',
-    {
+    productSessionId: 'psn_00000000000000000000000002',
+    stageRunId: 'run_00000000000000000000000003',
+    candidatePath: 'src/current file.ts',
+    candidateView: 'side-by-side',
+    historySelection: {
+      taskId: 'task:history',
+      stageRunId: 'run_00000000000000000000000004',
+    },
+  }, {
       organizationId: 'org_00000000000000000000000001',
       workspaceId: 'wsp_00000000000000000000000001',
       projectId: 'prj_00000000000000000000000001',
       repositoryId: 'rep_00000000000000000000000001',
-    },
-    {
-      taskId: 'task:history',
-      stageRunId: 'run_00000000000000000000000004',
-    },
-  )
+    })
   const completeParameters = new URLSearchParams(completeRoute.split('?')[1])
   assert.equal(completeParameters.get('file'), 'src/current file.ts')
   assert.equal(completeParameters.get('view'), 'side-by-side')

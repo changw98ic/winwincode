@@ -27,6 +27,7 @@ import {
   strongFlowHistoryHashWithSelection,
   strongFlowHistorySelectionFromHash,
   type StrongFlowHistoryLocation,
+  type StrongFlowHistorySelection,
 } from './strongflow-history-selection.js'
 import {
   strongFlowHistoryTree,
@@ -70,12 +71,19 @@ export interface StrongFlowPageOptions {
    * selection. Defaults to the page window; injection keeps tests hermetic.
    */
   readonly historyLocation?: StrongFlowHistoryLocation | null
+  readonly onHistorySelectionChange?: (selection: StrongFlowHistorySelection) => void
   readonly routeScope?: ScopeRouteSelection
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
+  /** Artifact panel requested by the canonical StrongFlow route. */
+  readonly panel?: StrongFlowArtifactsTab
+  readonly onPanelChange?: (panel: StrongFlowArtifactsTab) => void
   /** Candidate Diff layout requested by the typed route seam. */
   readonly candidateView?: CandidateDiffViewMode
   readonly onCandidateViewModeChange?: (mode: CandidateDiffViewMode) => void
+  /** One-based changed-file line requested by the typed route seam. */
+  readonly candidateLine?: number | null
+  readonly onCandidateLineChange?: (line: number | null) => void
 }
 
 export interface StrongFlowLayoutViewport {
@@ -737,6 +745,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const stagesOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
   const stagesEmpty = strongFlowElement(document, 'p', 'wwc-strongflow-stages-empty')
   const historyHost = strongFlowElement(document, 'div', 'wwc-strongflow-history-host')
+  const historyRouteError = strongFlowElement(
+    document,
+    'p',
+    'wwc-strongflow-history-route-error',
+  )
   const attentionSection = strongFlowElement(document, 'section', 'wwc-strongflow-attention')
   const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
@@ -827,7 +840,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   )
   let closed = false
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
-  if (options.model.state.candidateFiles.selectedPath !== null) {
+  if (options.panel !== undefined) {
+    preferences = normalizeStrongFlowLayoutPreferences({
+      ...preferences,
+      artifactsTab: options.panel,
+    })
+  } else if (options.model.state.candidateFiles.selectedPath !== null) {
     preferences = normalizeStrongFlowLayoutPreferences({
       ...preferences,
       artifactsTab: 'candidate',
@@ -857,7 +875,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
    * Server stays the sole mutation authority for the live run.
    */
   let historicalReviewOpen = false
+  let historyRouteUnavailable = false
   let candidateViewMode: CandidateDiffViewMode = options.candidateView ?? 'unified'
+  let candidateLine = options.candidateLine ?? null
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -873,7 +893,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
 
   function selectArtifactTab(id: string): void {
     if (!STRONGFLOW_ARTIFACTS_TABS.includes(id as StrongFlowArtifactsTab)) return
-    persist({ ...preferences, artifactsTab: id as StrongFlowArtifactsTab })
+    const panel = id as StrongFlowArtifactsTab
+    persist({ ...preferences, artifactsTab: panel })
+    options.onPanelChange?.(panel)
   }
 
   status.setAttribute('role', 'status')
@@ -1130,8 +1152,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     },
     onLoadFiles() { void options.model.loadCandidateFiles() },
     onLoadMoreFiles() { void options.model.loadMoreCandidateFiles() },
-    onSelectFile(path) { void options.model.selectCandidateFile(path) },
+    onSelectFile(path) {
+      if (options.model.state.candidateFiles.selectedPath !== path) candidateLine = null
+      void options.model.selectCandidateFile(path)
+    },
     onLoadMoreDiff() { void options.model.loadMoreCandidateDiff() },
+    selectedLine: options.candidateLine ?? null,
+    onLineChange(line) {
+      candidateLine = line
+      options.onCandidateLineChange?.(line)
+    },
   })
   candidateHost.append(candidateView.root)
 
@@ -1189,7 +1219,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       ),
     },
   })
-  historyHost.append(runDetail.root)
+  historyRouteError.setAttribute('role', 'alert')
+  historyRouteError.hidden = true
+  historyHost.append(historyRouteError, runDetail.root)
   const historyNavigation = mountStrongFlowHistoryNavigation({
     document,
     tasksParent: tasks,
@@ -1200,12 +1232,23 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     stagesEmpty,
     initialSelection: strongFlowHistorySelectionFromHash(historyLocation?.hash() ?? ''),
     onSelect(selection) {
+      historyRouteUnavailable = false
+      historyRouteError.hidden = true
+      historyRouteError.textContent = ''
       if (historyLocation !== null) {
         historyLocation.replaceHash(
           strongFlowHistoryHashWithSelection(historyLocation.hash(), selection),
         )
       }
+      options.onHistorySelectionChange?.(selection)
       render(options.model.state)
+    },
+    onUnavailable() {
+      historyRouteUnavailable = true
+      historyRouteError.hidden = false
+      historyRouteError.textContent = 'The Task or Attempt named by this StrongFlow link is no longer available.'
+      historicalReviewOpen = true
+      renderActions(options.model.state)
     },
   })
 
@@ -1671,7 +1714,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       artifactEvidenceNode = null
       diagramsFingerprint = null
       lastEvidenceKey = null
-      candidateView.update({ projection: null, candidateFiles, viewMode: candidateViewMode })
+      candidateView.update({
+        projection: null,
+        candidateFiles,
+        viewMode: candidateViewMode,
+        selectedLine: candidateLine,
+      })
       return
     }
 
@@ -1681,13 +1729,19 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       projection.metadata.revisions.delivery,
     )} · Runtime r${String(projection.metadata.revisions.runtime)} · updated ${projection.metadata.updatedAt}`
     if (projection !== historyTreeSource) {
-      historyTree = strongFlowHistoryTree(projection, limits)
+      historyTree = strongFlowHistoryTree(
+        projection,
+        limits,
+        historyNavigation.selection(),
+      )
       historyTreeSource = projection
     }
     historyNavigation.update(historyTree)
     const historySelection = historyNavigation.selection()
-    historicalReviewOpen = historySelection.stageRunId !== null
+    historicalReviewOpen = historyRouteUnavailable || (
+      historySelection.stageRunId !== null
       && projection.stage.id !== historySelection.stageRunId
+    )
     runDetail.update({ tree: historyTree, selection: historySelection })
     const boundedAttention = boundedItems(projection.attention, limits.attention)
     attentionCollection.update(boundedAttention.items)
@@ -1705,7 +1759,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       diagramsHost.append(diagramsNode)
       diagramsFingerprint = nextDiagramsFingerprint
     }
-    candidateView.update({ projection, candidateFiles, viewMode: candidateViewMode })
+    candidateView.update({
+      projection,
+      candidateFiles,
+      viewMode: candidateViewMode,
+      selectedLine: candidateLine,
+    })
     if (
       contextEvidenceNode === null
       || artifactEvidenceNode === null

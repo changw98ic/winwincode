@@ -79,11 +79,9 @@ export function sameHistorySelection(
 
 /**
  * Keep only selection identities that exist in the current tree, and only in
- * their canonical Task association: a StageRun belongs to exactly the Task its
- * own `deliveryTaskId` names, so a crossed `task`/`run` deep link is normalized
- * onto that association instead of expanding one Task while reviewing another
- * Task's run. Stale deep links collapse to the live view instead of pinning a
- * vanished run.
+ * their canonical Task association. This pure normalization result lets the
+ * navigation layer detect each mismatch and fail closed without rewriting a
+ * crossed or stale deep link onto another Task or StageRun.
  */
 export function strongFlowHistorySelectionForTree(
   tree: StrongFlowHistoryTree,
