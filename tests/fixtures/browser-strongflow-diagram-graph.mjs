@@ -177,10 +177,32 @@ const projection = {
 }
 
 class BrowserStrongFlowModel {
+  draftScope = '["strongflow-diagram-browser-actor","strongflow-diagram-browser-scope"]'
+
   state = {
     status: 'ready',
     realtime: 'subscribed',
     projection,
+    candidateFiles: {
+      status: 'idle',
+      items: [],
+      hasMore: false,
+      previewLimited: false,
+      selectedPath: null,
+      diff: {
+        status: 'idle',
+        path: null,
+        content: '',
+        loadedBytes: 0,
+        totalBytes: null,
+        hasMore: false,
+        previewLimited: false,
+        fileDiffSha256: null,
+        unavailableReason: null,
+        error: null,
+      },
+      error: null,
+    },
     interaction: { status: 'idle', error: null },
     error: null,
   }
@@ -193,6 +215,10 @@ class BrowserStrongFlowModel {
 
   async start() {}
   async refresh() {}
+  async loadCandidateFiles() {}
+  async loadMoreCandidateFiles() {}
+  async selectCandidateFile() {}
+  async loadMoreCandidateDiff() {}
   async decideSolutionReview() {}
   async approveTaskBreakdown() {}
   async resolveAttention() {}

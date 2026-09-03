@@ -201,6 +201,7 @@ globalThis.runStrongFlowEventReloadScenario = () => {
   model.publish(ready(createProjection({ candidateDigest: '4' })))
   const candidateAfterChange = document.querySelector('.wwc-strongflow-view-candidate')
   const diagramsAfterCandidate = document.querySelector('.wwc-strongflow-diagrams')
+  const executionAfterCandidate = document.querySelector('.wwc-strongflow-execution-session')
   model.publish(ready(createProjection({ candidateDigest: '4', runtimeSource: '2' })))
   const runtimeChange = {
     candidateRetained: document.querySelector('.wwc-strongflow-view-candidate')

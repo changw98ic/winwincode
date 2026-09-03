@@ -237,6 +237,7 @@ function historyProjection() {
         },
       ],
       solutionReview: null,
+      diagramExecution: null,
       currentCandidate: {
         candidateRef: 'refs/winwincode/candidate/attempt-2',
         candidateCommitId: '1111111111111111111111111111111111111111',
@@ -251,6 +252,7 @@ function historyProjection() {
       readCursor: {},
     },
     solutionReview: null,
+    diagramExecution: null,
     stage: { id: currentRunId },
     runtime: { stageRunId: currentRunId, sessions: [] },
     evidence: [
