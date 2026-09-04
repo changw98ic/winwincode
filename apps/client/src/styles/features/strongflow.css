@@ -517,6 +517,21 @@
   color: var(--wwc-color-text-muted);
 }
 
+/* Names the required criteria that keep one Delivery unverified, so the missing
+   final approval control is explained instead of silently absent. */
+.wwc-strongflow-advance-blocked {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-warning-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-warning-text);
+  background: var(--wwc-color-warning-surface);
+}
+
+.wwc-strongflow-advance-blocked[hidden] {
+  display: none;
+}
+
 .wwc-strongflow-task-list li,
 .wwc-strongflow-stage-list li,
 .wwc-strongflow-attention-list li,

@@ -1045,7 +1045,8 @@
         "ui604-a11y-shell",
         "ui604-a11y-semantics",
         "candidate-comparison",
-        "candidate-preview"
+        "candidate-preview",
+        "ui607-delivery-review-vertical"
       ]
     },
     {
@@ -1516,6 +1517,20 @@
         "Preview health names no-candidate, not-generated, expired, unverified, degraded, and unreachable instead of inventing a pass",
         "only a bounded raster screenshot Artifact opens, inside one sandboxed image whose object URL is revoked on close",
         "missing, scriptable, oversized, and link-less Artifacts stay download-only with the exact reason"
+      ]
+    },
+    {
+      "id": "ui607-delivery-review-vertical",
+      "scenario": "success",
+      "testFile": "tests/ui607-delivery-review-browser.test.mjs",
+      "testName": "a real browser reviews a candidate, approves bounded rework, and reads one publication receipt",
+      "expectedFacts": [
+        "the reviewer reads the real unified Candidate Diff and the exact Evidence bound to the frozen Candidate",
+        "a required Criterion that did not pass, including an infra_error result, leaves no final Delivery approval control and no command path",
+        "a Candidate superseded under the reviewer keeps the staged draft and submits nothing onto the new Candidate",
+        "a revision conflict keeps the draft and the retry composes one delivery.resolve_attention with a bounded rework scope",
+        "the reworked Candidate is compared against the Delivery baseline, the Verdict is computed, and the final approval opens only once every required Criterion passed",
+        "the Publication receipt follows the coordinator journal, including publication.approval.expired and a retried write, while the browser issues no publication command"
       ]
     }
   ],
