@@ -9,6 +9,7 @@
 //! callers cannot publish an event before every durable fact commits.
 
 mod artifact;
+mod client_registry;
 mod control_plane_instances;
 mod enterprise_policy;
 mod enterprise_policy_evaluation;
@@ -39,6 +40,11 @@ pub use artifact::{
     ArtifactStorageSourceCursor, ArtifactStorageSourceEntry, ArtifactStorageSourceFact,
     ArtifactStorageSourcePage, ArtifactStore, ArtifactWriteReceipt, FakeArtifactObjectStore,
     LocalArtifactObjectStore, MAX_ARTIFACT_RANGE_BYTES,
+};
+pub use client_registry::{
+    ClientExchangeCursors, ClientLockState, ClientNodeRecord, ClientNodeRegistration,
+    ClientNodeRegistrationReceipt, ClientNodeRegistry, ClientPresenceState, ClientRegistryError,
+    ClientRegistryErrorKind,
 };
 pub use control_plane_instances::{
     ControlPlaneCommandAdmission, ControlPlaneCommandClaim, ControlPlaneCommittedCommand,
