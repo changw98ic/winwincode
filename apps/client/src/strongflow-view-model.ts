@@ -256,6 +256,13 @@ export interface StrongFlowViewModel {
     stageRunId: StageRunId,
     signal?: AbortSignal,
   ): Promise<readonly CandidateHistoryItemProjection[]>
+  /**
+   * Read the exact frozen Candidate history of the current Delivery, without a
+   * StageRun filter, so one comparison can select every accessible Candidate.
+   */
+  loadDeliveryCandidates(
+    signal?: AbortSignal,
+  ): Promise<readonly CandidateHistoryItemProjection[]>
   /** Open one exact historical Candidate review (candidate.review.get), display-only. */
   loadCandidateHistoricalReview(
     candidate: StrongFlowHistoricalCandidateIdentity,
@@ -2304,8 +2311,8 @@ export function createStrongFlowViewModel(
     }
   }
 
-  async function loadStageRunCandidates(
-    requestedStageRunId: StageRunId,
+  async function loadCandidateHistory(
+    requestedStageRunId: StageRunId | null,
     signal?: AbortSignal,
   ): Promise<readonly CandidateHistoryItemProjection[]> {
     requireOpenViewModel()
@@ -2349,7 +2356,8 @@ export function createStrongFlowViewModel(
           'The Candidate history does not match the current Delivery read cursor.',
         )
         items.push(...result.items.filter(
-          item => item.candidate.producerStageRunId === requestedStageRunId,
+          item => requestedStageRunId === null
+            || item.candidate.producerStageRunId === requestedStageRunId,
         ))
         if (!response.page.hasMore) {
           if (response.page.nextCursor !== null) throw clientFailure(
@@ -2374,6 +2382,19 @@ export function createStrongFlowViewModel(
     } finally {
       releaseController(active)
     }
+  }
+
+  async function loadStageRunCandidates(
+    requestedStageRunId: StageRunId,
+    signal?: AbortSignal,
+  ): Promise<readonly CandidateHistoryItemProjection[]> {
+    return loadCandidateHistory(requestedStageRunId, signal)
+  }
+
+  async function loadDeliveryCandidates(
+    signal?: AbortSignal,
+  ): Promise<readonly CandidateHistoryItemProjection[]> {
+    return loadCandidateHistory(null, signal)
   }
 
   async function loadCandidateHistoricalReview(
@@ -2466,6 +2487,9 @@ export function createStrongFlowViewModel(
     },
     async loadStageRunCandidates(stageRunId, signal) {
       return loadStageRunCandidates(stageRunId, signal)
+    },
+    async loadDeliveryCandidates(signal) {
+      return loadDeliveryCandidates(signal)
     },
     async loadCandidateHistoricalReview(candidate, signal) {
       return loadCandidateHistoricalReview(candidate, signal)

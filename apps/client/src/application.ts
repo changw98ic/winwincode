@@ -52,7 +52,10 @@ import {
   type ScopeSelectorPage,
 } from './scope-selector-page.js'
 import { createScopeSelectorViewModel } from './scope-selector-view-model.js'
-import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
+import type {
+  CandidateComparisonRouteSelection,
+  CandidateDiffViewMode,
+} from './strongflow-diff-model.js'
 import {
   strongFlowHistorySelectionFromHash,
 } from './strongflow-history-selection.js'
@@ -862,6 +865,7 @@ export function mountWinWinCodeClient(
               stageRunId: null,
               candidatePath: null,
               candidateView: 'unified',
+              comparison: { status: 'none' },
               evidenceTab: 'evidence',
               evidenceId: null,
             }, scopeSelectionFromHash(browser.location.hash)))
@@ -996,6 +1000,20 @@ export function mountWinWinCodeClient(
         model,
         deliveryList,
         candidateView,
+        comparison: currentRoute.comparison,
+        onComparisonSelectionChange(request) {
+          if (closed || generation !== renderGeneration || controller.signal.aborted) return
+          const comparison: CandidateComparisonRouteSelection = {
+            status: 'requested',
+            request,
+          }
+          currentRoute = Object.freeze({ ...currentRoute, comparison })
+          replaceHash(strongFlowRouteHash(
+            currentRoute,
+            scopeSelectionFromHash(browser.location.hash),
+            strongFlowHistorySelectionFromHash(browser.location.hash),
+          ))
+        },
         onCandidateViewModeChange(mode) {
           if (closed || generation !== renderGeneration || controller.signal.aborted) return
           candidateView = mode

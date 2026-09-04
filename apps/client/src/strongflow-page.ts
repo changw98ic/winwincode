@@ -22,6 +22,10 @@ import {
 } from './editable-draft.js'
 import { mountStrongFlowCandidate } from './strongflow-candidate.js'
 import {
+  mountStrongFlowCandidateComparison,
+  type StrongFlowCandidateComparisonIdentity,
+} from './strongflow-candidate-comparison.js'
+import {
   mountStrongFlowDiagrams,
   type StrongFlowDiagramSelection,
 } from './strongflow-diagrams.js'
@@ -53,7 +57,11 @@ import {
   strongFlowHistoryTree,
   type StrongFlowHistoryTree,
 } from './strongflow-history-tree.js'
-import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
+import type {
+  CandidateComparisonRequest,
+  CandidateComparisonRouteSelection,
+  CandidateDiffViewMode,
+} from './strongflow-diff-model.js'
 import {
   boundedItems,
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
@@ -102,6 +110,12 @@ export interface StrongFlowPageOptions {
   /** Candidate Diff layout requested by the typed route seam. */
   readonly candidateView?: CandidateDiffViewMode
   readonly onCandidateViewModeChange?: (mode: CandidateDiffViewMode) => void
+  /** Candidate comparison requested by one shareable canonical link. */
+  readonly comparison?: CandidateComparisonRouteSelection
+  /** Digest of the Candidate frozen before an approved bounded rework. */
+  readonly reworkBaselineDigest?: string | null
+  /** Publishes the comparison so the canonical route stays shareable. */
+  readonly onComparisonSelectionChange?: (request: CandidateComparisonRequest) => void
   /** Canonical Evidence read/query and typed-route boundary. */
   readonly evidence: StrongFlowEvidenceOptions
   /** One-based changed-file line requested by the typed route seam. */
@@ -1225,6 +1239,24 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     },
   })
   candidateHost.append(candidateView.root)
+  // UI-405: one bounded comparison workbench per Delivery. It selects only the
+  // frozen Candidates the current Delivery exposes and reports what changed
+  // between two review cuts.
+  let reworkBaselineDigest = options.reworkBaselineDigest ?? null
+  /** Comparison carried by the canonical route; defaults stay presentation-only. */
+  const comparisonSelection: CandidateComparisonRouteSelection = options.comparison ?? { status: 'none' }
+  const comparisonView = mountStrongFlowCandidateComparison({
+    document,
+    limits,
+    loadCandidates: (signal) => options.model.loadDeliveryCandidates(signal),
+    loadReview: (candidate: StrongFlowCandidateComparisonIdentity, signal) => (
+      options.model.loadCandidateHistoricalReview(candidate, signal)
+    ),
+    onSelectionChange(request) {
+      options.onComparisonSelectionChange?.(request)
+    },
+  })
+  candidateHost.append(comparisonView.root)
   if (options.evidence !== undefined) {
     evidenceWorkbench = mountStrongFlowEvidence({
       ...options.evidence,
@@ -1487,7 +1519,13 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       }
       const onResolve = () => { decide('resolve', false) }
       const onDismiss = () => { decide('dismiss', false) }
-      const onRework = () => { decide('resolve', true) }
+      const onRework = () => {
+        // UI-405: the Candidate frozen at rework time becomes the default
+        // comparison baseline once the reworked Candidate is frozen.
+        const digest = options.model.state.projection?.currentCandidate?.diffSha256 ?? null
+        if (digest !== null) reworkBaselineDigest = digest
+        decide('resolve', true)
+      }
       const onResolutionInput = () => { draft.edit('resolution', resolution.value) }
       const onTaskChange = () => { draft.edit('taskId', task.value) }
       const onNodeChange = () => { draft.edit('nodeId', node.value) }
@@ -1771,6 +1809,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
         viewMode: candidateViewMode,
         selectedLine: candidateLine,
       })
+      comparisonView.update({
+        projection: null,
+        candidateFiles,
+        requested: comparisonSelection,
+        reworkBaselineDigest,
+      })
       applyDiagramSelection(null)
       return
     }
@@ -1829,6 +1873,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       candidateFiles,
       viewMode: candidateViewMode,
       selectedLine: candidateLine,
+    })
+    comparisonView.update({
+      projection,
+      candidateFiles,
+      requested: comparisonSelection,
+      reworkBaselineDigest,
     })
     applyDiagramSelection(diagramSelection)
   }
@@ -2185,6 +2235,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       diagrams.close()
       executionGraph.close()
       candidateView.close()
+      comparisonView.close()
       evidenceWorkbench?.close()
       evidenceWorkbench = null
       navigationResize.close()

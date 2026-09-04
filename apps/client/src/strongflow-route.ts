@@ -10,6 +10,11 @@ import { matchesCanonicalSchema } from './generated/control-plane-client.js'
 import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
 import type { CandidateDiffViewMode } from './strongflow-diff-model.js'
 import {
+  formatCandidateComparisonRequest,
+  parseCandidateComparisonRequest,
+  type CandidateComparisonRouteSelection,
+} from './strongflow-diff-model.js'
+import {
   strongFlowHistoryHashWithSelection,
   type StrongFlowHistorySelection,
 } from './strongflow-history-selection.js'
@@ -18,6 +23,11 @@ export type StrongFlowEvidenceTabId = 'evidence' | 'tests' | 'logs'
 
 /** Longest repository-relative path the canonical portable_path rules accept. */
 const MAX_CANDIDATE_PATH_LENGTH = 4_096
+
+const COMPARISON_FROM_PARAMETER = 'compareFrom'
+const COMPARISON_TO_PARAMETER = 'compareTo'
+/** `compareFrom` value that names the Delivery base revision. */
+export const STRONGFLOW_COMPARISON_BASELINE_VALUE = 'baseline'
 
 export interface StrongFlowEvidenceRouteState {
   readonly tab: StrongFlowEvidenceTabId
@@ -30,6 +40,8 @@ export interface StrongFlowRoute {
   readonly stageRunId: StageRunId | null
   readonly candidatePath: string | null
   readonly candidateView: CandidateDiffViewMode
+  /** Candidate comparison requested by one shareable link. */
+  readonly comparison: CandidateComparisonRouteSelection
   readonly evidenceTab: StrongFlowEvidenceTabId
   readonly evidenceId: EvidenceId | null
 }
@@ -103,6 +115,23 @@ export function strongFlowCandidateViewFromHash(
   return value === 'side-by-side' || value === 'unified' ? value : null
 }
 
+/**
+ * Read one shareable Candidate comparison from the canonical StrongFlow route.
+ * The baseline side names the Delivery base revision, so it carries no value;
+ * anything else that is not one exact frozen Candidate identity fails closed.
+ */
+export function strongFlowComparisonFromHash(
+  hash: string,
+): CandidateComparisonRouteSelection {
+  const parameters = routeParameters(hash)
+  const from = singleParameter(parameters, COMPARISON_FROM_PARAMETER)
+  const to = singleParameter(parameters, COMPARISON_TO_PARAMETER)
+  if (from === STRONGFLOW_COMPARISON_BASELINE_VALUE) {
+    return parseCandidateComparisonRequest(null, to)
+  }
+  return parseCandidateComparisonRequest(from, to)
+}
+
 /** Parse the complete StrongFlow browser route once at the application boundary. */
 export function parseStrongFlowRouteHash(hash: string): StrongFlowRoute {
   const parameters = routeParameters(hash)
@@ -117,6 +146,7 @@ export function parseStrongFlowRouteHash(hash: string): StrongFlowRoute {
     stageRunId: canonicalParameter<StageRunId>(parameters, 'stageRun', 'StageRunId'),
     candidatePath: candidatePathParameter(parameters),
     candidateView: strongFlowCandidateViewFromHash(hash) ?? 'unified',
+    comparison: strongFlowComparisonFromHash(hash),
     evidenceTab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
     evidenceId: canonicalParameter<EvidenceId>(parameters, 'evidence', 'EvidenceId'),
   })
@@ -134,6 +164,11 @@ export function strongFlowRouteHash(
   if (route.stageRunId !== null) parameters.set('stageRun', route.stageRunId)
   if (route.candidatePath !== null) parameters.set('file', route.candidatePath)
   parameters.set('view', route.candidateView)
+  if (route.comparison.status === 'requested') {
+    const comparison = formatCandidateComparisonRequest(route.comparison.request)
+    if (comparison.before !== null) parameters.set(COMPARISON_FROM_PARAMETER, comparison.before)
+    parameters.set(COMPARISON_TO_PARAMETER, comparison.after)
+  }
   if (route.evidenceTab !== 'evidence' || route.evidenceId !== null) {
     parameters.set('tab', route.evidenceTab)
   }

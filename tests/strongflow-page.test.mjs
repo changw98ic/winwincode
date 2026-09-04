@@ -44,6 +44,11 @@ const clientSurface = await import(`${pathToFileURL(resolve(
   '.cache/strongflow-page-tests/client-surface.js',
 )).href}`)
 
+/** Drain the queued comparison loads so their keyed renders settle. */
+function flush() {
+  return new Promise(resolveQueue => setImmediate(resolveQueue))
+}
+
 const {
   mountStrongFlowCreatePage,
   mountStrongFlowPage,
@@ -412,6 +417,9 @@ class FakeStrongFlowViewModel {
 
   draftScope = '["strongflow-page-test-actor","strongflow-page-test-scope"]'
   calls = []
+  loaderCalls = []
+  candidateHistory = []
+  candidateReviews = {}
   listeners = new Set()
 
   subscribe(listener) {
@@ -434,6 +442,14 @@ class FakeStrongFlowViewModel {
   async decideSolutionReview(input) { this.calls.push(['decideSolutionReview', input]) }
   async approveTaskBreakdown() { this.calls.push(['approveTaskBreakdown']) }
   async resolveAttention(input) { this.calls.push(['resolveAttention', input]) }
+  async loadDeliveryCandidates() {
+    this.loaderCalls.push(['loadDeliveryCandidates'])
+    return this.candidateHistory
+  }
+  async loadCandidateHistoricalReview(candidate) {
+    this.loaderCalls.push(['loadCandidateHistoricalReview', candidate.candidateRef])
+    return this.candidateReviews?.[candidate.candidateRef] ?? null
+  }
   async submitVerdict() { this.calls.push(['submitVerdict']) }
   async advanceDelivery() { this.calls.push(['advanceDelivery']) }
   cancelPending() { this.calls.push(['cancelPending']) }
@@ -893,6 +909,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       stageRunId: 'run_00000000000000000000000003',
       candidatePath: null,
       candidateView: 'unified',
+      comparison: { status: 'none' },
       evidenceTab: 'logs',
       evidenceId,
     }),
@@ -909,6 +926,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       stageRunId: 'run_00000000000000000000000003',
       candidatePath: 'src/current file.ts',
       candidateView: 'unified',
+      comparison: { status: 'none' },
       evidenceTab: 'evidence',
       evidenceId: null,
     }),
@@ -925,6 +943,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       stageRunId: 'run_00000000000000000000000003',
       candidatePath: 'src/app.ts',
       candidateView: 'side-by-side',
+      comparison: { status: 'none' },
       evidenceTab: 'evidence',
       evidenceId: null,
     }),
@@ -941,6 +960,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       stageRunId: 'run_00000000000000000000000003',
       candidatePath: 'src/current file.ts',
       candidateView: 'unified',
+      comparison: { status: 'none' },
       evidenceTab: 'evidence',
       evidenceId: null,
     }, {
@@ -966,6 +986,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
     stageRunId: 'run_00000000000000000000000003',
     candidatePath: 'src/current file.ts',
     candidateView: 'side-by-side',
+    comparison: { status: 'none' },
     evidenceTab: 'logs',
     evidenceId,
   }, {
@@ -1000,6 +1021,7 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       stageRunId: 'run_00000000000000000000000003',
       candidatePath: null,
       candidateView: 'unified',
+      comparison: { status: 'none' },
       evidenceTab: 'evidence',
       evidenceId: null,
     },
@@ -1018,6 +1040,7 @@ test('typed StrongFlow routes reject values outside the canonical entity identit
       stageRunId: null,
       candidatePath: null,
       candidateView: 'unified',
+      comparison: { status: 'none' },
       evidenceTab: 'tests',
       evidenceId: null,
     },
@@ -1863,5 +1886,205 @@ test('a changed Candidate says so instead of silently rereading the same file', 
     'UI-305: no stale notice without an open review context',
   )
 
+  mounted.close()
+})
+
+test('the Candidate comparison workbench offers only this Delivery and closes with the page', async () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.delivery.requirements.deliverySpecId = 'spec-comparison'
+  current.delivery.requirements.deliverySpecRevision = 2
+  const historyCandidate = (ref, commitPrefix, isCurrent) => ({
+    availability: 'available',
+    candidate: {
+      candidateRef: ref,
+      candidateCommitId: commitPrefix.repeat(40),
+      candidateTreeId: '2'.repeat(40),
+      deliverySpecId: 'spec-comparison',
+      deliverySpecRevision: 2,
+      diffSha256: `sha256:${'4'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:00:04.000Z',
+      producerSessionBindingId: 'binding:1',
+      producerStageRunId: stageRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: isCurrent,
+    lastSeenDeliveryRevision: 3,
+    reviewDeliveryRevision: null,
+  })
+  const previousCandidate = historyCandidate('refs/winwincode/candidate/0', '0', false)
+  const currentCandidateItem = historyCandidate(
+    current.currentCandidate.candidateRef,
+    '1',
+    true,
+  )
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  model.candidateHistory = [previousCandidate, currentCandidateItem]
+  model.candidateReviews = {
+    [previousCandidate.candidate.candidateRef]: {
+      availability: 'available',
+      candidate: previousCandidate.candidate,
+      currentAuthorization: false,
+      displayOnly: true,
+      evidence: [],
+      firstSeenDeliveryRevision: 1,
+      kind: 'candidate_historical_review',
+      lastSeenDeliveryRevision: 3,
+      readCursor: {},
+      reviewDeliveryRevision: null,
+      verdict: null,
+    },
+    [current.currentCandidate.candidateRef]: {
+      availability: 'available',
+      candidate: currentCandidateItem.candidate,
+      currentAuthorization: false,
+      displayOnly: true,
+      evidence: [],
+      firstSeenDeliveryRevision: 4,
+      kind: 'candidate_historical_review',
+      lastSeenDeliveryRevision: 4,
+      readCursor: {},
+      reviewDeliveryRevision: null,
+      verdict: {
+        candidateRef: currentCandidateItem.candidate.candidateRef,
+        criteria: [{
+          criterionId: 'criterion-verification',
+          evaluatedAt: '2026-08-27T01:00:00.000Z',
+          evidenceRefs: [],
+          explanation: 'Verification passed for the reworked Candidate.',
+          resultId: 'result:1',
+          verdict: 'pass',
+        }],
+        deliverySpecId: 'spec-comparison',
+        deliverySpecRevision: 2,
+        id: 'verdict:1',
+        producedAt: '2026-08-27T01:00:00.000Z',
+        status: 'pass',
+        unresolvedFindings: [],
+      },
+    },
+  }
+  const selections = []
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+    comparison: { status: 'none' },
+    onComparisonSelectionChange(request) { selections.push(request) },
+  })
+  await flush()
+  const workbench = findByClass(rootElement, 'wwc-strongflow-candidate-comparison')
+  assert.notEqual(workbench, null)
+  // One bounded read of the Delivery's frozen Candidate history backs the selector.
+  assert.deepEqual(
+    model.loaderCalls.filter(([name]) => name === 'loadDeliveryCandidates').length,
+    1,
+    model.loaderCalls,
+  )
+  const from = findByClass(rootElement, 'wwc-strongflow-candidate-comparison-from')
+  const to = findByClass(rootElement, 'wwc-strongflow-candidate-comparison-to')
+  // "Compare from" also offers the current Candidate, so a reviewer can read a
+  // rework in reverse; "Compare to" lists every frozen Candidate of the Delivery.
+  assert.deepEqual([...from.children].map(option => option.value), [
+    'baseline',
+    previousCandidate.candidate.candidateRef,
+    current.currentCandidate.candidateRef,
+  ])
+  assert.deepEqual([...to.children].map(option => option.value), [
+    previousCandidate.candidate.candidateRef,
+    current.currentCandidate.candidateRef,
+  ])
+  assert.equal(from.value, 'baseline')
+  assert.equal(to.value, current.currentCandidate.candidateRef)
+
+  // Choosing the reworked-away Candidate publishes one shareable comparison.
+  from.value = previousCandidate.candidate.candidateRef
+  from.emit('change')
+  await flush()
+  assert.deepEqual(selections, [{
+    before: {
+      candidateRef: previousCandidate.candidate.candidateRef,
+      diffSha256: previousCandidate.candidate.diffSha256,
+    },
+    // The published identity is the frozen history's, not the snapshot's copy.
+    after: {
+      candidateRef: currentCandidateItem.candidate.candidateRef,
+      diffSha256: currentCandidateItem.candidate.diffSha256,
+    },
+  }])
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-comparison-alert').hidden,
+    true,
+  )
+  const verdictLine = findByClass(rootElement, 'wwc-strongflow-candidate-comparison-verdict')
+  assert.equal(verdictLine.dataset.changed, 'true')
+
+  mounted.close()
+  assert.deepEqual(rootElement.children, [])
+})
+
+test('returning from bounded rework defaults the comparison to the rework pair', async () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const current = projection()
+  current.delivery.requirements.deliverySpecId = 'spec-comparison'
+  current.delivery.requirements.deliverySpecRevision = 2
+  const model = new FakeStrongFlowViewModel(state({ projection: current }))
+  model.candidateHistory = [{
+    availability: 'available',
+    candidate: {
+      candidateRef: 'refs/winwincode/candidate/0',
+      candidateCommitId: '0'.repeat(40),
+      candidateTreeId: '1'.repeat(40),
+      deliverySpecId: 'spec-comparison',
+      deliverySpecRevision: 2,
+      diffSha256: `sha256:${'4'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:00:04.000Z',
+      producerSessionBindingId: 'binding:1',
+      producerStageRunId: stageRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: false,
+    lastSeenDeliveryRevision: 3,
+    reviewDeliveryRevision: null,
+  }, {
+    availability: 'available',
+    candidate: {
+      candidateRef: current.currentCandidate.candidateRef,
+      candidateCommitId: current.currentCandidate.candidateCommitId,
+      candidateTreeId: current.currentCandidate.candidateTreeId,
+      deliverySpecId: 'spec-comparison',
+      deliverySpecRevision: 2,
+      diffSha256: `sha256:${'6'.repeat(64)}`,
+      frozenAt: '2026-08-27T01:00:04.000Z',
+      producerSessionBindingId: 'binding:2',
+      producerStageRunId: stageRunId,
+    },
+    firstSeenDeliveryRevision: 4,
+    isCurrentAtReadCursor: true,
+    lastSeenDeliveryRevision: 4,
+    reviewDeliveryRevision: null,
+  }]
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+    comparison: { status: 'none' },
+    reworkBaselineDigest: `sha256:${'4'.repeat(64)}`,
+  })
+  await flush()
+  const from = findByClass(rootElement, 'wwc-strongflow-candidate-comparison-from')
+  assert.equal(from.value, 'refs/winwincode/candidate/0')
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-comparison-to').value,
+    current.currentCandidate.candidateRef,
+  )
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-candidate-comparison-alert').hidden,
+    true,
+  )
   mounted.close()
 })

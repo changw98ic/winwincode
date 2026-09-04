@@ -50,6 +50,7 @@ function fullRoute(overrides = {}) {
     stageRunId,
     candidatePath: 'src/deep link.ts',
     candidateView: 'side-by-side',
+    comparison: { status: 'none' },
     evidenceTab: 'logs',
     evidenceId,
     ...overrides,

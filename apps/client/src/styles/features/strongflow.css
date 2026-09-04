@@ -1167,9 +1167,150 @@
   background: var(--wwc-color-success-surface);
 }
 
+/* ── Candidate comparison (UI-405) ─────────────────────────────────────── */
+
+.wwc-strongflow-candidate-comparison {
+  margin-top: var(--wwc-space-4);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-strongflow-candidate-comparison-empty {
+  margin: var(--wwc-space-2) var(--wwc-space-0) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-strongflow-candidate-comparison-alert {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wwc-space-2);
+  margin: var(--wwc-space-3) var(--wwc-space-0) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-strongflow-candidate-comparison-alert[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-candidate-comparison-alert-icon {
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-strongflow-candidate-comparison-alert-text {
+  flex: 1 1 100%;
+  margin: var(--wwc-space-0);
+}
+
+.wwc-strongflow-candidate-comparison-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--wwc-space-2);
+  margin-top: var(--wwc-space-3);
+}
+
+.wwc-strongflow-candidate-comparison-controls[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-candidate-comparison-controls label {
+  display: grid;
+  gap: var(--wwc-space-1);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-xs);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-strongflow-candidate-comparison-from,
+.wwc-strongflow-candidate-comparison-to {
+  min-width: var(--wwc-space-0);
+  min-height: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-text);
+  background: var(--wwc-color-surface);
+  font: inherit;
+}
+
+.wwc-strongflow-candidate-comparison-status {
+  margin: var(--wwc-space-2) var(--wwc-space-0) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-strongflow-candidate-comparison-summary {
+  display: grid;
+  gap: var(--wwc-space-2);
+  margin: var(--wwc-space-3) var(--wwc-space-0) var(--wwc-space-0);
+}
+
+.wwc-strongflow-candidate-comparison-row {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: var(--wwc-space-2);
+  align-items: baseline;
+}
+
+.wwc-strongflow-candidate-comparison-summary dt {
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-xs);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-strongflow-candidate-comparison-summary dd {
+  min-width: var(--wwc-space-0);
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text);
+  font-size: var(--wwc-font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.wwc-strongflow-candidate-comparison-files[data-known='false'] {
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-strongflow-candidate-comparison-files-summary,
+.wwc-strongflow-candidate-comparison-files-unavailable,
+.wwc-strongflow-candidate-comparison-evidence-summary {
+  margin: var(--wwc-space-0);
+}
+
+.wwc-strongflow-candidate-comparison-file-list,
+.wwc-strongflow-candidate-comparison-evidence-list {
+  max-height: var(--wwc-log-preview-max-height);
+  margin: var(--wwc-space-1) var(--wwc-space-0) var(--wwc-space-0);
+  padding: var(--wwc-space-0);
+  list-style: none;
+  font-family: var(--wwc-font-family-mono);
+  font-size: var(--wwc-font-size-xs);
+  overflow-y: auto;
+}
+
+
+.wwc-strongflow-candidate-comparison-diff[data-changed='true'],
+.wwc-strongflow-candidate-comparison-verdict[data-changed='true'] {
+  color: var(--wwc-color-info-text);
+}
+
+.wwc-strongflow-candidate-comparison-diff[data-changed='false'],
+.wwc-strongflow-candidate-comparison-verdict[data-changed='false'] {
+  color: var(--wwc-color-success-text);
+}
+
 @media (max-width: 64rem) {
   .wwc-strongflow-diagrams,
   .wwc-candidate-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .wwc-strongflow-candidate-comparison-controls {
     grid-template-columns: 1fr;
   }
 
