@@ -656,6 +656,53 @@ test('a rejected advance fails closed and leaves the card in its server column',
   model.close()
 })
 
+// Red light for winwincode-3rs: a refresh that starts while a load more is in
+// flight supersedes the continuation, and the early return must still reset
+// loadingMore so later load-more requests keep working.
+test('a refresh during an in-flight load more keeps later continuations usable', async () => {
+  let requests = 0
+  let releaseMore
+  const moreGate = new Promise(resolve => { releaseMore = resolve })
+  const fullPage = Array.from({ length: 50 }, (_, index) => summary(index + 10))
+  const client = new FakeClient().onQuery('delivery.list', () => {
+    requests += 1
+    if (requests === 1) {
+      return listPage([summary(1)], { hasMore: true, nextCursor: 'opaque-cursor-a' })
+    }
+    if (requests === 2) {
+      return moreGate.then(() => listPage(
+        [summary(2)],
+        { hasMore: true, nextCursor: 'opaque-cursor-b' },
+      ))
+    }
+    return listPage(fullPage, { hasMore: true, nextCursor: 'opaque-cursor-c' })
+  })
+  const { model } = view(client)
+  await model.start()
+  const more = model.loadMore()
+  await new Promise(resolveTick => setImmediate(resolveTick))
+  const refreshed = model.refresh()
+  releaseMore(undefined)
+  await Promise.all([more, refreshed])
+
+  assert.equal(
+    model.state.loadingMore,
+    false,
+    'a superseded load more must not stay flagged as loading',
+  )
+  assert.equal(model.state.hasMore, true)
+  assert.equal(model.state.loadedCount, 50)
+
+  await model.loadMore()
+  assert.equal(
+    client.queries.length,
+    4,
+    'the continuation must still reach the server after the overlap',
+  )
+  assert.equal(model.state.loadedCount, 51)
+  model.close()
+})
+
 test('a superseded rebuild never publishes an older generation over a newer one', async () => {
   const firstPage = deferred()
   const secondPage = deferred()
