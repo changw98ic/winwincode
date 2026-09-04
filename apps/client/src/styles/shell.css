@@ -176,6 +176,74 @@
   background: var(--wwc-color-surface);
 }
 
+/* AUTH-100.2: the username + password sign-in page is the unauthenticated
+   shell region. It only reads tokens, like every other shell region. */
+.wwc-login {
+  max-width: 24rem;
+  margin: var(--wwc-space-6) auto;
+  padding: var(--wwc-space-4);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-lg);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-login-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-3);
+  font-size: var(--wwc-font-size-lg);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-login-status {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-login-error {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-danger-border);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-danger-text);
+  background: var(--wwc-color-danger-surface);
+}
+
+.wwc-login-label {
+  display: block;
+  margin-bottom: var(--wwc-space-1);
+  font-size: var(--wwc-font-size-sm);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-login-control {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.wwc-login-submit {
+  margin-top: var(--wwc-space-3);
+}
+
+.wwc-login-initialization {
+  margin-top: var(--wwc-space-4);
+  padding-top: var(--wwc-space-3);
+  border-top: var(--wwc-border-width) solid var(--wwc-color-border);
+}
+
+.wwc-login-initialization-heading {
+  margin: var(--wwc-space-0) var(--wwc-space-0) var(--wwc-space-2);
+  font-size: var(--wwc-font-size-md);
+  font-weight: var(--wwc-font-weight-strong);
+}
+
+.wwc-login-initialization-detail {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+}
+
+.wwc-login-initialization-submit {
+  margin-top: var(--wwc-space-3);
+}
+
 .wwc-startup-error {
   max-width: var(--wwc-readable-max);
   margin: var(--wwc-space-16) auto;
