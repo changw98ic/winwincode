@@ -829,6 +829,7 @@
         "crates/winwincode-control-plane/src/model_retry_planner.rs",
         "crates/winwincode-control-plane/src/model_retry_settlement.rs",
         "crates/winwincode-control-plane/src/model_retry_usage.rs",
+        "crates/winwincode-control-plane/src/model_route_availability.rs",
         "crates/winwincode-control-plane/src/model_settings.rs",
         "crates/winwincode-control-plane/src/model_stream_flow_control.rs",
         "crates/winwincode-control-plane/src/provider_admission.rs",
@@ -945,6 +946,8 @@
       "id": "client-application",
       "sourcePaths": [
         "apps/client/src/application.ts",
+        "apps/client/src/attention-center-page.ts",
+        "apps/client/src/attention-center-view-model.ts",
         "apps/client/src/auth-page.ts",
         "apps/client/src/auth-view-model.ts",
         "apps/client/src/boot.ts",

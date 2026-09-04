@@ -82,7 +82,7 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   const personal = await navigate('personal')
   assert.equal(personal.deployment, 'personal')
   assert.deepEqual(Object.keys(personal.entries).sort(), [
-    'approvals', 'chat', 'settings', 'strongflow',
+    'attention', 'chat', 'settings', 'strongflow',
   ])
   const directDenial = await evaluate(
     devtools,
@@ -98,7 +98,7 @@ test('real Chrome projects personal, enterprise, disabled, and read-only navigat
   const enterprise = await navigate('enterprise')
   assert.equal(enterprise.deployment, 'enterprise')
   assert.deepEqual(Object.keys(enterprise.entries).sort(), [
-    'approvals', 'chat', 'enterprise', 'settings', 'strongflow',
+    'attention', 'chat', 'enterprise', 'settings', 'strongflow',
   ])
   assert.equal(enterprise.entries.enterprise.capability, 'available')
   const websocketRevoked = await evaluate(

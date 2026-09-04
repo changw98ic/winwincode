@@ -21,7 +21,7 @@ import {
 const root = resolve(import.meta.dirname, '..')
 const productSessionId = 'psn_00000000000000000000000001'
 
-test('real browser routes mount Settings, Approvals, and Local Operations without empty slots', async t => {
+test('real browser routes mount Settings, the Attention Center, session decisions, and Local Operations without empty slots', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(chromePath, null, 'Chrome or Chromium is required for the Client route browser test')
   command(root, 'corepack', ['pnpm', '--filter', '@winwincode/client', 'build'])
@@ -82,7 +82,8 @@ test('real browser routes mount Settings, Approvals, and Local Operations withou
   assert.match(navigation.operations.hash, /^#\/settings\/runtime/iu)
   assert.match(navigation.operations.status, /^Ready/iu)
   assert.equal(navigation.settingsSubscriptionClosed, true)
-  assert.match(navigation.unconfigured, /session/iu)
+  assert.equal(navigation.attentionCenter.hash, '#/attention')
+  assert.match(navigation.attentionCenter.status, /^Ready/iu)
   assert.match(navigation.denied, /do not have access/iu)
   assert.doesNotMatch(navigation.denied, /private route fixture/iu)
   assert.match(navigation.network, /could not be reached/iu)
@@ -127,22 +128,39 @@ test('real browser routes mount Settings, Approvals, and Local Operations withou
   assert.equal(compactSettings.noHorizontalOverflow, true)
   assert.equal(compactSettings.panelWithinPage, true)
 
-  await open(`#/approvals?session=${productSessionId}`, 'approvals')
-  const approvals = await evaluate(
+  await open('#/attention', 'attention')
+  const attentionCenter = await evaluate(
     devtools,
     sessionId,
-    'globalThis.inspectFeatureRoute("approvals")',
+    'globalThis.inspectFeatureRoute("attention")',
   )
-  assert.equal(approvals.hash, `#/approvals?session=${productSessionId}`)
-  assert.match(approvals.status, /^Ready/iu)
-  const compactApprovals = await evaluate(
+  assert.equal(attentionCenter.hash, '#/attention')
+  assert.match(attentionCenter.status, /^Ready/iu)
+  const compactCenter = await evaluate(
     devtools,
     sessionId,
-    'globalThis.inspectManagementPresentation("approvals")',
+    'globalThis.inspectManagementPresentation("attention")',
   )
-  assert.equal(compactApprovals.panelCount, 3)
-  assert.equal(compactApprovals.emptyCount, 3)
-  assert.equal(compactApprovals.noHorizontalOverflow, true)
+  assert.equal(compactCenter.panelCount, 2)
+  assert.equal(compactCenter.emptyCount, 1)
+  assert.equal(compactCenter.noHorizontalOverflow, true)
+
+  await open(`#/attention?session=${productSessionId}`, 'attention-session')
+  const sessionDecisions = await evaluate(
+    devtools,
+    sessionId,
+    'globalThis.inspectFeatureRoute("attention-session")',
+  )
+  assert.equal(sessionDecisions.hash, `#/attention?session=${productSessionId}`)
+  assert.match(sessionDecisions.status, /^Ready/iu)
+  const compactDecisions = await evaluate(
+    devtools,
+    sessionId,
+    'globalThis.inspectManagementPresentation("attention-session")',
+  )
+  assert.equal(compactDecisions.panelCount, 3)
+  assert.equal(compactDecisions.emptyCount, 3)
+  assert.equal(compactDecisions.noHorizontalOverflow, true)
 
   await open('#/settings/runtime', 'operations')
   const directOperations = await evaluate(

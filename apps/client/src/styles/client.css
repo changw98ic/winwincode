@@ -9,4 +9,5 @@
 @import './features/settings.css' layer(features);
 @import './features/local-operations.css' layer(features);
 @import './features/local-decisions.css' layer(features);
+@import './features/attention-center.css' layer(features);
 @import './features/enterprise.css' layer(features);

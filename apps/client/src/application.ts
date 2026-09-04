@@ -659,55 +659,83 @@ export function mountWinWinCodeClient(
     }
   }
 
-  async function renderApprovals(generation: number): Promise<void> {
+  async function renderAttention(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
     const parameters = routeParameters(browser.location.hash)
     const productSessionId = parameters.get('session') as ProductSessionId | null
-    if (productSessionId === null) {
-      routeUnavailable('Choose a Chat session before opening Approvals.')
+    if (productSessionId !== null) {
+      const controller = new AbortController()
+      featureController = controller
+      routeLoading('Loading session decisions…')
+      try {
+        const deliveryId = parameters.get('delivery') as DeliveryId | null
+        const [{ createLocalDecisionsViewModel }, { mountLocalDecisionsPage }] = await Promise.all([
+          import('./local-decisions-view-model.js'),
+          import('./local-decisions-page.js'),
+        ])
+        if (closed || generation !== renderGeneration || controller.signal.aborted) return
+        const model = createLocalDecisionsViewModel({
+          client: controlPlane,
+          actor: context.actor,
+          scope: context.scope,
+          productSessionId,
+          interactionSubscriptionId: contractId(
+            'sub',
+            browser.crypto,
+          ) as ControlPlaneWebSocketSubscriptionId,
+          ...(deliveryId === null
+            ? {}
+            : {
+                delivery: {
+                  deliveryId,
+                  subscriptionId: contractId(
+                    'sub',
+                    browser.crypto,
+                  ) as ControlPlaneWebSocketSubscriptionId,
+                },
+              }),
+          nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        })
+        activeFeature = mountLocalDecisionsPage({
+          root: slot,
+          model,
+          readOnly: activeRouteReadOnly,
+        })
+      } catch (error) {
+        if (closed || generation !== renderGeneration || controller.signal.aborted) return
+        showRouteFailure(error, 'ATTENTION_ROUTE_FAILURE')
+      }
       return
     }
     const controller = new AbortController()
     featureController = controller
-    routeLoading('Loading Approvals…')
+    routeLoading('Loading the Attention Center…')
     try {
-      const deliveryId = parameters.get('delivery') as DeliveryId | null
-      const [{ createLocalDecisionsViewModel }, { mountLocalDecisionsPage }] = await Promise.all([
-        import('./local-decisions-view-model.js'),
-        import('./local-decisions-page.js'),
+      const [{ createAttentionCenterViewModel }, { mountAttentionCenterPage }] = await Promise.all([
+        import('./attention-center-view-model.js'),
+        import('./attention-center-page.js'),
       ])
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      const model = createLocalDecisionsViewModel({
+      const model = createAttentionCenterViewModel({
         client: controlPlane,
         actor: context.actor,
         scope: context.scope,
-        productSessionId,
-        interactionSubscriptionId: contractId(
+        subscriptionId: contractId(
           'sub',
           browser.crypto,
         ) as ControlPlaneWebSocketSubscriptionId,
-        ...(deliveryId === null
-          ? {}
-          : {
-              delivery: {
-                deliveryId,
-                subscriptionId: contractId(
-                  'sub',
-                  browser.crypto,
-                ) as ControlPlaneWebSocketSubscriptionId,
-              },
-            }),
         nextRequestId: () => contractId('req', browser.crypto) as RequestId,
       })
-      activeFeature = mountLocalDecisionsPage({
+      activeFeature = mountAttentionCenterPage({
         root: slot,
         model,
+        scopeSelection: scopeSelectionFromHash(browser.location.hash),
         readOnly: activeRouteReadOnly,
       })
     } catch (error) {
       if (closed || generation !== renderGeneration || controller.signal.aborted) return
-      showRouteFailure(error, 'APPROVALS_ROUTE_FAILURE')
+      showRouteFailure(error, 'ATTENTION_ROUTE_FAILURE')
     }
   }
 
@@ -1054,8 +1082,8 @@ export function mountWinWinCodeClient(
       launchRoute(renderStrongFlow(generation), generation, 'STRONGFLOW_ROUTE_FAILURE')
     } else if (activeSurface.id === 'settings') {
       launchRoute(renderSettings(generation), generation, 'SETTINGS_ROUTE_FAILURE')
-    } else if (activeSurface.id === 'approvals') {
-      launchRoute(renderApprovals(generation), generation, 'APPROVALS_ROUTE_FAILURE')
+    } else if (activeSurface.id === 'attention') {
+      launchRoute(renderAttention(generation), generation, 'ATTENTION_ROUTE_FAILURE')
     } else if (activeSurface.id === 'enterprise') {
       launchRoute(renderEnterprise(generation), generation, 'ENTERPRISE_ROUTE_FAILURE')
     }
@@ -1119,7 +1147,7 @@ export function mountWinWinCodeClient(
       activeSurface.id === 'chat'
       || activeSurface.id === 'strongflow'
       || activeSurface.id === 'settings'
-      || activeSurface.id === 'approvals'
+      || activeSurface.id === 'attention'
       || activeSurface.id === 'enterprise'
     )) render()
   })
