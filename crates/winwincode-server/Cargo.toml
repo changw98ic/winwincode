@@ -26,6 +26,7 @@ sha2.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "signal"] }
 winwincode-api.workspace = true
+winwincode-client-port = { path = "../winwincode-client-port" }
 winwincode-control-plane = { path = "../winwincode-control-plane" }
 winwincode-codex = { path = "../winwincode-codex" }
 winwincode-domain.workspace = true

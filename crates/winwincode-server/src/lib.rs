@@ -4,6 +4,7 @@
 
 mod application;
 mod auth_session;
+mod client_exchange;
 mod config;
 mod dispatcher;
 mod durable_event_hub;
@@ -24,6 +25,10 @@ pub use application::{
 pub use auth_session::{
     AuthSessionBootstrap, AuthSessionConfig, AuthSessionError, ExternalIdentitySessionIssuer,
     ExternalIdentitySessionResult, OwnerInitializationHook, SqliteAuthSessionManager,
+};
+pub use client_exchange::{
+    ClientExchangeApplication, ClientExchangeConfig, ClientExchangeError, ClientExchangeErrorKind,
+    ClientExchangePort,
 };
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 

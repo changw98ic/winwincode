@@ -12881,6 +12881,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "winwincode-api",
+ "winwincode-client-port",
  "winwincode-codex",
  "winwincode-control-plane",
  "winwincode-domain",
