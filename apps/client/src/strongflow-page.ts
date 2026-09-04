@@ -26,6 +26,11 @@ import {
   type StrongFlowDiagramSelection,
 } from './strongflow-diagrams.js'
 import {
+  mountStrongFlowExecutionGraph,
+  strongFlowExecutionEvidenceLink,
+  type StrongFlowExecutionApprovalRow,
+} from './strongflow-execution-graph.js'
+import {
   mountStrongFlowEvidence,
   type StrongFlowEvidenceOptions,
   type StrongFlowEvidenceWorkbench,
@@ -723,6 +728,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
   const attentionOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
   const diagramsHost = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams-host')
+  const executionSection = strongFlowElement(document, 'section', 'wwc-strongflow-view-execution')
+  const executionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
+  executionHeading.textContent = 'Live execution view'
   const candidateHost = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-host')
   const evidenceHost = strongFlowElement(
     document,
@@ -983,6 +991,16 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     onSelectNode: applyDiagramSelection,
   })
   diagramsHost.append(diagrams.root)
+  // The execution graph is a stable keyed view mounted beside the solution
+  // diagrams: high-frequency runtime deltas update rows in place instead of
+  // rebuilding this section.
+  const executionGraph = mountStrongFlowExecutionGraph({
+    document,
+    limits,
+    onOpenEvidence: openEvidence,
+  })
+  executionSection.append(executionHeading, executionGraph.root)
+  diagramsHost.append(executionSection)
 
   const innerSplit = mountSplitPane({
     document,
@@ -1689,6 +1707,14 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       attentionCollection.update([])
       updateOmitted(attentionOmitted, 0, 'Attention records')
       diagrams.update({ projection: null, narrow: strongFlowLayoutMode(viewport.width) === 'narrow' })
+      executionGraph.update({
+        heading: 'Live execution view',
+        emptyText: 'No live execution sessions are available.',
+        sessions: [],
+        evidence: [],
+        approvals: [],
+        readOnly: false,
+      })
       candidateView.update({ projection: null, candidateFiles, viewMode: candidateViewMode })
       applyDiagramSelection(null)
       return
@@ -1715,6 +1741,27 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     diagrams.update({
       projection,
       narrow: strongFlowLayoutMode(viewport.width) === 'narrow',
+    })
+    // Runtime deltas are display-only here: the keyed execution graph keeps
+    // session and activity row identity, and only delivered Evidence records
+    // become timeline jump targets.
+    const executionApprovals: readonly StrongFlowExecutionApprovalRow[] = projection.attention
+      .filter(item => item.status === 'open'
+        && (item.type === 'delivery_approval' || item.blocking))
+      .map(item => ({
+        id: item.id,
+        title: item.title,
+        type: item.type,
+        status: item.status,
+        blocking: item.blocking,
+      }))
+    executionGraph.update({
+      heading: 'Live execution view',
+      emptyText: 'No live execution sessions are available.',
+      sessions: projection.runtime.sessions,
+      evidence: projection.evidence.map(strongFlowExecutionEvidenceLink),
+      approvals: executionApprovals,
+      readOnly: false,
     })
     candidateView.update({ projection, candidateFiles, viewMode: candidateViewMode })
     applyDiagramSelection(diagramSelection)
@@ -1853,13 +1900,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       preferences.artifactsTab === 'execution' ? 'execution' : 'solution',
     )
     if (diagramPanel !== undefined) mountRegion(diagramPanel, [diagramsHost])
-    for (const child of [...diagrams.root.children] as HTMLElement[]) {
-      if (child.className === 'wwc-strongflow-view-solution') {
-        child.hidden = preferences.artifactsTab === 'execution'
-      } else if (child.className === 'wwc-strongflow-view-execution') {
-        child.hidden = preferences.artifactsTab !== 'execution'
-      }
-    }
+    diagrams.root.hidden = preferences.artifactsTab === 'execution'
+    executionSection.hidden = preferences.artifactsTab !== 'execution'
     if (lastLayoutKey === layoutKey) return
     lastLayoutKey = layoutKey
 
@@ -2072,6 +2114,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       deliveryListPage.close()
       options.deliveryList.close()
       diagrams.close()
+      executionGraph.close()
       candidateView.close()
       evidenceWorkbench?.close()
       evidenceWorkbench = null

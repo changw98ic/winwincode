@@ -3,6 +3,7 @@
 import type {
   CandidateHistoricalReviewProjection,
   CandidateHistoryItemProjection,
+  EvidenceId,
   RuntimeProjectionSnapshot,
   RuntimeSessionProjection,
   StageRunId,
@@ -12,6 +13,11 @@ import {
   strongFlowElement,
   type StrongFlowRenderLimits,
 } from './strongflow-rendering.js'
+import {
+  mountStrongFlowActivityTimeline,
+  strongFlowExecutionEvidenceLink,
+  type StrongFlowExecutionEvidenceLink,
+} from './strongflow-execution-graph.js'
 import type { StrongFlowHistorySelection } from './strongflow-history-selection.js'
 import type {
   StrongFlowHistoryEvidence,
@@ -128,53 +134,11 @@ function statusNode(
   return node
 }
 
-/** Keyed activity rows inside one runtime session, keyed by call id + occurrence. */
-function updateActivities(
-  document: Document,
-  parent: HTMLElement,
-  omittedNote: HTMLElement,
-  session: RuntimeSessionProjection,
-  limit: number,
-): void {
-  const bounded = boundedItems([...session.activities], limit)
-  const occurrences = new Map<string, number>()
-  const keys = bounded.items.map(activity => {
-    const occurrence = occurrences.get(activity.callId) ?? 0
-    occurrences.set(activity.callId, occurrence + 1)
-    return `${activity.callId}#${String(occurrence)}`
-  })
-  const retained = new Set(keys)
-  const mounted = new Map<string, HTMLLIElement>()
-  for (const node of [...parent.children] as HTMLLIElement[]) {
-    const key = node.dataset.activityKey ?? ''
-    if (retained.has(key) && !mounted.has(key)) mounted.set(key, node)
-    else node.remove()
-  }
-  bounded.items.forEach((activity, index) => {
-    const key = keys[index]
-    if (key === undefined) return
-    let node = mounted.get(key)
-    if (node === undefined) {
-      node = document.createElement('li')
-      node.dataset.activityKey = key
-    }
-    setText(
-      node,
-      `${activity.activityType} · ${activity.command ?? activity.callId} · ${activity.status}`,
-    )
-    const current = parent.childNodes[index] ?? null
-    if (current !== node) parent.insertBefore(node, current)
-  })
-  omittedNote.hidden = bounded.omitted === 0
-  setText(omittedNote, `${String(bounded.omitted)} more runtime events not shown.`)
-}
-
 /**
- * Mount the read-only historical run review panel. It renders identity,
- * runtime binding, the exact historical RuntimeProjection, Evidence, openable
- * historical Candidates, and the run conclusion for one selected non-current
- * StageRun. Rows are keyed and updated in place, so equivalent snapshots keep
- * DOM identity, focus, and scroll; no mutating control is ever exposed.
+ * Read-only historical run review. Rebuilds the execution graph and timeline
+ * of a historical Attempt strictly from that attempt's own RuntimeProjection
+ * snapshot, loaded at the historical read cursor. No current-run state is
+ * ever mixed into it, and no mutating control is exposed.
  */
 export function mountStrongFlowRunDetail(
   options: StrongFlowRunDetailOptions,
@@ -274,6 +238,15 @@ export function mountStrongFlowRunDetail(
     },
   })
 
+  let lastRunEvidence: readonly StrongFlowExecutionEvidenceLink[] = []
+
+  function openEvidenceDetail(evidenceId: EvidenceId): void {
+    const row = evidenceCollection.node(evidenceId)
+    if (row === null) return
+    row.dataset.evidenceTarget = 'true'
+    row.scrollIntoView({ block: 'nearest' })
+  }
+
   const runtimeStatus = statusNode(
     document,
     runtimeHost,
@@ -308,6 +281,7 @@ export function mountStrongFlowRunDetail(
     .map(term => definitionRow(document, runtimeList, term))
 
   const candidateRows = new WeakMap<HTMLLIElement, CandidateRowState>()
+  const sessionTimelines: ReturnType<typeof mountStrongFlowActivityTimeline>[] = []
   const sessionsCollection = mountKeyedCollection<
     RuntimeSessionProjection,
     string,
@@ -318,17 +292,18 @@ export function mountStrongFlowRunDetail(
     create: () => {
       const item = document.createElement('li')
       const summary = document.createElement('p')
-      const activities = document.createElement('ul')
-      const omitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
       summary.className = 'wwc-strongflow-history-runtime-session'
-      activities.className = 'wwc-strongflow-history-runtime-activities'
-      item.append(summary, activities, omitted)
+      const timeline = mountStrongFlowActivityTimeline({
+        document,
+        limits: options.limits,
+        onOpenEvidence: openEvidenceDetail,
+      })
+      item.append(summary, timeline.root)
+      sessionTimelines.push(timeline)
       return item
     },
     update(item, session) {
       const summary = item.children[0] as HTMLElement
-      const activities = item.children[1] as HTMLElement
-      const omitted = item.children[2] as HTMLElement
       item.dataset.codexThreadId = session.codexThreadId
       setText(
         summary,
@@ -336,7 +311,23 @@ export function mountStrongFlowRunDetail(
           String(session.agents.length)
         } agents · as-of ${String(session.asOfSequence)}`,
       )
-      updateActivities(document, activities, omitted, session, options.limits.activities)
+      const timelineRoot = item.children[1] as HTMLElement | undefined
+      const timeline = sessionTimelines.find(entry => entry.root === timelineRoot)
+      if (timeline === undefined) return
+      timeline.update({
+        session,
+        evidence: lastRunEvidence,
+        readOnly: true,
+      })
+    },
+    remove(item) {
+      const timelineRoot = item.children[1] as HTMLElement | undefined
+      const index = sessionTimelines.findIndex(entry => entry.root === timelineRoot)
+      const timeline = sessionTimelines[index]
+      if (timeline !== undefined) {
+        timeline.close()
+        sessionTimelines.splice(index, 1)
+      }
     },
   })
 
@@ -509,6 +500,7 @@ export function mountStrongFlowRunDetail(
     runtimeSessions.hidden = state !== 'ready'
     if (state !== 'ready') {
       applyDefinitions(runtimeRows, ['—', '—', '—', '—'])
+      lastRunEvidence = []
       sessionsCollection.update([])
     }
   }
@@ -779,6 +771,7 @@ export function mountStrongFlowRunDetail(
     evidenceCollection.update(boundedEvidence.items)
     evidenceOmitted.hidden = boundedEvidence.omitted === 0
     setText(evidenceOmitted, `${String(boundedEvidence.omitted)} more evidence records not shown.`)
+    lastRunEvidence = boundedEvidence.items.map(strongFlowExecutionEvidenceLink)
     conclusion.dataset.status = run.status
     setText(conclusionStatus, run.status)
     setText(conclusionText, run.finishedAt === null
@@ -804,6 +797,7 @@ export function mountStrongFlowRunDetail(
       reviewEvidenceCollection.close()
       // Release the last snapshot payloads so a closed view keeps no state.
       lastCandidateItems = []
+      lastRunEvidence = []
       openCandidateKey = null
       reviewTarget = null
       payloadKey = null

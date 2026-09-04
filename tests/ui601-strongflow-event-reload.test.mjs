@@ -110,6 +110,10 @@ function projection() {
     runtime: {
       stageRunId,
       sessions: many(3, sessionValue => ({
+        productSessionId: `psn_${String(sessionValue).padStart(26, '0')}`,
+        stageRunId,
+        sessionBindingId: `bind:${String(sessionValue)}`,
+        codexThreadId: `cdx_t${String(sessionValue).padStart(25, '0')}`,
         deliveryTaskId: `task:${String(sessionValue)}`,
         attempt: sessionValue,
         asOfSequence: sessionValue,
@@ -133,6 +137,15 @@ function projection() {
           additions: 20,
           deletions: 5,
           sourceRef: 'runtime:diff:1',
+        },
+        usage: null,
+        plan: null,
+        recovery: {
+          failureCount: 0,
+          lastFailureSourceRef: null,
+          latestRecoverySourceRef: null,
+          recoveryCount: 0,
+          state: 'none',
         },
       })),
     },
@@ -242,6 +255,20 @@ function findByClass(node, className) {
     if (match !== null) return match
   }
   return null
+}
+
+function findAllByClass(node, className, matches = []) {
+  if (node.className === className) matches.push(node)
+  for (const child of node.children) findAllByClass(child, className, matches)
+  return matches
+}
+
+function flatten(node) {
+  return [node, ...node.children.flatMap(child => flatten(child))]
+}
+
+function allText(node) {
+  return flatten(node).map(entry => entry.textContent ?? '').join(' ')
 }
 
 class FakeDeliveryListModel {
@@ -459,6 +486,7 @@ test('UI-601: mounted artifact views retain identity while their content changes
 
   const runtimeChanged = projection()
   runtimeChanged.runtime.sessions[0].diffSummary.sourceRef = 'runtime:diff:2'
+  runtimeChanged.runtime.sessions[0].asOfSequence = 9
   model.publish(state({ projection: runtimeChanged }))
   const diagramsAfterRuntime = findByClass(root, 'wwc-strongflow-diagrams')
   assert.equal(
@@ -471,19 +499,40 @@ test('UI-601: mounted artifact views retain identity while their content changes
     graphNodeBefore,
     'UI-307: keyed graph nodes survive unrelated runtime snapshots',
   )
-  assert.notEqual(
-    findByClass(root, 'wwc-strongflow-execution-session'),
+  const retainedSession = findByClass(root, 'wwc-strongflow-execution-session')
+  assert.equal(
+    retainedSession,
     sessionBefore,
-    'changed session content still re-renders',
+    'UI-308: runtime deltas update the keyed execution session in place',
+  )
+  assert.match(
+    allText(retainedSession),
+    /as-of sequence 9/u,
+    'UI-308: the retained session still renders the delivered runtime facts',
   )
   assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
   assert.equal(comments.value, 'draft for the current candidate')
 
+  // A solution review change is the one thing that replaces the rendered
+  // diagram content; the mounted diagrams region itself keeps its identity.
+  const reviewChanged = projection()
+  reviewChanged.solutionReview.processDiagram = diagram('process-flow-v2')
+  reviewChanged.solutionReview.processDiagram.nodes[0].label = 'Renamed process node'
+  model.publish(state({ projection: reviewChanged }))
+  const diagramsAfterReview = findByClass(root, 'wwc-strongflow-diagrams')
+  assert.equal(diagramsAfterReview, diagramsBefore)
+  const renamedLabel = findAllByClass(root, 'wwc-strongflow-graph-node-label')
+    .find(label => (label.textContent ?? '') === 'Renamed process node')
+  assert.notEqual(renamedLabel, undefined)
+  assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
+  assert.equal(comments.value, 'draft for the current candidate')
+
   const candidateChanged = projection()
+  candidateChanged.solutionReview.processDiagram = diagram('process-flow-v2')
   candidateChanged.runtime.sessions[0].diffSummary.sourceRef = 'runtime:diff:2'
   candidateChanged.currentCandidate.diffSha256 = `sha256:${'4'.repeat(64)}`
   model.publish(state({ projection: candidateChanged }))
-  assert.equal(findByClass(root, 'wwc-strongflow-diagrams'), diagramsAfterRuntime)
+  assert.equal(findByClass(root, 'wwc-strongflow-diagrams'), diagramsAfterReview)
   assert.equal(findByClass(root, 'wwc-strongflow-view-candidate'), candidateBefore)
   assert.equal(comments.value, '')
   mounted.close()

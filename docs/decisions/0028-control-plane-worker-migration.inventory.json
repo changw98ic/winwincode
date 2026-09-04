@@ -1000,6 +1000,7 @@
         "apps/client/src/strongflow-diff-model.ts",
         "apps/client/src/strongflow-diff-viewer.ts",
         "apps/client/src/strongflow-evidence.ts",
+        "apps/client/src/strongflow-execution-graph.ts",
         "apps/client/src/strongflow-history-navigation.ts",
         "apps/client/src/strongflow-history-selection.ts",
         "apps/client/src/strongflow-history-tree.ts",
