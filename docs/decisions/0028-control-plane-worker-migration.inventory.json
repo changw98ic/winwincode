@@ -994,6 +994,7 @@
         "apps/client/src/scope-selector-view-model.ts",
         "apps/client/src/settings-page.ts",
         "apps/client/src/settings-view-model.ts",
+        "apps/client/src/strongflow-candidate-comparison.ts",
         "apps/client/src/strongflow-candidate.ts",
         "apps/client/src/strongflow-delivery-list-page.ts",
         "apps/client/src/strongflow-delivery-list-view-model.ts",
@@ -1033,7 +1034,8 @@
         "client-transport",
         "first-run-vertical",
         "ui604-a11y-shell",
-        "ui604-a11y-semantics"
+        "ui604-a11y-semantics",
+        "candidate-comparison"
       ]
     },
     {
@@ -1481,6 +1483,17 @@
         "the Chat conversion confirmation is a named dialog that moves focus to its first field on open, closes on Escape, and returns focus to its trigger",
         "a panel can nest one heading level below the page title so a page exposes a single top-level heading",
         "the Diff table carries a caption naming the selected file and a header row whose columns follow the active unified or side-by-side layout"
+      ]
+    },
+    {
+      "id": "candidate-comparison",
+      "scenario": "candidate-comparison",
+      "testFile": "tests/strongflow-candidate-comparison.test.mjs",
+      "testName": "returning from bounded rework defaults to the rework pair and renders its summary",
+      "expectedFacts": [
+        "one Delivery compares only its own frozen Candidates",
+        "a stale, missing, or foreign comparison link is rejected",
+        "the comparison summary reports changed paths, Diff, Evidence, and Verdict"
       ]
     }
   ],
