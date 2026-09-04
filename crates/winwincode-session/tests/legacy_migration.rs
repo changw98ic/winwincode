@@ -205,6 +205,12 @@ fn all_ten_legacy_oracle_snapshots_migrate_to_closed_shapes() {
             &serde_json::to_vec(&input).expect("legacy oracle snapshot"),
             &mut transaction,
         );
+        let spec = output["spec"].as_object().expect("canonical Spec object");
+        assert!(
+            spec.contains_key("sourceProductSessionId"),
+            "{scenario_id} canonical Spec lacks sourceProductSessionId",
+        );
+        assert_eq!(spec["sourceProductSessionId"], Value::Null, "{scenario_id}");
         let run_ids: HashSet<&str> = stage_runs(&output)
             .iter()
             .map(|run| run["id"].as_str().expect("stage id"))
