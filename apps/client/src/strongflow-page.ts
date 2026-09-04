@@ -35,6 +35,7 @@ import {
   type StrongFlowDeliveryListView,
 } from './strongflow-delivery-list-page.js'
 import type { StrongFlowDeliveryListViewModel } from './strongflow-delivery-list-view-model.js'
+import { mountStrongFlowHeader } from './strongflow-header.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -132,6 +133,11 @@ export function strongFlowPagePresentation(
 ): StrongFlowPagePresentation {
   const interaction = state.interaction ?? { status: 'idle', error: null }
   const visibleError = interaction.error ?? state.error
+  // The mounted header is the single polite live region for the next-step
+  // status, so the legacy status line stays empty whenever its only content
+  // would repeat the header's own label. Every state the header hides
+  // (loading, reconnecting, errors, cancelled, closed, no Delivery) keeps its
+  // visible, announced line here.
   const statusText = interaction.status === 'submitting'
     ? 'Submitting StrongFlow decision…'
     : interaction.status === 'waiting'
@@ -154,9 +160,7 @@ export function strongFlowPagePresentation(
                   ? 'StrongFlow closed'
                   : state.projection === null
                     ? 'No Delivery selected'
-                    : `${state.projection.delivery.status} · revision ${String(
-                        state.projection.metadata.revisions.delivery,
-                      )}`
+                    : ''
   const errorText = visibleError === null
     ? null
     : visibleError.code === 'REVISION_CONFLICT'
@@ -664,6 +668,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
           },
         }
   const layout = strongFlowElement(document, 'div', 'wwc-strongflow')
+  const header = mountStrongFlowHeader({ document })
   const status = strongFlowElement(document, 'p', 'wwc-strongflow-status')
   const error = strongFlowElement(document, 'div', 'wwc-strongflow-error')
   const errorText = strongFlowElement(document, 'span', 'wwc-strongflow-error-text')
@@ -1117,7 +1122,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   stagesSection.append(stagesHeading, stages, stagesEmpty, stagesOmitted)
   attentionSection.append(attentionHeading, attention, attentionOmitted)
   details.append(empty, overview)
-  historyBlockedNote.setAttribute('role', 'status')
+  // Static guidance text: its content never mutates while visible, so it is
+  // deliberately not a live region — the page's single polite status stays the
+  // only live announcement while a historical review is open.
   historyBlockedNote.textContent = 'History review is open. Return to the current StageRun to act on this Delivery.'
   historyBlockedNote.hidden = true
   actions.append(
@@ -1147,7 +1154,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   narrowBar.append(openNavigation.root, openContext.root)
   workspace.append(desktopControls, narrowBar, outerSplit.root, artifacts)
   content.append(workspace, navigationDrawer.root, contextDrawer.root)
-  layout.append(status, error, content)
+  layout.append(status, error, header.root, content)
   options.root.replaceChildren(layout)
 
   function openEvidence(evidenceId: EvidenceId): void {
@@ -2022,7 +2029,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   function render(state: StrongFlowViewModelState): void {
     if (closed) return
     const presentation = strongFlowPagePresentation(state)
+    status.hidden = presentation.statusText.length === 0
     status.textContent = presentation.statusText
+    header.update(state, presentation.statusText)
     content.setAttribute('aria-busy', String(presentation.busy))
     error.hidden = presentation.errorText === null
     errorText.textContent = presentation.errorText ?? ''
@@ -2050,6 +2059,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       closed = true
       unsubscribe()
       browserWindow?.removeEventListener('resize', onWindowResize)
+      header.close()
       retry.removeEventListener('click', onRetry)
       reconnect.removeEventListener('click', onReconnect)
       comments.removeEventListener('input', onReviewCommentsInput)

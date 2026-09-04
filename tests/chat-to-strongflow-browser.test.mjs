@@ -75,7 +75,7 @@ test('a real browser confirms Chat requirements then opens and restores exact St
     /^#\/strongflow\?delivery=dlv_[0-9A-HJKMNP-TV-Z]{26}&session=psn_[0-9A-HJKMNP-TV-Z]{26}&stageRun=run_[0-9A-HJKMNP-TV-Z]{26}&view=unified$/u,
   )
   assert.equal(result.created.heading, 'Confirmed requirements Chat')
-  assert.match(result.created.status, /clarifying.*revision 2/iu)
+  assert.match(result.created.status, /Waiting for your input/u)
   assert.deepEqual(result.created.listDeliveryIds, [result.deliveryId])
   assert.deepEqual(result.calls.commands.map(request => ({
     ...request,
@@ -127,6 +127,6 @@ test('a real browser confirms Chat requirements then opens and restores exact St
   const restored = await evaluate(devtools, sessionId, 'globalThis.inspectConvertedAfterReload()')
   assert.equal(restored.hash, result.created.hash)
   assert.equal(restored.heading, 'Confirmed requirements Chat')
-  assert.match(restored.status, /clarifying.*revision 2/iu)
+  assert.match(restored.status, /Waiting for your input/u)
   assert.equal(restored.deliverySubscribed, true)
 })
