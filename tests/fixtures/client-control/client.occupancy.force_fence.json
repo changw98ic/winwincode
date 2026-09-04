@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000021",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 905,
+  "occurredAt": "2026-09-01T09:38:00.000Z",
+  "kind": "client.occupancy.force_fence",
+  "expectedRevision": 18,
+  "idempotencyKey": "idem-client-occupancy-force-fence-0004",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": "4",
+  "payload": {
+    "clientOccupancyLeaseId": "lse_000000000000000000000001",
+    "holderUserId": "usr_00000000000000000000000a",
+    "previousFencingToken": 3,
+    "newFencingToken": 4,
+    "reason": "server_failover_rebase",
+    "issuedAt": "2026-09-01T09:38:00.000Z"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000001",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 401,
+  "occurredAt": "2026-09-01T09:30:00.000Z",
+  "kind": "client.enroll",
+  "expectedRevision": 0,
+  "idempotencyKey": "idem-client-enroll-0001",
+  "payload": {
+    "publicClientId": "100200300401",
+    "displayName": "Demo MacBook Pro",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "clientVersion": "1.0.0-demo.0",
+    "deviceCredentialDigest": "sha256:9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f9c1d2e3f",
+    "maxConcurrentWorkerSessions": 2
+  }
+}

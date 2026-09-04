@@ -1,0 +1,3177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.winwincode.dev/winwincode/v1/client-control.schema.json",
+  "title": "WinWinCode ClientControlPort v1",
+  "description": "Transport-neutral contract between the WinWinCode Server Control Plane and the WinWinCode Device Client for enrollment, presence, access challenges, exclusive occupancy, repository projections, worker supervision, and candidate delivery. Local absolute paths never cross this contract; connect codes appear only as codeDigest values.",
+  "$ref": "#/$defs/ClientControlMessage",
+  "x-winwincode-transports": {
+    "adapters": [
+      "client-exchange"
+    ],
+    "clientInitiated": true,
+    "boundedFrame": true,
+    "durableOutbox": true,
+    "transportConfigurationOutsideContract": true
+  },
+  "x-winwincode-semantics": {
+    "commandFields": {
+      "appliesTo": "every message with x-message-class command",
+      "required": [
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "conflict": "expectedRevision mismatch is rejected without state change; an identical idempotencyKey with an identical payload replays the first result"
+    },
+    "occupancyFencingFields": {
+      "appliesTo": "every message with x-message-class command that involves occupancy or task execution",
+      "required": [
+        "occupancyLeaseId",
+        "occupancyFencingToken"
+      ],
+      "staleFencingToken": "a fencing token below the current occupancy token is rejected before any local effect"
+    },
+    "redelivery": {
+      "condition": "same messageId and payload digest after reconnect or server restart",
+      "result": "duplicate",
+      "effect": "acknowledge without a second state transition"
+    },
+    "pathBan": "no field of this contract carries a local absolute path; repository locations resolve only inside the Device Client local database",
+    "connectCodeBan": "connect code material appears only as codeDigest; plaintext connect codes never enter this contract"
+  },
+  "$defs": {
+    "ClientControlMessageId": {
+      "type": "string",
+      "pattern": "^cmsg_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Unique identity of one ClientControlPort message envelope."
+    },
+    "ClientExchangeSequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "description": "Strictly increasing per-client exchange stream position used for acknowledgement and replay."
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{7,199}$",
+      "description": "Opaque retry identity of one command; the same key with the same payload replays the first result."
+    },
+    "OccupancyFencingToken": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Monotonically increasing occupancy fencing token encoded as a string to preserve 64-bit precision. Every new occupancy mints a higher token; stale tokens are always rejected."
+    },
+    "ClientNodeId": {
+      "type": "string",
+      "pattern": "^cnd_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one registered Device Client node."
+    },
+    "PublicClientId": {
+      "type": "string",
+      "pattern": "^[0-9]{9,12}$",
+      "description": "Stable user-visible Client ID used to look up a pending or active ClientNode. It is public and never a credential."
+    },
+    "ClientInstanceId": {
+      "type": "string",
+      "pattern": "^cix_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one Device Client process boot; changes after every restart."
+    },
+    "ClientConnectCodeId": {
+      "type": "string",
+      "pattern": "^cct_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one one-time dynamic connect code publication."
+    },
+    "ClientAccessChallengeId": {
+      "type": "string",
+      "pattern": "^cac_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one pending access challenge sent to the Device Client before a grant is created."
+    },
+    "ClientAccessGrantId": {
+      "type": "string",
+      "pattern": "^cag_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one user-to-client access grant."
+    },
+    "ClientOccupancyLeaseId": {
+      "type": "string",
+      "pattern": "^ocl_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one exclusive occupancy lease. At most one active lease exists per ClientNode."
+    },
+    "OccupancyClaimId": {
+      "type": "string",
+      "pattern": "^ocq_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one atomic occupancy claim attempt."
+    },
+    "RepositoryBindingId": {
+      "type": "string",
+      "pattern": "^rbd_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one ClientNode-local repository binding. The absolute local path stays in the Device Client local database and never crosses this contract."
+    },
+    "RepositoryAccessGrantId": {
+      "type": "string",
+      "pattern": "^rag_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one user-to-repository access grant."
+    },
+    "WorkerLaunchGrantId": {
+      "type": "string",
+      "pattern": "^wlg_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one single-use worker launch grant."
+    },
+    "LocalCandidateReceiptId": {
+      "type": "string",
+      "pattern": "^lcr_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one client-issued candidate retention receipt."
+    },
+    "LocalApplyReceiptId": {
+      "type": "string",
+      "pattern": "^lar_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Identity of one client-issued local apply receipt."
+    },
+    "GitCommitSha": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "Full git commit object name in SHA-1 or SHA-256 form."
+    },
+    "GitRefName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9/._-]{0,254}$",
+      "description": "Git branch or ref name as accepted by git check-ref-format. Full git ref-format rules are enforced by git itself."
+    },
+    "CandidateRef": {
+      "type": "string",
+      "pattern": "^refs/winwincode/candidates/[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+      "description": "Stable local git ref that survives worktree cleanup."
+    },
+    "ClientDisplayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "User-chosen display name for a ClientNode or repository binding."
+    },
+    "ClientVersion": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$",
+      "description": "Device Client semantic version."
+    },
+    "UserAccountRole": {
+      "type": "string",
+      "enum": [
+        "owner",
+        "member"
+      ],
+      "title": "UserAccountRole",
+      "description": "Server-wide account role."
+    },
+    "UserAccountState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "disabled"
+      ],
+      "title": "UserAccountState",
+      "description": "Lifecycle state of a user account; disabled accounts lose every active browser session immediately."
+    },
+    "ClientNodePresenceState": {
+      "type": "string",
+      "enum": [
+        "pending_enrollment",
+        "online",
+        "degraded",
+        "offline",
+        "locked",
+        "revoked"
+      ],
+      "title": "ClientNodePresenceState",
+      "description": "Machine-level presence of a ClientNode. It belongs to no browser session."
+    },
+    "ClientLockState": {
+      "type": "string",
+      "enum": [
+        "unlocked",
+        "locked"
+      ],
+      "title": "ClientLockState",
+      "description": "Operator lock toggle of a ClientNode; locked blocks new connections and occupancy regardless of presence."
+    },
+    "ClientPlatformTarget": {
+      "type": "string",
+      "enum": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "title": "ClientPlatformTarget",
+      "description": "Supported release target triple of the reporting Device Client."
+    },
+    "ClientArchitecture": {
+      "type": "string",
+      "enum": [
+        "aarch64",
+        "x86_64"
+      ],
+      "title": "ClientArchitecture",
+      "description": "Machine architecture of the reporting Device Client."
+    },
+    "ClientConnectCodeState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "consumed",
+        "expired",
+        "revoked"
+      ],
+      "title": "ClientConnectCodeState",
+      "description": "Lifecycle state of a one-time connect code."
+    },
+    "ClientAccessGrantPermission": {
+      "type": "string",
+      "enum": [
+        "use",
+        "manage",
+        "share"
+      ],
+      "title": "ClientAccessGrantPermission",
+      "description": "Permission carried by a ClientAccessGrant."
+    },
+    "ClientTrustMode": {
+      "type": "string",
+      "enum": [
+        "temporary",
+        "trusted"
+      ],
+      "title": "ClientTrustMode",
+      "description": "Trust mode of a ClientAccessGrant; trusted only skips the connect code, never occupancy, repository ACL, or presence checks."
+    },
+    "ClientAccessGrantState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "revoked",
+        "expired"
+      ],
+      "title": "ClientAccessGrantState",
+      "description": "Lifecycle state of a ClientAccessGrant."
+    },
+    "ClientAccessGrantSource": {
+      "type": "string",
+      "enum": [
+        "connect_code",
+        "administrator",
+        "local_confirmation"
+      ],
+      "title": "ClientAccessGrantSource",
+      "description": "How a ClientAccessGrant was established."
+    },
+    "ClientOccupancyLeaseState": {
+      "type": "string",
+      "enum": [
+        "available",
+        "reserving",
+        "occupied",
+        "draining",
+        "recovery_pending",
+        "released",
+        "expired"
+      ],
+      "title": "ClientOccupancyLeaseState",
+      "description": "Exclusive occupancy lifecycle of one ClientNode. At most one active lease exists per ClientNode and it belongs to a userId, not to a browser cookie."
+    },
+    "ClientOccupancyReleaseMode": {
+      "type": "string",
+      "enum": [
+        "immediate",
+        "drain_then_release",
+        "cancel_tasks_and_release"
+      ],
+      "title": "ClientOccupancyReleaseMode",
+      "description": "Requested release behavior; drain_then_release finishes active tasks, cancel_tasks_and_release cancels them first."
+    },
+    "ClientOccupancyReleaseReason": {
+      "type": "string",
+      "enum": [
+        "user_requested",
+        "cancel_tasks_and_release",
+        "drained",
+        "idle_timeout",
+        "revoked",
+        "force_fenced"
+      ],
+      "title": "ClientOccupancyReleaseReason",
+      "description": "Recorded reason why an occupancy lease reached a released terminal state."
+    },
+    "RepositoryKind": {
+      "type": "string",
+      "enum": [
+        "git"
+      ],
+      "title": "RepositoryKind",
+      "description": "Supported repository kind; local git is required and remote git is optional."
+    },
+    "RepositoryDirtyState": {
+      "type": "string",
+      "enum": [
+        "clean",
+        "dirty"
+      ],
+      "title": "RepositoryDirtyState",
+      "description": "Working-tree dirty projection of the bound repository."
+    },
+    "RepositoryAvailability": {
+      "type": "string",
+      "enum": [
+        "available",
+        "dirty",
+        "unavailable",
+        "moved",
+        "invalid_git",
+        "permission_denied",
+        "scan_failed"
+      ],
+      "title": "RepositoryAvailability",
+      "description": "Combined repository status projection; every launch revalidates it and never trusts the previous scan."
+    },
+    "WorkerLaunchGrantState": {
+      "type": "string",
+      "enum": [
+        "issued",
+        "consumed",
+        "revoked",
+        "expired"
+      ],
+      "title": "WorkerLaunchGrantState",
+      "description": "Lifecycle state of a single-use worker launch grant."
+    },
+    "LocalCandidateReceiptState": {
+      "type": "string",
+      "enum": [
+        "retained",
+        "branch_created",
+        "applied",
+        "discarded",
+        "failed"
+      ],
+      "title": "LocalCandidateReceiptState",
+      "description": "Retention lifecycle of a locally frozen candidate."
+    },
+    "LocalApplyStrategy": {
+      "type": "string",
+      "enum": [
+        "create_branch",
+        "fast_forward",
+        "cherry_pick",
+        "merge"
+      ],
+      "title": "LocalApplyStrategy",
+      "description": "Strategy used to deliver a candidate onto its target branch."
+    },
+    "LocalApplyResult": {
+      "type": "string",
+      "enum": [
+        "retained",
+        "branch_created",
+        "applied",
+        "base_stale",
+        "working_tree_dirty",
+        "merge_conflict",
+        "candidate_missing",
+        "permission_denied",
+        "discarded",
+        "failed"
+      ],
+      "title": "LocalApplyResult",
+      "description": "Terminal outcome of one local apply attempt; every attempt writes a LocalApplyReceipt."
+    },
+    "ClientWorkerRunState": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "draining",
+        "stopping",
+        "stopped",
+        "crashed",
+        "missing",
+        "unknown"
+      ],
+      "title": "ClientWorkerRunState",
+      "description": "Observed run state of one supervised worker process."
+    },
+    "WorkerReconcileState": {
+      "type": "string",
+      "enum": [
+        "still_running",
+        "terminal",
+        "missing",
+        "unknown"
+      ],
+      "title": "WorkerReconcileState",
+      "description": "Reconciliation verdict for one worker process after Device Client restart."
+    },
+    "ClientChallengeAckStatus": {
+      "type": "string",
+      "enum": [
+        "confirmed",
+        "stale_generation"
+      ],
+      "title": "ClientChallengeAckStatus",
+      "description": "Device Client verdict for one access challenge."
+    },
+    "OccupancyRejectReason": {
+      "type": "string",
+      "enum": [
+        "unknown_lease",
+        "stale_fencing_token",
+        "local_state_conflict",
+        "client_locked",
+        "capacity_exhausted"
+      ],
+      "title": "OccupancyRejectReason",
+      "description": "Client-side reason for rejecting an offered occupancy lease."
+    },
+    "WorkerLaunchAckStatus": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "duplicate",
+        "rejected_stale_fencing_token",
+        "rejected_lease_mismatch",
+        "rejected_capacity_exhausted",
+        "rejected_repository_unavailable",
+        "rejected_unknown_grant",
+        "rejected_wrong_state"
+      ],
+      "title": "WorkerLaunchAckStatus",
+      "description": "Idempotent result of applying one worker launch command locally."
+    },
+    "CommandAckStatus": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "duplicate",
+        "rejected_unknown_command",
+        "rejected_revision_conflict",
+        "rejected_stale_fencing_token",
+        "rejected_lease_mismatch",
+        "rejected_wrong_state",
+        "rejected_unauthorized",
+        "rejected_capacity_exhausted"
+      ],
+      "title": "CommandAckStatus",
+      "description": "Universal acknowledgement status for control-plane-to-client commands."
+    },
+    "ClientRepositoryRescanReason": {
+      "type": "string",
+      "enum": [
+        "occupant_requested",
+        "occupancy_recovered",
+        "policy"
+      ],
+      "title": "ClientRepositoryRescanReason",
+      "description": "Why the Control Plane requests a repository rescan."
+    },
+    "ClientWorkerStopReason": {
+      "type": "string",
+      "enum": [
+        "occupant_requested",
+        "draining_complete",
+        "lease_recovered",
+        "grant_revoked",
+        "superseded"
+      ],
+      "title": "ClientWorkerStopReason",
+      "description": "Why the Control Plane stops one supervised worker process."
+    },
+    "ClientOccupancyForceFenceReason": {
+      "type": "string",
+      "enum": [
+        "recovery_deadline_exceeded",
+        "administrator_force_clean"
+      ],
+      "title": "ClientOccupancyForceFenceReason",
+      "description": "Why the Control Plane force-fences a stale occupancy."
+    },
+    "ClientCredentialRotateReason": {
+      "type": "string",
+      "enum": [
+        "scheduled",
+        "suspected_compromise"
+      ],
+      "title": "ClientCredentialRotateReason",
+      "description": "Why device credential rotation is requested; credential material itself never crosses this contract."
+    },
+    "ClientControlErrorCode": {
+      "type": "string",
+      "enum": [
+        "PROTOCOL_VERSION_UNSUPPORTED",
+        "DEVICE_NOT_ENROLLED",
+        "DEVICE_INSTANCE_CHANGED",
+        "UNKNOWN_LEASE",
+        "STALE_FENCING_TOKEN",
+        "REVISION_CONFLICT",
+        "IDEMPOTENCY_CONFLICT",
+        "CAPACITY_EXHAUSTED",
+        "REPOSITORY_UNAVAILABLE",
+        "GRANT_INVALID",
+        "WRONG_STATE",
+        "RATE_LIMITED",
+        "INTERNAL_ERROR"
+      ],
+      "title": "ClientControlErrorCode",
+      "description": "Stable error codes carried by ClientControlError."
+    },
+    "ClientControlError": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ClientControlErrorCode"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "$ref": "./domain.schema.json#/$defs/ErrorDetails"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "title": "ClientControlError",
+      "description": "Machine-readable error fact whose optional details reuse the public redaction rules."
+    },
+    "ClientCapacityReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrentWorkerSessions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "runningWorkerSessions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "reservedWorkerSessions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "drainingWorkerSessions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        }
+      },
+      "required": [
+        "maxConcurrentWorkerSessions",
+        "runningWorkerSessions",
+        "reservedWorkerSessions",
+        "drainingWorkerSessions"
+      ],
+      "title": "ClientCapacityReport",
+      "description": "Client-reported worker session capacity. The Control Plane computes durable reservations from it and the Device Client revalidates locally; V1 never oversells."
+    },
+    "RepositoryBindingProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "displayName": {
+          "$ref": "#/$defs/ClientDisplayName"
+        },
+        "repositoryKind": {
+          "$ref": "#/$defs/RepositoryKind"
+        },
+        "defaultBranch": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "headCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "dirtyState": {
+          "$ref": "#/$defs/RepositoryDirtyState"
+        },
+        "availability": {
+          "$ref": "#/$defs/RepositoryAvailability"
+        },
+        "repositoryFingerprint": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "lastScannedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "repositoryBindingId",
+        "displayName",
+        "repositoryKind",
+        "defaultBranch",
+        "headCommit",
+        "dirtyState",
+        "availability",
+        "repositoryFingerprint",
+        "lastScannedAt"
+      ],
+      "title": "RepositoryBindingProjection",
+      "description": "Secret-safe repository metadata the Device Client reports to the Control Plane. It carries no local filesystem path."
+    },
+    "ClientWorkerReconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "reconcileState": {
+          "$ref": "#/$defs/WorkerReconcileState"
+        },
+        "observedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "workerSessionId",
+        "workerInstanceId",
+        "reconcileState",
+        "observedAt"
+      ],
+      "title": "ClientWorkerReconciliation",
+      "description": "Reconciliation verdict for one supervised worker process after Device Client restart."
+    },
+    "UserAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "userId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$"
+        },
+        "normalizedUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_.@-]{0,63}$"
+        },
+        "passwordHash": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^\\$argon2id\\$[A-Za-z0-9$+=/.,-]{10,500}$",
+          "description": "Argon2id PHC password hash. Control Plane owned; it is never returned by any projection and never leaves the server boundary."
+        },
+        "role": {
+          "$ref": "#/$defs/UserAccountRole"
+        },
+        "state": {
+          "$ref": "#/$defs/UserAccountState"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "updatedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "userId",
+        "username",
+        "normalizedUsername",
+        "passwordHash",
+        "role",
+        "state",
+        "createdAt",
+        "updatedAt",
+        "revision"
+      ],
+      "title": "UserAccount",
+      "description": "Server-local user account. Ownership: Control Plane.",
+      "x-owner": "control-plane"
+    },
+    "ClientNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "publicClientId": {
+          "$ref": "#/$defs/PublicClientId"
+        },
+        "displayName": {
+          "$ref": "#/$defs/ClientDisplayName"
+        },
+        "platform": {
+          "$ref": "#/$defs/ClientPlatformTarget"
+        },
+        "architecture": {
+          "$ref": "#/$defs/ClientArchitecture"
+        },
+        "clientVersion": {
+          "$ref": "#/$defs/ClientVersion"
+        },
+        "deviceCredentialDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "currentInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "presenceState": {
+          "$ref": "#/$defs/ClientNodePresenceState"
+        },
+        "acceptingConnections": {
+          "type": "boolean"
+        },
+        "lockState": {
+          "$ref": "#/$defs/ClientLockState"
+        },
+        "maxConcurrentWorkerSessions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "reportedRunningWorkerSessions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "lastHeartbeatAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "clientNodeId",
+        "publicClientId",
+        "displayName",
+        "platform",
+        "architecture",
+        "clientVersion",
+        "deviceCredentialDigest",
+        "currentInstanceId",
+        "presenceState",
+        "acceptingConnections",
+        "lockState",
+        "maxConcurrentWorkerSessions",
+        "reportedRunningWorkerSessions",
+        "lastHeartbeatAt",
+        "createdAt",
+        "revision"
+      ],
+      "title": "ClientNode",
+      "description": "Machine-level Device Client identity and presence projection. Ownership: Device Client reports, Control Plane persists the projection.",
+      "x-owner": "control-plane-projection-of-device-client"
+    },
+    "ClientConnectCode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "connectCodeId": {
+          "$ref": "#/$defs/ClientConnectCodeId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "codeDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest",
+          "description": "HMAC or digest of the one-time code. The plaintext code never crosses this contract."
+        },
+        "issuedByInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "remainingAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "state": {
+          "$ref": "#/$defs/ClientConnectCodeState"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "connectCodeId",
+        "clientNodeId",
+        "codeDigest",
+        "issuedByInstanceId",
+        "expiresAt",
+        "remainingAttempts",
+        "state",
+        "createdAt",
+        "revision"
+      ],
+      "title": "ClientConnectCode",
+      "description": "One-time dynamic connect code record. Ownership: Control Plane stores the digest only.",
+      "x-owner": "control-plane"
+    },
+    "ClientAccessGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientAccessGrantId": {
+          "$ref": "#/$defs/ClientAccessGrantId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "userId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientAccessGrantPermission"
+          },
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "trustMode": {
+          "$ref": "#/$defs/ClientTrustMode"
+        },
+        "state": {
+          "$ref": "#/$defs/ClientAccessGrantState"
+        },
+        "grantedByUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "grantSource": {
+          "$ref": "#/$defs/ClientAccessGrantSource"
+        },
+        "expiresAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null means no expiry; temporary grants always carry one."
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "clientAccessGrantId",
+        "clientNodeId",
+        "userId",
+        "permissions",
+        "trustMode",
+        "state",
+        "grantedByUserId",
+        "grantSource",
+        "expiresAt",
+        "createdAt",
+        "revision"
+      ],
+      "title": "ClientAccessGrant",
+      "description": "Many-to-many user-to-client permission relation. A grant never implies occupancy. Ownership: Control Plane.",
+      "x-owner": "control-plane"
+    },
+    "ClientOccupancyLease": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientOccupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "holderUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "state": {
+          "$ref": "#/$defs/ClientOccupancyLeaseState"
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "claimRequestId": {
+          "$ref": "#/$defs/OccupancyClaimId"
+        },
+        "claimedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "acknowledgedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set when the Device Client ACKs the fencing token; the lease enters occupied only after this."
+        },
+        "lastRenewedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idleExpiresAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recoveryDeadlineAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "releaseRequestedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "releasedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "releaseReason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientOccupancyReleaseReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "clientOccupancyLeaseId",
+        "clientNodeId",
+        "holderUserId",
+        "state",
+        "fencingToken",
+        "claimRequestId",
+        "claimedAt",
+        "acknowledgedAt",
+        "lastRenewedAt",
+        "idleExpiresAt",
+        "recoveryDeadlineAt",
+        "releaseRequestedAt",
+        "releasedAt",
+        "releaseReason",
+        "revision"
+      ],
+      "title": "ClientOccupancyLease",
+      "description": "Exclusive occupancy of one ClientNode by one user. Ownership: Control Plane authoritative, Device Client enforces. Storage guarantees at most one active lease per clientNodeId.",
+      "x-owner": "control-plane-authoritative-device-client-enforced"
+    },
+    "RepositoryBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "displayName": {
+          "$ref": "#/$defs/ClientDisplayName"
+        },
+        "repositoryKind": {
+          "$ref": "#/$defs/RepositoryKind"
+        },
+        "defaultBranch": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "headCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "dirtyState": {
+          "$ref": "#/$defs/RepositoryDirtyState"
+        },
+        "availability": {
+          "$ref": "#/$defs/RepositoryAvailability"
+        },
+        "repositoryFingerprint": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "lastScannedAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null before the first completed scan."
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "repositoryBindingId",
+        "clientNodeId",
+        "displayName",
+        "repositoryKind",
+        "defaultBranch",
+        "headCommit",
+        "dirtyState",
+        "availability",
+        "repositoryFingerprint",
+        "lastScannedAt",
+        "revision"
+      ],
+      "title": "RepositoryBinding",
+      "description": "Product identity and safe metadata of one ClientNode-local repository. It carries no absolutePath; the local path lives only in the Device Client local database. Ownership: Control Plane holds the product identity; the Device Client owns path resolution.",
+      "x-owner": "control-plane-projection-of-device-client"
+    },
+    "RepositoryAccessGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repositoryAccessGrantId": {
+          "$ref": "#/$defs/RepositoryAccessGrantId"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "userId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientAccessGrantPermission"
+          },
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "description": "Restricted to use and manage; share is a client-level permission only."
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "revoked"
+          ]
+        },
+        "grantedByUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "repositoryAccessGrantId",
+        "repositoryBindingId",
+        "userId",
+        "permissions",
+        "state",
+        "grantedByUserId",
+        "createdAt",
+        "revision"
+      ],
+      "title": "RepositoryAccessGrant",
+      "description": "Explicit per-user repository permission; a ClientAccessGrant never implies repository access. Ownership: Control Plane.",
+      "x-owner": "control-plane"
+    },
+    "WorkerLaunchGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workerLaunchGrantId": {
+          "$ref": "#/$defs/WorkerLaunchGrantId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "productSessionId": {
+          "$ref": "./domain.schema.json#/$defs/ProductSessionId"
+        },
+        "stageRunId": {
+          "$ref": "./domain.schema.json#/$defs/StageRunId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "credentialDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest",
+          "description": "Digest of the short-lived worker session credential. Credential material itself never crosses this contract."
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkerLaunchGrantState"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "workerLaunchGrantId",
+        "clientNodeId",
+        "clientInstanceId",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "repositoryBindingId",
+        "productSessionId",
+        "stageRunId",
+        "workerSessionId",
+        "workerId",
+        "workerInstanceId",
+        "credentialDigest",
+        "expiresAt",
+        "state",
+        "revision"
+      ],
+      "title": "WorkerLaunchGrant",
+      "description": "Single-use binding of one occupancy lease to exactly one WorkerSession and one Worker process. Any field mismatch is rejected. Ownership: Control Plane.",
+      "x-owner": "control-plane"
+    },
+    "LocalCandidateReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "localCandidateReceiptId": {
+          "$ref": "#/$defs/LocalCandidateReceiptId"
+        },
+        "candidateRef": {
+          "$ref": "#/$defs/CandidateRef"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "localRefName": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "state": {
+          "$ref": "#/$defs/LocalCandidateReceiptState"
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "localCandidateReceiptId",
+        "candidateRef",
+        "repositoryBindingId",
+        "candidateCommit",
+        "localRefName",
+        "state",
+        "createdAt",
+        "revision"
+      ],
+      "title": "LocalCandidateReceipt",
+      "description": "Client-issued proof that a candidate commit is frozen under a stable local git ref before worktree cleanup. Ownership: Device Client issued, Control Plane audited.",
+      "x-owner": "device-client-issued-control-plane-audited"
+    },
+    "LocalApplyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "localApplyReceiptId": {
+          "$ref": "#/$defs/LocalApplyReceiptId"
+        },
+        "candidateRef": {
+          "$ref": "#/$defs/CandidateRef"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "targetBranch": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "expectedHead": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "strategy": {
+          "$ref": "#/$defs/LocalApplyStrategy"
+        },
+        "result": {
+          "$ref": "#/$defs/LocalApplyResult"
+        },
+        "resultingCommit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/GitCommitSha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null when the apply did not produce a commit."
+        },
+        "conflictArtifactRef": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$",
+              "description": "Opaque client-local artifact reference for conflict details; never a filesystem path."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "revision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        }
+      },
+      "required": [
+        "localApplyReceiptId",
+        "candidateRef",
+        "repositoryBindingId",
+        "targetBranch",
+        "expectedHead",
+        "strategy",
+        "result",
+        "resultingCommit",
+        "conflictArtifactRef",
+        "createdAt",
+        "revision"
+      ],
+      "title": "LocalApplyReceipt",
+      "description": "Audit record of one local candidate apply attempt, supporting retry and fail-closed base-stale handling. Ownership: Device Client issued, Control Plane audited.",
+      "x-owner": "device-client-issued-control-plane-audited"
+    },
+    "ClientEnrollMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.enroll"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "displayName": {
+          "$ref": "#/$defs/ClientDisplayName"
+        },
+        "platform": {
+          "$ref": "#/$defs/ClientPlatformTarget"
+        },
+        "architecture": {
+          "$ref": "#/$defs/ClientArchitecture"
+        },
+        "clientVersion": {
+          "$ref": "#/$defs/ClientVersion"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision",
+          "description": "ClientNode revision known to the Device Client; zero identifies a not-yet-enrolled node."
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "displayName",
+        "platform",
+        "architecture",
+        "clientVersion",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.enroll",
+      "description": "First contact of one Device Client identity; creates the ClientNode in pending_enrollment. Device credential provisioning stays outside this contract.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-enrollment",
+      "x-message-class": "command"
+    },
+    "ClientHelloMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.hello"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "clientVersion": {
+          "$ref": "#/$defs/ClientVersion"
+        },
+        "presenceState": {
+          "$ref": "#/$defs/ClientNodePresenceState"
+        },
+        "acceptingConnections": {
+          "type": "boolean"
+        },
+        "lockState": {
+          "$ref": "#/$defs/ClientLockState"
+        },
+        "capacity": {
+          "$ref": "#/$defs/ClientCapacityReport"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "clientVersion",
+        "presenceState",
+        "acceptingConnections",
+        "lockState",
+        "capacity"
+      ],
+      "title": "client.hello",
+      "description": "Announces full presence and capacity after connect or reconnect, before any other client traffic on the new exchange.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-presence",
+      "x-message-class": "report"
+    },
+    "ClientHeartbeatMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.heartbeat"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "presenceState": {
+          "$ref": "#/$defs/ClientNodePresenceState"
+        },
+        "acceptingConnections": {
+          "type": "boolean"
+        },
+        "lockState": {
+          "$ref": "#/$defs/ClientLockState"
+        },
+        "capacity": {
+          "$ref": "#/$defs/ClientCapacityReport"
+        },
+        "occupancyLeaseId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientOccupancyLeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Locally mirrored active occupancy lease; null when the ClientNode holds none."
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "presenceState",
+        "acceptingConnections",
+        "lockState",
+        "capacity",
+        "occupancyLeaseId"
+      ],
+      "title": "client.heartbeat",
+      "description": "Reports liveness, presence, capacity, and the locally mirrored occupancy lease without dispatching commands as a side effect.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-presence",
+      "x-message-class": "report"
+    },
+    "ClientConnectCodePublishedMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.connect_code.published"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "connectCodeId": {
+          "$ref": "#/$defs/ClientConnectCodeId"
+        },
+        "codeDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "connectCodeId",
+        "codeDigest",
+        "expiresAt",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.connect_code.published",
+      "description": "Publishes or replaces the one-time dynamic connect code as a digest only; the plaintext code never crosses this contract.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "access-write",
+      "x-message-class": "command"
+    },
+    "ClientAccessChallengeAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.access.challenge_ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "challengeId": {
+          "$ref": "#/$defs/ClientAccessChallengeId"
+        },
+        "connectCodeId": {
+          "$ref": "#/$defs/ClientConnectCodeId"
+        },
+        "status": {
+          "$ref": "#/$defs/ClientChallengeAckStatus"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "challengeId",
+        "connectCodeId",
+        "status",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.access.challenge_ack",
+      "description": "Confirms that the challenged connect code generation is still valid on the Device Client; the Control Plane may create the ClientAccessGrant only after this ACK.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "access-write",
+      "x-message-class": "command"
+    },
+    "ClientOccupancyAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.occupancy.ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.occupancy.ack",
+      "description": "Acknowledges the offered occupancy lease and its fencing token after persisting the local occupancy mirror; the lease enters occupied only after this ACK.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "occupancy-write",
+      "x-message-class": "command"
+    },
+    "ClientOccupancyRejectedMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.occupancy.rejected"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "reason": {
+          "$ref": "#/$defs/OccupancyRejectReason"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "reason",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.occupancy.rejected",
+      "description": "Refuses an offered occupancy lease; a stale or unknown fencing token is always rejected locally and never lands.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "occupancy-write",
+      "x-message-class": "command"
+    },
+    "ClientRepositoryUpsertMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.repository.upsert"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryBindingProjection"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision",
+          "description": "RepositoryBinding revision known to the Device Client; zero creates the binding projection."
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "repository",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.repository.upsert",
+      "description": "Upserts the secret-safe repository binding projection; the absolute local path never leaves the Device Client.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "repository-write",
+      "x-message-class": "command"
+    },
+    "ClientRepositoryRemovedMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.repository.removed"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "repositoryBindingId",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.repository.removed",
+      "description": "Withdraws a repository binding projection after local removal.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "repository-write",
+      "x-message-class": "command"
+    },
+    "ClientRepositoryStatusMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.repository.status"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "availability": {
+          "$ref": "#/$defs/RepositoryAvailability"
+        },
+        "dirtyState": {
+          "$ref": "#/$defs/RepositoryDirtyState"
+        },
+        "headCommit": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "lastScannedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "repositoryBindingId",
+        "availability",
+        "dirtyState",
+        "headCommit",
+        "lastScannedAt"
+      ],
+      "title": "client.repository.status",
+      "description": "Reports the refreshed status projection of one repository binding, for example after a rescan command.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "repository-projection",
+      "x-message-class": "report"
+    },
+    "ClientWorkerLaunchAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.worker.launch_ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "workerLaunchGrantId": {
+          "$ref": "#/$defs/WorkerLaunchGrantId"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkerLaunchAckStatus"
+        },
+        "error": {
+          "$ref": "#/$defs/ClientControlError"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "workerLaunchGrantId",
+        "workerSessionId",
+        "workerId",
+        "workerInstanceId",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "status",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.worker.launch_ack",
+      "description": "Returns the idempotent result of applying one worker launch command; duplicate launches reuse the first result without a second process.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "worker-write",
+      "x-message-class": "command"
+    },
+    "ClientWorkerStateMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.worker.state"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "workerInstanceId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerInstanceId"
+        },
+        "occupancyLeaseId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientOccupancyLeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/ClientWorkerRunState"
+        },
+        "observedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "exitCode": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "workerSessionId",
+        "workerInstanceId",
+        "occupancyLeaseId",
+        "state",
+        "observedAt"
+      ],
+      "title": "client.worker.state",
+      "description": "Reports the observed run state of one supervised worker process without creating product-side conclusions.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-report",
+      "x-message-class": "report"
+    },
+    "ClientWorkerReconcileMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.worker.reconcile"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientOccupancyLeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Mirrored occupancy lease under recovery; null when no lease mirror exists."
+        },
+        "workers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientWorkerReconciliation"
+          },
+          "maxItems": 1024,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "workers"
+      ],
+      "title": "client.worker.reconcile",
+      "description": "Reports local worker reconciliation after Device Client restart; presence stays degraded and occupancy recovery_pending until it is accepted.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "device-report",
+      "x-message-class": "report"
+    },
+    "ClientCandidateRetainedMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.candidate.retained"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "receipt": {
+          "$ref": "#/$defs/LocalCandidateReceipt"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "workerSessionId",
+        "receipt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.candidate.retained",
+      "description": "Reports that a candidate commit is frozen under a stable local git ref before worktree cleanup.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "candidate-write",
+      "x-message-class": "command"
+    },
+    "ClientCandidateApplyResultMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.candidate.apply_result"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "receipt": {
+          "$ref": "#/$defs/LocalApplyReceipt"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "receipt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.candidate.apply_result",
+      "description": "Reports the receipt of one local candidate apply attempt, including fail-closed outcomes such as base_stale or working_tree_dirty.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "candidate-write",
+      "x-message-class": "command"
+    },
+    "ClientCommandAckMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.command_ack"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "commandMessageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "commandKind": {
+          "$ref": "#/$defs/ClientControlMessageKind"
+        },
+        "status": {
+          "$ref": "#/$defs/CommandAckStatus"
+        },
+        "currentRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "error": {
+          "$ref": "#/$defs/ClientControlError"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "commandMessageId",
+        "commandKind",
+        "status"
+      ],
+      "title": "client.command_ack",
+      "description": "Universal idempotent acknowledgement for control-plane-to-client commands that have no dedicated ack message.",
+      "x-direction": "client-to-control-plane",
+      "x-authority": "control-ack",
+      "x-message-class": "ack"
+    },
+    "ClientEnrollmentAcceptedMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.enrollment_accepted"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "publicClientId": {
+          "$ref": "#/$defs/PublicClientId"
+        },
+        "serverTime": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "heartbeatIntervalMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "publicClientId",
+        "serverTime",
+        "heartbeatIntervalMs"
+      ],
+      "title": "client.enrollment_accepted",
+      "description": "Completes enrollment and returns the stable public Client ID; the public Client ID is not a credential. Device credential material never crosses this contract.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "device-enrollment",
+      "x-message-class": "response"
+    },
+    "ClientAccessChallengeMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.access.challenge"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "challengeId": {
+          "$ref": "#/$defs/ClientAccessChallengeId"
+        },
+        "connectCodeId": {
+          "$ref": "#/$defs/ClientConnectCodeId"
+        },
+        "codeDigest": {
+          "$ref": "./domain.schema.json#/$defs/Sha256Digest"
+        },
+        "requesterUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "expiresAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "challengeId",
+        "connectCodeId",
+        "codeDigest",
+        "requesterUserId",
+        "expiresAt"
+      ],
+      "title": "client.access.challenge",
+      "description": "Asks the Device Client to verify that the challenged connect code generation is still valid before a ClientAccessGrant is created; the plaintext code never crosses this contract.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "access-write",
+      "x-message-class": "request"
+    },
+    "ClientOccupancyOfferMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.occupancy.offer"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "holderUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "claimRequestId": {
+          "$ref": "#/$defs/OccupancyClaimId"
+        },
+        "claimedAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "idleExpiresAt": {
+          "oneOf": [
+            {
+              "$ref": "./domain.schema.json#/$defs/Instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "holderUserId",
+        "claimRequestId",
+        "claimedAt",
+        "idleExpiresAt",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.occupancy.offer",
+      "description": "Offers the reserved occupancy lease; the Device Client must persist the local occupancy mirror and answer with client.occupancy.ack before the lease becomes occupied.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientOccupancyReleaseMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.occupancy.release"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "mode": {
+          "$ref": "#/$defs/ClientOccupancyReleaseMode"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "mode",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.occupancy.release",
+      "description": "Releases the occupancy; drain_then_release finishes active tasks first, cancel_tasks_and_release cancels them and requires explicit user confirmation upstream.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientOccupancyForceFenceMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.occupancy.force_fence"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken",
+          "description": "New fencing token minted above every prior token; the superseded token is permanently rejected."
+        },
+        "supersededLeaseId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClientOccupancyLeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/ClientOccupancyForceFenceReason"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "supersededLeaseId",
+        "reason",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.occupancy.force_fence",
+      "description": "Force-fences a stale occupancy after the recovery deadline or by administrator action; the previous lease and token can never land again.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientRepositoryRescanMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.repository.rescan"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "reason": {
+          "$ref": "#/$defs/ClientRepositoryRescanReason"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "repositoryBindingId",
+        "reason",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.repository.rescan",
+      "description": "Requests canonicalization and a fresh scan of one repository binding; the Device Client answers with client.repository.status.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientWorkerLaunchMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.worker.launch"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "launchGrant": {
+          "$ref": "#/$defs/WorkerLaunchGrant"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "launchGrant",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.worker.launch",
+      "description": "Launches exactly one worker process for the bound WorkerSession; the Device Client validates fencing, repository, capacity, and local state before spawning and answers with client.worker.launch_ack.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientWorkerStopMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.worker.stop"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "workerSessionId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerSessionId"
+        },
+        "workerId": {
+          "$ref": "./domain.schema.json#/$defs/WorkerId"
+        },
+        "reason": {
+          "$ref": "#/$defs/ClientWorkerStopReason"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "workerSessionId",
+        "workerId",
+        "reason",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.worker.stop",
+      "description": "Stops the supervised worker process of one WorkerSession under the current occupancy fencing token.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientCandidateApplyMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.candidate.apply"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "occupancyLeaseId": {
+          "$ref": "#/$defs/ClientOccupancyLeaseId"
+        },
+        "occupancyFencingToken": {
+          "$ref": "#/$defs/OccupancyFencingToken"
+        },
+        "repositoryBindingId": {
+          "$ref": "#/$defs/RepositoryBindingId"
+        },
+        "candidateRef": {
+          "$ref": "#/$defs/CandidateRef"
+        },
+        "targetBranch": {
+          "$ref": "#/$defs/GitRefName"
+        },
+        "expectedHead": {
+          "$ref": "#/$defs/GitCommitSha"
+        },
+        "strategy": {
+          "$ref": "#/$defs/LocalApplyStrategy"
+        },
+        "requesterUserId": {
+          "$ref": "./domain.schema.json#/$defs/UserId"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "occupancyLeaseId",
+        "occupancyFencingToken",
+        "repositoryBindingId",
+        "candidateRef",
+        "targetBranch",
+        "expectedHead",
+        "strategy",
+        "requesterUserId",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.candidate.apply",
+      "description": "Applies a retained candidate onto its target branch; the Device Client verifies the candidate ref, expected HEAD, working-tree policy, fencing, and permissions before writing and answers with client.candidate.apply_result.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientLockMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.client_lock"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "lockState": {
+          "$ref": "#/$defs/ClientLockState"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "lockState",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.client_lock",
+      "description": "Locks or unlocks the ClientNode; locked blocks new connections and occupancy regardless of presence.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientCredentialRotateMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "client.credential_rotate"
+        },
+        "schemaVersion": {
+          "$ref": "./domain.schema.json#/$defs/SchemaVersion"
+        },
+        "messageId": {
+          "$ref": "#/$defs/ClientControlMessageId"
+        },
+        "clientNodeId": {
+          "$ref": "#/$defs/ClientNodeId"
+        },
+        "clientInstanceId": {
+          "$ref": "#/$defs/ClientInstanceId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/ClientExchangeSequence"
+        },
+        "occurredAt": {
+          "$ref": "./domain.schema.json#/$defs/Instant"
+        },
+        "reason": {
+          "$ref": "#/$defs/ClientCredentialRotateReason"
+        },
+        "expectedRevision": {
+          "$ref": "./domain.schema.json#/$defs/Revision"
+        },
+        "idempotencyKey": {
+          "$ref": "#/$defs/IdempotencyKey"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "messageId",
+        "clientNodeId",
+        "clientInstanceId",
+        "sequence",
+        "occurredAt",
+        "reason",
+        "expectedRevision",
+        "idempotencyKey"
+      ],
+      "title": "client.credential_rotate",
+      "description": "Requests device credential rotation; the rotation handshake and credential material stay outside this contract.",
+      "x-direction": "control-plane-to-client",
+      "x-authority": "control-command",
+      "x-message-class": "command"
+    },
+    "ClientControlMessageKind": {
+      "type": "string",
+      "enum": [
+        "client.enroll",
+        "client.hello",
+        "client.heartbeat",
+        "client.connect_code.published",
+        "client.access.challenge_ack",
+        "client.occupancy.ack",
+        "client.occupancy.rejected",
+        "client.repository.upsert",
+        "client.repository.removed",
+        "client.repository.status",
+        "client.worker.launch_ack",
+        "client.worker.state",
+        "client.worker.reconcile",
+        "client.candidate.retained",
+        "client.candidate.apply_result",
+        "client.command_ack",
+        "client.enrollment_accepted",
+        "client.access.challenge",
+        "client.occupancy.offer",
+        "client.occupancy.release",
+        "client.occupancy.force_fence",
+        "client.repository.rescan",
+        "client.worker.launch",
+        "client.worker.stop",
+        "client.candidate.apply",
+        "client.client_lock",
+        "client.credential_rotate"
+      ],
+      "title": "ClientControlMessageKind",
+      "description": "Every ClientControlPort message kind: sixteen client-to-control-plane kinds followed by eleven control-plane-to-client kinds, exactly as frozen by the ClientControlPort v1 plan."
+    },
+    "ClientControlMessage": {
+      "title": "ClientControlMessage",
+      "description": "The single versioned message union of the ClientControlPort exchange. Every message carries the envelope identity fields; command-class messages additionally carry expectedRevision and idempotencyKey, and occupancy or execution commands carry occupancyLeaseId and occupancyFencingToken.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ClientEnrollMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientHelloMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientHeartbeatMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientConnectCodePublishedMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientAccessChallengeAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientOccupancyAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientOccupancyRejectedMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientRepositoryUpsertMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientRepositoryRemovedMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientRepositoryStatusMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientWorkerLaunchAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientWorkerStateMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientWorkerReconcileMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientCandidateRetainedMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientCandidateApplyResultMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientCommandAckMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientEnrollmentAcceptedMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientAccessChallengeMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientOccupancyOfferMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientOccupancyReleaseMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientOccupancyForceFenceMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientRepositoryRescanMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientWorkerLaunchMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientWorkerStopMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientCandidateApplyMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientLockMessage"
+        },
+        {
+          "$ref": "#/$defs/ClientCredentialRotateMessage"
+        }
+      ]
+    }
+  }
+}

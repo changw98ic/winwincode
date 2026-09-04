@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000013",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 413,
+  "occurredAt": "2026-09-01T09:40:00.000Z",
+  "kind": "client.worker.reconcile",
+  "expectedRevision": 16,
+  "idempotencyKey": "idem-client-worker-reconcile-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": "3",
+  "payload": {
+    "workerSessionId": "wks_000000000000000000000001",
+    "localState": "still_running",
+    "processStartIdentity": "spawn:2026-09-01T09:31:20.000Z:1",
+    "lastObservedAt": "2026-09-01T09:39:58.000Z"
+  }
+}

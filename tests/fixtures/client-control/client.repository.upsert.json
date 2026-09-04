@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000008",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 408,
+  "occurredAt": "2026-09-01T09:31:20.000Z",
+  "kind": "client.repository.upsert",
+  "expectedRevision": 34,
+  "idempotencyKey": "idem-client-repository-upsert-0001",
+  "payload": {
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "displayName": "demo",
+    "repositoryKind": "git",
+    "defaultBranch": "main",
+    "headCommit": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "dirtyState": false,
+    "availability": "available",
+    "repositoryFingerprint": "sha256:5b7c9e1f5b7c9e1f5b7c9e1f5b7c9e1f5b7c9e1f5b7c9e1f5b7c9e1f5b7c9e1f",
+    "lastScannedAt": "2026-09-01T09:31:18.000Z",
+    "localPathAlias": "repositories/demo"
+  }
+}
