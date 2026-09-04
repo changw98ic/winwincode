@@ -45,6 +45,7 @@ const canonicalTestFiles = Object.freeze([
   'tests/enterprise-policy-contract.test.mjs',
   'tests/enterprise-resource-page.test.mjs',
   'tests/execution-port-contract.test.mjs',
+  'tests/first-run-strongflow-browser.test.mjs',
   'tests/generated-control-plane-client.test.mjs',
   'tests/i18n-embed-fl-reproducibility.test.mjs',
   'tests/local-decisions-client.test.mjs',

@@ -1027,7 +1027,8 @@
       ],
       "behaviorBaselineIds": [
         "success",
-        "client-transport"
+        "client-transport",
+        "first-run-vertical"
       ]
     },
     {
@@ -1440,6 +1441,17 @@
       "expectedFacts": [
         "repository facts name an exact commit",
         "index capability mode is explicit"
+      ]
+    },
+    {
+      "id": "first-run-vertical",
+      "scenario": "success",
+      "testFile": "tests/first-run-strongflow-browser.test.mjs",
+      "testName": "a real browser runs the first-use vertical from sign-in into StrongFlow",
+      "expectedFacts": [
+        "a first run signs in, chooses one authorized repository Scope, selects a model route, creates the first Chat, submits the requirement, and opens StrongFlow from the created Delivery",
+        "a mid-flow reload restores the same ProductSession and the same Delivery subscription from the URL",
+        "every key command carries a fresh requestId, an exact expectedRevision, and the selected repository Scope"
       ]
     }
   ],
