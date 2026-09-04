@@ -10,7 +10,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ORIGIN,
@@ -24,13 +24,15 @@ use axum_server::tls_rustls::RustlsConfig;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use winwincode_api::generated::{
-    AuthSessionRequest, ControlPlaneWebSocketProtocolErrorFrame,
+    Actor, AuthSessionRequest, ControlPlaneWebSocketProtocolErrorFrame,
     ControlPlaneWebSocketProtocolErrorFrameTypeValue, ControlPlaneWebSocketServerFrame, Error,
     ErrorDetailValue, ErrorDetails, ErrorEnvelope, RetryableError, RetryableErrorCode,
-    TerminalError, TerminalErrorCode,
+    TerminalError, TerminalErrorCode, UserActor, UserActorKind,
 };
 use winwincode_control_plane::{CredentialLeakGate, CredentialOutputBoundary};
-use winwincode_domain::{RequestId, SchemaVersion};
+use winwincode_domain::{
+    RequestId, Revision, SchemaVersion, UserAccount, UserAccountRole, UserAccountState, UserId,
+};
 
 use crate::application::{StandaloneApplicationClock, SystemStandaloneApplicationClock};
 use crate::auth_session::{
@@ -45,6 +47,7 @@ use crate::transport::{
     ApiError, AuthenticatedPrincipal, ControlPlaneApiPort, RequestAuthenticator,
     TransportCredentials,
 };
+use crate::user_accounts::{UserAccountServiceErrorKind, generate_temporary_password};
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const FIRST_SUBSCRIPTION_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
@@ -260,11 +263,12 @@ async fn spawn_listener(
     handle: Handle<SocketAddr>,
 ) -> Result<tokio::task::JoinHandle<Result<(), ServerError>>, ServerError> {
     let address = config.bind_address();
+    let make_service = router.into_make_service_with_connect_info::<SocketAddr>();
     let task = match config.tls() {
         ServerTls::Disabled => tokio::spawn(async move {
             axum_server::bind(address)
                 .handle(handle)
-                .serve(router.into_make_service())
+                .serve(make_service)
                 .await
                 .map_err(|_| ServerError::new("public HTTP listener failed"))
         }),
@@ -279,7 +283,7 @@ async fn spawn_listener(
             tokio::spawn(async move {
                 axum_server::bind_rustls(address, tls)
                     .handle(handle)
-                    .serve(router.into_make_service())
+                    .serve(make_service)
                     .await
                     .map_err(|_| ServerError::new("public HTTPS listener failed"))
             })
@@ -304,6 +308,15 @@ fn router(
         .route("/api/v1/commands", post(command).options(preflight))
         .route("/api/v1/queries", post(query).options(preflight))
         .route("/api/v1/events", get(events).options(preflight))
+        .route("/api/v1/users", post(create_user).options(preflight))
+        .route(
+            "/api/v1/users/state",
+            post(set_user_state).options(preflight),
+        )
+        .route(
+            "/api/v1/users/password",
+            post(reset_password).options(preflight),
+        )
         .route(
             "/internal/v1/execution-port/exchange",
             post(remote_worker_exchange),
@@ -415,7 +428,11 @@ async fn get_auth_session(
     response
 }
 
-async fn create_auth_session(State(state): State<ServerState>, request: Request<Body>) -> Response {
+async fn create_auth_session(
+    State(state): State<ServerState>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response {
     let headers = request.headers().clone();
     let uri = request.uri().clone();
     let origin = match required_origin(&state, &headers) {
@@ -435,14 +452,27 @@ async fn create_auth_session(State(state): State<ServerState>, request: Request<
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) = parse_auth_session_request(body, Some(origin.clone())) {
-        return error.into_response();
-    }
+    let login = match parse_login_request(&body, Some(origin.clone())) {
+        Ok(login) => login,
+        Err(error) => return error.into_response(),
+    };
     let credentials = match extract_credentials(&headers) {
         Ok(credentials) => credentials,
         Err(error) => return error.with_origin(origin).into_response(),
     };
-    let issued = match state.auth_sessions.bootstrap(&credentials) {
+    // A Bearer credential carries the one-time bootstrap proof for first
+    // initialization; otherwise the request is a username + password login.
+    let issued = if credentials.bearer().is_some() {
+        state
+            .auth_sessions
+            .initialize(&credentials, &login.username, &login.password)
+    } else {
+        let client = client.ip().to_string();
+        state
+            .auth_sessions
+            .login(&credentials, &client, &login.username, &login.password)
+    };
+    let issued = match issued {
         Ok(issued) => issued,
         Err(error) => return auth_session_error(error, Some(origin)).into_response(),
     };
@@ -525,12 +555,76 @@ fn parse_auth_session_request(
     })
 }
 
+/// One username + password login or initialization request body.
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+fn parse_login_request(value: &Value, origin: Option<HeaderValue>) -> ResponseResult<LoginRequest> {
+    let invalid = |origin: Option<HeaderValue>| {
+        BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "login request must carry string username and password fields",
+            origin,
+        )
+    };
+    if value.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION) {
+        return Err(BoundaryError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "CLIENT_UPGRADE_REQUIRED",
+            "client protocol is unsupported; upgrade to winwincode/v1",
+            origin,
+        ));
+    }
+    let Some(fields) = value.as_object() else {
+        return Err(invalid(origin));
+    };
+    if fields.len() != 3 {
+        return Err(invalid(origin));
+    }
+    let username = fields
+        .get("username")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(origin.clone()))?;
+    let password = fields
+        .get("password")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(origin))?;
+    Ok(LoginRequest {
+        username: username.to_owned(),
+        password: password.to_owned(),
+    })
+}
+
 fn auth_session_error(error: AuthSessionError, origin: Option<HeaderValue>) -> BoundaryError {
     if error.is_authentication() {
         BoundaryError::new(
             StatusCode::UNAUTHORIZED,
             "AUTHENTICATION_REQUIRED",
             "authentication failed",
+            origin,
+        )
+    } else if error.is_already_initialized() {
+        BoundaryError::new(
+            StatusCode::CONFLICT,
+            "WRONG_STATE",
+            "server initialization already completed",
+            origin,
+        )
+    } else if error.is_rate_limited() {
+        BoundaryError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "login attempts are rate limited",
+            origin,
+        )
+    } else if error.is_invalid_request() {
+        BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "login request is invalid",
             origin,
         )
     } else {
@@ -541,6 +635,460 @@ fn auth_session_error(error: AuthSessionError, origin: Option<HeaderValue>) -> B
             origin,
         )
     }
+}
+
+async fn create_user(State(state): State<ServerState>, request: Request<Body>) -> Response {
+    let headers = request.headers().clone();
+    let uri = request.uri().clone();
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = require_owner(&state, &headers, &uri) {
+        return error.into_response();
+    }
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let creation = match parse_create_user_request(&body, origin.clone()) {
+        Ok(creation) => creation,
+        Err(error) => return error.into_response(),
+    };
+    let Ok(temporary_password) = generate_temporary_password() else {
+        return account_error(UserAccountServiceErrorKind::Storage, origin).into_response();
+    };
+    let occurred_at = SystemStandaloneApplicationClock.now_instant();
+    match state.auth_sessions.accounts().create_user(
+        &creation.username,
+        creation.role,
+        &temporary_password,
+        &occurred_at,
+    ) {
+        Ok(account) => json_response(
+            StatusCode::CREATED,
+            json!({
+                "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+                "user": account_json(&account),
+                "temporaryPassword": temporary_password,
+            }),
+            origin.as_ref(),
+        ),
+        Err(error) => account_error(error.kind(), origin).into_response(),
+    }
+}
+
+async fn set_user_state(State(state): State<ServerState>, request: Request<Body>) -> Response {
+    let headers = request.headers().clone();
+    let uri = request.uri().clone();
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    let (_, acting) = match require_owner(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let update = match parse_user_state_request(&body, origin.clone()) {
+        Ok(update) => update,
+        Err(error) => return error.into_response(),
+    };
+    if update.state == UserAccountState::Disabled && update.user_id == acting.user_id {
+        return BoundaryError::new(
+            StatusCode::CONFLICT,
+            "WRONG_STATE",
+            "the acting Owner cannot disable the account in use",
+            origin,
+        )
+        .into_response();
+    }
+    let occurred_at = SystemStandaloneApplicationClock.now_instant();
+    let account = match state.auth_sessions.accounts().set_state(
+        &update.user_id,
+        &Revision(update.expected_revision),
+        update.state,
+        &occurred_at,
+    ) {
+        Ok(account) => account,
+        Err(error) => return account_error(error.kind(), origin).into_response(),
+    };
+    if update.state == UserAccountState::Disabled {
+        // Disable kill switch: revoke every live session immediately.
+        let actor = Actor::UserActor(UserActor {
+            kind: UserActorKind::User,
+            id: account.user_id.clone(),
+        });
+        if state.auth_sessions.revoke_actor_sessions(&actor).is_err() {
+            return BoundaryError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "browser session service is unavailable",
+                origin,
+            )
+            .into_response();
+        }
+    }
+    json_response(
+        StatusCode::OK,
+        json!({
+            "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+            "user": account_json(&account),
+        }),
+        origin.as_ref(),
+    )
+}
+
+async fn reset_password(State(state): State<ServerState>, request: Request<Body>) -> Response {
+    let headers = request.headers().clone();
+    let uri = request.uri().clone();
+    let origin = match allowed_origin(&state, &headers) {
+        Ok(origin) => origin,
+        Err(error) => return error.into_response(),
+    };
+    // Password reset is available to the account holder themself and to an
+    // Owner on behalf of anyone.
+    let (principal, _, _) = match authorize(&state, &headers, &uri) {
+        Ok(authorized) => authorized,
+        Err(error) => return error.into_response(),
+    };
+    let body = match parse_json_body(request, origin.clone()).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let reset = match parse_password_reset_request(&body, origin.clone()) {
+        Ok(reset) => reset,
+        Err(error) => return error.into_response(),
+    };
+    let occurred_at = SystemStandaloneApplicationClock.now_instant();
+    let acting_user = principal.actor_user_id();
+    let self_reset = acting_user.is_some_and(|user| user == reset.user_id);
+    let temporary_password;
+    if self_reset {
+        // A self reset must prove the current password.
+        let (Some(current_password), Some(new_password)) =
+            (&reset.current_password, &reset.new_password)
+        else {
+            return BoundaryError::new(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST",
+                "self reset requires currentPassword and newPassword",
+                origin,
+            )
+            .into_response();
+        };
+        let account = match state.auth_sessions.accounts().find(&reset.user_id) {
+            Ok(Some(account)) => account,
+            Ok(None) => {
+                return account_error(UserAccountServiceErrorKind::NotFound, origin)
+                    .into_response();
+            }
+            Err(error) => return account_error(error.kind(), origin).into_response(),
+        };
+        match state
+            .auth_sessions
+            .accounts()
+            .verify_credentials(&account.username, current_password)
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {
+                return BoundaryError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "AUTHENTICATION_REQUIRED",
+                    "authentication failed",
+                    origin,
+                )
+                .into_response();
+            }
+            Err(error) => return account_error(error.kind(), origin).into_response(),
+        }
+        temporary_password = new_password.clone();
+    } else {
+        // Resetting somebody else's password requires the Owner role.
+        if let Err(error) = require_owner(&state, &headers, &uri) {
+            return error.into_response();
+        }
+        // An Owner reset issues a fresh temporary password returned once.
+        match generate_temporary_password() {
+            Ok(password) => temporary_password = password,
+            Err(_) => {
+                return account_error(UserAccountServiceErrorKind::Storage, origin).into_response();
+            }
+        }
+    }
+    let account = match state.auth_sessions.accounts().set_password(
+        &reset.user_id,
+        &Revision(reset.expected_revision),
+        &temporary_password,
+        &occurred_at,
+    ) {
+        Ok(account) => account,
+        Err(error) => return account_error(error.kind(), origin).into_response(),
+    };
+    let mut value = json!({
+        "schemaVersion": SUPPORTED_SCHEMA_VERSION,
+        "user": account_json(&account),
+    });
+    if !self_reset {
+        value["temporaryPassword"] = Value::String(temporary_password);
+    }
+    json_response(StatusCode::OK, value, origin.as_ref())
+}
+
+fn require_owner(
+    state: &ServerState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> ResponseResult<(AuthenticatedPrincipal, UserAccount)> {
+    let (principal, _, _) = authorize(state, headers, uri)?;
+    let Some(user_id) = principal.actor_user_id() else {
+        return Err(BoundaryError::new(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "owner role is required",
+            None,
+        ));
+    };
+    let account = state
+        .auth_sessions
+        .accounts()
+        .find(&user_id)
+        .map_err(|_| {
+            BoundaryError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "user account service is unavailable",
+                None,
+            )
+        })?
+        .ok_or_else(|| {
+            BoundaryError::new(
+                StatusCode::FORBIDDEN,
+                "PERMISSION_DENIED",
+                "owner role is required",
+                None,
+            )
+        })?;
+    if account.role != UserAccountRole::Owner || account.state != UserAccountState::Active {
+        return Err(BoundaryError::new(
+            StatusCode::FORBIDDEN,
+            "PERMISSION_DENIED",
+            "owner role is required",
+            None,
+        ));
+    }
+    Ok((principal, account))
+}
+
+fn account_json(account: &UserAccount) -> Value {
+    json!({
+        "userId": account.user_id.0,
+        "username": account.username,
+        "normalizedUsername": account.normalized_username,
+        "role": account.role.as_str(),
+        "state": account.state.as_str(),
+        "createdAt": account.created_at.0,
+        "updatedAt": account.updated_at.0,
+        "revision": account.revision.0,
+    })
+}
+
+fn account_error(kind: UserAccountServiceErrorKind, origin: Option<HeaderValue>) -> BoundaryError {
+    match kind {
+        UserAccountServiceErrorKind::InvalidInput => BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "user account request is invalid",
+            origin,
+        ),
+        UserAccountServiceErrorKind::Conflict | UserAccountServiceErrorKind::AlreadyInitialized => {
+            BoundaryError::new(
+                StatusCode::CONFLICT,
+                "WRONG_STATE",
+                "user account request conflicts with durable state",
+                origin,
+            )
+        }
+        UserAccountServiceErrorKind::NotFound => BoundaryError::new(
+            StatusCode::NOT_FOUND,
+            "RESOURCE_NOT_FOUND",
+            "user account does not exist",
+            origin,
+        ),
+        UserAccountServiceErrorKind::RevisionConflict => BoundaryError::new(
+            StatusCode::CONFLICT,
+            "REVISION_CONFLICT",
+            "user account revision differs from the expected revision",
+            origin,
+        ),
+        UserAccountServiceErrorKind::InvalidCredentials => BoundaryError::new(
+            StatusCode::UNAUTHORIZED,
+            "AUTHENTICATION_REQUIRED",
+            "authentication failed",
+            origin,
+        ),
+        UserAccountServiceErrorKind::AccountDisabled | UserAccountServiceErrorKind::Storage => {
+            BoundaryError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "user account service is unavailable",
+                origin,
+            )
+        }
+    }
+}
+
+struct CreateUserRequest {
+    username: String,
+    role: UserAccountRole,
+}
+
+fn parse_create_user_request(
+    value: &Value,
+    origin: Option<HeaderValue>,
+) -> ResponseResult<CreateUserRequest> {
+    let invalid = |origin: Option<HeaderValue>| {
+        BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "user creation must carry string username and owner|member role fields",
+            origin,
+        )
+    };
+    if value.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION) {
+        return Err(BoundaryError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "CLIENT_UPGRADE_REQUIRED",
+            "client protocol is unsupported; upgrade to winwincode/v1",
+            origin,
+        ));
+    }
+    let Some(fields) = value.as_object() else {
+        return Err(invalid(origin));
+    };
+    if fields.len() != 3 {
+        return Err(invalid(origin));
+    }
+    let username = fields
+        .get("username")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(origin.clone()))?;
+    let role = match fields.get("role").and_then(Value::as_str) {
+        Some("owner") => UserAccountRole::Owner,
+        Some("member") => UserAccountRole::Member,
+        _ => return Err(invalid(origin)),
+    };
+    Ok(CreateUserRequest {
+        username: username.to_owned(),
+        role,
+    })
+}
+
+struct UserStateRequest {
+    user_id: UserId,
+    expected_revision: i64,
+    state: UserAccountState,
+}
+
+fn parse_user_state_request(
+    value: &Value,
+    origin: Option<HeaderValue>,
+) -> ResponseResult<UserStateRequest> {
+    let invalid = |origin: Option<HeaderValue>| {
+        BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "user state update must carry userId, active|disabled state, and expectedRevision",
+            origin,
+        )
+    };
+    if value.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION) {
+        return Err(BoundaryError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "CLIENT_UPGRADE_REQUIRED",
+            "client protocol is unsupported; upgrade to winwincode/v1",
+            origin,
+        ));
+    }
+    let Some(fields) = value.as_object() else {
+        return Err(invalid(origin));
+    };
+    if fields.len() != 4 {
+        return Err(invalid(origin));
+    }
+    let user_id = fields
+        .get("userId")
+        .and_then(Value::as_str)
+        .map(|value| UserId(value.to_owned()))
+        .ok_or_else(|| invalid(origin.clone()))?;
+    let expected_revision = fields
+        .get("expectedRevision")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| invalid(origin.clone()))?;
+    let state = match fields.get("state").and_then(Value::as_str) {
+        Some("active") => UserAccountState::Active,
+        Some("disabled") => UserAccountState::Disabled,
+        _ => return Err(invalid(origin)),
+    };
+    Ok(UserStateRequest {
+        user_id,
+        expected_revision,
+        state,
+    })
+}
+
+struct PasswordResetRequest {
+    user_id: UserId,
+    expected_revision: i64,
+    current_password: Option<String>,
+    new_password: Option<String>,
+}
+
+fn parse_password_reset_request(
+    value: &Value,
+    origin: Option<HeaderValue>,
+) -> ResponseResult<PasswordResetRequest> {
+    let invalid = |origin: Option<HeaderValue>| {
+        BoundaryError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "password reset must carry userId and expectedRevision",
+            origin,
+        )
+    };
+    if value.get("schemaVersion").and_then(Value::as_str) != Some(SUPPORTED_SCHEMA_VERSION) {
+        return Err(BoundaryError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "CLIENT_UPGRADE_REQUIRED",
+            "client protocol is unsupported; upgrade to winwincode/v1",
+            origin,
+        ));
+    }
+    let Some(fields) = value.as_object() else {
+        return Err(invalid(origin));
+    };
+    if fields.len() < 3 || fields.len() > 5 {
+        return Err(invalid(origin));
+    }
+    let user_id = fields
+        .get("userId")
+        .and_then(Value::as_str)
+        .map(|value| UserId(value.to_owned()))
+        .ok_or_else(|| invalid(origin.clone()))?;
+    let expected_revision = fields
+        .get("expectedRevision")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| invalid(origin.clone()))?;
+    let optional_string = |name: &str| fields.get(name).and_then(Value::as_str).map(str::to_owned);
+    Ok(PasswordResetRequest {
+        user_id,
+        expected_revision,
+        current_password: optional_string("currentPassword"),
+        new_password: optional_string("newPassword"),
+    })
 }
 
 async fn command(State(state): State<ServerState>, request: Request<Body>) -> Response {

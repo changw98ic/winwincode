@@ -329,27 +329,35 @@ impl RepositoryRuntimeScheduler {
     /// Installs the authenticated local user and the one configured Worker
     /// pool used by operational execution admission.  These identities are
     /// carried into the durable reservation; Worker frames cannot replace
-    /// them.
+    /// them. The user identity is the initializing Owner's durable userId
+    /// once the Server is initialized; an uninitialized Server keeps the
+    /// stable default until initialization assigns the Owner.
     ///
     /// # Errors
     ///
     /// Returns an error when either identity is outside the canonical format.
     pub fn with_admission_identity(
         mut self,
-        user_id: UserId,
+        user_id: Option<UserId>,
         worker_pool_id: WorkerPoolId,
     ) -> Result<Self, RuntimeSupervisorError> {
-        if !user_id.0.starts_with("usr_")
-            || user_id.0.len() <= 4
-            || !worker_pool_id.0.starts_with("wpl_")
-            || worker_pool_id.0.len() <= 4
+        if let Some(user_id) = &user_id
+            && (!user_id.0.starts_with("usr_") || user_id.0.len() <= 4)
         {
             return Err(RuntimeSupervisorError::new(
                 RuntimeSupervisorErrorKind::InvalidConfiguration,
                 "repository runtime scheduler admission identity is invalid",
             ));
         }
-        self.user_id = user_id;
+        if !worker_pool_id.0.starts_with("wpl_") || worker_pool_id.0.len() <= 4 {
+            return Err(RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::InvalidConfiguration,
+                "repository runtime scheduler admission identity is invalid",
+            ));
+        }
+        if let Some(user_id) = user_id {
+            self.user_id = user_id;
+        }
         self.worker_pool_id = worker_pool_id;
         Ok(self)
     }
@@ -425,16 +433,33 @@ impl RepositoryRuntimeScheduler {
             };
             reservation
         };
-        if reservation.scope != record.scope
-            || reservation.user_id != self.user_id
-            || reservation.worker_pool_id != self.worker_pool_id
-        {
+        if reservation.scope != record.scope || reservation.worker_pool_id != self.worker_pool_id {
             return Err(RuntimeSupervisorError::new(
                 RuntimeSupervisorErrorKind::Driver,
                 "repository runtime scheduler admission identity differs",
             ));
         }
-        match reservation.state {
+        // Admission admits reservations from any active user account instead
+        // of one fixed process subject: every browser session now carries its
+        // own durable userId, so the reservation subject may differ per user.
+        let reservation_user = reservation.user_id.clone();
+        let reservation_state = reservation.state;
+        let reservation_revision = reservation.revision;
+        let reservation_updated_at = reservation.updated_at.clone();
+        let reservation_scope = reservation.scope.clone();
+        let reservation_pool = reservation.worker_pool_id.clone();
+        // The first admission borrow ends here; the reopen below shadows it.
+        if !admission_user_is_active(storage, &reservation_user)? {
+            return Err(RuntimeSupervisorError::new(
+                RuntimeSupervisorErrorKind::Driver,
+                "repository runtime scheduler admission identity differs",
+            ));
+        }
+        let mut admission = storage.execution_admission().map_err(|error| {
+            debug_scheduler_error("reopen execution admission", &error);
+            scheduler_failure()
+        })?;
+        match reservation_state {
             ExecutionReservationState::Queued => {
                 // A command may commit a new queued Job after this driver's
                 // tick captured its clock value.  Admission intentionally
@@ -442,15 +467,15 @@ impl RepositoryRuntimeScheduler {
                 // reservation; leave the Job queued and retry on the next
                 // tick instead of faulting the supervisor or claiming a
                 // dispatch without a running reservation.
-                if now.0 < reservation.updated_at.0 {
+                if now.0 < reservation_updated_at.0 {
                     return Ok(false);
                 }
                 match admission.start(&ExecutionReservationStart {
-                    scope: reservation.scope,
-                    worker_pool_id: reservation.worker_pool_id,
+                    scope: reservation_scope,
+                    worker_pool_id: reservation_pool,
                     job_id: reservation.job_id,
                     request_id: self.job_request_id(b"admission-start", &record.job_id),
-                    expected_revision: reservation.revision,
+                    expected_revision: reservation_revision,
                     started_at: now.clone(),
                 }) {
                     Ok(_) => {}
@@ -987,6 +1012,23 @@ impl RepositoryRuntimeScheduler {
             })?;
         Ok(())
     }
+}
+
+/// Reports whether the reservation subject resolves to one active durable
+/// user account.
+fn admission_user_is_active(
+    storage: &mut winwincode_storage::SqliteStorage,
+    user_id: &UserId,
+) -> Result<bool, RuntimeSupervisorError> {
+    let state = storage
+        .user_account_ledger()
+        .and_then(|ledger| ledger.find(user_id))
+        .map(|account| account.map(|account| account.state))
+        .map_err(|error| {
+            debug_scheduler_error("load admission user account", &error);
+            scheduler_failure()
+        })?;
+    Ok(state == Some(winwincode_domain::UserAccountState::Active))
 }
 
 fn validate_admission_job(

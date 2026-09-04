@@ -37,7 +37,7 @@ use winwincode_domain::{
 use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, ControlPlaneApiPort,
     EnterpriseIdentityProtocolApplication, EventSubscription, RequestAuthenticator, ServerConfig,
-    ServerTls, SqliteAuthSessionManager, start_server,
+    ServerTls, SqliteAuthSessionManager, UserAccountService, start_server,
 };
 use winwincode_storage::SqliteStorage;
 
@@ -218,15 +218,11 @@ impl Fixture {
         let sessions = Arc::new(
             SqliteAuthSessionManager::open(
                 root.join("auth-sessions"),
-                vec![
-                    AuthSessionBootstrap::new(
-                        "fixture-bootstrap-proof",
-                        user_actor(&user_id),
-                        vec![organization_scope(&organization_id)],
-                    )
-                    .expect("bootstrap"),
-                ],
+                vec![AuthSessionBootstrap::new("fixture-bootstrap-proof").expect("bootstrap")],
+                vec![organization_scope(&organization_id)],
                 AuthSessionConfig::default(),
+                Arc::new(UserAccountService::open(root.join("accounts")).expect("accounts")),
+                None,
             )
             .expect("session manager"),
         );
@@ -647,13 +643,6 @@ fn management_actor() -> Actor {
     Actor::ServiceAccountActor(ServiceAccountActor {
         kind: ServiceAccountActorKind::ServiceAccount,
         id: ServiceAccountId("svc_00000000000000000000000001".to_owned()),
-    })
-}
-
-fn user_actor(user_id: &UserId) -> Actor {
-    Actor::UserActor(winwincode_api::generated::UserActor {
-        kind: winwincode_api::generated::UserActorKind::User,
-        id: user_id.clone(),
     })
 }
 

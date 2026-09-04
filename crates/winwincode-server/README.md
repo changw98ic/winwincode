@@ -6,9 +6,12 @@ events. Worker execution and provider addresses are not part of this router.
 
 Runtime configuration is supplied through `ServerConfig`. TLS certificate and
 key paths, allowed browser origins, bind address, public URL, storage path, and
-graceful-shutdown timeout are explicit. A short-lived in-memory bootstrap proof
-creates an independent random browser session. SQLite stores only the session's
-SHA-256 digest, subject, creation time, expiry, and optional revocation time.
+graceful-shutdown timeout are explicit. The bootstrap proof is the Server's
+one-time initialization credential: an uninitialized Server accepts exactly one
+proof to create the first Owner account, and initialization then closes
+permanently, in memory and through a durable marker. Daily sign-in is username
+plus Argon2id password. SQLite stores only each session's SHA-256 digest,
+subject, creation time, expiry, and optional revocation time.
 
 `GeneratedContractDispatcher` is the single application entry. It accepts only
 the generated `winwincode/v1` command, query, and WebSocket types; checks that
@@ -23,7 +26,6 @@ The binary reads these required values from its environment:
 - `WWC_SERVER_DATA_DIRECTORY`
 - `WWC_SERVER_ALLOWED_ORIGINS`
 - `WWC_SERVER_BOOTSTRAP_PROOF`
-- `WWC_SERVER_AUTH_SUBJECT`
 - `WWC_SERVER_REPOSITORY_ROOT`
 - `WWC_SERVER_ORGANIZATION_ID`
 - `WWC_SERVER_WORKSPACE_ID`
@@ -49,11 +51,14 @@ approval age is expressed in milliseconds. Startup validates and installs the
 Publication authority and provider registry before the listener accepts a
 request; HTTP publication commands do not supply policy or provider facts.
 
-`WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` optionally changes the ten-minute login
-window, and `WWC_SERVER_SESSION_TTL_SECONDS` optionally changes the eight-hour
-browser-session lifetime. The Client sends the proof only in the Authorization
-header of `POST /api/v1/auth/session`; commands, queries, WebSocket upgrades,
-and `DELETE /api/v1/auth/session` use only the secure `wwc_session` cookie.
+`WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS` optionally changes the ten-minute
+initialization window, and `WWC_SERVER_SESSION_TTL_SECONDS` optionally changes
+the eight-hour browser-session lifetime (live sessions renew while in use).
+The Client sends the proof only in the Authorization header of
+`POST /api/v1/auth/session` while the Server is uninitialized; every later
+session request carries `username` and `password` in that request body.
+Commands, queries, WebSocket upgrades, and `DELETE /api/v1/auth/session` use
+only the secure `wwc_session` cookie.
 
 TLS additionally requires both `WWC_SERVER_TLS_CERTIFICATE` and
 `WWC_SERVER_TLS_PRIVATE_KEY`. The binary composes the generated dispatcher,

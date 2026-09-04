@@ -10,17 +10,20 @@ mod durable_event_hub;
 mod enterprise_identity_protocol;
 mod enterprise_management;
 mod identity_authenticator;
+mod login_rate_limiter;
+mod password_hash;
 mod remote_worker_transport;
 mod runtime;
 mod server;
 mod transport;
+mod user_accounts;
 
 pub use application::{
     StandaloneApplicationClock, StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
 };
 pub use auth_session::{
     AuthSessionBootstrap, AuthSessionConfig, AuthSessionError, ExternalIdentitySessionIssuer,
-    ExternalIdentitySessionResult, SqliteAuthSessionManager,
+    ExternalIdentitySessionResult, OwnerInitializationHook, SqliteAuthSessionManager,
 };
 pub use winwincode_api::generated::{AuthSessionRequest, AuthSessionResponse};
 
@@ -53,4 +56,7 @@ pub use server::{RunningServer, ServerError, start_server, start_server_with_rem
 pub use transport::{
     ApiError, AuthError, AuthenticatedPrincipal, ControlPlaneApiPort, EventSubscription,
     RequestAuthenticator, TransportCredentials,
+};
+pub use user_accounts::{
+    CredentialRejection, UserAccountService, UserAccountServiceError, UserAccountServiceErrorKind,
 };
