@@ -12671,6 +12671,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-device-client"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "winwincode-client-port",
+]
+
+[[package]]
 name = "winwincode-domain"
 version = "0.1.0-alpha.1"
 dependencies = [
