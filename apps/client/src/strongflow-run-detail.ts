@@ -121,14 +121,27 @@ function candidateIdentityKey(identity: StrongFlowHistoryCandidateIdentity): str
   ])
 }
 
-function statusNode(
+function panelNote(
   document: Document,
   parent: HTMLElement,
   className: string,
-  role: 'status' | 'alert',
+): HTMLElement {
+  // Transient loading hint with immutable text per visible phase: rendered as
+  // plain text so the page's single polite status stays the only live
+  // announcement while historical run data loads.
+  const node = strongFlowElement(document, 'p', className)
+  node.hidden = true
+  parent.append(node)
+  return node
+}
+
+function panelAlert(
+  document: Document,
+  parent: HTMLElement,
+  className: string,
 ): HTMLElement {
   const node = strongFlowElement(document, 'p', className)
-  node.setAttribute('role', role)
+  node.setAttribute('role', 'alert')
   node.hidden = true
   parent.append(node)
   return node
@@ -247,17 +260,15 @@ export function mountStrongFlowRunDetail(
     row.scrollIntoView({ block: 'nearest' })
   }
 
-  const runtimeStatus = statusNode(
+  const runtimeStatus = panelNote(
     document,
     runtimeHost,
     'wwc-strongflow-history-runtime-status',
-    'status',
   )
-  const runtimeError = statusNode(
+  const runtimeError = panelAlert(
     document,
     runtimeHost,
     'wwc-strongflow-history-runtime-error',
-    'alert',
   )
   const runtimeRetry = strongFlowElement(
     document,
@@ -331,17 +342,15 @@ export function mountStrongFlowRunDetail(
     },
   })
 
-  const candidatesStatus = statusNode(
+  const candidatesStatus = panelNote(
     document,
     candidatesHost,
     'wwc-strongflow-history-candidates-status',
-    'status',
   )
-  const candidatesError = statusNode(
+  const candidatesError = panelAlert(
     document,
     candidatesHost,
     'wwc-strongflow-history-candidates-error',
-    'alert',
   )
   const candidatesRetry = strongFlowElement(
     document,
@@ -374,17 +383,15 @@ export function mountStrongFlowRunDetail(
     },
   })
 
-  const reviewStatus = statusNode(
+  const reviewStatus = panelNote(
     document,
     reviewHost,
     'wwc-strongflow-history-review-status',
-    'status',
   )
-  const reviewError = statusNode(
+  const reviewError = panelAlert(
     document,
     reviewHost,
     'wwc-strongflow-history-review-error',
-    'alert',
   )
   const reviewNote = strongFlowElement(document, 'p', 'wwc-strongflow-history-review-note')
   const reviewList = strongFlowElement(document, 'dl', 'wwc-strongflow-history-review')
