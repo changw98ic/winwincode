@@ -174,6 +174,10 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
         'Content-Type': publicRequest && path.endsWith('.css')
           ? 'text/css; charset=utf-8'
           : 'text/javascript; charset=utf-8',
+        // A fixture may be served several times in one browser profile with a
+        // different route each time, so Chrome must never reuse a module it
+        // already evaluated.
+        'Cache-Control': 'no-store',
       })
       response.end(readSharedClientFile(source))
       return

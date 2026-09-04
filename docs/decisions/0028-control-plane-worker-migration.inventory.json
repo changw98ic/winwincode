@@ -1025,7 +1025,8 @@
         "apps/client/src/strongflow-run-detail.ts",
         "apps/client/src/strongflow-view-model.ts",
         "apps/client/src/usage-health-page.ts",
-        "apps/client/src/usage-health-view-model.ts"
+        "apps/client/src/usage-health-view-model.ts",
+        "apps/client/src/visual-regression.ts"
       ],
       "entrySymbols": [
         "mountWinWinCodeClient"
@@ -1049,7 +1050,9 @@
         "ui604-a11y-semantics",
         "candidate-comparison",
         "candidate-preview",
-        "ui607-delivery-review-vertical"
+        "ui607-delivery-review-vertical",
+        "ui608-component-state-visual",
+        "ui608-page-visual"
       ]
     },
     {
@@ -1534,6 +1537,30 @@
         "a revision conflict keeps the draft and the retry composes one delivery.resolve_attention with a bounded rework scope",
         "the reworked Candidate is compared against the Delivery baseline, the Verdict is computed, and the final approval opens only once every required Criterion passed",
         "the Publication receipt follows the coordinator journal, including publication.approval.expired and a retried write, while the browser issues no publication command"
+      ]
+    },
+    {
+      "id": "ui608-component-state-visual",
+      "scenario": "success",
+      "testFile": "tests/ui608-component-state-visual-browser.test.mjs",
+      "testName": "every component state renders exactly the committed visual baseline",
+      "expectedFacts": [
+        "every UI primitive, the Candidate Diff viewer, and the StrongFlow Delivery list and Kanban views are fingerprinted through their own mount functions",
+        "the default, busy, disabled, error, empty, stale, and destructive states are each pinned by a committed baseline entry",
+        "a difference reports the component state, the element path, and the property that moved, with a reason code a reviewer can tell apart from a functional failure",
+        "the captured presentation resolves the design tokens by name and carries no credential material"
+      ]
+    },
+    {
+      "id": "ui608-page-visual",
+      "scenario": "success",
+      "testFile": "tests/ui608-page-visual-browser.test.mjs",
+      "testName": "every key page matches its committed visual baseline on desktop and at a narrow viewport",
+      "expectedFacts": [
+        "Home, Chat, Chat empty, Settings, Attention, Local decisions, and Local operations are baselined at a desktop and a narrow viewport",
+        "the shell header, the connected connection presentation, and the offline connection presentation are baselined at both viewports",
+        "every timestamp, identifier, and rendered string comes from fixture literals and a pinned shell clock, so two runs of one revision are identical",
+        "the baseline is scanned by the credential leak gate and stores no credential material"
       ]
     }
   ],
