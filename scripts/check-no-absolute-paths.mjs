@@ -114,7 +114,12 @@ function collectTargetFiles(scanRoot, target) {
 }
 
 export function collectScanFiles(scanRoot = root) {
-  const files = scanTargets.flatMap(target => collectTargetFiles(scanRoot, target))
+  // Negative fixtures under an `invalid/` segment deliberately contain
+  // absolute paths to prove the golden contract rejects them; they are sample
+  // data, not part of the valid public surface.
+  const files = scanTargets
+    .flatMap(target => collectTargetFiles(scanRoot, target))
+    .filter(path => !path.includes('/invalid/'))
   return Object.freeze([...new Set(files)].toSorted())
 }
 
