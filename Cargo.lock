@@ -12617,6 +12617,8 @@ dependencies = [
 name = "winwincode-cli"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "getrandom 0.3.4",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12624,6 +12626,7 @@ dependencies = [
  "winwincode-domain",
  "winwincode-evidence-export",
  "winwincode-repository-context",
+ "winwincode-server",
  "winwincode-storage",
  "winwincode-test-assets",
 ]

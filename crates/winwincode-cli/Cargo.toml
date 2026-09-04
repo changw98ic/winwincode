@@ -17,18 +17,21 @@ name = "wwc"
 path = "src/main.rs"
 
 [dependencies]
+getrandom.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 winwincode-delivery = { path = "../winwincode-delivery" }
+winwincode-domain.workspace = true
 winwincode-evidence-export = { path = "../winwincode-evidence-export" }
 winwincode-repository-context = { path = "../winwincode-repository-context" }
+winwincode-server = { path = "../winwincode-server" }
+winwincode-storage.workspace = true
 winwincode-test-assets = { path = "../winwincode-test-assets" }
 
 [dev-dependencies]
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
-winwincode-domain.workspace = true
-winwincode-storage = { path = "../winwincode-storage" }
 
 [lints]
 workspace = true
