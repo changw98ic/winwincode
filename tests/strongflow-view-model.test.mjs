@@ -40,7 +40,12 @@ const queryCacheModule = await import(`${pathToFileURL(resolve(
   '.cache/strongflow-view-model-tests/core/query-cache.js',
 )).href}`)
 
-const { createStrongFlowCreateViewModel, createStrongFlowViewModel } = module
+const {
+  canAdvanceStrongFlowDelivery,
+  createStrongFlowCreateViewModel,
+  createStrongFlowViewModel,
+  hasUnmetStrongFlowRequiredCriterion,
+} = module
 const { ControlPlaneClientError } = facade
 const { createQueryCache } = queryCacheModule
 const schemaVersion = 'winwincode/v1'
@@ -2898,5 +2903,214 @@ test('historical facade reads propagate selection cancellation to the generated 
 
   await assert.rejects(pending, error => error.name === 'AbortError')
   assert.equal(receivedSignal.aborted, true)
+  model.close()
+})
+
+function reviewProjection(overrides = {}) {
+  const value = delivery()
+  const projection = {
+    delivery: value,
+    solutionReview: value.solutionReview,
+    stage: value.stages[0],
+    runtime: runtime(value),
+    evidence: value.evidence,
+    verdict: value.verdict,
+    attention: value.attention,
+    publication: value.publication,
+    currentCandidate: value.currentCandidate,
+    diagramExecution: null,
+    metadata: {
+      source: 'control-plane-snapshot',
+      updatedAt: '2026-08-27T01:00:06.000Z',
+      revisions: { delivery: 1, deliverySpec: 3, runtime: 11, publication: 1 },
+      readCursor: value.readCursor,
+    },
+  }
+  for (const [key, next] of Object.entries(overrides)) {
+    projection[key] = key === 'delivery'
+      ? { ...value, ...next }
+      : next
+  }
+  return projection
+}
+
+function criterionResult(criterionId, verdict, overrides = {}) {
+  return {
+    criterionId,
+    evaluatedAt: '2026-08-27T01:00:05.000Z',
+    evidenceRefs: [],
+    explanation: `The ${criterionId} check returned ${verdict}.`,
+    resultId: `result:${criterionId}`,
+    verdict,
+    ...overrides,
+  }
+}
+
+test('a delivery whose required criteria all passed may be advanced', () => {
+  const projection = reviewProjection()
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), false)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), true)
+})
+
+test('a delivery without a verdict is not reported as unmet because verification has not run', () => {
+  const projection = reviewProjection({ verdict: null })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), false)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), true)
+})
+
+test('a failing required criterion blocks the final Delivery approval', () => {
+  const projection = reviewProjection({
+    verdict: {
+      ...reviewProjection().verdict,
+      status: 'fail',
+      criteria: [criterionResult('criterion:1', 'fail')],
+      unresolvedFindings: ['The export still leaks one value.'],
+    },
+  })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), true)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('an infra_error required criterion blocks the final Delivery approval', () => {
+  const projection = reviewProjection({
+    verdict: {
+      ...reviewProjection().verdict,
+      status: 'infra_error',
+      criteria: [criterionResult('criterion:1', 'infra_error')],
+    },
+  })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), true)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('an inconclusive required criterion blocks the final Delivery approval', () => {
+  const projection = reviewProjection({
+    verdict: {
+      ...reviewProjection().verdict,
+      status: 'inconclusive',
+      criteria: [criterionResult('criterion:1', 'inconclusive')],
+    },
+  })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), true)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('a required criterion without any result blocks the final Delivery approval', () => {
+  const value = reviewProjection().delivery
+  value.requirements.acceptanceCriteria.push({
+    id: 'criterion:2',
+    description: 'The export stays secret-safe.',
+    verificationMethod: null,
+    required: true,
+  })
+  const projection = reviewProjection({ delivery: value })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), true)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('an unmet optional criterion never blocks the final Delivery approval', () => {
+  const value = reviewProjection().delivery
+  value.requirements.acceptanceCriteria.push({
+    id: 'criterion:2',
+    description: 'The changelog is updated.',
+    verificationMethod: 'review',
+    required: false,
+  })
+  const projection = reviewProjection({
+    delivery: value,
+    verdict: {
+      ...reviewProjection().verdict,
+      criteria: [
+        criterionResult('criterion:1', 'pass'),
+        criterionResult('criterion:2', 'fail'),
+      ],
+    },
+  })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), false)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), true)
+})
+
+test('a non-passing verdict blocks the final Delivery approval even when every result passed', () => {
+  const projection = reviewProjection({
+    verdict: {
+      ...reviewProjection().verdict,
+      status: 'fail',
+      unresolvedFindings: ['One finding was never explained.'],
+    },
+  })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), true)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('a foreign criterion result cannot stand in for a required criterion', () => {
+  const projection = reviewProjection({
+    verdict: {
+      ...reviewProjection().verdict,
+      criteria: [criterionResult('criterion:ghost', 'pass')],
+    },
+  })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), true)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('a delivery outside ready-to-deliver is never advanceable', () => {
+  const value = reviewProjection().delivery
+  value.status = 'verifying'
+  const projection = reviewProjection({ delivery: value })
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(projection), false)
+  assert.equal(canAdvanceStrongFlowDelivery(projection), false)
+})
+
+test('a missing projection is never advanceable', () => {
+  assert.equal(canAdvanceStrongFlowDelivery(null), false)
+})
+
+test('advancing an unverified delivery is refused instead of submitted', async () => {
+  const client = new FakeClient()
+  const requests = []
+  client.command = async request => {
+    requests.push(request)
+    return {
+      schemaVersion,
+      requestId: request.requestId,
+      command: request.command,
+      outcome: 'accepted',
+      currentRevision: request.expectedRevision + 1,
+      acceptedAt: '2026-08-27T01:00:00.000Z',
+    }
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const failed = delivery()
+  failed.status = 'ready-to-deliver'
+  failed.verdict = {
+    ...failed.verdict,
+    status: 'fail',
+    criteria: [criterionResult('criterion:1', 'fail')],
+    unresolvedFindings: ['The export still leaks one value.'],
+  }
+  client.enqueue('delivery.get', response('delivery.get', failed))
+  await model.refresh()
+
+  assert.equal(model.state.projection.delivery.status, 'ready-to-deliver')
+  assert.equal(hasUnmetStrongFlowRequiredCriterion(model.state.projection), true)
+
+  await model.advanceDelivery()
+
+  assert.deepEqual(
+    requests.filter(request => request.command === 'delivery.advance'),
+    [],
+    'an unverified Delivery must not be advanced',
+  )
+  assert.match(
+    model.state.interaction.error.code,
+    /STRONGFLOW_DELIVERY_NOT_VERIFIED/u,
+  )
+  assert.match(
+    model.state.interaction.error.message,
+    /criterion:1 must pass before the Delivery can be approved/u,
+  )
+
   model.close()
 })

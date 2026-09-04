@@ -83,7 +83,11 @@ import type {
   StrongFlowViewModel,
   StrongFlowViewModelState,
 } from './strongflow-view-model.js'
-import { canSubmitStrongFlowVerdict } from './strongflow-view-model.js'
+import {
+  canAdvanceStrongFlowDelivery,
+  canSubmitStrongFlowVerdict,
+  unmetRequiredStrongFlowCriteria,
+} from './strongflow-view-model.js'
 import {
   normalizeStrongFlowLayoutPreferences,
   STRONGFLOW_ARTIFACTS_TABS,
@@ -854,6 +858,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     'p',
     'wwc-strongflow-history-blocked',
   )
+  const advanceBlocked = strongFlowElement(document, 'p', 'wwc-strongflow-advance-blocked')
   let closed = false
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
   if (
@@ -1228,6 +1233,9 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   // only live announcement while a historical review is open.
   historyBlockedNote.textContent = 'History review is open. Return to the current StageRun to act on this Delivery.'
   historyBlockedNote.hidden = true
+  // Static guidance text naming the exact unmet criteria. It is not a live
+  // region: the page keeps exactly one polite announcement channel.
+  advanceBlocked.hidden = true
   actions.append(
     actionsHeading,
     historyBlockedNote,
@@ -1237,6 +1245,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     submitVerdict,
     attentionActions,
     actionsOmitted,
+    advanceBlocked,
     advanceDelivery,
   )
   navigation.append(deliveriesRoot, tasksSection, stagesSection)
@@ -2005,8 +2014,22 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       submitVerdict.remove()
     }
     submitVerdict.disabled = readOnly || busy || historicalReviewOpen
-    advanceDelivery.hidden = projection?.delivery.status !== 'ready-to-deliver'
+    // The final Delivery approval exists only for a verified Delivery: a
+    // required Criterion that did not pass leaves no control to bypass it with.
+    const advanceReady = canAdvanceStrongFlowDelivery(projection)
+    advanceDelivery.hidden = !advanceReady
     advanceDelivery.disabled = readOnly || busy || historicalReviewOpen
+    const unmetCriteria = projection !== null
+      && projection.delivery.status === 'ready-to-deliver'
+      && !advanceReady
+    advanceBlocked.hidden = !unmetCriteria
+    if (unmetCriteria) {
+      const unmet = unmetRequiredStrongFlowCriteria(projection!)
+      advanceBlocked.textContent = `${unmet.length === 0
+        ? 'The current Verdict is not a pass'
+        : `${unmet.join(', ')} did not pass`}. Approve a bounded rework and `
+        + 'recompute the Verdict before approving this Delivery.'
+    }
     const nodes: readonly ReviewNode[] = review === null
       ? []
       : boundedItems(

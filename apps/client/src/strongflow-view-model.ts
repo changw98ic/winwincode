@@ -827,6 +827,53 @@ export function canSubmitStrongFlowVerdict(projection: StrongFlowProjection): bo
     && !projection.delivery.stages.some(stage => ['running', 'waiting'].includes(stage.status))
 }
 
+/**
+ * A required acceptance criterion that did not pass, or a Verdict that is not a
+ * pass, keeps the Delivery unverified. This mirrors the Server rule that only a
+ * passing Verdict reaches `ready-to-deliver`, so the workbench can never present
+ * a final approval the verified facts do not support. A Delivery without a
+ * Verdict has not been verified yet rather than having failed one.
+ */
+export function hasUnmetStrongFlowRequiredCriterion(
+  projection: StrongFlowProjection,
+): boolean {
+  const verdict = projection.verdict
+  if (verdict === null) return false
+  if (verdict.status !== 'pass') return true
+  const results = new Map(
+    verdict.criteria.map(result => [result.criterionId, result.verdict]),
+  )
+  const criteria = projection.delivery.requirements.acceptanceCriteria ?? []
+  return criteria.some(criterion => criterion.required && results.get(criterion.id) !== 'pass')
+}
+
+/**
+ * The workbench offers its one final Delivery approval only for a Delivery the
+ * authority marked `ready-to-deliver` whose required criteria all passed.
+ */
+export function canAdvanceStrongFlowDelivery(
+  projection: StrongFlowProjection | null,
+): boolean {
+  return projection !== null
+    && projection.delivery.status === 'ready-to-deliver'
+    && !hasUnmetStrongFlowRequiredCriterion(projection)
+}
+
+/** Readable names of the required criteria that did not pass, in spec order. */
+export function unmetRequiredStrongFlowCriteria(
+  projection: StrongFlowProjection,
+): readonly string[] {
+  const verdict = projection.verdict
+  if (verdict === null) return []
+  const results = new Map(
+    verdict.criteria.map(result => [result.criterionId, result.verdict]),
+  )
+  const criteria = projection.delivery.requirements.acceptanceCriteria ?? []
+  return criteria
+    .filter(criterion => criterion.required && results.get(criterion.id) !== 'pass')
+    .map(criterion => criterion.id)
+}
+
 function projectionUpdatedAt(snapshot: StrongFlowSnapshot): string {
   const { delivery, runtime } = snapshot
   const timestamps = [
@@ -2249,6 +2296,23 @@ export function createStrongFlowViewModel(
   }
 
   async function advanceDelivery(): Promise<void> {
+    const projection = commandProjection()
+    if (projection === null) return
+    // Fail closed before a transport is opened: a Delivery whose required
+    // criteria did not pass is never advanced from this Client, whatever the
+    // current snapshot claims.
+    if (!canAdvanceStrongFlowDelivery(projection)) {
+      const unmet = hasUnmetStrongFlowRequiredCriterion(projection)
+        ? unmetRequiredStrongFlowCriteria(projection)
+        : []
+      interactionFailure(
+        'STRONGFLOW_DELIVERY_NOT_VERIFIED',
+        unmet.length === 0
+          ? 'This Delivery is not ready to deliver yet.'
+          : `${unmet.join(', ')} must pass before the Delivery can be approved.`,
+      )
+      return
+    }
     await runCommand(CommandName.DeliveryAdvance, (current, requestId) => ({
       ...requestBase(),
       requestId,

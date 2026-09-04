@@ -2088,3 +2088,74 @@ test('returning from bounded rework defaults the comparison to the rework pair',
   )
   mounted.close()
 })
+
+test('a failing required criterion leaves no final Delivery approval bypass', async () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    deliveryList: fakeDeliveryList([]),
+    limits,
+  })
+
+  // A verified Delivery at ready-to-deliver keeps its approval control.
+  const verified = state()
+  verified.projection.delivery.status = 'ready-to-deliver'
+  model.publish(verified)
+
+  const advance = findByClass(rootElement, 'wwc-strongflow-advance-delivery')
+  assert.equal(advance.hidden, false)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-advance-blocked').hidden, true)
+
+  advance.emit('click')
+  await flush()
+  assert.deepEqual(model.calls.at(-1), ['advanceDelivery'])
+
+  // A required criterion that did not pass removes the control entirely.
+  const unmet = state()
+  unmet.projection.delivery.status = 'ready-to-deliver'
+  unmet.projection.delivery.requirements = {
+    ...unmet.projection.delivery.requirements,
+    acceptanceCriteria: [{
+      id: 'criterion:1',
+      description: 'The exact check passes.',
+      verificationMethod: 'Focused test',
+      required: true,
+    }],
+  }
+  unmet.projection.verdict = {
+    ...unmet.projection.verdict,
+    status: 'fail',
+    criteria: [{
+      criterionId: 'criterion:1',
+      evaluatedAt: '2026-08-27T01:00:05.000Z',
+      evidenceRefs: [evidenceId],
+      explanation: 'The exact check leaked one value.',
+      resultId: 'result:1',
+      verdict: 'fail',
+    }],
+    unresolvedFindings: ['The export still leaks one value.'],
+  }
+  model.publish(unmet)
+
+  const blocked = findByClass(rootElement, 'wwc-strongflow-advance-blocked')
+  const hiddenAdvance = findByClass(rootElement, 'wwc-strongflow-advance-delivery')
+  assert.equal(hiddenAdvance.hidden, true)
+  assert.equal(blocked.hidden, false)
+  assert.match(blocked.textContent, /criterion:1 did not pass/u)
+
+  // Republishing an equivalent snapshot must not resurrect the bypass.
+  model.publish({ ...unmet, projection: { ...unmet.projection } })
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-advance-delivery').hidden, true)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-advance-blocked').hidden, false)
+
+  // Returning to the verified snapshot restores the control.
+  model.publish(verified)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-advance-delivery').hidden, false)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-advance-blocked').hidden, true)
+
+  mounted.close()
+  assert.deepEqual(rootElement.children, [])
+})
