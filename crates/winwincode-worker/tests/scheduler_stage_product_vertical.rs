@@ -77,6 +77,26 @@ use winwincode_worker::{
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 static NEXT_FRAME: AtomicU64 = AtomicU64::new(10_000);
 
+fn run_on_large_stack<Build, Test>(build: Build)
+where
+    Build: FnOnce() -> Test + Send + 'static,
+    Test: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name("scheduler-stage-product-vertical".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build scheduler stage-product runtime")
+                .block_on(build());
+        })
+        .expect("spawn scheduler stage-product thread")
+        .join()
+        .expect("scheduler stage-product thread");
+}
+
 fn id(prefix: &str, value: u64) -> String {
     format!("{prefix}_{value:026}")
 }
@@ -1424,409 +1444,416 @@ fn terminal_request(
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
-    let fixture = Fixture::new("roles");
-    let mut storage = SqliteStorage::open(fixture.data()).expect("storage");
-    configure_admission(&mut storage);
-    let worker_id = WorkerId(id("wrk", 10));
-    let instance = WorkerInstanceId(id("wki", 11));
-    let adapter = ScriptedStageProductAdapter::default();
-    let config = worker_config(worker_id.clone(), instance.clone(), at(0));
-    let (mut worker, port, _) = start_worker(
-        &mut storage,
-        config,
-        fixture.workspace_runtime(),
-        adapter.clone(),
-        WorkerRegistrationResultMessageLeaseRecovery::NoActiveLeases,
-    )
-    .await;
+#[test]
+fn scheduler_stage_product_roles_cancel_restart_and_old_attempt_are_exact() {
+    run_on_large_stack(|| async {
+        let fixture = Fixture::new("roles");
+        let mut storage = SqliteStorage::open(fixture.data()).expect("storage");
+        configure_admission(&mut storage);
+        let worker_id = WorkerId(id("wrk", 10));
+        let instance = WorkerInstanceId(id("wki", 11));
+        let adapter = ScriptedStageProductAdapter::default();
+        let config = worker_config(worker_id.clone(), instance.clone(), at(0));
+        let (mut worker, port, _) = start_worker(
+            &mut storage,
+            config,
+            fixture.workspace_runtime(),
+            adapter.clone(),
+            WorkerRegistrationResultMessageLeaseRecovery::NoActiveLeases,
+        )
+        .await;
 
-    let mut candidate_ref = None;
-    for (role, seed) in [
-        ("planner", 1),
-        ("executor", 2),
-        ("reviewer", 3),
-        ("verifier", 4),
-    ] {
-        let job = stage_job(role, seed, &fixture.revision, candidate_ref.as_deref());
-        submit_job(&mut storage, &job, seed);
-        reserve_and_start(&mut storage, &job, seed);
-        let dispatch = RepositoryExecutionScheduler::new(&mut storage)
-            .claim_next(&dispatch_request(seed, worker_id.clone(), instance.clone()))
-            .expect("claim stage")
-            .expect("stage dispatch");
-        let cursor = port.len();
-        worker
-            .accept_control(
-                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-                at(9 + seed),
-            )
-            .await
-            .expect("accept stage dispatch");
-        let messages = port.since(cursor);
-        let result = dispatch_result_for(&messages);
-        let binding = binding_for(&messages);
-        assert_eq!(result.status, JobDispatchResultMessageStatus::Accepted);
-        assert_eq!(result.job_id, job.job_id);
-        assert_eq!(result.lease, dispatch.lease);
-        assert_eq!(result.payload_digest, job.payload_digest);
-        assert_eq!(
-            result.worker_session_id,
-            Some(binding.worker_session_id.clone())
-        );
-        assert_eq!(binding.attempt, dispatch.job.attempt);
-        assert_eq!(binding.lease, dispatch.lease);
-        assert_eq!(binding.product_session_id, queue_scope().product_session_id);
-        assert_eq!(
-            binding.stage_run_id,
-            Some(match &job.scope {
-                ExecutionScope::DeliveryStageExecutionScope(scope) => scope.stage_run_id.clone(),
-                _ => unreachable!("delivery stage"),
-            })
-        );
-        assert_eq!(
-            binding.session_identity.codex_thread_id,
-            binding.codex_thread_id
-        );
-        assert_eq!(
-            binding.session_identity.worker_session_id,
-            binding.worker_session_id
-        );
-        assert_eq!(binding.source_identity.worker_id, worker_id);
-        assert_eq!(binding.source_identity.worker_instance_id, instance);
-        let running = RepositoryExecutionScheduler::new(&mut storage)
-            .record_dispatch_result(&repository_scope(), &result, &at(10 + seed))
-            .expect("record accepted dispatch");
-        assert!(running.accepted);
-        assert_eq!(running.job.state, ExecutionJobState::Running);
-        let authority = open_slot(&mut storage, &binding, seed);
-        let outcome =
-            run_worker_until_outcome(&mut worker, &port, &job.job_id, at(12 + seed)).await;
-        assert_eq!(outcome.lease, dispatch.lease);
-        assert_eq!(outcome.session_identity, binding.session_identity);
-        assert_eq!(outcome.worker_session_id, binding.worker_session_id);
-        assert_eq!(
-            outcome.outcome.codex_thread_id,
-            Some(binding.codex_thread_id.clone())
-        );
-        assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
-        let runtime = runtime_for(&port.messages(), &job.job_id);
-        assert!(!runtime.is_empty(), "{role} emitted no runtime product");
-        assert!(runtime.iter().all(|message| {
-            message.lease == dispatch.lease
-                && message.session_identity == binding.session_identity
-                && message.worker_session_id == binding.worker_session_id
-        }));
-        match role {
-            "planner" => assert_eq!(runtime[0].event.category, ExecutionEventCategory::Activity),
-            "executor" => {
-                assert_eq!(runtime[0].event.category, ExecutionEventCategory::Diff);
-                assert_eq!(outcome.outcome.artifacts.len(), 1);
-                candidate_ref = adapter.candidate_ref();
-                assert!(
-                    candidate_ref.is_some(),
-                    "executor candidate was not retained"
-                );
+        let mut candidate_ref = None;
+        for (role, seed) in [
+            ("planner", 1),
+            ("executor", 2),
+            ("reviewer", 3),
+            ("verifier", 4),
+        ] {
+            let job = stage_job(role, seed, &fixture.revision, candidate_ref.as_deref());
+            submit_job(&mut storage, &job, seed);
+            reserve_and_start(&mut storage, &job, seed);
+            let dispatch = RepositoryExecutionScheduler::new(&mut storage)
+                .claim_next(&dispatch_request(seed, worker_id.clone(), instance.clone()))
+                .expect("claim stage")
+                .expect("stage dispatch");
+            let cursor = port.len();
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at(9 + seed),
+                )
+                .await
+                .expect("accept stage dispatch");
+            let messages = port.since(cursor);
+            let result = dispatch_result_for(&messages);
+            let binding = binding_for(&messages);
+            assert_eq!(result.status, JobDispatchResultMessageStatus::Accepted);
+            assert_eq!(result.job_id, job.job_id);
+            assert_eq!(result.lease, dispatch.lease);
+            assert_eq!(result.payload_digest, job.payload_digest);
+            assert_eq!(
+                result.worker_session_id,
+                Some(binding.worker_session_id.clone())
+            );
+            assert_eq!(binding.attempt, dispatch.job.attempt);
+            assert_eq!(binding.lease, dispatch.lease);
+            assert_eq!(binding.product_session_id, queue_scope().product_session_id);
+            assert_eq!(
+                binding.stage_run_id,
+                Some(match &job.scope {
+                    ExecutionScope::DeliveryStageExecutionScope(scope) =>
+                        scope.stage_run_id.clone(),
+                    _ => unreachable!("delivery stage"),
+                })
+            );
+            assert_eq!(
+                binding.session_identity.codex_thread_id,
+                binding.codex_thread_id
+            );
+            assert_eq!(
+                binding.session_identity.worker_session_id,
+                binding.worker_session_id
+            );
+            assert_eq!(binding.source_identity.worker_id, worker_id);
+            assert_eq!(binding.source_identity.worker_instance_id, instance);
+            let running = RepositoryExecutionScheduler::new(&mut storage)
+                .record_dispatch_result(&repository_scope(), &result, &at(10 + seed))
+                .expect("record accepted dispatch");
+            assert!(running.accepted);
+            assert_eq!(running.job.state, ExecutionJobState::Running);
+            let authority = open_slot(&mut storage, &binding, seed);
+            let outcome =
+                run_worker_until_outcome(&mut worker, &port, &job.job_id, at(12 + seed)).await;
+            assert_eq!(outcome.lease, dispatch.lease);
+            assert_eq!(outcome.session_identity, binding.session_identity);
+            assert_eq!(outcome.worker_session_id, binding.worker_session_id);
+            assert_eq!(
+                outcome.outcome.codex_thread_id,
+                Some(binding.codex_thread_id.clone())
+            );
+            assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Succeeded);
+            let runtime = runtime_for(&port.messages(), &job.job_id);
+            assert!(!runtime.is_empty(), "{role} emitted no runtime product");
+            assert!(runtime.iter().all(|message| {
+                message.lease == dispatch.lease
+                    && message.session_identity == binding.session_identity
+                    && message.worker_session_id == binding.worker_session_id
+            }));
+            match role {
+                "planner" => {
+                    assert_eq!(runtime[0].event.category, ExecutionEventCategory::Activity);
+                }
+                "executor" => {
+                    assert_eq!(runtime[0].event.category, ExecutionEventCategory::Diff);
+                    assert_eq!(outcome.outcome.artifacts.len(), 1);
+                    candidate_ref = adapter.candidate_ref();
+                    assert!(
+                        candidate_ref.is_some(),
+                        "executor candidate was not retained"
+                    );
+                }
+                "reviewer" => {
+                    assert_eq!(runtime[0].event.category, ExecutionEventCategory::Lifecycle);
+                    assert_eq!(runtime[1].event.category, ExecutionEventCategory::Command);
+                    assert_eq!(runtime[2].event.category, ExecutionEventCategory::Activity);
+                }
+                "verifier" => {
+                    assert_eq!(runtime[0].event.category, ExecutionEventCategory::Lifecycle);
+                    assert_eq!(runtime[1].event.category, ExecutionEventCategory::Test);
+                    assert_eq!(runtime[2].event.category, ExecutionEventCategory::Activity);
+                }
+                _ => unreachable!("role fixture"),
             }
-            "reviewer" => {
-                assert_eq!(runtime[0].event.category, ExecutionEventCategory::Lifecycle);
-                assert_eq!(runtime[1].event.category, ExecutionEventCategory::Command);
-                assert_eq!(runtime[2].event.category, ExecutionEventCategory::Activity);
-            }
-            "verifier" => {
-                assert_eq!(runtime[0].event.category, ExecutionEventCategory::Lifecycle);
-                assert_eq!(runtime[1].event.category, ExecutionEventCategory::Test);
-                assert_eq!(runtime[2].event.category, ExecutionEventCategory::Activity);
-            }
-            _ => unreachable!("role fixture"),
+            close_slot(&mut storage, &authority, seed, false);
+            let settled = RepositoryExecutionScheduler::new(&mut storage)
+                .settle_terminal(&terminal_request(&job, &outcome, seed))
+                .expect("settle stage");
+            assert_eq!(settled.job.state, ExecutionJobState::Completed);
+            let replay = RepositoryExecutionScheduler::new(&mut storage)
+                .settle_terminal(&terminal_request(&job, &outcome, seed))
+                .expect("replay stage settlement");
+            assert!(replay.replayed);
+            settle_admission(&mut storage, &job, seed, false);
+            let duplicate_cursor = port.len();
+            worker
+                .accept_control(
+                    &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
+                    at(20 + seed),
+                )
+                .await
+                .expect("replay dispatch");
+            let duplicate_messages = port.since(duplicate_cursor);
+            assert_eq!(
+                output_since(&duplicate_messages, |message| match message {
+                    ExecutionPortMessage::JobDispatchResultMessage(result) => Some(result.clone()),
+                    _ => None,
+                })
+                .len(),
+                1
+            );
+            assert!(
+                output_since(&duplicate_messages, |message| match message {
+                    ExecutionPortMessage::SessionBindingMessage(_) => Some(()),
+                    _ => None,
+                })
+                .is_empty()
+            );
         }
-        close_slot(&mut storage, &authority, seed, false);
-        let settled = RepositoryExecutionScheduler::new(&mut storage)
-            .settle_terminal(&terminal_request(&job, &outcome, seed))
-            .expect("settle stage");
-        assert_eq!(settled.job.state, ExecutionJobState::Completed);
-        let replay = RepositoryExecutionScheduler::new(&mut storage)
-            .settle_terminal(&terminal_request(&job, &outcome, seed))
-            .expect("replay stage settlement");
-        assert!(replay.replayed);
-        settle_admission(&mut storage, &job, seed, false);
-        let duplicate_cursor = port.len();
+
+        let cancel_job = stage_job("planner", 5, &fixture.revision, None);
+        submit_job(&mut storage, &cancel_job, 5);
+        reserve_and_start(&mut storage, &cancel_job, 5);
+        let cancel_dispatch = RepositoryExecutionScheduler::new(&mut storage)
+            .claim_next(&dispatch_request(5, worker_id.clone(), instance.clone()))
+            .expect("claim cancel")
+            .expect("cancel dispatch");
+        let cancel_cursor = port.len();
         worker
             .accept_control(
-                &ExecutionPortMessage::JobDispatchMessage(dispatch.clone()),
-                at(20 + seed),
+                &ExecutionPortMessage::JobDispatchMessage(cancel_dispatch.clone()),
+                at(14),
             )
             .await
-            .expect("replay dispatch");
-        let duplicate_messages = port.since(duplicate_cursor);
-        assert_eq!(
-            output_since(&duplicate_messages, |message| match message {
-                ExecutionPortMessage::JobDispatchResultMessage(result) => Some(result.clone()),
-                _ => None,
-            })
-            .len(),
-            1
-        );
-        assert!(
-            output_since(&duplicate_messages, |message| match message {
-                ExecutionPortMessage::SessionBindingMessage(_) => Some(()),
-                _ => None,
-            })
-            .is_empty()
-        );
-    }
-
-    let cancel_job = stage_job("planner", 5, &fixture.revision, None);
-    submit_job(&mut storage, &cancel_job, 5);
-    reserve_and_start(&mut storage, &cancel_job, 5);
-    let cancel_dispatch = RepositoryExecutionScheduler::new(&mut storage)
-        .claim_next(&dispatch_request(5, worker_id.clone(), instance.clone()))
-        .expect("claim cancel")
-        .expect("cancel dispatch");
-    let cancel_cursor = port.len();
-    worker
-        .accept_control(
-            &ExecutionPortMessage::JobDispatchMessage(cancel_dispatch.clone()),
-            at(14),
-        )
-        .await
-        .expect("accept cancel dispatch");
-    let cancel_messages = port.since(cancel_cursor);
-    let cancel_result = dispatch_result_for(&cancel_messages);
-    let cancel_binding = binding_for(&cancel_messages);
-    RepositoryExecutionScheduler::new(&mut storage)
-        .record_dispatch_result(&repository_scope(), &cancel_result, &at(15))
-        .expect("record cancel dispatch");
-    let cancel_authority = open_slot(&mut storage, &cancel_binding, 5);
-    let current = storage
-        .execution_queue()
-        .expect("queue")
-        .load_job(&queue_scope(), &cancel_job.job_id)
-        .expect("load cancelling job")
-        .expect("cancelling job");
-    let cancel = RepositoryExecutionScheduler::new(&mut storage)
-        .request_cancellation(&RepositorySchedulerCancellationRequest {
-            scope: scheduler_scope(),
-            job_id: cancel_job.job_id.clone(),
-            request_id: RequestId(id("req", 34_005)),
-            expected_revision: current.revision,
-            requested_at: at(16),
-        })
-        .expect("request cancellation")
-        .expect("typed cancellation");
-    assert_eq!(cancel.worker_session_id, cancel_binding.worker_session_id);
-    assert_eq!(
-        cancel.session_identity.codex_thread_id,
-        cancel_binding.codex_thread_id
-    );
-    storage
-        .worker_session_slots()
-        .expect("slots")
-        .request_cancellation(&WorkerSlotCancellation {
-            authority: cancel_authority.clone(),
-            request_id: RequestId(id("req", 34_105)),
-            expected_revision: 1,
-            requested_at: at(16),
-        })
-        .expect("persist slot cancellation");
-    let cancel_ack_cursor = port.len();
-    worker
-        .accept_control(
-            &ExecutionPortMessage::JobCancelMessage(cancel.clone()),
-            at(17),
-        )
-        .await
-        .expect("accept cancellation");
-    let cancel_ack_messages = port.since(cancel_ack_cursor);
-    assert!(
-        output_since(&cancel_ack_messages, |message| match message {
-            ExecutionPortMessage::JobCancelAckMessage(ack)
-                if ack.status == JobCancelAckMessageStatus::Accepted =>
-                Some(()),
-            _ => None,
-        })
-        .len()
-            == 1
-    );
-    let cancelled = run_worker_until_outcome(&mut worker, &port, &cancel_job.job_id, at(18)).await;
-    assert_eq!(cancelled.outcome.status, ExecutionOutcomeStatus::Cancelled);
-    assert!(runtime_for(&port.messages(), &cancel_job.job_id).is_empty());
-    close_slot(&mut storage, &cancel_authority, 5, true);
-    let cancel_settled = RepositoryExecutionScheduler::new(&mut storage)
-        .settle_terminal(&terminal_request(&cancel_job, &cancelled, 5))
-        .expect("settle cancellation");
-    assert_eq!(cancel_settled.job.state, ExecutionJobState::Failed);
-    settle_admission(&mut storage, &cancel_job, 5, true);
-
-    let restart_job = stage_job("planner", 6, &fixture.revision, None);
-    submit_job(&mut storage, &restart_job, 6);
-    reserve_and_start(&mut storage, &restart_job, 6);
-    let old_dispatch = RepositoryExecutionScheduler::new(&mut storage)
-        .claim_next(&dispatch_request(6, worker_id.clone(), instance.clone()))
-        .expect("claim old restart")
-        .expect("old restart dispatch");
-    let old_cursor = port.len();
-    worker
-        .accept_control(
-            &ExecutionPortMessage::JobDispatchMessage(old_dispatch.clone()),
-            at(20),
-        )
-        .await
-        .expect("accept old restart dispatch");
-    let old_messages = port.since(old_cursor);
-    let old_result = dispatch_result_for(&old_messages);
-    let old_binding = binding_for(&old_messages);
-    RepositoryExecutionScheduler::new(&mut storage)
-        .record_dispatch_result(&repository_scope(), &old_result, &at(21))
-        .expect("record old restart dispatch");
-    let old_authority = open_slot(&mut storage, &old_binding, 6);
-    let before_replacement = durable_snapshot(
-        &mut storage,
-        &restart_job,
-        Some(&old_binding.worker_session_id),
-    );
-    drop(worker);
-
-    let replacement_instance = WorkerInstanceId(id("wki", 12));
-    let replacement_config = worker_config(worker_id.clone(), replacement_instance.clone(), at(22));
-    let (mut replacement_worker, replacement_port, _) = start_worker(
-        &mut storage,
-        replacement_config,
-        fixture.workspace_runtime(),
-        ScriptedStageProductAdapter::default(),
-        WorkerRegistrationResultMessageLeaseRecovery::ReacquireRequired,
-    )
-    .await;
-    let replacement_dispatch = RepositoryExecutionScheduler::new(&mut storage)
-        .claim_next(&replacement_request(
-            7,
-            worker_id.clone(),
-            replacement_instance.clone(),
-        ))
-        .expect("claim replacement")
-        .expect("replacement dispatch");
-    assert_eq!(replacement_dispatch.job.attempt, 2);
-    assert_eq!(replacement_dispatch.lease.attempt, 2);
-    let replacement_authority = replacement_dispatch
-        .replacement_authority
-        .as_ref()
-        .expect("replacement authority");
-    assert_eq!(replacement_authority.predecessor_lease, old_dispatch.lease);
-    assert_eq!(
-        replacement_authority.successor_lease,
-        replacement_dispatch.lease
-    );
-    assert_eq!(
-        replacement_authority.predecessor_session_identity.as_ref(),
-        Some(&old_binding.session_identity)
-    );
-    let replacement_cursor = replacement_port.len();
-    replacement_worker
-        .accept_control(
-            &ExecutionPortMessage::JobDispatchMessage(replacement_dispatch.clone()),
-            at(51),
-        )
-        .await
-        .expect("accept replacement dispatch");
-    let replacement_messages = replacement_port.since(replacement_cursor);
-    let replacement_result = dispatch_result_for(&replacement_messages);
-    let replacement_binding = binding_for(&replacement_messages);
-    assert_eq!(
-        replacement_result.status,
-        JobDispatchResultMessageStatus::Accepted
-    );
-    assert_eq!(replacement_result.lease, replacement_dispatch.lease);
-    assert_eq!(replacement_binding.lease, replacement_dispatch.lease);
-    assert_ne!(
-        replacement_binding.worker_session_id,
-        old_binding.worker_session_id
-    );
-    assert_ne!(
-        replacement_binding.codex_thread_id,
-        old_binding.codex_thread_id
-    );
-    assert_eq!(
-        replacement_binding.product_session_id,
-        old_binding.product_session_id
-    );
-    assert_eq!(replacement_binding.stage_run_id, old_binding.stage_run_id);
-    assert_eq!(
-        replacement_binding.session_identity.worker_session_id,
-        replacement_binding.worker_session_id
-    );
-    let replacement_running = RepositoryExecutionScheduler::new(&mut storage)
-        .record_dispatch_result(&repository_scope(), &replacement_result, &at(52))
-        .expect("record replacement dispatch");
-    assert!(replacement_running.accepted);
-    let replacement_slot = open_slot(&mut storage, &replacement_binding, 7);
-    let replacement_outcome = run_worker_until_outcome(
-        &mut replacement_worker,
-        &replacement_port,
-        &restart_job.job_id,
-        at(53),
-    )
-    .await;
-    assert_eq!(replacement_outcome.lease, replacement_dispatch.lease);
-    assert_eq!(
-        replacement_outcome.session_identity,
-        replacement_binding.session_identity
-    );
-    assert_eq!(
-        replacement_outcome.outcome.status,
-        ExecutionOutcomeStatus::Succeeded
-    );
-    assert!(
-        runtime_for(&replacement_port.messages(), &restart_job.job_id)
-            .iter()
-            .all(|runtime| runtime.lease == replacement_dispatch.lease)
-    );
-    close_slot(&mut storage, &replacement_slot, 7, false);
-    RepositoryExecutionScheduler::new(&mut storage)
-        .settle_terminal(&terminal_request(&restart_job, &replacement_outcome, 7))
-        .expect("settle replacement");
-    settle_admission(&mut storage, &restart_job, 6, false);
-
-    let after_replacement = durable_snapshot(
-        &mut storage,
-        &restart_job,
-        Some(&replacement_binding.worker_session_id),
-    );
-    assert_ne!(before_replacement, after_replacement);
-    let stale_terminal = RepositorySchedulerTerminalRequest {
-        scope: scheduler_scope(),
-        terminal: ExecutionLeaseTerminalRequest {
-            job_id: old_dispatch.lease.job_id.clone(),
-            lease_id: old_dispatch.lease.lease_id.clone(),
-            worker_id: old_dispatch.lease.worker_id.clone(),
-            worker_instance_id: old_dispatch.lease.worker_instance_id.clone(),
-            attempt: 1,
-            fencing_token: old_dispatch.lease.fencing_token.clone(),
-            outcome: ExecutionLeaseTerminalOutcome::Failed,
-            terminal_at: at(27),
-            request_id: RequestId(id("req", 35_006)),
-        },
-    };
-    assert!(
+            .expect("accept cancel dispatch");
+        let cancel_messages = port.since(cancel_cursor);
+        let cancel_result = dispatch_result_for(&cancel_messages);
+        let cancel_binding = binding_for(&cancel_messages);
         RepositoryExecutionScheduler::new(&mut storage)
-            .settle_terminal(&stale_terminal)
-            .is_err()
-    );
-    let after_stale_terminal = durable_snapshot(
-        &mut storage,
-        &restart_job,
-        Some(&replacement_binding.worker_session_id),
-    );
-    assert_eq!(after_replacement, after_stale_terminal);
-    assert!(
+            .record_dispatch_result(&repository_scope(), &cancel_result, &at(15))
+            .expect("record cancel dispatch");
+        let cancel_authority = open_slot(&mut storage, &cancel_binding, 5);
+        let current = storage
+            .execution_queue()
+            .expect("queue")
+            .load_job(&queue_scope(), &cancel_job.job_id)
+            .expect("load cancelling job")
+            .expect("cancelling job");
+        let cancel = RepositoryExecutionScheduler::new(&mut storage)
+            .request_cancellation(&RepositorySchedulerCancellationRequest {
+                scope: scheduler_scope(),
+                job_id: cancel_job.job_id.clone(),
+                request_id: RequestId(id("req", 34_005)),
+                expected_revision: current.revision,
+                requested_at: at(16),
+            })
+            .expect("request cancellation")
+            .expect("typed cancellation");
+        assert_eq!(cancel.worker_session_id, cancel_binding.worker_session_id);
+        assert_eq!(
+            cancel.session_identity.codex_thread_id,
+            cancel_binding.codex_thread_id
+        );
         storage
             .worker_session_slots()
             .expect("slots")
-            .load(&old_authority.worker_session_id)
-            .expect("old slot")
-            .is_some_and(|slot| matches!(slot.state, WorkerSlotState::RecoveryFailed))
-    );
-    assert!(before_replacement["queue"] != serde_json::Value::Null);
+            .request_cancellation(&WorkerSlotCancellation {
+                authority: cancel_authority.clone(),
+                request_id: RequestId(id("req", 34_105)),
+                expected_revision: 1,
+                requested_at: at(16),
+            })
+            .expect("persist slot cancellation");
+        let cancel_ack_cursor = port.len();
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobCancelMessage(cancel.clone()),
+                at(17),
+            )
+            .await
+            .expect("accept cancellation");
+        let cancel_ack_messages = port.since(cancel_ack_cursor);
+        assert!(
+            output_since(&cancel_ack_messages, |message| match message {
+                ExecutionPortMessage::JobCancelAckMessage(ack)
+                    if ack.status == JobCancelAckMessageStatus::Accepted =>
+                    Some(()),
+                _ => None,
+            })
+            .len()
+                == 1
+        );
+        let cancelled =
+            run_worker_until_outcome(&mut worker, &port, &cancel_job.job_id, at(18)).await;
+        assert_eq!(cancelled.outcome.status, ExecutionOutcomeStatus::Cancelled);
+        assert!(runtime_for(&port.messages(), &cancel_job.job_id).is_empty());
+        close_slot(&mut storage, &cancel_authority, 5, true);
+        let cancel_settled = RepositoryExecutionScheduler::new(&mut storage)
+            .settle_terminal(&terminal_request(&cancel_job, &cancelled, 5))
+            .expect("settle cancellation");
+        assert_eq!(cancel_settled.job.state, ExecutionJobState::Failed);
+        settle_admission(&mut storage, &cancel_job, 5, true);
+
+        let restart_job = stage_job("planner", 6, &fixture.revision, None);
+        submit_job(&mut storage, &restart_job, 6);
+        reserve_and_start(&mut storage, &restart_job, 6);
+        let old_dispatch = RepositoryExecutionScheduler::new(&mut storage)
+            .claim_next(&dispatch_request(6, worker_id.clone(), instance.clone()))
+            .expect("claim old restart")
+            .expect("old restart dispatch");
+        let old_cursor = port.len();
+        worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(old_dispatch.clone()),
+                at(20),
+            )
+            .await
+            .expect("accept old restart dispatch");
+        let old_messages = port.since(old_cursor);
+        let old_result = dispatch_result_for(&old_messages);
+        let old_binding = binding_for(&old_messages);
+        RepositoryExecutionScheduler::new(&mut storage)
+            .record_dispatch_result(&repository_scope(), &old_result, &at(21))
+            .expect("record old restart dispatch");
+        let old_authority = open_slot(&mut storage, &old_binding, 6);
+        let before_replacement = durable_snapshot(
+            &mut storage,
+            &restart_job,
+            Some(&old_binding.worker_session_id),
+        );
+        drop(worker);
+
+        let replacement_instance = WorkerInstanceId(id("wki", 12));
+        let replacement_config =
+            worker_config(worker_id.clone(), replacement_instance.clone(), at(22));
+        let (mut replacement_worker, replacement_port, _) = start_worker(
+            &mut storage,
+            replacement_config,
+            fixture.workspace_runtime(),
+            ScriptedStageProductAdapter::default(),
+            WorkerRegistrationResultMessageLeaseRecovery::ReacquireRequired,
+        )
+        .await;
+        let replacement_dispatch = RepositoryExecutionScheduler::new(&mut storage)
+            .claim_next(&replacement_request(
+                7,
+                worker_id.clone(),
+                replacement_instance.clone(),
+            ))
+            .expect("claim replacement")
+            .expect("replacement dispatch");
+        assert_eq!(replacement_dispatch.job.attempt, 2);
+        assert_eq!(replacement_dispatch.lease.attempt, 2);
+        let replacement_authority = replacement_dispatch
+            .replacement_authority
+            .as_ref()
+            .expect("replacement authority");
+        assert_eq!(replacement_authority.predecessor_lease, old_dispatch.lease);
+        assert_eq!(
+            replacement_authority.successor_lease,
+            replacement_dispatch.lease
+        );
+        assert_eq!(
+            replacement_authority.predecessor_session_identity.as_ref(),
+            Some(&old_binding.session_identity)
+        );
+        let replacement_cursor = replacement_port.len();
+        replacement_worker
+            .accept_control(
+                &ExecutionPortMessage::JobDispatchMessage(replacement_dispatch.clone()),
+                at(51),
+            )
+            .await
+            .expect("accept replacement dispatch");
+        let replacement_messages = replacement_port.since(replacement_cursor);
+        let replacement_result = dispatch_result_for(&replacement_messages);
+        let replacement_binding = binding_for(&replacement_messages);
+        assert_eq!(
+            replacement_result.status,
+            JobDispatchResultMessageStatus::Accepted
+        );
+        assert_eq!(replacement_result.lease, replacement_dispatch.lease);
+        assert_eq!(replacement_binding.lease, replacement_dispatch.lease);
+        assert_ne!(
+            replacement_binding.worker_session_id,
+            old_binding.worker_session_id
+        );
+        assert_ne!(
+            replacement_binding.codex_thread_id,
+            old_binding.codex_thread_id
+        );
+        assert_eq!(
+            replacement_binding.product_session_id,
+            old_binding.product_session_id
+        );
+        assert_eq!(replacement_binding.stage_run_id, old_binding.stage_run_id);
+        assert_eq!(
+            replacement_binding.session_identity.worker_session_id,
+            replacement_binding.worker_session_id
+        );
+        let replacement_running = RepositoryExecutionScheduler::new(&mut storage)
+            .record_dispatch_result(&repository_scope(), &replacement_result, &at(52))
+            .expect("record replacement dispatch");
+        assert!(replacement_running.accepted);
+        let replacement_slot = open_slot(&mut storage, &replacement_binding, 7);
+        let replacement_outcome = run_worker_until_outcome(
+            &mut replacement_worker,
+            &replacement_port,
+            &restart_job.job_id,
+            at(53),
+        )
+        .await;
+        assert_eq!(replacement_outcome.lease, replacement_dispatch.lease);
+        assert_eq!(
+            replacement_outcome.session_identity,
+            replacement_binding.session_identity
+        );
+        assert_eq!(
+            replacement_outcome.outcome.status,
+            ExecutionOutcomeStatus::Succeeded
+        );
+        assert!(
+            runtime_for(&replacement_port.messages(), &restart_job.job_id)
+                .iter()
+                .all(|runtime| runtime.lease == replacement_dispatch.lease)
+        );
+        close_slot(&mut storage, &replacement_slot, 7, false);
+        RepositoryExecutionScheduler::new(&mut storage)
+            .settle_terminal(&terminal_request(&restart_job, &replacement_outcome, 7))
+            .expect("settle replacement");
+        settle_admission(&mut storage, &restart_job, 6, false);
+
+        let after_replacement = durable_snapshot(
+            &mut storage,
+            &restart_job,
+            Some(&replacement_binding.worker_session_id),
+        );
+        assert_ne!(before_replacement, after_replacement);
+        let stale_terminal = RepositorySchedulerTerminalRequest {
+            scope: scheduler_scope(),
+            terminal: ExecutionLeaseTerminalRequest {
+                job_id: old_dispatch.lease.job_id.clone(),
+                lease_id: old_dispatch.lease.lease_id.clone(),
+                worker_id: old_dispatch.lease.worker_id.clone(),
+                worker_instance_id: old_dispatch.lease.worker_instance_id.clone(),
+                attempt: 1,
+                fencing_token: old_dispatch.lease.fencing_token.clone(),
+                outcome: ExecutionLeaseTerminalOutcome::Failed,
+                terminal_at: at(27),
+                request_id: RequestId(id("req", 35_006)),
+            },
+        };
+        assert!(
+            RepositoryExecutionScheduler::new(&mut storage)
+                .settle_terminal(&stale_terminal)
+                .is_err()
+        );
+        let after_stale_terminal = durable_snapshot(
+            &mut storage,
+            &restart_job,
+            Some(&replacement_binding.worker_session_id),
+        );
+        assert_eq!(after_replacement, after_stale_terminal);
+        assert!(
+            storage
+                .worker_session_slots()
+                .expect("slots")
+                .load(&old_authority.worker_session_id)
+                .expect("old slot")
+                .is_some_and(|slot| matches!(slot.state, WorkerSlotState::RecoveryFailed))
+        );
+        assert!(before_replacement["queue"] != serde_json::Value::Null);
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]

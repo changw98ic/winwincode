@@ -23,6 +23,8 @@ name = "production_vertical"
 required-features = ["test-support"]
 
 [dependencies]
+base64.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -33,9 +35,9 @@ winwincode-domain = { path = "../winwincode-domain" }
 winwincode-execution-port = { path = "../winwincode-execution-port" }
 
 [dev-dependencies]
-base64.workspace = true
 futures.workspace = true
 rusqlite.workspace = true
+tempfile = "=3.27.0"
 winwincode-api.workspace = true
 winwincode-control-plane = { path = "../winwincode-control-plane", features = ["test-support"] }
 winwincode-delivery = { path = "../winwincode-delivery", features = ["test-support"] }
