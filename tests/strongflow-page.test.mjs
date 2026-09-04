@@ -898,8 +898,12 @@ test('empty StrongFlow keeps one complete creation draft through command errors'
   assert.deepEqual(rootElement.children, [])
 })
 
-test('default route remains Chat while StrongFlow query routes stay on the advanced surface', () => {
-  assert.equal(clientSurfaceFromHash('').id, 'chat')
+test('default route is the Home dashboard while StrongFlow query routes stay on the advanced surface', () => {
+  // UI-504: a start-up without a route lands on Home, never in a random Chat or
+  // the first Delivery; Chat stays reachable and StrongFlow keeps its routes.
+  assert.equal(clientSurfaceFromHash('').id, 'home')
+  assert.equal(clientSurfaceFromHash('#/home').id, 'home')
+  assert.equal(clientSurfaceFromHash('#/home?x=1').id, 'home')
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/strongflow?delivery=dlv_1').id, 'strongflow')
   assert.equal(

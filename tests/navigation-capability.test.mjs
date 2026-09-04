@@ -90,7 +90,7 @@ const SIGNED_OUT = { status: 'signed-out', session: null, error: null }
 test('signed-out and restoring sessions hide every navigation entry', () => {
   for (const status of ['signed-out', 'restoring']) {
     const capabilities = capabilityMap(status)
-    for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+    for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
       assert.equal(
         capabilities[surface].capability,
         'hidden',
@@ -165,7 +165,7 @@ test('deployment projection distinguishes personal from enterprise sessions', ()
 
 test('a session without any scope hides product areas without crashing', () => {
   const capabilities = capabilityMap('signed-in', sessionWith([]))
-  for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
     assert.equal(capabilities[surface].capability, 'hidden', surface)
   }
 })
@@ -196,16 +196,18 @@ test('surfaceCapabilityForHash resolves the exact surface a URL will enter', () 
     session: sessionWith([repositoryScope]),
     error: null,
   }).surface.id, 'chat')
+  // UI-504: an address without a product path, and an unknown path, both enter
+  // the canonical Home dashboard instead of an arbitrary product area.
   assert.equal(surfaceCapabilityForHash('', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
     error: null,
-  }).surface.id, 'chat')
+  }).surface.id, 'home')
   assert.equal(surfaceCapabilityForHash('#/unknown-route', {
     status: 'signed-in',
     session: sessionWith([repositoryScope]),
     error: null,
-  }).surface.id, 'chat')
+  }).surface.id, 'home')
 })
 
 test('projection is a read-only view that never mutates the session', () => {

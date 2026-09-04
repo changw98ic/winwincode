@@ -354,12 +354,13 @@ async function restoredFixture(hash, client = facadeFake()) {
 test('personal deployment hides the Enterprise entry and keeps product areas navigable', async () => {
   const fixture = await restoredFixture('#/chat', facadeFake())
   await waitFor(() => navigationLinks(fixture.rootElement).chat !== undefined, 'navigation')
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 4, 'trimmed navigation')
+  // UI-504: Home joins Chat, StrongFlow, Settings and Attention in the nav.
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'trimmed navigation')
 
   const links = navigationLinks(fixture.rootElement)
   assert.deepEqual(
     Object.keys(links).sort(),
-    ['attention', 'chat', 'settings', 'strongflow'],
+    ['attention', 'chat', 'home', 'settings', 'strongflow'],
   )
   assert.equal(links.chat.getAttribute('aria-disabled'), null)
   fixture.application.close()
@@ -370,7 +371,7 @@ test('enterprise deployment shows every entry including Enterprise', async () =>
     '#/chat',
     facadeFake(sessionWith([organizationScope, repositoryScope])),
   )
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'full navigation')
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 6, 'full navigation')
 
   const links = navigationLinks(fixture.rootElement)
   assert.equal(links.enterprise.getAttribute('aria-disabled'), null)
@@ -469,7 +470,7 @@ test('disabled navigation entries stay visible and block navigation', async () =
     () => fixture.application.authSession.state.status === 'signed-in',
     'restored session',
   )
-  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 5, 'full navigation')
+  await waitFor(() => Object.values(navigationLinks(fixture.rootElement)).length === 6, 'full navigation')
 
   const links = navigationLinks(fixture.rootElement)
   assert.equal(links.enterprise.getAttribute('aria-disabled'), 'true')

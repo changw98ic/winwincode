@@ -90,6 +90,12 @@ import type {
   AttentionNotificationControl,
   AttentionNotificationMonitor,
 } from './attention-notifications.js'
+import {
+  browserHomeVisitStorage,
+  createHomeRecentVisitStore,
+  homeDeliveryVisitFromHash,
+  type HomeRecentVisitStore,
+} from './home-recent-visits.js'
 
 export interface WinWinCodeClientApplicationOptions {
   readonly serverUrl: string
@@ -232,6 +238,18 @@ export function mountWinWinCodeClient(
   // UI-506: one shell-owned notification monitor for the selected repository Scope.
   let attentionMonitor: AttentionNotificationMonitor | null = null
   let attentionMonitorScope: string | null = null
+  // UI-504: one browser-local history of opened Deliveries, keyed by Scope, that
+  // the Home dashboard renders as its "recently opened" section.
+  const homeVisits: HomeRecentVisitStore = createHomeRecentVisitStore({
+    storage: browserHomeVisitStorage(browser),
+  })
+
+  /** Records one Delivery visit; every other route leaves the history alone. */
+  function recordHomeVisit(hash: string): void {
+    const deliveryId = homeDeliveryVisitFromHash(hash)
+    if (deliveryId === null) return
+    homeVisits.record(deliveryId, scopeSelectionFromHash(hash), Date.now())
+  }
 
   function selectionIdentity(selection: ScopeRouteSelection): string {
     return [
@@ -839,6 +857,44 @@ export function mountWinWinCodeClient(
     }
   }
 
+  /** UI-504: the Attention-first dashboard composed from the existing projections. */
+  async function renderHome(generation: number): Promise<void> {
+    const context = authenticatedRouteContext()
+    if (context === null) return
+    const controller = new AbortController()
+    featureController = controller
+    routeLoading('Loading Home…')
+    try {
+      const [{ createHomeDashboardViewModel }, { mountHomeDashboardPage }] = await Promise.all([
+        import('./home-dashboard-view-model.js'),
+        import('./home-dashboard-page.js'),
+      ])
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      const model = createHomeDashboardViewModel({
+        client: controlPlane,
+        actor: context.actor,
+        scope: context.scope,
+        subscriptionId: contractId(
+          'sub',
+          browser.crypto,
+        ) as ControlPlaneWebSocketSubscriptionId,
+        nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+        visits: homeVisits,
+      })
+      // The page owns the composed model: its close chain also closes the
+      // Attention, Delivery and Usage projections it mounted.
+      activeFeature = mountHomeDashboardPage({
+        root: slot,
+        model,
+        scopeSelection: scopeSelectionFromHash(browser.location.hash),
+        ownsModel: true,
+      })
+    } catch (error) {
+      if (closed || generation !== renderGeneration || controller.signal.aborted) return
+      showRouteFailure(error, 'HOME_ROUTE_FAILURE')
+    }
+  }
+
   async function renderAttention(generation: number): Promise<void> {
     const context = authenticatedRouteContext()
     if (context === null) return
@@ -1265,6 +1321,7 @@ export function mountWinWinCodeClient(
     }
     currentScopeResolution = null
     activeSurface = clientSurfaceFromHash(browser.location.hash)
+    recordHomeVisit(browser.location.hash)
     for (const link of links.values()) link.removeAttribute('data-route-access')
     delete slot.dataset.routeAccess
     clearRouteFailure()
@@ -1372,7 +1429,8 @@ export function mountWinWinCodeClient(
         controlPlane,
       }),
     }))
-    if (activeSurface.id === 'chat') launchRoute(renderChat(generation), generation, 'CHAT_ROUTE_FAILURE')
+    if (activeSurface.id === 'home') launchRoute(renderHome(generation), generation, 'HOME_ROUTE_FAILURE')
+    else if (activeSurface.id === 'chat') launchRoute(renderChat(generation), generation, 'CHAT_ROUTE_FAILURE')
     else if (activeSurface.id === 'strongflow') {
       launchRoute(renderStrongFlow(generation), generation, 'STRONGFLOW_ROUTE_FAILURE')
     } else if (activeSurface.id === 'settings') {
@@ -1442,7 +1500,8 @@ export function mountWinWinCodeClient(
       || state.status === 'signed-out'
       || state.status === 'authentication-required'
       || state.status === 'error') && (
-      activeSurface.id === 'chat'
+      activeSurface.id === 'home'
+      || activeSurface.id === 'chat'
       || activeSurface.id === 'strongflow'
       || activeSurface.id === 'settings'
       || activeSurface.id === 'attention'
