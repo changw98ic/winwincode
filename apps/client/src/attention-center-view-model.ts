@@ -87,10 +87,23 @@ export interface AttentionCenterItem {
   readonly revision: number
 }
 
+/**
+ * UI-506 execution origin of one decision: the Delivery summary already loaded
+ * for this Scope names the StageRun that is currently waiting or running, so a
+ * decision can return to the exact Task/StageRun context that raised it.
+ */
+export interface AttentionCenterOrigin {
+  readonly deliveryId: DeliveryId
+  readonly deliveryTitle: string
+  readonly deliveryRevision: number
+  readonly activeStageRunId: StageRunId | null
+}
+
 export interface AttentionCenterViewModelState {
   readonly status: AttentionCenterStatus
   readonly realtime: AttentionCenterRealtimeStatus
   readonly items: readonly AttentionCenterItem[]
+  readonly origins: readonly AttentionCenterOrigin[]
   readonly error: ControlPlaneClientError | null
 }
 
@@ -120,6 +133,7 @@ function initialState(): AttentionCenterViewModelState {
     status: 'idle',
     realtime: 'inactive',
     items: Object.freeze([]),
+    origins: Object.freeze([]),
     error: null,
   })
 }
@@ -373,6 +387,20 @@ function attentionItems(
     }))
 }
 
+function originsOf(summaries: readonly DeliveryProjection[]): readonly AttentionCenterOrigin[] {
+  return Object.freeze(summaries.map(summary => Object.freeze({
+    deliveryId: summary.deliveryId,
+    deliveryTitle: summary.title,
+    deliveryRevision: summary.revision,
+    activeStageRunId: summary.activeStageRunId,
+  })))
+}
+
+interface AttentionCenterSnapshot {
+  readonly items: readonly AttentionCenterItem[]
+  readonly origins: readonly AttentionCenterOrigin[]
+}
+
 /** Build the global Attention Center from authoritative Control Plane projections only. */
 export function createAttentionCenterViewModel(
   options: AttentionCenterViewModelOptions,
@@ -558,7 +586,7 @@ export function createAttentionCenterViewModel(
     }))
   }
 
-  async function snapshot(signal: AbortSignal): Promise<readonly AttentionCenterItem[]> {
+  async function snapshot(signal: AbortSignal): Promise<AttentionCenterSnapshot> {
     const [approvalValues, sessionValues, deliveryValues] = await Promise.all([
       approvalItems(signal),
       sessionItems(signal),
@@ -585,11 +613,14 @@ export function createAttentionCenterViewModel(
     }
     const inputs = await inputItems(signal, inputSources)
     const attention = await attentionItemsFor(signal, deliveryValues)
-    return orderedAttentionCenterItems([
-      ...inputs,
-      ...approvalValues.map(approval => approvalItem(approval, titles, clock, scopedSessionIds)),
-      ...attention,
-    ])
+    return {
+      items: orderedAttentionCenterItems([
+        ...inputs,
+        ...approvalValues.map(approval => approvalItem(approval, titles, clock, scopedSessionIds)),
+        ...attention,
+      ]),
+      origins: originsOf(deliveryValues),
+    }
   }
 
   async function load(replace: boolean, realtimeStatus: AttentionCenterRealtimeStatus): Promise<void> {
@@ -608,12 +639,13 @@ export function createAttentionCenterViewModel(
       error: null,
     })
     try {
-      const items = await snapshot(active.signal)
+      const { items, origins } = await snapshot(active.signal)
       if (!isCurrent(ownGeneration)) return
       publish({
         status: 'ready',
         realtime: realtimeStatus === 'reloading' ? 'subscribed' : realtimeStatus,
         items,
+        origins,
         error: null,
       })
     } catch (error) {
@@ -643,6 +675,7 @@ export function createAttentionCenterViewModel(
       status: statusForError(error),
       realtime: 'access-revoked',
       items: Object.freeze([]),
+      origins: Object.freeze([]),
       error,
     })
   }
@@ -750,6 +783,7 @@ export function createAttentionCenterViewModel(
         status: 'closed',
         realtime: 'closed',
         items: Object.freeze([]),
+        origins: Object.freeze([]),
         error: null,
       })
       listeners.clear()

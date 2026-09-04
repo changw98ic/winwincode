@@ -13,19 +13,34 @@ import {
 } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
 import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
+import type { StageRunId } from './generated/contracts.js'
+import type {
+  AttentionNotificationControl,
+  AttentionNotificationDesktopState,
+} from './attention-notifications.js'
 import type {
   AttentionCenterItem,
   AttentionCenterItemKind,
+  AttentionCenterOrigin,
   AttentionCenterViewModel,
   AttentionCenterViewModelState,
 } from './attention-center-view-model.js'
 import { orderedAttentionCenterItems } from './attention-center-view-model.js'
+import { strongFlowRouteHash, type StrongFlowRoute } from './strongflow-route.js'
 
 export interface AttentionCenterPageOptions {
   readonly root: HTMLElement
   readonly model: AttentionCenterViewModel
   /** Current exact Scope path used to build every source-context entry link. */
   readonly scopeSelection: ScopeRouteSelection
+  /**
+   * Lifecycle ownership: `true` (the default composition) lets the page close
+   * the model it mounted; a host that shares this model passes `false` and
+   * closes it itself.
+   */
+  readonly ownsModel: boolean
+  /** Shell-owned desktop notification control; absent when the shell is closed. */
+  readonly notifications?: AttentionNotificationControl
   /** Presentation-only capability; Server authorization remains authoritative. */
   readonly readOnly?: boolean
 }
@@ -186,16 +201,46 @@ function urgencyLabel(urgency: AttentionCenterItem['urgency']): string {
 export function attentionCenterItemHash(
   item: AttentionCenterItem,
   scopeSelection: ScopeRouteSelection,
+  origins?: readonly AttentionCenterOrigin[],
 ): string {
   if (item.kind === 'attention') {
     const hash = `#/strongflow?delivery=${encodeURIComponent(item.deliveryId ?? '')}`
       + (item.stageRunId === null ? '' : `&stageRun=${encodeURIComponent(item.stageRunId)}`)
     return scopeHash(hash, scopeSelection)
   }
-  return scopeHash(
-    `#/attention?session=${encodeURIComponent(item.productSessionId ?? '')}`,
-    scopeSelection,
-  )
+  // The decision link carries the exact execution origin so the decision
+  // surface can return to the Task/StageRun that raised the decision.
+  const stageRunId = item.stageRunId
+  const origin = stageRunId === null
+    ? undefined
+    : origins?.find(candidate => candidate.activeStageRunId === stageRunId)
+  const parameters = [`session=${encodeURIComponent(item.productSessionId ?? '')}`]
+  if (origin !== undefined && stageRunId !== null) {
+    parameters.push(
+      `delivery=${encodeURIComponent(origin.deliveryId)}`,
+      `stageRun=${encodeURIComponent(stageRunId)}`,
+    )
+  }
+  return scopeHash(`#/attention?${parameters.join('&')}`, scopeSelection)
+}
+
+/** The exact StrongFlow context of the StageRun that raised one decision. */
+export function attentionCenterOriginHash(
+  origin: AttentionCenterOrigin,
+  stageRunId: StageRunId,
+  scopeSelection: ScopeRouteSelection,
+): string {
+  const route: StrongFlowRoute = {
+    deliveryId: origin.deliveryId,
+    productSessionId: null,
+    stageRunId,
+    candidatePath: null,
+    candidateView: 'unified',
+    comparison: { status: 'none' },
+    evidenceTab: 'evidence',
+    evidenceId: null,
+  }
+  return strongFlowRouteHash(route, scopeSelection)
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -223,6 +268,42 @@ function updateCardContext(list: HTMLUListElement, entries: readonly string[]): 
     const item = list.children[index]
     if (item !== undefined && item.textContent !== entry) item.textContent = entry
   })
+}
+
+interface DesktopPresentation {
+  readonly statusText: string
+  readonly buttonLabel: string | null
+}
+
+/**
+ * UI-506 desktop notifications stay off until the user turns them on here, so
+ * the browser permission prompt is always an explicit user action.
+ */
+function desktopPresentation(
+  state: AttentionNotificationDesktopState,
+): DesktopPresentation {
+  if (!state.supported) {
+    return {
+      statusText: 'Desktop notifications are not available in this browser.',
+      buttonLabel: null,
+    }
+  }
+  if (state.blocked) {
+    return {
+      statusText: 'Desktop notifications are blocked. Allow them in the browser to enable.',
+      buttonLabel: null,
+    }
+  }
+  if (state.enabled) {
+    return {
+      statusText: 'Desktop notifications are on for entries that need you.',
+      buttonLabel: 'Turn off desktop notifications',
+    }
+  }
+  return {
+    statusText: 'Desktop notifications are off. Turn them on to hear about blocking entries.',
+    buttonLabel: 'Turn on desktop notifications',
+  }
 }
 
 /** Mount the unified Attention Center: one filtered, ordered view of every pending decision. */
@@ -343,6 +424,51 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
   })
   controlsPanel.content.append(toolbar.root)
 
+  // UI-506: the browser notification permission is only ever requested from this
+  // explicit control, and the state text stays a plain paragraph so the page
+  // keeps exactly one polite live region.
+  const desktopStatus = element(document, 'p', 'wwc-attention-center-desktop-status')
+  desktopStatus.hidden = true
+  const desktopToggle = mountButton({
+    document,
+    props: {
+      label: 'Turn on desktop notifications',
+      className: 'wwc-attention-center-desktop-toggle',
+      variant: 'default',
+      onActivate: () => {
+        const control = options.notifications
+        if (control === undefined) return
+        void control.setDesktopEnabled(control.state.desktop.enabled !== true)
+      },
+    },
+  })
+  const desktopButton = desktopToggle.root
+  desktopButton.hidden = true
+  controlsPanel.content.append(desktopStatus, desktopButton)
+
+  function renderDesktopNotifications(): void {
+    const control = options.notifications
+    if (control === undefined) {
+      desktopStatus.hidden = true
+      desktopButton.hidden = true
+      return
+    }
+    const presentation = desktopPresentation(control.state.desktop)
+    desktopStatus.hidden = false
+    desktopStatus.textContent = presentation.statusText
+    desktopButton.hidden = presentation.buttonLabel === null
+    desktopToggle.update({
+      label: presentation.buttonLabel ?? 'Turn on desktop notifications',
+      className: 'wwc-attention-center-desktop-toggle',
+      variant: 'default',
+      onActivate: () => {
+        void control.setDesktopEnabled(control.state.desktop.enabled !== true)
+      },
+    })
+  }
+  renderDesktopNotifications()
+  const unsubscribeDesktop = options.notifications?.subscribe(renderDesktopNotifications) ?? null
+
   const listPanel = mountPanel({
     document,
     props: {
@@ -388,9 +514,11 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
     readonly kind: HTMLElement
     readonly title: HTMLElement
     readonly context: HTMLUListElement
+    readonly origin: HTMLAnchorElement
     readonly action: HTMLAnchorElement
   }
   const cardParts = new WeakMap<HTMLLIElement, CardParts>()
+  const origins = (): readonly AttentionCenterOrigin[] => options.model.state.origins
   const cardCollection: KeyedCollectionView<AttentionCenterItem, string, HTMLLIElement> = mountKeyedCollection({
     parent: cards,
     key: item => `${item.kind}:${item.id}`,
@@ -399,9 +527,11 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       const kind = element(document, 'span', 'wwc-attention-card-kind')
       const title = element(document, 'h4', 'wwc-attention-card-title')
       const context = cardContext(document, ['', '', '', '', '', '', '', ''])
+      const origin = element(document, 'a', 'wwc-attention-card-origin')
+      origin.hidden = true
       const action = element(document, 'a', 'wwc-attention-card-action')
-      row.append(kind, title, context, action)
-      cardParts.set(row, { kind, title, context, action })
+      row.append(kind, title, context, origin, action)
+      cardParts.set(row, { kind, title, context, origin, action })
       return row
     },
     update(row, item) {
@@ -411,10 +541,26 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
         || attentionCenterPresentation(options.model.state, selection).actionsDisabled
         || item.urgency === 'expired'
         || item.urgency === 'binding-invalid'
+      const cardStageRunId = item.stageRunId
+      const origin = cardStageRunId === null
+        ? undefined
+        : origins().find(candidate => candidate.activeStageRunId === cardStageRunId)
       row.dataset.kind = item.kind
       row.dataset.urgency = item.urgency
       parts.kind.textContent = KIND_LABELS[item.kind]
       parts.title.textContent = item.title
+      parts.origin.hidden = item.kind === 'attention' || origin === undefined || disabled
+      if (origin !== undefined && cardStageRunId !== null && item.kind !== 'attention' && !disabled) {
+        parts.origin.href = attentionCenterOriginHash(
+          origin,
+          cardStageRunId,
+          options.scopeSelection,
+        )
+        parts.origin.textContent = 'Open execution context'
+      } else {
+        parts.origin.removeAttribute('href')
+        parts.origin.textContent = ''
+      }
       updateCardContext(parts.context, [
         urgencyLabel(item.urgency),
         item.createdAt === null ? 'Created · not reported' : `Created ${item.createdAt}`,
@@ -452,6 +598,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       const parts = cardParts.get(row)
       if (parts !== undefined) {
         parts.action.removeAttribute('href')
+        parts.origin.removeAttribute('href')
         cardParts.delete(row)
       }
     },
@@ -504,6 +651,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       if (closed) return
       closed = true
       unsubscribe()
+      unsubscribeDesktop?.()
       kindSelect.removeEventListener('change', onKindChange)
       sortSelect.removeEventListener('change', onSortChange)
       cardCollection.close()
@@ -518,7 +666,7 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       statusBadge.close()
       pageHeader.close()
       options.root.replaceChildren()
-      options.model.close()
+      if (options.ownsModel) options.model.close()
     },
   }
 }

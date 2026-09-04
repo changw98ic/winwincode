@@ -947,6 +947,8 @@
         "apps/client/src/application.ts",
         "apps/client/src/attention-center-page.ts",
         "apps/client/src/attention-center-view-model.ts",
+        "apps/client/src/attention-notifications.ts",
+        "apps/client/src/attention-signals.ts",
         "apps/client/src/auth-page.ts",
         "apps/client/src/auth-view-model.ts",
         "apps/client/src/boot.ts",
