@@ -36,6 +36,7 @@ use crate::application::{StandaloneApplicationClock, SystemStandaloneApplication
 use crate::auth_session::{
     AuthSessionError, SqliteAuthSessionManager, cleared_session_cookie_header,
 };
+use crate::client_exchange::ClientExchangePort;
 use crate::config::{ServerConfig, ServerTls};
 use crate::enterprise_identity_protocol::{
     EnterpriseIdentityProtocolApplication, router as enterprise_identity_router,
@@ -105,6 +106,7 @@ struct ServerState {
     authenticator: Arc<dyn RequestAuthenticator>,
     api: Arc<dyn ControlPlaneApiPort>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
+    client_exchange: Option<Arc<dyn ClientExchangePort>>,
 }
 
 /// Running standalone listener with deterministic graceful shutdown.
@@ -192,6 +194,7 @@ pub async fn start_server(
         api,
         enterprise_identity,
         None,
+        None,
     )
     .await
 }
@@ -210,6 +213,7 @@ pub async fn start_server_with_remote_worker(
     api: Arc<dyn ControlPlaneApiPort>,
     enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
     remote_worker: Option<Arc<dyn RemoteWorkerExchangePort>>,
+    client_exchange: Option<Arc<dyn ClientExchangePort>>,
 ) -> Result<RunningServer, ServerError> {
     if remote_worker.is_some() && matches!(config.tls(), ServerTls::Disabled) {
         return Err(ServerError::new(
@@ -223,6 +227,7 @@ pub async fn start_server_with_remote_worker(
         authenticator,
         api: Arc::clone(&api),
         remote_worker,
+        client_exchange,
     };
     let router = router(state, enterprise_identity);
     let handle = Handle::new();
@@ -308,6 +313,10 @@ fn router(
             "/internal/v1/execution-port/exchange",
             post(remote_worker_exchange),
         )
+        .route(
+            "/internal/v1/client/exchange",
+            post(client_control_exchange),
+        )
         .fallback(not_found)
         .with_state(state);
     let router = enterprise_identity.map_or(router.clone(), |application| {
@@ -348,6 +357,51 @@ async fn remote_worker_exchange(
                 eprintln!("remote Worker exchange error: {error}");
             }
             StatusCode::UNAUTHORIZED.into_response()
+        }
+    }
+}
+
+async fn client_control_exchange(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(exchange) = &state.client_exchange else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if headers.get_all(AUTHORIZATION).iter().count() > 1 {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let credential = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .map(str::as_bytes);
+    // Registry ordering compares the canonical millisecond `Instant` text.
+    // Reuse the application clock so a registration and its placement cannot
+    // acquire different fractional-second widths at the HTTP boundary.
+    let now = SystemStandaloneApplicationClock.now_instant();
+    match exchange.exchange(credential.map(<[u8]>::to_vec), &body, now) {
+        Ok(response) => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "application/json")],
+            response,
+        )
+            .into_response(),
+        Err(error) => {
+            if std::env::var_os("WWC_DEBUG_RUNTIME").is_some() {
+                eprintln!("client exchange error: {error}");
+            }
+            if error.is_authentication() {
+                // One uniform rejection: wrong, missing, or unknown-node
+                // credentials are indistinguishable.
+                StatusCode::UNAUTHORIZED.into_response()
+            } else if error.is_invalid_request() {
+                StatusCode::BAD_REQUEST.into_response()
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
         }
     }
 }

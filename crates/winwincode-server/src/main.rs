@@ -49,15 +49,16 @@ use winwincode_execution_port::{
 };
 use winwincode_local::LocalLauncherConfig;
 use winwincode_server::{
-    AuthSessionBootstrap, AuthSessionConfig, DurableEventHub, DurableEventHubConfig,
-    DurableEventPublisher, EnterpriseIdentityManagementApplication,
-    EnterpriseIdentityProtocolApplication, EnterpriseRbacManagementApplication,
-    EnterpriseRequestAuthenticator, FileRemoteWorkerAuthenticator, GeneratedContractDispatcher,
-    LocalRuntimeSupervisor, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-    RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig, ServerExecutionPortCore,
-    ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
-    StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
-    UnavailableEnterpriseManagementApplication, start_server, start_server_with_remote_worker,
+    AuthSessionBootstrap, AuthSessionConfig, ClientExchangeApplication, ClientExchangeConfig,
+    ClientExchangePort, DurableEventHub, DurableEventHubConfig, DurableEventPublisher,
+    EnterpriseIdentityManagementApplication, EnterpriseIdentityProtocolApplication,
+    EnterpriseRbacManagementApplication, EnterpriseRequestAuthenticator,
+    FileRemoteWorkerAuthenticator, GeneratedContractDispatcher, LocalRuntimeSupervisor,
+    ProductionRemoteWorkerExchange, RemoteWorkerExchangePort, RepositoryRuntimeScheduler,
+    RequestAuthenticator, ServerConfig, ServerExecutionPortCore, ServerTls,
+    SqliteAuthSessionManager, StandaloneApplicationClock, StandaloneControlPlaneApplication,
+    SystemStandaloneApplicationClock, UnavailableEnterpriseManagementApplication, start_server,
+    start_server_with_remote_worker,
 };
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
@@ -512,6 +513,10 @@ where
             scheduler,
             execution_port,
         ));
+    let client_exchange: Arc<dyn ClientExchangePort> = Arc::new(
+        ClientExchangeApplication::open(config.data_directory(), &ClientExchangeConfig::default())
+            .map_err(|error| error.to_string())?,
+    );
     let api = Arc::new(GeneratedContractDispatcher::new(Arc::new(application)));
     let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
         config.data_directory().join("auth-sessions"),
@@ -536,6 +541,7 @@ where
         api,
         enterprise_identity,
         exchange,
+        client_exchange,
     )
     .await
 }
@@ -547,6 +553,7 @@ async fn serve_remote_runtime(
     api: Arc<GeneratedContractDispatcher>,
     enterprise_identity: Option<Arc<EnterpriseIdentityProtocolApplication>>,
     exchange: Arc<dyn RemoteWorkerExchangePort>,
+    client_exchange: Arc<dyn ClientExchangePort>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let running = start_server_with_remote_worker(
         config,
@@ -555,6 +562,7 @@ async fn serve_remote_runtime(
         api,
         enterprise_identity,
         Some(exchange),
+        Some(client_exchange),
     )
     .await?;
     tokio::signal::ctrl_c().await?;
