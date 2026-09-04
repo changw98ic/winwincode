@@ -37,7 +37,7 @@ use winwincode_server::{
     ApiError, AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal,
     ClientExchangeApplication, ClientExchangeConfig, ClientExchangePort, ControlPlaneApiPort,
     EventSubscription, RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
-    start_server_with_remote_worker,
+    UserAccountService, start_server_with_remote_worker,
 };
 use winwincode_storage::{
     ClientExchangeCursors, ClientNodeRecord, ClientPresenceState, SqliteStorage,
@@ -137,23 +137,21 @@ fn server_config(data_directory: &Path) -> ServerConfig {
 }
 
 fn auth_sessions() -> Arc<SqliteAuthSessionManager> {
-    let bootstrap = AuthSessionBootstrap::new(
-        BOOTSTRAP_PROOF,
-        Actor::UserActor(UserActor {
-            kind: UserActorKind::User,
-            id: UserId("usr_00000000000000000000000001".to_owned()),
-        }),
-        vec![Scope::OrganizationScope(OrganizationScope {
-            kind: OrganizationScopeKind::Organization,
-            organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
-        })],
-    )
-    .expect("bootstrap context");
+    let scopes = vec![Scope::OrganizationScope(OrganizationScope {
+        kind: OrganizationScopeKind::Organization,
+        organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
+    })];
+    let accounts = Arc::new(
+        UserAccountService::open(test_directory("client-exchange-auth")).expect("account service"),
+    );
     Arc::new(
         SqliteAuthSessionManager::open(
             test_directory("client-exchange-auth"),
-            vec![bootstrap],
+            vec![AuthSessionBootstrap::new(BOOTSTRAP_PROOF).expect("proof")],
+            scopes,
             AuthSessionConfig::default(),
+            Arc::clone(&accounts),
+            None,
         )
         .expect("auth session manager"),
     )
