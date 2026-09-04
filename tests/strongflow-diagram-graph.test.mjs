@@ -877,6 +877,57 @@ test('the page mounts both solution graphs with state chips inside the solution 
   mounted.close()
 })
 
+test('contract-bounded diagrams drop connections whose nodes exceed the render window', () => {
+  const document = new FakeDocument()
+  const current = projection()
+  const largeDiagram = kind => ({
+    id: `diagram:${kind}`,
+    kind,
+    title: `${kind} diagram`,
+    nodes: many(120, value => ({
+      id: `node:${String(value)}`,
+      label: `Node ${String(value)}`,
+      description: `Description ${String(value)}`,
+      kind: 'component',
+      trustBoundary: null,
+      unresolved: false,
+    })),
+    edges: many(150, value => value <= 119
+      ? {
+          id: `edge:${String(value)}`,
+          from: `node:${String(value)}`,
+          to: `node:${String(value + 1)}`,
+          label: 'next',
+        }
+      : {
+          id: `edge:${String(value)}`,
+          from: 'node:1',
+          to: 'node:2',
+          label: 'next',
+        }),
+  })
+  current.solutionReview.architectureDiagram = largeDiagram('system-architecture')
+  current.solutionReview.processDiagram = largeDiagram('process-flow')
+  const mounted = mountStrongFlowDiagrams({
+    document,
+    limits: {
+      ...limits,
+      graphNodes: 100,
+      graphEdges: 200,
+    },
+  })
+
+  assert.doesNotThrow(() => mounted.update({ projection: current, narrow: false }))
+  const graphs = findAllByClass(mounted.root, 'wwc-strongflow-graph')
+  assert.equal(findAllByClass(graphs[0], 'wwc-strongflow-graph-node').length, 100)
+  assert.equal(
+    findAllByClass(graphs[0], 'wwc-strongflow-omitted')
+      .some(note => /20 more diagram connections not rendered\./u.test(note.textContent)),
+    true,
+  )
+  mounted.close()
+})
+
 test('canonical diagram execution state reaches matching graph nodes as a text signal', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
