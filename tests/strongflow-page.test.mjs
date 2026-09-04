@@ -714,6 +714,74 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
   )
 })
 
+test('typed StrongFlow routes reject values outside the canonical entity identities', () => {
+  assert.deepEqual(
+    parseStrongFlowRouteHash(
+      '#/strongflow?delivery=../../private&session=%2500'
+        + '&stageRun=not%20valid&evidence=%3Cscript%3E&tab=tests',
+    ),
+    {
+      deliveryId: null,
+      productSessionId: null,
+      stageRunId: null,
+      evidenceTab: 'tests',
+      evidenceId: null,
+    },
+  )
+})
+
+test('Evidence entry controls preserve keyed identity across equivalent projections', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const classNames = [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]
+  const entries = classNames.map(className => findByClass(rootElement, className))
+
+  model.publish(state())
+
+  for (const [index, className] of classNames.entries()) {
+    assert.equal(
+      findByClass(rootElement, className),
+      entries[index],
+      `${className} must retain its keyed DOM identity`,
+    )
+  }
+  mounted.close()
+})
+
+test('closing StrongFlow removes listeners from retained Evidence entry controls', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const entries = [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ].map(className => findByClass(rootElement, className))
+
+  mounted.close()
+
+  for (const entry of entries) {
+    assert.deepEqual(entry.listeners.get('click') ?? [], [])
+  }
+})
+
 test('review controls send only current view-model decisions and disable while waiting', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
