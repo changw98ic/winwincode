@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000003",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 403,
+  "occurredAt": "2026-09-01T09:30:15.000Z",
+  "kind": "client.heartbeat",
+  "payload": {
+    "lastHeartbeatAt": "2026-09-01T09:30:15.000Z",
+    "presenceState": "online",
+    "occupancyState": "occupied_by_me",
+    "draining": false,
+    "reportedRunningWorkerSessions": 1,
+    "clientVersion": "1.0.0-demo.0"
+  }
+}

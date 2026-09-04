@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000015",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 415,
+  "occurredAt": "2026-09-01T09:37:00.000Z",
+  "kind": "client.candidate.apply_result",
+  "expectedRevision": 17,
+  "idempotencyKey": "idem-client-candidate-apply-result-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": "3",
+  "payload": {
+    "localApplyReceiptId": "lar_000000000000000000000001",
+    "candidateRef": "cand_000000000000000000000001",
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "targetBranch": "winwincode/demo-task-9f2c",
+    "expectedHead": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "strategy": "create_branch",
+    "result": "branch_created",
+    "resultingCommit": "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776",
+    "conflictArtifactRef": null,
+    "completedAt": "2026-09-01T09:36:59.000Z"
+  }
+}

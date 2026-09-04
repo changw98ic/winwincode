@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000016",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 416,
+  "occurredAt": "2026-09-01T09:36:05.000Z",
+  "kind": "client.command_ack",
+  "expectedRevision": 17,
+  "idempotencyKey": "idem-client-command-ack-000024",
+  "payload": {
+    "acknowledgedMessageId": "msg_000000000000000000000024",
+    "commandKind": "client.worker.stop",
+    "status": "applied",
+    "completedAt": "2026-09-01T09:36:05.000Z"
+  }
+}

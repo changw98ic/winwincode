@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000004",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 404,
+  "occurredAt": "2026-09-01T09:30:30.000Z",
+  "kind": "client.connect_code.published",
+  "expectedRevision": 13,
+  "idempotencyKey": "idem-client-connect-code-published-0007",
+  "payload": {
+    "connectCodeId": "cct_000000000000000000000001",
+    "codeDigest": "sha256:3f5a8c2d3f5a8c2d3f5a8c2d3f5a8c2d3f5a8c2d3f5a8c2d3f5a8c2d3f5a8c2d",
+    "issuedByInstanceId": "cli_000000000000000000000001",
+    "codeGeneration": 7,
+    "expiresAt": "2026-09-01T09:32:30.000Z",
+    "remainingAttempts": 5
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000026",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 910,
+  "occurredAt": "2026-09-01T09:50:00.000Z",
+  "kind": "client.client_lock",
+  "payload": {
+    "lockState": "locked",
+    "reason": "user_initiated",
+    "changedAt": "2026-09-01T09:50:00.000Z"
+  },
+  "expectedRevision": 12,
+  "idempotencyKey": "idem-client-client_lock-0001"
+}

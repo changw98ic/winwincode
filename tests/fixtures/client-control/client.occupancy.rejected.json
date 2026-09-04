@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000007",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 407,
+  "occurredAt": "2026-09-01T09:31:11.000Z",
+  "kind": "client.occupancy.rejected",
+  "expectedRevision": 14,
+  "idempotencyKey": "idem-client-occupancy-rejected-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": "3",
+  "payload": {
+    "clientOccupancyLeaseId": "lse_000000000000000000000001",
+    "holderUserId": "usr_00000000000000000000000a",
+    "claimRequestId": "crq_000000000000000000000001",
+    "reason": "client_locked",
+    "detail": "Client is locally locked, so the occupancy offer cannot be honored.",
+    "rejectedAt": "2026-09-01T09:31:11.000Z"
+  }
+}

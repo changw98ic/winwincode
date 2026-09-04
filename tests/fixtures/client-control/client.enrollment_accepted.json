@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000017",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 901,
+  "occurredAt": "2026-09-01T09:30:01.000Z",
+  "kind": "client.enrollment_accepted",
+  "payload": {
+    "clientNodeId": "cln_000000000000000000000001",
+    "publicClientId": "100200300401",
+    "enrolledAt": "2026-09-01T09:30:01.000Z",
+    "heartbeatIntervalSeconds": 15
+  },
+  "expectedRevision": 12,
+  "idempotencyKey": "idem-client-enrollment_accepted-0001"
+}
