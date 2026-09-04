@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated as api;
 use winwincode_delivery::{
     domain::{
-        AttentionItemStatus, AttentionItemType, CandidatePathState, CriterionVerdict,
-        DeliveryStage, DeliveryStatus as DomainDeliveryStatus,
+        AttentionItemStatus, AttentionItemType, CandidatePathFact, CandidatePathState,
+        CriterionVerdict, DeliveryStage, DeliveryStatus as DomainDeliveryStatus,
         DeliveryTaskStatus as DomainTaskStatus, DeliveryVerdict, EvidenceRef, EvidenceRefType,
         FrozenDeliveryCandidate, RepositoryKind, SessionBindingSourceKind, StageRunActorType,
         StageRunStatus,
@@ -73,6 +73,120 @@ pub(super) fn delivery_detail(
 
 const MAX_DIAGRAM_LINK_FILES: usize = 1_000;
 
+fn diagram_file_node_ids(
+    review: &delivery_projection::SolutionReviewProjection,
+    process_node_id: &str,
+    path: &CandidatePathFact,
+) -> Vec<String> {
+    let mut node_ids = Vec::new();
+    if review
+        .architecture_diagram()
+        .nodes()
+        .iter()
+        .any(|node| node.id() == "platform:repository")
+    {
+        node_ids.push("platform:repository".to_owned());
+    }
+    node_ids.extend(
+        review
+            .components()
+            .iter()
+            .filter(|component| {
+                component.repository_path_prefixes().iter().any(|prefix| {
+                    path.path == *prefix
+                        || path
+                            .path
+                            .strip_prefix(prefix)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                })
+            })
+            .map(|component| component.id().to_owned()),
+    );
+    if review
+        .process_diagram()
+        .nodes()
+        .iter()
+        .any(|node| node.id() == process_node_id)
+    {
+        node_ids.push(process_node_id.to_owned());
+    }
+    node_ids
+}
+
+fn diagram_diff_files(
+    review: &delivery_projection::SolutionReviewProjection,
+    process_node_id: &str,
+    finished_candidate: Option<&FrozenDeliveryCandidate>,
+) -> Vec<api::StrongFlowDiagramDiffFileProjection> {
+    finished_candidate.map_or_else(Vec::new, |value| {
+        value
+            .changed_paths()
+            .iter()
+            .take(MAX_DIAGRAM_LINK_FILES)
+            .map(|path| {
+                let identity = format!("{}\0{}", value.candidate_ref(), path.path);
+                api::StrongFlowDiagramDiffFileProjection {
+                    id: format!(
+                        "diagram-file:sha256:{:x}",
+                        Sha256::digest(identity.as_bytes())
+                    ),
+                    node_ids: diagram_file_node_ids(review, process_node_id, path),
+                    path: path.path.clone(),
+                    state: match path.state {
+                        CandidatePathState::Present => "present",
+                        CandidatePathState::Deleted => "deleted",
+                    }
+                    .to_owned(),
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn execution_diagram(
+    source: &delivery_projection::DiagramProjection,
+    kind: &str,
+    state: &str,
+    process_node_id: &str,
+    files: &[api::StrongFlowDiagramDiffFileProjection],
+) -> Result<api::StrongFlowDiagramExecutionDiagramProjection, StrongFlowProjectionError> {
+    Ok(api::StrongFlowDiagramExecutionDiagramProjection {
+        diagram_id: source.id().to_owned(),
+        kind: kind.to_owned(),
+        nodes: source
+            .nodes()
+            .iter()
+            .map(|node| {
+                let file_ids = files
+                    .iter()
+                    .filter(|file| file.node_ids.iter().any(|id| id == node.id()))
+                    .map(|file| file.id.clone())
+                    .collect::<Vec<_>>();
+                let live = state == "executing" && node.id() == process_node_id;
+                let affected = live || !file_ids.is_empty();
+                Ok(api::StrongFlowDiagramExecutionNodeProjection {
+                    affected_file_count: count(
+                        if live { 1 } else { file_ids.len() as u64 },
+                        "diagram node affected file count",
+                    )?,
+                    file_ids,
+                    node_id: node.id().to_owned(),
+                    state: if affected {
+                        if state == "executing" {
+                            "affected-live"
+                        } else {
+                            "affected-finished"
+                        }
+                    } else {
+                        "normal"
+                    }
+                    .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, StrongFlowProjectionError>>()?,
+    })
+}
+
 fn diagram_execution(
     read: &EstablishedDeliveryRead,
 ) -> Result<Option<api::StrongFlowDiagramExecutionProjection>, StrongFlowProjectionError> {
@@ -101,101 +215,7 @@ fn diagram_execution(
     } else {
         "process:executing"
     };
-    let files = finished_candidate.map_or_else(Vec::new, |value| {
-        value
-            .changed_paths()
-            .iter()
-            .take(MAX_DIAGRAM_LINK_FILES)
-            .map(|path| {
-                let mut node_ids = Vec::new();
-                if review
-                    .architecture_diagram()
-                    .nodes()
-                    .iter()
-                    .any(|node| node.id() == "platform:repository")
-                {
-                    node_ids.push("platform:repository".to_owned());
-                }
-                node_ids.extend(review.components().iter().filter_map(|component| {
-                    component
-                        .repository_path_prefixes()
-                        .iter()
-                        .any(|prefix| {
-                            path.path == *prefix
-                                || path
-                                    .path
-                                    .strip_prefix(prefix)
-                                    .is_some_and(|tail| tail.starts_with('/'))
-                        })
-                        .then(|| component.id().to_owned())
-                }));
-                if review
-                    .process_diagram()
-                    .nodes()
-                    .iter()
-                    .any(|node| node.id() == process_node_id)
-                {
-                    node_ids.push(process_node_id.to_owned());
-                }
-                let identity = format!("{}\0{}", value.candidate_ref(), path.path);
-                api::StrongFlowDiagramDiffFileProjection {
-                    id: format!(
-                        "diagram-file:sha256:{:x}",
-                        Sha256::digest(identity.as_bytes())
-                    ),
-                    node_ids,
-                    path: path.path.clone(),
-                    state: match path.state {
-                        CandidatePathState::Present => "present",
-                        CandidatePathState::Deleted => "deleted",
-                    }
-                    .to_owned(),
-                }
-            })
-            .collect::<Vec<_>>()
-    });
-    let diagram = |source: &delivery_projection::DiagramProjection,
-                   kind: &str|
-     -> Result<
-        api::StrongFlowDiagramExecutionDiagramProjection,
-        StrongFlowProjectionError,
-    > {
-        Ok(api::StrongFlowDiagramExecutionDiagramProjection {
-            diagram_id: source.id().to_owned(),
-            kind: kind.to_owned(),
-            nodes: source
-                .nodes()
-                .iter()
-                .map(|node| {
-                    let file_ids = files
-                        .iter()
-                        .filter(|file| file.node_ids.iter().any(|id| id == node.id()))
-                        .map(|file| file.id.clone())
-                        .collect::<Vec<_>>();
-                    let live = state == "executing" && node.id() == process_node_id;
-                    let affected = live || !file_ids.is_empty();
-                    Ok(api::StrongFlowDiagramExecutionNodeProjection {
-                        affected_file_count: count(
-                            if live { 1 } else { file_ids.len() as u64 },
-                            "diagram node affected file count",
-                        )?,
-                        file_ids,
-                        node_id: node.id().to_owned(),
-                        state: if affected {
-                            if state == "executing" {
-                                "affected-live"
-                            } else {
-                                "affected-finished"
-                            }
-                        } else {
-                            "normal"
-                        }
-                        .to_owned(),
-                    })
-                })
-                .collect::<Result<Vec<_>, StrongFlowProjectionError>>()?,
-        })
-    };
+    let files = diagram_diff_files(review, process_node_id, finished_candidate);
     let details = finished_candidate
         .map(|value| {
             let evidence_ref_ids = delivery
@@ -232,11 +252,11 @@ fn diagram_execution(
             finished_candidate.map_or(0, |value| value.changed_paths().len() as u64),
             "diagram affected file count",
         )?,
-        architecture: diagram(review.architecture_diagram(), "system-architecture")?,
+        architecture: execution_diagram(review.architecture_diagram(), "system-architecture", state, process_node_id, &files)?,
         delivery_id: delivery.delivery_id().clone(),
         delivery_revision: revision(delivery.delivery_revision(), "diagram delivery revision")?,
         details,
-        process: diagram(review.process_diagram(), "process-flow")?,
+        process: execution_diagram(review.process_diagram(), "process-flow", state, process_node_id, &files)?,
         protocol: api::StrongFlowDiagramExecutionProjectionProtocol::WinwincodeDiagramExecutionProjectionV1,
         review_set_sha256: digest(review.review_set_sha256())?,
         schema_version: 1.0,
