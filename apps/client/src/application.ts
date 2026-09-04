@@ -743,9 +743,16 @@ export function mountWinWinCodeClient(
     routeLoading(operationsRoute ? 'Loading local operations…' : 'Loading Settings…')
     try {
       if (operationsRoute) {
-        const [{ createLocalOperationsViewModel }, { mountLocalOperationsPage }] = await Promise.all([
+        const [
+          { createLocalOperationsViewModel },
+          { mountLocalOperationsPage },
+          { createUsageHealthViewModel },
+          { mountUsageHealthSummary },
+        ] = await Promise.all([
           import('./local-operations-view-model.js'),
           import('./local-operations-page.js'),
+          import('./usage-health-view-model.js'),
+          import('./usage-health-page.js'),
         ])
         if (closed || generation !== renderGeneration || controller.signal.aborted) return
         const model = createLocalOperationsViewModel({
@@ -758,7 +765,7 @@ export function mountWinWinCodeClient(
           ) as ControlPlaneWebSocketSubscriptionId,
           nextRequestId: () => contractId('req', browser.crypto) as RequestId,
         })
-        activeFeature = mountLocalOperationsPage({
+        const operationsPage = mountLocalOperationsPage({
           root: slot,
           model,
           readOnly: activeRouteReadOnly,
@@ -766,6 +773,38 @@ export function mountWinWinCodeClient(
             if (!closed) readiness.setCollapsed(false)
           },
         })
+        // UI-505: the diagnostics route also carries the read-only Usage, Provider,
+        // Credential and Worker health summary next to the local operations panel.
+        let mountedHealth: { close(): void } | null = null
+        try {
+          const healthRoot = element(document, 'div', 'wwc-usage-health-root')
+          slot.append(healthRoot)
+          const healthModel = createUsageHealthViewModel({
+            client: controlPlane,
+            actor: context.actor,
+            scope: context.scope,
+            nextRequestId: () => contractId('req', browser.crypto) as RequestId,
+          })
+          const healthSummary = mountUsageHealthSummary({
+            root: healthRoot,
+            model: healthModel,
+          })
+          void healthModel.start().catch(() => {})
+          mountedHealth = {
+            close() {
+              healthSummary.close()
+              healthModel.close()
+            },
+          }
+        } catch {
+          // The local operations panel stays usable when only this summary fails to mount.
+        }
+        activeFeature = {
+          close() {
+            mountedHealth?.close()
+            operationsPage.close()
+          },
+        }
         return
       }
       const [{ createSettingsViewModel }, { mountSettingsPage }] = await Promise.all([
