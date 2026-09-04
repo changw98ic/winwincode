@@ -1,0 +1,62 @@
+# UI-106 review: fix flaky client-feature-routes-browser test
+
+## Defect
+
+`tests/client-feature-routes-browser.test.mjs` fails intermittently
+(~3/55 runs, ~5%) at line 94:
+
+    AssertionError: actual null, expected 'management'
+
+The `open()` helper only waits for the fixture global function to exist
+(`waitForGlobal` checks `typeof globalThis.inspectFeatureRoute === "function"`).
+After `runFeatureNavigationScenario()` the browser sits on
+`#/settings/runtime` with Local Operations mounted. `open('#/settings')`
+navigates, and the very next statement calls
+`inspectManagementPresentation('settings')`, which synchronously queries
+`.wwc-settings`. Meanwhile `renderSettings()` is still awaiting the auth
+restore + dynamic module import before it mounts the Settings page, so the
+query returns `null`.
+
+Every later step in the same test that goes through `settled()`/`waitFor`
+on the selector never flakes — only the two synchronous
+`inspectManagementPresentation` calls after `open()` are exposed.
+
+Isolated repro: `review/ui106/verify-feature-routes-race.mjs` reproduces the
+ordering gap (7/120 iterations observed `page=null`) using the same fixture
+and the exact operations→settings navigation sequence.
+
+## Minimal fix
+
+Make `open()` also wait for the surface slot to settle before returning, by
+reusing the in-page `waitFor` already exported by the fixture. One-line
+change to the `open` helper; no assertions change.
+
+```diff
+--- a/tests/client-feature-routes-browser.test.mjs
++++ b/tests/client-feature-routes-browser.test.mjs
+@@ -64,7 +64,9 @@
+   async function open(path) {
+     await devtools.send('Page.navigate', { url: `${clientOrigin}/${path}` }, sessionId)
+     await waitForGlobal(devtools, sessionId, 'inspectFeatureRoute')
++    await evaluate(devtools, sessionId,
++      `globalThis.waitFor ? globalThis.waitFor(() => document.querySelector('.wwc-surface-slot section:not([hidden])') !== null, 'route slot') : true`)
+   }
+```
+
+Note: the fixture currently keeps `waitFor` module-private. Equivalent
+one-line alternative that needs no fixture change — poll through the already
+global `inspectFeatureRoute`-family helpers is not possible for the
+management pages, so export `waitFor` from
+`tests/fixtures/browser-client-feature-routes.mjs`:
+
+```diff
+--- a/tests/fixtures/browser-client-feature-routes.mjs
++++ b/tests/fixtures/browser-client-feature-routes.mjs
+@@ -161,7 +161,7 @@
+-async function waitFor(predicate, label) {
++globalThis.waitFor = async function waitFor(predicate, label) {
+```
+
+Both diffs are against the candidate worktree files (untracked in this
+branch). Apply there if the team prefers fixing the test alongside the
+feature; the review worktree keeps only this record.
