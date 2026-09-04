@@ -2743,9 +2743,9 @@ function rustIntegerLiteral(value, sourcePath) {
   return String(value).replace(/\B(?=(\d{3})+(?!\d))/gu, '_')
 }
 
-function rustJsonValueConstraint(
+function rustJsonPresentValueConstraint(
   schema,
-  accessor,
+  valueAccessor,
   sourcePath,
   document,
   context,
@@ -2756,30 +2756,41 @@ function rustJsonValueConstraint(
   }
   if (schema.const !== undefined) {
     if (typeof schema.const === 'string') {
-      return `matches!(${accessor}, Some(serde_json::Value::String(value)) if value == ${JSON.stringify(schema.const)})`
+      return `matches!(${valueAccessor}, serde_json::Value::String(value) if value == ${JSON.stringify(schema.const)})`
     }
     if (typeof schema.const === 'boolean') {
-      return `${accessor}.and_then(serde_json::Value::as_bool) == Some(${String(schema.const)})`
+      return `${valueAccessor}.as_bool() == Some(${String(schema.const)})`
     }
     if (typeof schema.const === 'number') {
-      return `${accessor}.and_then(serde_json::Value::as_f64) == Some(${String(schema.const)}f64)`
+      return `${valueAccessor}.as_f64() == Some(${String(schema.const)}f64)`
     }
-    if (schema.const === null) return `${accessor}.is_some_and(serde_json::Value::is_null)`
+    if (schema.const === null) return `${valueAccessor}.is_null()`
   }
   if (typeof schema.$ref === 'string') {
     const type = rustType(schema, document, context, qualifyShared)
-    return `${accessor}.is_some_and(|value| serde_json::from_value::<${type}>(value.clone()).is_ok())`
+    return `serde_json::from_value::<${type}>(${valueAccessor}.clone()).is_ok()`
   }
   const types = schemaTypes(schema)
   if (types.length === 1 && types[0] === 'null') {
-    return `${accessor}.is_some_and(serde_json::Value::is_null)`
+    return `${valueAccessor}.is_null()`
   }
   if (types.length === 1 && types[0] === 'string') {
-    const checks = [`let Some(value) = value.as_str() else { return false; };`]
-    if (schema.minLength !== undefined) checks.push(`if value.chars().count() < ${String(schema.minLength)} { return false; }`)
-    if (schema.maxLength !== undefined) checks.push(`if value.chars().count() > ${String(schema.maxLength)} { return false; }`)
+    const checks = [`let Some(value) = ${valueAccessor}.as_str() else { return false; };`]
+    if (schema.minLength !== undefined) checks.push(`if value.chars().count() < ${rustIntegerLiteral(schema.minLength, sourcePath)} { return false; }`)
+    if (schema.maxLength !== undefined) checks.push(`if value.chars().count() > ${rustIntegerLiteral(schema.maxLength, sourcePath)} { return false; }`)
+    if (schema.pattern === '^sha256:[0-9a-f]{64}$') {
+      checks.push('let Some(digest) = value.strip_prefix("sha256:") else { return false; };')
+      checks.push('if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b\'a\'..=b\'f\')) { return false; }')
+    } else if (schema.pattern === '^git-tree:(?:[0-9a-f]{40}|[0-9a-f]{64})$') {
+      checks.push('let Some(object_id) = value.strip_prefix("git-tree:") else { return false; };')
+      checks.push('if !matches!(object_id.len(), 40 | 64) || !object_id.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b\'a\'..=b\'f\')) { return false; }')
+    } else if (schema.pattern === '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$') {
+      checks.push('let mut bytes = value.bytes();')
+      checks.push('if !bytes.next().is_some_and(|byte| byte.is_ascii_alphanumeric()) { return false; }')
+      checks.push('if !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b\'.\' | b\'_\' | b\':\' | b\'/\' | b\'@\' | b\'-\')) { return false; }')
+    }
     checks.push('true')
-    return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+    return `{\n${checks.join('\n')}\n}`
   }
   if (types.length === 1 && types[0] === 'integer') {
     let predicate = 'true'
@@ -2792,24 +2803,57 @@ function rustJsonValueConstraint(
     } else if (schema.maximum !== undefined) {
       predicate = `value <= ${rustIntegerLiteral(schema.maximum, sourcePath)}`
     }
-    return `${accessor}.and_then(serde_json::Value::as_i64).is_some_and(|value| ${predicate})`
+    return `${valueAccessor}.as_i64().is_some_and(|value| ${predicate})`
   }
   if (types.length === 1 && types[0] === 'array') {
-    const checks = ['let Some(items) = value.as_array() else { return false; };']
+    const checks = [`let Some(items) = ${valueAccessor}.as_array() else { return false; };`]
     if (schema.minItems === 1) checks.push('if items.is_empty() { return false; }')
-    else if (schema.minItems !== undefined) checks.push(`if items.len() < ${String(schema.minItems)} { return false; }`)
-    if (schema.maxItems !== undefined) checks.push(`if items.len() > ${String(schema.maxItems)} { return false; }`)
+    else if (schema.minItems !== undefined && schema.minItems > 0) {
+      checks.push(`if items.len() < ${rustIntegerLiteral(schema.minItems, sourcePath)} { return false; }`)
+    }
+    if (schema.maxItems === 0) checks.push('if !items.is_empty() { return false; }')
+    else if (schema.maxItems !== undefined) checks.push(`if items.len() > ${rustIntegerLiteral(schema.maxItems, sourcePath)} { return false; }`)
+    if (schema.uniqueItems === true) {
+      checks.push('if items.iter().enumerate().any(|(index, item)| items[..index].contains(item)) { return false; }')
+    }
     if (isObject(schema.items) && schemaTypes(schema.items).includes('string')) {
       const itemChecks = ['let Some(value) = item.as_str() else { return false; };']
-      if (schema.items.minLength !== undefined) itemChecks.push(`if value.chars().count() < ${String(schema.items.minLength)} { return false; }`)
-      if (schema.items.maxLength !== undefined) itemChecks.push(`if value.chars().count() > ${String(schema.items.maxLength)} { return false; }`)
+      if (schema.items.minLength !== undefined) itemChecks.push(`if value.chars().count() < ${rustIntegerLiteral(schema.items.minLength, sourcePath)} { return false; }`)
+      if (schema.items.maxLength !== undefined) itemChecks.push(`if value.chars().count() > ${rustIntegerLiteral(schema.items.maxLength, sourcePath)} { return false; }`)
+      if (schema.items.pattern === '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$') {
+        itemChecks.push('let mut bytes = value.bytes();')
+        itemChecks.push('if !bytes.next().is_some_and(|byte| byte.is_ascii_alphanumeric()) { return false; }')
+        itemChecks.push('if !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b\'.\' | b\'_\' | b\':\' | b\'/\' | b\'@\' | b\'-\')) { return false; }')
+      }
       itemChecks.push('true')
       checks.push(`if !items.iter().all(|item| {\n${itemChecks.join('\n')}\n}) { return false; }`)
     }
     checks.push('true')
-    return `${accessor}.is_some_and(|value| {\n${checks.join('\n')}\n})`
+    return `{\n${checks.join('\n')}\n}`
   }
   throw new Error(`${sourcePath}: unsupported object-level oneOf property constraint`)
+}
+
+function rustJsonValueConstraint(
+  schema,
+  accessor,
+  sourcePath,
+  document,
+  context,
+  qualifyShared,
+) {
+  if (schema.const === null || (schemaTypes(schema).length === 1 && schemaTypes(schema)[0] === 'null')) {
+    return `${accessor}.is_some_and(serde_json::Value::is_null)`
+  }
+  const present = rustJsonPresentValueConstraint(
+    schema,
+    'value',
+    sourcePath,
+    document,
+    context,
+    qualifyShared,
+  )
+  return `${accessor}.is_some_and(|value| ${present})`
 }
 
 function rustObjectOneOfBranchExpression(branch, entry, index, context, qualifyShared) {
@@ -2818,17 +2862,61 @@ function rustObjectOneOfBranchExpression(branch, entry, index, context, qualifyS
       `${entry.document.path}: ${entry.name} oneOf branch ${String(index + 1)} must use property constraints`,
     )
   }
-  const checks = Object.entries(branch.properties).map(([name, constraint]) => (
-    rustJsonValueConstraint(
+  const baseRequired = new Set(entry.schema.required ?? [])
+  const branchRequired = new Set(branch.required ?? [])
+  const checks = Object.entries(branch.properties).map(([name, constraint]) => {
+    const accessor = `value.get(${JSON.stringify(name)})`
+    const sourcePath = `${entry.document.path}: ${entry.name}.oneOf[${String(index)}].${name}`
+    if (baseRequired.has(name) || branchRequired.has(name)) {
+      return rustJsonValueConstraint(
+        constraint,
+        accessor,
+        sourcePath,
+        entry.document,
+        context,
+        qualifyShared,
+      )
+    }
+    if (constraint.const === null || (schemaTypes(constraint).length === 1 && schemaTypes(constraint)[0] === 'null')) {
+      return `${accessor}.is_none_or(serde_json::Value::is_null)`
+    }
+    const present = rustJsonPresentValueConstraint(
       constraint,
-      `value.get(${JSON.stringify(name)})`,
-      `${entry.document.path}: ${entry.name}.oneOf[${String(index)}].${name}`,
+      'value',
+      sourcePath,
       entry.document,
       context,
       qualifyShared,
     )
-  ))
+    return `${accessor}.is_none_or(|value| ${present})`
+  })
+  const forbiddenRequiredGroups = []
+  if (isObject(branch.not) && Array.isArray(branch.not.anyOf)) {
+    for (const forbidden of branch.not.anyOf) {
+      if (isObject(forbidden) && Array.isArray(forbidden.required)) {
+        forbiddenRequiredGroups.push(forbidden.required)
+      }
+    }
+  }
+  for (const group of forbiddenRequiredGroups) {
+    if (group.length === 0) continue
+    if (group.length === 1) {
+      checks.push(`value.get(${JSON.stringify(group[0])}).is_none()`)
+    } else {
+      checks.push(`!(${group.map(name => `value.get(${JSON.stringify(name)}).is_some()`).join(' && ')})`)
+    }
+  }
   return checks.length === 0 ? 'true' : checks.join(' && ')
+}
+
+function schemaExplicitlyAcceptsNull(schema) {
+  if (!isObject(schema)) return false
+  if (schema.const === null || schemaTypes(schema).includes('null')) return true
+  if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {
+    return (schema.oneOf ?? schema.anyOf).some(schemaExplicitlyAcceptsNull)
+  }
+  if (Array.isArray(schema.allOf)) return schema.allOf.every(schemaExplicitlyAcceptsNull)
+  return false
 }
 
 function renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTypes) {
@@ -2869,18 +2957,28 @@ function renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTy
   lines.push('')
   lines.push('#[rustfmt::skip]')
   lines.push(`impl ${entry.name} {`)
-  lines.push(`    fn from_wire(wire: ${wireName}) -> Result<Self, String> {`)
-  lines.push('        let value = serde_json::to_value(&wire)')
-  lines.push(`            .map_err(|error| format!(${JSON.stringify(`${entry.name} validation failed: {error}`)}))?;`)
-  lines.push('        let matching_branches = [')
   entry.schema.oneOf.forEach((branch, index) => {
-    lines.push(`            ${rustObjectOneOfBranchExpression(
+    lines.push(`    fn matches_branch_${String(index)}(value: &serde_json::Value) -> bool {`)
+    lines.push(`        ${rustObjectOneOfBranchExpression(
       branch,
       entry,
       index,
       context,
       qualifyShared,
-    )},`)
+    )}`)
+    lines.push('    }')
+  })
+  lines.push(`    fn from_wire(wire: ${wireName}, value: &serde_json::Value) -> Result<Self, String> {`)
+  for (const [name, property] of shape.properties) {
+    if (!shape.required.has(name) && !schemaExplicitlyAcceptsNull(property.schema)) {
+      lines.push(`        if value.get(${JSON.stringify(name)}).is_some_and(serde_json::Value::is_null) {`)
+      lines.push(`            return Err(${JSON.stringify(`${entry.name}.${name} must be absent rather than null`)}.to_owned());`)
+      lines.push('        }')
+    }
+  }
+  lines.push('        let matching_branches = [')
+  entry.schema.oneOf.forEach((_branch, index) => {
+    lines.push(`            Self::matches_branch_${String(index)}(value),`)
   })
   lines.push('        ]')
   lines.push('        .into_iter()')
@@ -2904,8 +3002,10 @@ function renderRustObjectWithOneOf(entry, context, qualifyShared, lines, constTy
   lines.push('    where')
   lines.push("        D: serde::Deserializer<'de>,")
   lines.push('    {')
-  lines.push(`        let wire = <${wireName} as serde::Deserialize>::deserialize(deserializer)?;`)
-  lines.push('        Self::from_wire(wire).map_err(serde::de::Error::custom)')
+  lines.push('        let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;')
+  lines.push(`        let wire = serde_json::from_value::<${wireName}>(value.clone())`)
+  lines.push('            .map_err(serde::de::Error::custom)?;')
+  lines.push('        Self::from_wire(wire, &value).map_err(serde::de::Error::custom)')
   lines.push('    }')
   lines.push('}')
   return lines.join('\n')
@@ -3073,6 +3173,38 @@ function renderRustDefinition(entry, context, qualifyShared) {
 function renderRustSharedDefinition(entry, context) {
   if (!isRustSharedScalarDefinition(entry)) return renderRustDefinition(entry, context, false)
   const primitive = rustPrimitiveType(schemaTypes(entry.schema)[0])
+  if (entry.name === 'WorkspaceRevision') {
+    return [
+      ...rustDocumentation(entry.schema.description),
+      '#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]',
+      '#[serde(transparent)]',
+      `pub struct ${entry.name}(pub String);`,
+      '',
+      `impl<'de> serde::Deserialize<'de> for ${entry.name} {`,
+      '    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>',
+      '    where',
+      "        D: serde::Deserializer<'de>,",
+      '    {',
+      '        let value = <String as serde::Deserialize>::deserialize(deserializer)?;',
+      '        let Some(object_id) = value.strip_prefix("git-tree:") else {',
+      '            return Err(serde::de::Error::custom(',
+      '                "WorkspaceRevision must start with git-tree:",',
+      '            ));',
+      '        };',
+      '        if !matches!(object_id.len(), 40 | 64)',
+      '            || !object_id',
+      '                .bytes()',
+      "                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))",
+      '        {',
+      '            return Err(serde::de::Error::custom(',
+      '                "WorkspaceRevision must contain a 40- or 64-digit lowercase Git tree object id",',
+      '            ));',
+      '        }',
+      '        Ok(Self(value))',
+      '    }',
+      '}',
+    ].join('\n')
+  }
   const derives = primitive === 'f64'
     ? 'Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize'
     : 'Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize'
@@ -3092,34 +3224,6 @@ function renderRustApi(context, digest) {
     ))
     .sort((left, right) => left.name.localeCompare(right.name))
   const declarations = entries.map(entry => renderRustDefinition(entry, context, true))
-  const sharedReexports = [...context.rustSharedDefinitionNames].sort()
-  if (context.rustSharedDefinitionNames.has('RepositoryScope')) {
-    sharedReexports.push('RepositoryScopeKind')
-  }
-  if (context.rustSharedDefinitionNames.has('SessionBindingSourceIdentity')) {
-    sharedReexports.push('SessionBindingSourceIdentityKind')
-  }
-  if (context.rustSharedDefinitionNames.has('UserActor')) sharedReexports.push('UserActorKind')
-  sharedReexports.sort()
-  const sharedReexportLines = []
-  let currentReexportLine = '    '
-  for (const name of sharedReexports) {
-    const token = `${name},`
-    const candidate = currentReexportLine === '    '
-      ? `${currentReexportLine}${token}`
-      : `${currentReexportLine} ${token}`
-    if (candidate.length > 99) {
-      sharedReexportLines.push(currentReexportLine)
-      currentReexportLine = `    ${token}`
-    } else {
-      currentReexportLine = candidate
-    }
-  }
-  if (currentReexportLine !== '    ') sharedReexportLines.push(currentReexportLine)
-  const singleReexportLine = `pub use winwincode_domain::{${sharedReexports.join(', ')}};`
-  const sharedReexportBlock = singleReexportLine.length <= 99
-    ? [singleReexportLine]
-    : ['pub use winwincode_domain::{', ...sharedReexportLines, '};']
   return [
     '// SPDX-License-Identifier: Apache-2.0',
     `// ${GENERATED_MARKER}`,
@@ -3132,9 +3236,7 @@ function renderRustApi(context, digest) {
     ')]',
     '',
     '//! Public Control Plane HTTP/WebSocket transport types generated from the canonical `WinWinCode` schemas.',
-    '//! Shared identifiers and value objects are defined once in `winwincode-domain`.',
-    '',
-    ...sharedReexportBlock,
+    '//! Shared identifiers and value objects remain available only from `winwincode-domain`.',
     '',
     '#[allow(clippy::missing_errors_doc)]',
     "fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>",

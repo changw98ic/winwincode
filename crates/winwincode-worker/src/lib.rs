@@ -9,9 +9,14 @@
 //! same generated `ExecutionPortMessage` values to [`WorkerMain`].
 
 pub mod action_enforcement;
+pub mod change_batch_journal;
 pub mod remote_transport;
 pub mod stage_product;
+pub mod validation_artifact;
+pub mod validation_diagnostics;
+pub mod workspace_phase;
 pub mod workspace_runtime;
+pub(crate) mod workspace_tree;
 
 /// Canonical types used by deployment adapters that compose this Worker.
 ///
@@ -30,10 +35,11 @@ pub mod composition {
     };
 }
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use sha2::{Digest, Sha256};
+use winwincode_change_batch::{ChangeBatchPolicy, prepare_change_batch};
 pub use winwincode_codex::candidate_artifact_outbox::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
     RetainedCandidateArtifact,
@@ -44,26 +50,33 @@ pub use winwincode_codex::{
     secret_safe_runtime_summary,
 };
 use winwincode_domain::{
-    CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId, ExecutionMessageId,
-    ExecutionSequence, Instant, ProductSessionId, RequestId, SchemaVersion,
+    ChangeBatchId, CodexThreadId, ExecutionAckSequence, ExecutionEventId, ExecutionJobId,
+    ExecutionMessageId, ExecutionSequence, Instant, ProductSessionId, RequestId, SchemaVersion,
     SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity, StageRunId,
     WorkerId, WorkerInstanceId, WorkerSessionId,
 };
 use winwincode_execution_port::generated::{
     ActiveLeaseSummary, ApprovalDecisionMessage, ArtifactAckMessage, ArtifactKind,
-    ArtifactReference, DeliveryStageExecutionScope, ExecutionEventCategory, ExecutionJob,
+    ArtifactReference, ChangeBatchIdentity, ChangeBatchProgressEvent, ChangeBatchProposalEvent,
+    ChangeBatchReceipt, DeliveryStageExecutionScope, ExecutionEventCategory, ExecutionJob,
     ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionOutcome,
     ExecutionOutcomeStatus, ExecutionOutcomeUsage, ExecutionPortError, ExecutionPortErrorCode,
     ExecutionPortMessage, ExecutionScope, InputResponseMessage, JobCancelAckMessage,
     JobCancelAckMessageKind, JobCancelAckMessageStatus, JobCancelMessage, JobDispatchMessage,
     JobDispatchResultMessage, JobDispatchResultMessageKind, JobDispatchResultMessageStatus,
-    JobOutcomeMessage, JobOutcomeMessageKind, ProductSessionExecutionScope, RuntimeEventMessage,
-    RuntimeReplayRequestMessage, SessionBindingMessage, SessionBindingMessageKind,
-    WorkerCapabilitySet, WorkerCapacity, WorkerHeartbeatMessage, WorkerHeartbeatMessageKind,
-    WorkerRegisterMessage, WorkerRegisterMessageKind, WorkerRegistrationResultMessage,
-    WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
-    WorkerRegistrationResultMessageStatus,
+    JobOutcomeMessage, JobOutcomeMessageKind, ProductSessionExecutionScope, RepairEnvelope,
+    RuntimeEventMessage, RuntimeReplayRequestMessage, SessionBindingMessage,
+    SessionBindingMessageKind, WorkerCapabilitySet, WorkerCapacity, WorkerHeartbeatMessage,
+    WorkerHeartbeatMessageKind, WorkerRegisterMessage, WorkerRegisterMessageKind,
+    WorkerRegistrationResultMessage, WorkerRegistrationResultMessageKind,
+    WorkerRegistrationResultMessageLeaseRecovery, WorkerRegistrationResultMessageStatus,
 };
+use winwincode_execution_port::{
+    change_batch_identity::validate_change_batch_identity_derivation,
+    change_batch_progress::ChangeBatchProgressLedger,
+};
+
+const MAX_DELEGATED_POLL_OUTCOMES: usize = 1024;
 use workspace::WorkspaceCloseReason;
 use workspace_runtime::JobWorkspaceRuntime;
 
@@ -142,12 +155,24 @@ pub enum WorkerErrorCode {
     InvalidDispatchAuthority,
     /// A trace message does not match its exact active session.
     RuntimeTraceMismatch,
+    /// A delegated event does not match its exact active Job and session.
+    DelegatedPollMismatch,
     /// A detached per-Job checkout could not be created, recovered, or removed.
     Workspace,
     /// Candidate bytes or acknowledgement differ from the pending writer Job.
     CandidateArtifactMismatch,
     /// Outbound `ExecutionPort` failed.
     ExecutionPort,
+}
+
+/// Typed delegated event returned by Codex before an `ExecutionPort` transport
+/// envelope is defined for this family.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DelegatedPollOutcome {
+    ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
+    ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
+    ChangeBatchReceipt(Box<ChangeBatchReceipt>),
+    RepairRequired(Box<RepairEnvelope>),
 }
 
 /// Secret-free Worker lifecycle error.
@@ -221,6 +246,7 @@ struct DispatchRecord {
 struct PreparedDispatch {
     active: ActiveJob,
     checkout: std::path::PathBuf,
+    workspace_revision: winwincode_domain::WorkspaceRevision,
 }
 
 /// Test-only process stop around the adapter submission intent.
@@ -287,6 +313,8 @@ pub struct WorkerMain<Port, Codex> {
     /// clears the recovery deferral only after the exact resumed event has
     /// been observed and forwarded.
     core_interaction_jobs: HashSet<String>,
+    delegated_poll_outcomes: VecDeque<DelegatedPollOutcome>,
+    delegated_progress_ledgers: HashMap<(String, ChangeBatchId), ChangeBatchProgressLedger>,
     #[cfg(feature = "test-support")]
     submission_fault: Option<WorkerSubmissionFault>,
 }
@@ -327,6 +355,8 @@ where
             recovery_sent_delivery_ids: HashSet::new(),
             deferred_core_interaction_jobs: HashSet::new(),
             core_interaction_jobs: HashSet::new(),
+            delegated_poll_outcomes: VecDeque::new(),
+            delegated_progress_ledgers: HashMap::new(),
             #[cfg(feature = "test-support")]
             submission_fault: None,
         }
@@ -374,6 +404,15 @@ where
         let mut jobs = self.active.values().collect::<Vec<_>>();
         jobs.sort_by(|left, right| left.job.job_id.0.cmp(&right.job.job_id.0));
         jobs
+    }
+
+    /// Returns every validated delegated event in Codex poll order.
+    ///
+    /// The events remain inside the Worker until this explicit read, so the
+    /// current lack of an `ExecutionPortMessage` variant cannot silently drop
+    /// them or disguise them as runtime trace records.
+    pub fn take_delegated_poll_outcomes(&mut self) -> Vec<DelegatedPollOutcome> {
+        self.delegated_poll_outcomes.drain(..).collect()
     }
 
     /// Consumes the Worker and returns its injected ports for deterministic tests
@@ -564,7 +603,7 @@ where
             message_id: self.next_message_id(),
             observed_at: now.clone(),
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now,
+            sent_at: now.clone(),
             worker_id: self.config.worker_id.clone(),
             worker_instance_id: self.config.worker_instance_id.clone(),
         };
@@ -630,8 +669,32 @@ where
         match polled {
             CodexPoll::Pending => Ok(()),
             CodexPoll::RuntimeTrace(message) => self.forward_runtime_trace(job_id, *message).await,
+            CodexPoll::ChangeBatchProposed(event) => {
+                self.execute_delegated_proposal(job_id, *event, &now).await
+            }
+            CodexPoll::ChangeBatchProgress(event) => self.retain_delegated_progress(job_id, event),
+            CodexPoll::RepairRequired(envelope) => self.retain_delegated_poll_outcome(
+                job_id,
+                DelegatedPollOutcome::RepairRequired(envelope),
+            ),
             CodexPoll::Completed(completion) => {
                 self.complete_codex_job(job_id, completion, now).await
+            }
+            CodexPoll::Inconclusive(summary) => {
+                self.finish_job(
+                    job_id,
+                    ExecutionOutcomeStatus::Failed,
+                    summary.as_str(),
+                    Vec::new(),
+                    None,
+                    Some(port_error(
+                        ExecutionPortErrorCode::ExecutionFailed,
+                        "delegated ChangeBatch proposal was inconclusive",
+                        false,
+                    )),
+                    now,
+                )
+                .await
             }
             CodexPoll::Failed(summary) => {
                 self.finish_job(
@@ -682,6 +745,177 @@ where
                 .await
             }
         }
+    }
+
+    fn retain_delegated_poll_outcome(
+        &mut self,
+        job_id: &str,
+        outcome: DelegatedPollOutcome,
+    ) -> Result<(), WorkerError> {
+        let identity = match &outcome {
+            DelegatedPollOutcome::ChangeBatchProposed(event) => {
+                self.validate_delegated_proposal(job_id, event)?;
+                &event.identity
+            }
+            DelegatedPollOutcome::ChangeBatchProgress(event) => &event.identity,
+            DelegatedPollOutcome::ChangeBatchReceipt(receipt) => &receipt.identity,
+            DelegatedPollOutcome::RepairRequired(envelope) => &envelope.identity,
+        };
+        self.validate_delegated_identity(job_id, identity)?;
+        self.ensure_delegated_poll_capacity()?;
+        self.delegated_poll_outcomes.push_back(outcome);
+        Ok(())
+    }
+
+    async fn execute_delegated_proposal(
+        &mut self,
+        job_id: &str,
+        event: ChangeBatchProposalEvent,
+        now: &Instant,
+    ) -> Result<(), WorkerError> {
+        self.validate_delegated_proposal(job_id, &event)?;
+        let active = self.active.get(job_id).cloned().ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated ChangeBatch proposal has no active Job authority",
+            )
+        })?;
+        self.ensure_delegated_poll_capacity_for(8)?;
+        let executed = self
+            .workspaces
+            .execute_change_batch(&active, &event, now)
+            .await
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated ChangeBatch execution or replay was rejected",
+                )
+            })?;
+        self.delegated_poll_outcomes
+            .push_back(DelegatedPollOutcome::ChangeBatchProposed(Box::new(event)));
+        self.delegated_poll_outcomes.extend(
+            executed
+                .progress
+                .into_iter()
+                .map(|progress| DelegatedPollOutcome::ChangeBatchProgress(Box::new(progress))),
+        );
+        self.delegated_poll_outcomes
+            .push_back(DelegatedPollOutcome::ChangeBatchReceipt(Box::new(
+                executed.receipt,
+            )));
+        Ok(())
+    }
+
+    fn retain_delegated_progress(
+        &mut self,
+        job_id: &str,
+        event: Box<ChangeBatchProgressEvent>,
+    ) -> Result<(), WorkerError> {
+        self.validate_delegated_identity(job_id, &event.identity)?;
+        self.ensure_delegated_poll_capacity()?;
+        let key = (job_id.to_owned(), event.identity.batch_id.clone());
+        self.delegated_progress_ledgers
+            .entry(key)
+            .or_default()
+            .record(&event)
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated ChangeBatch progress order or state is invalid",
+                )
+            })?;
+        self.delegated_poll_outcomes
+            .push_back(DelegatedPollOutcome::ChangeBatchProgress(event));
+        Ok(())
+    }
+
+    fn validate_delegated_identity(
+        &self,
+        job_id: &str,
+        identity: &ChangeBatchIdentity,
+    ) -> Result<(), WorkerError> {
+        let active = self.active.get(job_id).ok_or_else(|| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated Codex event has no active Job authority",
+            )
+        })?;
+        let expected_run_key = self
+            .dispatches
+            .get(job_id)
+            .ok_or_else(|| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated Codex event has no sealed dispatch identity",
+                )
+            })?
+            .run_key
+            .canonical_digest()
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated Codex event run identity is invalid",
+                )
+            })?;
+        let expected_revision = self
+            .workspaces
+            .accepted_revision(&active.job.job_id)
+            .map_err(|_| {
+                worker_error(
+                    WorkerErrorCode::DelegatedPollMismatch,
+                    "delegated Codex workspace revision is unavailable",
+                )
+            })?;
+        if validate_change_batch_identity_derivation(identity).is_err()
+            || identity.run_key != expected_run_key.0
+            || identity.job_id != active.job.job_id
+            || identity.attempt != active.job.attempt
+            || identity.lease_id != active.lease.lease_id
+            || identity.fencing_token != active.lease.fencing_token
+            || identity.session_identity != active.session_identity
+            || identity.repository_id != active.job.workspace.repository_id
+            || identity.workspace_revision != expected_revision
+        {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated Codex event does not match its active Job authority",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_delegated_proposal(
+        &self,
+        job_id: &str,
+        event: &ChangeBatchProposalEvent,
+    ) -> Result<(), WorkerError> {
+        self.validate_delegated_identity(job_id, &event.identity)?;
+        prepare_change_batch(event, ChangeBatchPolicy::default()).map_err(|_| {
+            worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated ChangeBatch proposal is invalid",
+            )
+        })?;
+        Ok(())
+    }
+
+    fn ensure_delegated_poll_capacity(&self) -> Result<(), WorkerError> {
+        self.ensure_delegated_poll_capacity_for(1)
+    }
+
+    fn ensure_delegated_poll_capacity_for(&self, additional: usize) -> Result<(), WorkerError> {
+        if self
+            .delegated_poll_outcomes
+            .len()
+            .saturating_add(additional)
+            > MAX_DELEGATED_POLL_OUTCOMES
+        {
+            return Err(worker_error(
+                WorkerErrorCode::DelegatedPollMismatch,
+                "delegated Codex event retention limit reached",
+            ));
+        }
+        Ok(())
     }
 
     async fn complete_codex_job(
@@ -995,6 +1229,13 @@ where
             };
             if self.codex.interrupt(&thread_id, &now).await.is_err() {
                 codex_failures += 1;
+            } else {
+                // The interrupt retains the terminal Usage and Stopped
+                // traces. Forward them while the active Job still owns the
+                // runtime cursor so the shutdown outcome binds their final
+                // sequence instead of closing the Job first.
+                self.flush_codex_execution_messages().await?;
+                self.flush_durable_execution_deliveries().await?;
             }
             let Some(id) = self.active.get(&job_id).map(|job| job.job.job_id.clone()) else {
                 continue;
@@ -1141,12 +1382,10 @@ where
         stage_run_id: Option<StageRunId>,
         now: Instant,
     ) -> Result<(), WorkerError> {
-        let mut prepared = match self.prepare_dispatch_workspace(
-            dispatch,
-            &run_key,
-            product_session_id,
-            stage_run_id,
-        ) {
+        let mut prepared = match self
+            .prepare_dispatch_workspace(dispatch, &run_key, product_session_id, stage_run_id, &now)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(_error) => {
                 self.reject_dispatch_failure(
@@ -1169,6 +1408,7 @@ where
                 lease: &dispatch.lease,
                 worker_session_id: &prepared.active.worker_session_id,
                 workspace: &prepared.checkout,
+                workspace_revision: &prepared.workspace_revision,
             })
             .await
         {
@@ -1176,7 +1416,8 @@ where
             Err(_error) => {
                 let _ = self
                     .workspaces
-                    .close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed);
+                    .prepare_close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed, &now)
+                    .await;
                 self.reject_dispatch_failure(
                     dispatch,
                     JobDispatchResultMessageStatus::RejectedCapability,
@@ -1193,7 +1434,8 @@ where
             let _ = self.codex.close_thread(&thread_id).await;
             let _ = self
                 .workspaces
-                .close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed);
+                .prepare_close_job(&dispatch.job.job_id, WorkspaceCloseReason::Failed, &now)
+                .await;
             self.reject_dispatch_failure(
                 dispatch,
                 JobDispatchResultMessageStatus::Conflict,
@@ -1282,12 +1524,13 @@ where
                 .any(|record| record.codex_thread_id == *thread_id)
     }
 
-    fn prepare_dispatch_workspace(
+    async fn prepare_dispatch_workspace(
         &mut self,
         dispatch: &JobDispatchMessage,
         run_key: &CodexRunKey,
         product_session_id: ProductSessionId,
         stage_run_id: Option<StageRunId>,
+        now: &Instant,
     ) -> Result<PreparedDispatch, WorkerError> {
         let worker_session_id = self.worker_session_id(dispatch, run_key)?;
         let expected_thread_id = run_key
@@ -1309,9 +1552,18 @@ where
         };
         let checkout = self
             .workspaces
-            .open_for_job(&active, dispatch.replacement_authority.as_ref())
+            .open_for_job_recovering(&active, dispatch.replacement_authority.as_ref(), now)
+            .await
             .map_err(|_| workspace_error())?;
-        Ok(PreparedDispatch { active, checkout })
+        let workspace_revision = self
+            .workspaces
+            .accepted_revision(&active.job.job_id)
+            .map_err(|_| workspace_error())?;
+        Ok(PreparedDispatch {
+            active,
+            checkout,
+            workspace_revision,
+        })
     }
 
     async fn reject_dispatch_failure(
@@ -1826,7 +2078,7 @@ where
                 usage,
             },
             schema_version: SchemaVersion::WinwincodeV1,
-            sent_at: now,
+            sent_at: now.clone(),
             session_identity: active.session_identity.clone(),
             worker_session_id: active.worker_session_id.clone(),
         };
@@ -1839,12 +2091,15 @@ where
         // candidate and the outcome remain discoverable and the original
         // mutable workspace is still recoverable on the next dispatch.
         self.workspaces
-            .close_job_if_open(&active.job.job_id, close_reason)
+            .prepare_close_job(&active.job.job_id, close_reason, &now)
+            .await
             .map_err(|_| workspace_error())?;
         if let Some(record) = self.dispatches.get_mut(job_id) {
             record.terminal = true;
         }
         self.active.remove(job_id);
+        self.delegated_progress_ledgers
+            .retain(|(ledger_job_id, _), _| ledger_job_id != job_id);
         let _ = self.codex.close_thread(&active.codex_thread_id).await;
         self.send_retained_delivery(delivery).await?;
         self.flush_codex_execution_messages().await
@@ -2232,6 +2487,11 @@ where
                     | ExecutionPortMessage::RuntimeEventMessage(_)
             ) {
                 return Err(codex_model_error());
+            }
+            if let ExecutionPortMessage::RuntimeEventMessage(event) = message {
+                let job_id = event.lease.job_id.0.clone();
+                self.forward_runtime_trace(&job_id, event).await?;
+                continue;
             }
             let terminal_model_ack = matches!(
                 &message,

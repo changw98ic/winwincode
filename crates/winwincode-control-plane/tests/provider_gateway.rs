@@ -15,8 +15,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CanonicalModelStreamFrame, ConfiguredModelRetryPlanAuthority, CredentialReferenceResolution,
@@ -44,7 +43,7 @@ use winwincode_control_plane::{
     ProviderGatewaySettlement, ProviderGatewaySettlementError, ProviderGatewaySettlementPort,
     ProviderGatewayTerminal, ProviderStreamControlAction, ProviderStreamConverter,
     ProviderStreamEvent, ProviderTokenUsage, ResolvedSecret, SecretStoreError, SecretStorePort,
-    command_receipt_identity,
+    StructuredOutputSupport, command_receipt_identity,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, DeliveryId, ExecutionAckSequence, ExecutionJobId,
@@ -52,6 +51,7 @@ use winwincode_domain::{
     ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, SessionIdentity,
     Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, EncodedPayload, ExecutionJob,
     ExecutionLeaseStamp, ExecutionLimits, ExecutionPortError, ExecutionPortErrorCode,
@@ -109,7 +109,18 @@ fn model_capability(model_id: &str) -> ModelCapability {
         context_window_tokens: 128_000,
         max_output_tokens: 16_000,
         tool_support: ModelToolSupport::Parallel,
+        structured_output_support: StructuredOutputSupport::Unsupported,
         reasoning_efforts: vec!["high".to_owned()],
+    }
+}
+
+fn model_capability_with_structured_output(
+    model_id: &str,
+    structured_output_support: StructuredOutputSupport,
+) -> ModelCapability {
+    ModelCapability {
+        structured_output_support,
+        ..model_capability(model_id)
     }
 }
 
@@ -120,6 +131,27 @@ fn register_provider(
     provider_id: &str,
     model_id: &str,
     credential_seed: u64,
+) {
+    register_provider_with_structured_output(
+        storage,
+        request_seed,
+        expected_catalog_version,
+        provider_id,
+        model_id,
+        credential_seed,
+        StructuredOutputSupport::Unsupported,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_provider_with_structured_output(
+    storage: &mut SqliteStorage,
+    request_seed: u64,
+    expected_catalog_version: u64,
+    provider_id: &str,
+    model_id: &str,
+    credential_seed: u64,
+    structured_output_support: StructuredOutputSupport,
 ) {
     ProviderCatalogService::new(storage)
         .upsert(
@@ -134,7 +166,10 @@ fn register_provider(
                 display_name: format!("{provider_id} display"),
                 adapter_kind: "fixture-adapter".to_owned(),
                 credential_reference_id: CredentialReferenceId(id("crd", credential_seed)),
-                models: vec![model_capability(model_id)],
+                models: vec![model_capability_with_structured_output(
+                    model_id,
+                    structured_output_support,
+                )],
             },
         )
         .expect("register Provider fixture");
@@ -2329,6 +2364,422 @@ fn assert_active_admission_budget(root: &Path, authority: &FrozenModelRouteAutho
     assert_eq!(snapshot.minute_tokens, 100);
     assert_eq!(snapshot.budget_reserved_tokens, 100);
     assert_eq!(snapshot.budget_reserved_cost_micros, 10);
+}
+
+#[test]
+fn strict_json_schema_is_rejected_before_anthropic_credentials_admission_or_provider_io() {
+    let root = temporary_directory("structured-output-preflight");
+    let mut storage = SqliteStorage::open(&root).expect("open Gateway storage");
+    register_provider_with_structured_output(
+        &mut storage,
+        81,
+        0,
+        "anthropic",
+        "claude-fixture",
+        81,
+        StructuredOutputSupport::Unsupported,
+    );
+    // Deliberately omit CredentialReference state: capability routing must reject first.
+    configure_session(&mut storage, 83, 81, "anthropic", "claude-fixture", 81);
+
+    let identity = FakeIdentity {
+        repository_scope: repository_scope(),
+        deny: AtomicBool::new(false),
+    };
+    let secret_store = FakeSecretStore {
+        secrets: BTreeMap::from([(
+            "anthropic".to_owned(),
+            b"anthropic-secret-must-not-be-read".to_vec(),
+        )]),
+        resolutions: Mutex::new(Vec::new()),
+    };
+    let settlement = SettlementProbe::default();
+    let mut admission = AdmissionProbe::default();
+    let probe = Arc::new(AdapterProbe::default());
+    let message = open_message(
+        81,
+        81,
+        181,
+        81,
+        br#"{"request":{"text":{"format":{"type":"json_schema","strict":true,"name":"change_batch","schema":{"type":"object"}}}}}"#,
+    );
+    {
+        let mut gateway = ProviderGateway::new(
+            &mut storage,
+            &secret_store,
+            &identity,
+            &settlement,
+            &mut admission,
+        );
+        gateway
+            .register_adapter(Box::new(FakeAdapter {
+                provider_id: "anthropic".to_owned(),
+                expected_secret: b"anthropic-secret-must-not-be-read".to_vec(),
+                receipt_id: None,
+                probe: Arc::clone(&probe),
+            }))
+            .expect("register Anthropic fixture adapter");
+
+        let reserve_error = gateway
+            .reserve_before_open(&message)
+            .expect_err("unsupported capability must fail before reservation");
+        assert_eq!(
+            reserve_error.kind(),
+            ProviderGatewayErrorKind::StructuredOutputUnsupported
+        );
+        let open_error = gateway
+            .open(
+                &message,
+                &route("anthropic", "claude-fixture", 81),
+                &adapter_request_id(&message),
+            )
+            .expect_err("unsupported capability must fail before Provider open");
+        assert_eq!(
+            open_error.kind(),
+            ProviderGatewayErrorKind::StructuredOutputUnsupported
+        );
+        assert_eq!(
+            ModelAttemptFailureFact::from_gateway(
+                open_error.kind(),
+                ModelExecutionCertainty::NotSent,
+            )
+            .kind,
+            ModelAttemptFailureKind::InvalidRequest
+        );
+    }
+
+    assert!(
+        secret_store
+            .resolutions
+            .lock()
+            .expect("lock SecretStore calls")
+            .is_empty()
+    );
+    assert_eq!(probe.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(admission.reserves.load(Ordering::Relaxed), 0);
+    fs::remove_dir_all(root).expect("remove Gateway fixture directory");
+}
+
+#[test]
+fn strict_json_schema_reaches_a_model_that_declares_strict_support() {
+    let root = temporary_directory("structured-output-supported");
+    let mut storage = SqliteStorage::open(&root).expect("open Gateway storage");
+    register_provider_with_structured_output(
+        &mut storage,
+        91,
+        0,
+        "openai",
+        "gpt-fixture",
+        91,
+        StructuredOutputSupport::JsonSchemaStrict,
+    );
+    create_credential(&mut storage, 92, 91, "openai");
+    configure_session(&mut storage, 93, 91, "openai", "gpt-fixture", 91);
+
+    let identity = FakeIdentity {
+        repository_scope: repository_scope(),
+        deny: AtomicBool::new(false),
+    };
+    let secret = b"openai-secret-fixture".to_vec();
+    let secret_store = FakeSecretStore {
+        secrets: BTreeMap::from([("openai".to_owned(), secret.clone())]),
+        resolutions: Mutex::new(Vec::new()),
+    };
+    let settlement = SettlementProbe::default();
+    let mut admission = AdmissionProbe::default();
+    let probe = Arc::new(AdapterProbe::default());
+    let message = open_message(
+        91,
+        91,
+        191,
+        91,
+        br#"{"request":{"text":{"format":{"type":"json_schema","strict":true,"name":"change_batch","schema":{"type":"object"}}}}}"#,
+    );
+    {
+        let mut gateway = ProviderGateway::new(
+            &mut storage,
+            &secret_store,
+            &identity,
+            &settlement,
+            &mut admission,
+        );
+        gateway
+            .register_adapter(Box::new(FakeAdapter {
+                provider_id: "openai".to_owned(),
+                expected_secret: secret,
+                receipt_id: None,
+                probe: Arc::clone(&probe),
+            }))
+            .expect("register OpenAI fixture adapter");
+        gateway
+            .open(
+                &message,
+                &route("openai", "gpt-fixture", 91),
+                &adapter_request_id(&message),
+            )
+            .expect("strict-capable model opens Provider");
+    }
+    assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        secret_store
+            .resolutions
+            .lock()
+            .expect("lock SecretStore calls")
+            .len(),
+        1
+    );
+    fs::remove_dir_all(root).expect("remove Gateway fixture directory");
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the table pins every structured-output preflight shape and its side-effect boundary"
+)]
+fn structured_output_preflight_accepts_only_valid_non_strict_shapes_before_provider_io() {
+    let root = temporary_directory("structured-output-shape-matrix");
+    let mut storage = SqliteStorage::open(&root).expect("open Gateway storage");
+    register_provider_with_structured_output(
+        &mut storage,
+        101,
+        0,
+        "anthropic",
+        "claude-fixture",
+        101,
+        StructuredOutputSupport::Unsupported,
+    );
+    create_credential(&mut storage, 102, 101, "anthropic");
+    configure_session(&mut storage, 103, 101, "anthropic", "claude-fixture", 101);
+
+    let identity = FakeIdentity {
+        repository_scope: repository_scope(),
+        deny: AtomicBool::new(false),
+    };
+    let secret = b"anthropic-shape-matrix-secret".to_vec();
+    let secret_store = FakeSecretStore {
+        secrets: BTreeMap::from([("anthropic".to_owned(), secret.clone())]),
+        resolutions: Mutex::new(Vec::new()),
+    };
+    let settlement = SettlementProbe::default();
+    let mut admission = AdmissionProbe::default();
+    let probe = Arc::new(AdapterProbe::default());
+    let cases = [
+        (
+            "request_missing",
+            serde_json::json!({"prompt":"plain"}),
+            None,
+        ),
+        ("text_missing", serde_json::json!({"request":{}}), None),
+        (
+            "text_null",
+            serde_json::json!({"request":{"text":null}}),
+            None,
+        ),
+        (
+            "format_missing",
+            serde_json::json!({"request":{"text":{"verbosity":"low"}}}),
+            None,
+        ),
+        (
+            "format_null",
+            serde_json::json!({"request":{"text":{"format":null}}}),
+            None,
+        ),
+        (
+            "plain_text",
+            serde_json::json!({"request":{"text":{"format":{"type":"text"}}}}),
+            None,
+        ),
+        (
+            "json_schema_non_strict",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":false, "name":"result", "schema":{}
+            }}}}),
+            None,
+        ),
+        (
+            "request_not_object",
+            serde_json::json!({"request":[]}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "text_not_object",
+            serde_json::json!({"request":{"text":"plain"}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "format_not_object",
+            serde_json::json!({"request":{"text":{"format":"json_schema"}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "unknown_format_type",
+            serde_json::json!({"request":{"text":{"format":{"type":"future"}}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "strict_wrong_type",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":"true", "name":"result", "schema":{}
+            }}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "schema_wrong_type",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":true, "name":"result", "schema":[]
+            }}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "empty_name",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":true, "name":"", "schema":{}
+            }}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "description_wrong_type",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":true, "name":"result", "schema":{},
+                "description":false
+            }}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "required_field_missing",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":true, "schema":{}
+            }}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "unknown_field",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":true, "name":"result", "schema":{},
+                "future":true
+            }}}}),
+            Some(ProviderGatewayErrorKind::InvalidRequest),
+        ),
+        (
+            "strict_supported_shape",
+            serde_json::json!({"request":{"text":{"format":{
+                "type":"json_schema", "strict":true, "name":"result", "schema":{}
+            }}}}),
+            Some(ProviderGatewayErrorKind::StructuredOutputUnsupported),
+        ),
+    ];
+
+    {
+        let mut gateway = ProviderGateway::new(
+            &mut storage,
+            &secret_store,
+            &identity,
+            &settlement,
+            &mut admission,
+        );
+        gateway
+            .register_adapter(Box::new(FakeAdapter {
+                provider_id: "anthropic".to_owned(),
+                expected_secret: secret,
+                receipt_id: None,
+                probe: Arc::clone(&probe),
+            }))
+            .expect("register Anthropic fixture adapter");
+
+        let mut successful = 0_u64;
+        for (index, (name, value, expected_error)) in cases.into_iter().enumerate() {
+            let payload = serde_json::to_vec(&value).expect("encode shape fixture");
+            let seed = 201 + u64::try_from(index).expect("fixture index fits u64");
+            let message = open_message(seed, seed, seed + 100, 101, &payload);
+            let before_secret = secret_store
+                .resolutions
+                .lock()
+                .expect("lock SecretStore calls")
+                .len();
+            let before_adapter = probe.calls.load(Ordering::Relaxed);
+            let result = gateway.open(
+                &message,
+                &route("anthropic", "claude-fixture", 101),
+                &adapter_request_id(&message),
+            );
+            if let Some(expected) = expected_error {
+                assert_eq!(
+                    result.expect_err(name).kind(),
+                    expected,
+                    "unexpected preflight result for {name}"
+                );
+                assert_eq!(
+                    secret_store
+                        .resolutions
+                        .lock()
+                        .expect("lock SecretStore calls")
+                        .len(),
+                    before_secret,
+                    "{name} read a secret"
+                );
+                assert_eq!(
+                    probe.calls.load(Ordering::Relaxed),
+                    before_adapter,
+                    "{name} called the Provider"
+                );
+            } else {
+                result.unwrap_or_else(|error| panic!("{name} should pass preflight: {error}"));
+                successful += 1;
+            }
+        }
+
+        let malformed = open_message(
+            301,
+            301,
+            401,
+            101,
+            br#"{"request":{"text":{"format":{"type":"json_schema""#,
+        );
+        let before_secret = secret_store
+            .resolutions
+            .lock()
+            .expect("lock SecretStore calls")
+            .len();
+        let before_adapter = probe.calls.load(Ordering::Relaxed);
+        assert_eq!(
+            gateway
+                .open(
+                    &malformed,
+                    &route("anthropic", "claude-fixture", 101),
+                    &adapter_request_id(&malformed),
+                )
+                .expect_err("malformed JSON must fail preflight")
+                .kind(),
+            ProviderGatewayErrorKind::InvalidRequest
+        );
+        assert_eq!(
+            secret_store
+                .resolutions
+                .lock()
+                .expect("lock SecretStore calls")
+                .len(),
+            before_secret,
+            "malformed JSON read a secret"
+        );
+        assert_eq!(
+            probe.calls.load(Ordering::Relaxed),
+            before_adapter,
+            "malformed JSON called the Provider"
+        );
+        assert_eq!(successful, 7);
+    }
+    assert_eq!(probe.calls.load(Ordering::Relaxed), 7);
+    assert_eq!(admission.reserves.load(Ordering::Relaxed), 7);
+    assert_eq!(
+        secret_store
+            .resolutions
+            .lock()
+            .expect("lock SecretStore calls")
+            .len(),
+        7
+    );
+    fs::remove_dir_all(root).expect("remove Gateway fixture directory");
 }
 
 #[test]

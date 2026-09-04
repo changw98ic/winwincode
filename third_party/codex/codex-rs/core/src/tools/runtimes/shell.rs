@@ -158,7 +158,8 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
     }
 
     fn action_gate_payload(&self, req: &ShellRequest) -> Option<crate::ToolCallGatePayload> {
-        let (program, args) = req.command.split_first()?;
+        let command = super::command_for_action_gate(&req.command);
+        let (program, args) = command.split_first()?;
         Some(crate::ToolCallGatePayload::Shell {
             program: program.clone(),
             args: args.to_vec(),
@@ -206,6 +207,12 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
     ) -> Result<ExecToolCallOutput, ToolError> {
+        if req.turn_environment.environment.is_remote() && super::has_authorized_executable(attempt)
+        {
+            return Err(ToolError::Rejected(
+                "host executable authorization cannot be used in a remote environment".to_string(),
+            ));
+        }
         let session_shell = ctx.session.user_shell();
         let shell = req
             .turn_environment
@@ -250,14 +257,19 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         };
         #[cfg(not(unix))]
         let runtime_path_prepends = RuntimePathPrepends::default();
-        let command = maybe_wrap_shell_lc_with_snapshot(
-            &req.command,
-            shell,
-            shell_snapshot_location.as_ref(),
-            &explicit_env_overrides,
-            &env,
-            &runtime_path_prepends,
-        );
+        let authorized_command = super::command_with_authorized_executable(&req.command, attempt)?;
+        let command = if super::has_authorized_executable(attempt) {
+            authorized_command
+        } else {
+            maybe_wrap_shell_lc_with_snapshot(
+                &authorized_command,
+                shell,
+                shell_snapshot_location.as_ref(),
+                &explicit_env_overrides,
+                &env,
+                &runtime_path_prepends,
+            )
+        };
         let command = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
             req.shell_type.as_ref(),
@@ -270,7 +282,9 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
             command
         };
 
-        let zsh_fork_output = if self.backend == ShellRuntimeBackend::ShellCommandZshFork {
+        let zsh_fork_output = if self.backend == ShellRuntimeBackend::ShellCommandZshFork
+            && !super::has_authorized_executable(attempt)
+        {
             match zsh_fork_backend::maybe_run_shell_command(
                 req,
                 attempt,

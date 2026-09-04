@@ -6,7 +6,7 @@ use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{CommandEnvelope, CommandName, RepositoryScope};
+use winwincode_api::generated::{CommandEnvelope, CommandName};
 use winwincode_audit::{
     AuditAction, AuditEvent, AuditEventId, AuditExecutionIdentity, AuditExecutionSubjectKind,
     AuditState, AuditSubject,
@@ -20,6 +20,7 @@ use winwincode_delivery::{
     domain::{Delivery, StageRunStatus},
     store::{ApplyDeliveryTerminalOutcome, DeliveryCommand, DeliveryCommandPort, DeliveryStore},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     CodexThreadId, ControlPlaneEventId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
     ExecutionJobId, ExecutionMessageId, Instant, ProductSessionId, RequestId, SchemaVersion,

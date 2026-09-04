@@ -5,13 +5,17 @@
 use std::{fmt, future::Future, path::Path, sync::Arc};
 
 use sha2::{Digest as _, Sha256};
-use winwincode_domain::{CodexThreadId, Instant, WorkerId, WorkerInstanceId, WorkerSessionId};
+use winwincode_domain::{
+    CodexThreadId, Instant, Sha256Digest, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceRevision,
+};
 use winwincode_execution_port::{
     generated::{
         ActionEnforcementReceiptMessage, ApprovalDecisionMessage, ArtifactAckMessage,
-        ArtifactReference, ExecutionJob, ExecutionLeaseStamp, ExecutionOutcomeUsage,
-        ExecutionPortMessage, InputResponseMessage, JobDispatchMessage, JobOutcomeMessage,
-        ModelChunkMessage, RuntimeEventMessage, RuntimeReplayRequestMessage,
+        ArtifactReference, ChangeBatchProgressEvent, ChangeBatchProposalEvent, ExecutionJob,
+        ExecutionLeaseStamp, ExecutionOutcomeUsage, ExecutionPortMessage, InputResponseMessage,
+        JobDispatchMessage, JobOutcomeMessage, ModelChunkMessage, RepairEnvelope,
+        RuntimeEventMessage, RuntimeReplayRequestMessage,
     },
     runtime_trace_outbox::{RuntimeTraceInputError, SecretSafeTraceSummary},
 };
@@ -27,7 +31,7 @@ pub struct CodexRunKey {
     pub job_id: winwincode_domain::ExecutionJobId,
     pub attempt: i64,
     pub fencing_token: winwincode_domain::FencingToken,
-    pub payload_digest: winwincode_domain::Sha256Digest,
+    pub payload_digest: Sha256Digest,
 }
 
 impl CodexRunKey {
@@ -56,6 +60,19 @@ impl CodexRunKey {
         )))
     }
 
+    /// Returns the sole canonical digest used to persist and compare this run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an opaque contract error when the run identity cannot be
+    /// canonically encoded.
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, CodexRunKeyError> {
+        Ok(Sha256Digest(format!(
+            "sha256:{:x}",
+            Sha256::digest(self.canonical_bytes()?)
+        )))
+    }
+
     pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, CodexRunKeyError> {
         serde_json::to_vec(&(
             &self.job_id,
@@ -79,6 +96,37 @@ impl fmt::Display for CodexRunKeyError {
 
 impl std::error::Error for CodexRunKeyError {}
 
+#[cfg(test)]
+mod tests {
+    use winwincode_domain::{ExecutionJobId, FencingToken, Sha256Digest};
+
+    use super::CodexRunKey;
+
+    #[test]
+    fn canonical_digest_has_one_stable_full_length_vector() {
+        let key = CodexRunKey {
+            job_id: ExecutionJobId("job_00000000000000000000000000".to_owned()),
+            attempt: 1,
+            fencing_token: FencingToken("7".to_owned()),
+            payload_digest: Sha256Digest(format!("sha256:{}", "a".repeat(64))),
+        };
+
+        assert_eq!(
+            key.canonical_digest().expect("canonical run digest"),
+            Sha256Digest(
+                "sha256:809025db6972e3dfc1f4e61b3e908e79f70871e62e29bebf615c3656a6adc6ac"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            key.canonical_thread_id()
+                .expect("canonical thread identity")
+                .0,
+            "cdx_809025DB6972E3DFC1F4E61B3E"
+        );
+    }
+}
+
 /// Start data passed to the sole embedded Codex adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct CodexThreadStart<'job> {
@@ -88,6 +136,8 @@ pub struct CodexThreadStart<'job> {
     pub worker_session_id: &'job WorkerSessionId,
     /// Exact detached checkout sealed to this Job before Kernel session open.
     pub workspace: &'job Path,
+    /// Exact source tree sealed by the Worker, never a branch or commit expression.
+    pub workspace_revision: &'job WorkspaceRevision,
 }
 
 /// Secret-safe terminal result emitted by Codex Core.
@@ -103,7 +153,11 @@ pub struct CodexTurnCompletion {
 pub enum CodexPoll {
     Pending,
     RuntimeTrace(Box<RuntimeEventMessage>),
+    ChangeBatchProposed(Box<ChangeBatchProposalEvent>),
+    ChangeBatchProgress(Box<ChangeBatchProgressEvent>),
+    RepairRequired(Box<RepairEnvelope>),
     Completed(CodexTurnCompletion),
+    Inconclusive(SecretSafeTraceSummary),
     Failed(SecretSafeTraceSummary),
     Cancelled(SecretSafeTraceSummary),
     InfrastructureFailed(SecretSafeTraceSummary),

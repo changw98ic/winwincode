@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, OrganizationScope, ProjectScope, RepositoryScope, Scope,
-    ServiceAccountActor, UserActor, WorkspaceScope,
+    Actor, CommandEnvelope, CommandName, OrganizationScope, ProjectScope, Scope,
+    ServiceAccountActor, WorkspaceScope,
 };
 use winwincode_control_plane::{
     AggregateJournalKey, CommitError, CommitReceipt, ControlPlane, ControlPlaneConfig,
@@ -20,6 +20,7 @@ use winwincode_domain::{
     ControlPlaneEventId, DeliveryId, Instant, OrganizationId, ProjectId, RepositoryId, RequestId,
     SchemaVersion, ServiceAccountId, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_storage::{
     ProjectionReadCut, PublicEventActor, PublicEventScope, PublicEventSource, ReceiptActorKey,
     ReceiptIdentity, ReceiptScopeKey, StateCommit,
@@ -272,7 +273,7 @@ fn command(
 fn user_actor(value: &str) -> Actor {
     Actor::UserActor(UserActor {
         id: UserId(value.to_owned()),
-        kind: winwincode_api::generated::UserActorKind::User,
+        kind: winwincode_domain::UserActorKind::User,
     })
 }
 
@@ -290,7 +291,7 @@ fn repository_scope(
     repository_id: &str,
 ) -> Scope {
     Scope::RepositoryScope(RepositoryScope {
-        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        kind: winwincode_domain::RepositoryScopeKind::Repository,
         organization_id: OrganizationId(organization_id.to_owned()),
         workspace_id: WorkspaceId(workspace_id.to_owned()),
         project_id: ProjectId(project_id.to_owned()),

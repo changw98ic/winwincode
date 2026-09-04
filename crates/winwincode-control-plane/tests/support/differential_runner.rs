@@ -25,7 +25,7 @@ use winwincode_api::generated::{
     CommandCompletedResponse, CommandEnvelope, ControlPlaneWebSocketDeliveryChangedEvent,
     ControlPlaneWebSocketDeliveryChangedEventTypeValue, DeliveryDetailProjection, DeliveryGetQuery,
     DeliveryStageProjection, DeliveryStageSessionBindingProjection, ErrorEnvelope,
-    QueryResultResponse, RepositoryScope, RuntimeProjectionGetQuery,
+    QueryResultResponse, RuntimeProjectionGetQuery,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher, OutboxEvent,
@@ -93,6 +93,7 @@ use winwincode_delivery::{
         DeliveryStoreManifest, DeliveryStoreRecord,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     AttentionItemId, CodexThreadId, DeliveryId, ExecutionAckSequence, ExecutionJobId, FencingToken,
     Instant, LeaseId, ProductSessionId, RepositoryId, RequestId, Revision,

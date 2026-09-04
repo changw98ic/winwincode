@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use winwincode_domain::{
     CodexThreadId, ExecutionJobId, FencingToken, Instant, LeaseId, ProductSessionId, RepositoryId,
     RequestId, Sha256Digest, StageRunId, WorkerId, WorkerInstanceId, WorkerSessionId,
+    WorkspaceRevision,
 };
 use winwincode_execution_port::generated::{
     ExecutionJob, ExecutionJobReplacementAuthority, ExecutionLeaseStamp, ExecutionScope,
@@ -1218,6 +1219,21 @@ impl WorkerWorkspace {
     #[must_use]
     pub const fn origin_provenance(&self) -> &WorkspaceProvenance {
         &self.origin_provenance
+    }
+
+    /// Returns the sealed source commit resolved when this checkout was opened.
+    ///
+    /// This is immutable base authority for deterministic batch receipts. It is
+    /// not a candidate snapshot or a later workflow barrier.
+    #[must_use]
+    pub fn resolved_source_commit(&self) -> &str {
+        &self.source_commit_id
+    }
+
+    /// Exact sealed source tree used as the first accepted workspace revision.
+    #[must_use]
+    pub fn resolved_source_tree(&self) -> WorkspaceRevision {
+        WorkspaceRevision(format!("git-tree:{}", self.source_tree_id))
     }
 
     /// Resolves a relative checkout path without permitting traversal or links.

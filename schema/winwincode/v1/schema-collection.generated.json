@@ -333,6 +333,93 @@
       "pattern": "^tok_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
+    "AppliedFileOperation": {
+      "enum": [
+        "create",
+        "update",
+        "delete",
+        "move"
+      ],
+      "type": "string"
+    },
+    "AppliedFileSummary": {
+      "additionalProperties": false,
+      "description": "Secret-safe summary of one normalized file change. Paths are relative and source bytes remain in the Artifact store.",
+      "oneOf": [
+        {
+          "properties": {
+            "bytesAfter": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "bytesBefore": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "movePath": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "path": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "afterSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "beforeSha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "bytesAfter": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytesBefore": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modeAfter": {
+          "pattern": "^[0-7]{3,4}$",
+          "type": "string"
+        },
+        "modeBefore": {
+          "pattern": "^[0-7]{3,4}$",
+          "type": "string"
+        },
+        "movePath": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000]+$",
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/AppliedFileOperation"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\u0000]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "operation",
+        "bytesBefore",
+        "bytesAfter"
+      ],
+      "type": "object"
+    },
     "ApprovalAction": {
       "additionalProperties": false,
       "properties": {
@@ -1064,6 +1151,508 @@
         "authorizedScopes"
       ],
       "type": "object"
+    },
+    "ChangeBatchId": {
+      "description": "Content-derived identity of one ChangeBatch: SHA-256 over the canonical run key, turn id, optional call id, and patch digest.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ChangeBatchIdentity": {
+      "additionalProperties": false,
+      "description": "Replay-stable identity for one ChangeBatch. It binds the exact job attempt, lease fence, session, repository workspace revision, turn, and patch digest.",
+      "oneOf": [
+        {
+          "properties": {
+            "attempt": {
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "batchId": {
+              "maxLength": 71,
+              "minLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "callId": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "runKey": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "turnId": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "workspaceRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "batchId": {
+          "$ref": "#/$defs/ChangeBatchId"
+        },
+        "callId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "fencingToken": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "jobId": {
+          "$ref": "#/$defs/ExecutionJobId"
+        },
+        "leaseId": {
+          "$ref": "#/$defs/LeaseId"
+        },
+        "patchDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "repositoryId": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "runKey": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "sessionIdentity": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "turnId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "workspaceRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        }
+      },
+      "required": [
+        "batchId",
+        "runKey",
+        "jobId",
+        "attempt",
+        "leaseId",
+        "fencingToken",
+        "sessionIdentity",
+        "repositoryId",
+        "workspaceRevision",
+        "turnId",
+        "patchDigest"
+      ],
+      "type": "object"
+    },
+    "ChangeBatchProgressEvent": {
+      "additionalProperties": false,
+      "description": "Ordered bounded progress event for one ChangeBatch. Sequence is strictly increased by the runtime ledger.",
+      "oneOf": [
+        {
+          "properties": {
+            "artifactRefs": {
+              "items": {},
+              "maxItems": 16,
+              "minItems": 0,
+              "type": "array"
+            },
+            "sequence": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "summary": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "artifactRefs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array"
+        },
+        "identity": {
+          "$ref": "#/$defs/ChangeBatchIdentity"
+        },
+        "occurredAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/ChangeBatchProgressState"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "sequence",
+        "state",
+        "occurredAt",
+        "summary",
+        "artifactRefs"
+      ],
+      "type": "object"
+    },
+    "ChangeBatchProgressState": {
+      "enum": [
+        "proposed",
+        "authorized",
+        "apply_started",
+        "applied",
+        "rollback_started",
+        "rolled_back",
+        "validation_started",
+        "validation_completed",
+        "observation_requested",
+        "observation_completed",
+        "accepted",
+        "repair_required",
+        "infrastructure_failed"
+      ],
+      "type": "string"
+    },
+    "ChangeBatchProposal": {
+      "additionalProperties": false,
+      "description": "Bounded Composer output. The patch is capped at 512 KiB; it carries no source snapshot or log payload.",
+      "oneOf": [
+        {
+          "properties": {
+            "acceptanceCriteriaIds": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "patch": {
+              "maxLength": 524288,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schemaVersion": {
+              "const": 1
+            }
+          }
+        }
+      ],
+      "properties": {
+        "acceptanceCriteriaIds": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "disposition": {
+          "$ref": "#/$defs/ChangeBatchProposalDisposition"
+        },
+        "patch": {
+          "maxLength": 524288,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schemaVersion": {
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "validationProfile": {
+          "$ref": "#/$defs/ValidationProfileName"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "disposition",
+        "validationProfile",
+        "patch",
+        "acceptanceCriteriaIds"
+      ],
+      "type": "object"
+    },
+    "ChangeBatchProposalDisposition": {
+      "description": "Composer disposition for one bounded patch proposal.",
+      "enum": [
+        "final",
+        "continue",
+        "probe"
+      ],
+      "type": "string"
+    },
+    "ChangeBatchProposalEvent": {
+      "additionalProperties": false,
+      "description": "Codex poll event carrying one canonical bounded ChangeBatch proposal.",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/ChangeBatchIdentity"
+        },
+        "occurredAt": {
+          "$ref": "#/$defs/Instant"
+        },
+        "proposal": {
+          "$ref": "#/$defs/ChangeBatchProposal"
+        }
+      },
+      "required": [
+        "identity",
+        "proposal",
+        "occurredAt"
+      ],
+      "type": "object"
+    },
+    "ChangeBatchReceipt": {
+      "additionalProperties": false,
+      "description": "Terminal apply receipt for one ChangeBatch. Exact terminal states bind base and result Git trees plus the exact delta; an uncertain state forbids result claims.",
+      "oneOf": [
+        {
+          "properties": {
+            "baseRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "deltaDigest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "deltaExact": {
+              "const": true
+            },
+            "files": {
+              "items": {},
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "applied"
+            }
+          },
+          "required": [
+            "resultRevision",
+            "deltaDigest"
+          ]
+        },
+        {
+          "properties": {
+            "baseRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "deltaDigest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "deltaExact": {
+              "const": true
+            },
+            "files": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "rejected"
+            }
+          },
+          "required": [
+            "resultRevision",
+            "deltaDigest"
+          ]
+        },
+        {
+          "properties": {
+            "baseRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "deltaDigest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "deltaExact": {
+              "const": true
+            },
+            "files": {
+              "items": {},
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "partially_applied"
+            }
+          },
+          "required": [
+            "resultRevision",
+            "deltaDigest"
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "resultRevision"
+                ]
+              },
+              {
+                "required": [
+                  "deltaDigest"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "baseRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "deltaExact": {
+              "const": false
+            },
+            "files": {
+              "items": {},
+              "maxItems": 20,
+              "minItems": 0,
+              "type": "array"
+            },
+            "status": {
+              "const": "state_uncertain"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "artifactRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "deltaDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "deltaExact": {
+          "type": "boolean"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/AppliedFileSummary"
+          },
+          "maxItems": 20,
+          "minItems": 0,
+          "type": "array"
+        },
+        "identity": {
+          "$ref": "#/$defs/ChangeBatchIdentity"
+        },
+        "normalizer": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/NormalizerReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservationReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resultRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "status": {
+          "$ref": "#/$defs/ChangeBatchReceiptStatus"
+        },
+        "validation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ValidationReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "status",
+        "baseRevision",
+        "deltaExact",
+        "files",
+        "normalizer",
+        "validation",
+        "observation",
+        "artifactRef"
+      ],
+      "type": "object"
+    },
+    "ChangeBatchReceiptStatus": {
+      "enum": [
+        "rejected",
+        "applied",
+        "partially_applied",
+        "state_uncertain"
+      ],
+      "type": "string"
     },
     "ChatApprovalInteractionProjection": {
       "additionalProperties": false,
@@ -6488,6 +7077,152 @@
       ],
       "type": "object"
     },
+    "DiagnosticBaseline": {
+      "additionalProperties": false,
+      "description": "Canonical bounded diagnostics observed at one exact workspace tree.",
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "$ref": "#/$defs/NormalizedDiagnostic"
+          },
+          "maxItems": 4096,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "diagnosticSetDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "parserVersions": {
+          "items": {
+            "$ref": "#/$defs/DiagnosticParserVersion"
+          },
+          "maxItems": 6,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "workspaceRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        }
+      },
+      "required": [
+        "workspaceRevision",
+        "parserVersions",
+        "diagnostics",
+        "diagnosticSetDigest"
+      ],
+      "type": "object"
+    },
+    "DiagnosticBaselineComparison": {
+      "additionalProperties": false,
+      "description": "Deterministic new/resolved/unchanged comparison between two exact diagnostic baselines.",
+      "properties": {
+        "baselineDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "baseRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/DiagnosticComparisonEntry"
+          },
+          "maxItems": 8192,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "newCount": {
+          "maximum": 4096,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resolvedCount": {
+          "maximum": 4096,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resultDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "resultRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "unchangedCount": {
+          "maximum": 4096,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "baseRevision",
+        "resultRevision",
+        "baselineDigest",
+        "resultDigest",
+        "entries",
+        "newCount",
+        "resolvedCount",
+        "unchangedCount"
+      ],
+      "type": "object"
+    },
+    "DiagnosticCategory": {
+      "enum": [
+        "missing_symbol",
+        "missing_module",
+        "type_mismatch",
+        "lint_failure",
+        "test_failure",
+        "infrastructure",
+        "unclassified"
+      ],
+      "type": "string"
+    },
+    "DiagnosticChangeStatus": {
+      "enum": [
+        "new",
+        "resolved",
+        "unchanged"
+      ],
+      "type": "string"
+    },
+    "DiagnosticComparisonEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "diagnostic": {
+          "$ref": "#/$defs/NormalizedDiagnostic"
+        },
+        "status": {
+          "$ref": "#/$defs/DiagnosticChangeStatus"
+        }
+      },
+      "required": [
+        "status",
+        "diagnostic"
+      ],
+      "type": "object"
+    },
+    "DiagnosticParserVersion": {
+      "description": "Closed parser implementation and wire-format version used to normalize one validation output.",
+      "enum": [
+        "eslint_json_v1",
+        "typescript_v1",
+        "cargo_json_v1",
+        "go_test_json_v1",
+        "junit_xml_v1",
+        "pytest_json_v1"
+      ],
+      "type": "string"
+    },
+    "DiagnosticSeverity": {
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ],
+      "type": "string"
+    },
     "EmptyParameters": {
       "additionalProperties": false,
       "properties": {},
@@ -11622,6 +12357,513 @@
       ],
       "type": "object"
     },
+    "NormalizedDiagnostic": {
+      "additionalProperties": false,
+      "description": "Bounded normalized validation diagnostic. Display is a single-line summary; raw tool output remains an Artifact.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/DiagnosticCategory"
+        },
+        "code": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "column": {
+          "oneOf": [
+            {
+              "maximum": 2147483647,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnosticId": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "display": {
+          "maxLength": 500,
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\r\\n]+$",
+          "type": "string"
+        },
+        "line": {
+          "oneOf": [
+            {
+              "maximum": 2147483647,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messageDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "parserVersion": {
+          "$ref": "#/$defs/DiagnosticParserVersion"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)(?!.*\\\\)[^\\u0000\\r\\n]+)$",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        }
+      },
+      "required": [
+        "diagnosticId",
+        "parserVersion",
+        "path",
+        "code",
+        "severity",
+        "line",
+        "column",
+        "category",
+        "messageDigest",
+        "display"
+      ],
+      "type": "object"
+    },
+    "NormalizerReceipt": {
+      "additionalProperties": false,
+      "description": "Bounded receipt from deterministic patch normalization. It retains digests and Artifact references instead of patch bytes.",
+      "oneOf": [
+        {
+          "properties": {
+            "changedFileDigests": {
+              "items": {},
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "normalized"
+            }
+          },
+          "required": [
+            "resultRevision"
+          ]
+        },
+        {
+          "properties": {
+            "changedFileDigests": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "unchanged"
+            }
+          },
+          "required": [
+            "resultRevision"
+          ]
+        },
+        {
+          "not": {
+            "properties": {
+              "resultRevision": {}
+            },
+            "required": [
+              "resultRevision"
+            ]
+          },
+          "properties": {
+            "changedFileDigests": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "rejected"
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "resultRevision": {}
+            },
+            "required": [
+              "resultRevision"
+            ]
+          },
+          "properties": {
+            "changedFileDigests": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "infrastructure_error"
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "resultRevision": {}
+            },
+            "required": [
+              "resultRevision"
+            ]
+          },
+          "properties": {
+            "changedFileDigests": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "cancelled"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "artifactRefs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array"
+        },
+        "baseRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "changedFileDigests": {
+          "description": "Sorted unique domain-separated digests of each Writer file change, binding path, operation, before/after content digests, byte counts, and modes without inline bytes.",
+          "items": {
+            "$ref": "#/$defs/Sha256Digest"
+          },
+          "maxItems": 20,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "resultRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "status": {
+          "$ref": "#/$defs/NormalizerReceiptStatus"
+        }
+      },
+      "required": [
+        "status",
+        "baseRevision",
+        "changedFileDigests",
+        "artifactRefs"
+      ],
+      "type": "object"
+    },
+    "NormalizerReceiptStatus": {
+      "enum": [
+        "normalized",
+        "unchanged",
+        "rejected",
+        "infrastructure_error",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ObservationDecision": {
+      "enum": [
+        "accept",
+        "repair_required",
+        "semantic_risk",
+        "infrastructure_error",
+        "inconclusive",
+        "stale",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ObservationReceipt": {
+      "additionalProperties": false,
+      "description": "Bounded observation outcome. Free-form reasoning, source, and logs are excluded.",
+      "oneOf": [
+        {
+          "properties": {
+            "batchId": {
+              "maxLength": 71,
+              "minLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "confidenceBps": {
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "observationId": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "observedRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "reasonCode": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "rootCauses": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 0,
+              "type": "array"
+            },
+            "summary": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "batchId": {
+          "$ref": "#/$defs/ChangeBatchId"
+        },
+        "confidenceBps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "decision": {
+          "$ref": "#/$defs/ObservationDecision"
+        },
+        "inputDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "modelUsage": {
+          "$ref": "#/$defs/ExecutionOutcomeUsage"
+        },
+        "observationId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "observedRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "outputDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "reasonCode": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "repairClass": {
+          "$ref": "#/$defs/RepairClass"
+        },
+        "rootCauses": {
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 0,
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/ObservationSource"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "observationId",
+        "batchId",
+        "observedRevision",
+        "source",
+        "decision",
+        "reasonCode",
+        "summary",
+        "rootCauses",
+        "confidenceBps",
+        "inputDigest",
+        "outputDigest"
+      ],
+      "type": "object"
+    },
+    "ObservationRequest": {
+      "additionalProperties": false,
+      "description": "One bounded observer request tied to an exact ChangeBatch identity and workspace revision.",
+      "oneOf": [
+        {
+          "properties": {
+            "acceptanceCriteriaIds": {
+              "items": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array"
+            },
+            "artifactRefs": {
+              "items": {},
+              "maxItems": 16,
+              "minItems": 0,
+              "type": "array"
+            },
+            "diagnosticDigests": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 0,
+              "type": "array"
+            },
+            "goalSummary": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "observationId": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "observedRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "reasonCode": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "acceptanceCriteriaIds": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "artifactRefs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array"
+        },
+        "deltaDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "diagnosticDigests": {
+          "items": {
+            "$ref": "#/$defs/Sha256Digest"
+          },
+          "maxItems": 64,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "goalSummary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/ChangeBatchIdentity"
+        },
+        "inputDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "observationId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "observedRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "reasonCode": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "validationProfile": {
+          "$ref": "#/$defs/ValidationProfileName"
+        }
+      },
+      "required": [
+        "observationId",
+        "identity",
+        "observedRevision",
+        "validationProfile",
+        "inputDigest",
+        "reasonCode",
+        "goalSummary",
+        "acceptanceCriteriaIds",
+        "deltaDigest",
+        "diagnosticDigests",
+        "artifactRefs"
+      ],
+      "type": "object"
+    },
+    "ObservationSource": {
+      "enum": [
+        "deterministic_rule",
+        "cheap_model",
+        "fallback_model",
+        "human"
+      ],
+      "type": "string"
+    },
     "OpaqueCursor": {
       "description": "Opaque cursor bound to scope, query, filters, and one stable snapshot.",
       "maxLength": 2048,
@@ -12642,6 +13884,113 @@
       ],
       "type": "object"
     },
+    "RepairClass": {
+      "enum": [
+        "targeted_patch",
+        "regenerate_batch",
+        "replan",
+        "human_review"
+      ],
+      "type": "string"
+    },
+    "RepairEnvelope": {
+      "additionalProperties": false,
+      "description": "Bounded repair input. Source snippets and diagnostics are content-addressed Artifact references, never inline bytes.",
+      "oneOf": [
+        {
+          "properties": {
+            "diagnosticDigests": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 0,
+              "type": "array"
+            },
+            "observedRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "reasonCode": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "repairRound": {
+              "maximum": 8,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "rootCauseSummary": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "snippetArtifactRefs": {
+              "items": {},
+              "maxItems": 16,
+              "minItems": 0,
+              "type": "array"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "deltaDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "diagnosticDigests": {
+          "items": {
+            "$ref": "#/$defs/Sha256Digest"
+          },
+          "maxItems": 64,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "identity": {
+          "$ref": "#/$defs/ChangeBatchIdentity"
+        },
+        "observedRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "previousReceiptRef": {
+          "$ref": "#/$defs/ArtifactReference"
+        },
+        "reasonCode": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "repairRound": {
+          "maximum": 8,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rootCauseSummary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "snippetArtifactRefs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "repairRound",
+        "observedRevision",
+        "deltaDigest",
+        "reasonCode",
+        "rootCauseSummary",
+        "diagnosticDigests",
+        "snippetArtifactRefs"
+      ],
+      "type": "object"
+    },
     "RepositoryId": {
       "pattern": "^rep_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
@@ -12717,6 +14066,76 @@
       "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer"
+    },
+    "RoleExecutionMode": {
+      "description": "Role-session execution strategy. It is independent from the process-level Worker execution mode.",
+      "enum": [
+        "react",
+        "delegated_batch"
+      ],
+      "type": "string"
+    },
+    "RoleSessionPolicy": {
+      "additionalProperties": false,
+      "description": "Canonical version 2 policy applied to one role-scoped Kernel session. Durable version 1 rows are migrated once with executionMode react; version 1 is not a supported runtime shape.",
+      "oneOf": [
+        {
+          "properties": {
+            "developerInstructions": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schemaVersion": {
+              "const": 2
+            }
+          }
+        }
+      ],
+      "properties": {
+        "developerInstructions": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "executionMode": {
+          "$ref": "#/$defs/RoleExecutionMode"
+        },
+        "roleId": {
+          "enum": [
+            "requirements",
+            "solution",
+            "planner",
+            "executor",
+            "reviewer",
+            "verifier",
+            "adversarial-verifier",
+            "remediator"
+          ],
+          "type": "string"
+        },
+        "schemaVersion": {
+          "maximum": 2,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "workspaceMode": {
+          "enum": [
+            "source-read-only",
+            "candidate-read-only",
+            "candidate-write"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "roleId",
+        "workspaceMode",
+        "developerInstructions",
+        "executionMode"
+      ],
+      "type": "object"
     },
     "RuntimeAckMessage": {
       "additionalProperties": false,
@@ -14976,6 +16395,14 @@
       ],
       "type": "object"
     },
+    "StructuredOutputSupport": {
+      "description": "Closed model capability for strict structured final output. unsupported rejects strict JSON Schema requests before credentials or Provider calls; json_schema_strict admits them.",
+      "enum": [
+        "unsupported",
+        "json_schema_strict"
+      ],
+      "type": "string"
+    },
     "SystemActor": {
       "additionalProperties": false,
       "properties": {
@@ -15054,6 +16481,1022 @@
     },
     "UserId": {
       "pattern": "^usr_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "ValidationCheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "skipped",
+        "infrastructure_error",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ValidationCheckSummary": {
+      "additionalProperties": false,
+      "description": "One bounded, secret-safe validation check result.",
+      "oneOf": [
+        {
+          "properties": {
+            "name": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "summary": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "diagnosticDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ValidationCheckStatus"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "ValidationCommandLanguage": {
+      "description": "Supported repository language family for one validation command.",
+      "enum": [
+        "typescript",
+        "rust",
+        "python",
+        "go"
+      ],
+      "type": "string"
+    },
+    "ValidationCommandPhase": {
+      "description": "Closed Writer kind or read-only validation phase. Writer kinds are audited separately and always run before validation.",
+      "enum": [
+        "formatter",
+        "safe_lint_fix",
+        "codegen",
+        "lockfile_sync",
+        "validation"
+      ],
+      "type": "string"
+    },
+    "ValidationCommandSpec": {
+      "additionalProperties": false,
+      "description": "Shell-free Writer or validation command. Writer kind, parser version, and allowed companion paths are explicit; argv is capped at 256 entries and 64 KiB total by the canonical parser; network is denied.",
+      "oneOf": [
+        {
+          "properties": {
+            "allowedCompanionPaths": {
+              "description": "Portable repository-relative paths a Writer may change in addition to the current ChangeBatch paths; validation commands must leave this empty.",
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 0,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "argv": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array"
+            },
+            "diagnosticParserVersion": {
+              "type": "null"
+            },
+            "environment": {
+              "items": {
+                "$ref": "#/$defs/ValidationEnvironmentVariable"
+              },
+              "maxItems": 5,
+              "minItems": 0,
+              "type": "array"
+            },
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "type": "string"
+            },
+            "network": {
+              "const": false,
+              "type": "boolean"
+            },
+            "outputLimitBytes": {
+              "maximum": 16777216,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "phase": {
+              "const": "formatter"
+            },
+            "timeoutMillis": {
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+)$",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "allowedCompanionPaths": {
+              "description": "Portable repository-relative paths a Writer may change in addition to the current ChangeBatch paths; validation commands must leave this empty.",
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 0,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "argv": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array"
+            },
+            "diagnosticParserVersion": {
+              "type": "null"
+            },
+            "environment": {
+              "items": {
+                "$ref": "#/$defs/ValidationEnvironmentVariable"
+              },
+              "maxItems": 5,
+              "minItems": 0,
+              "type": "array"
+            },
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "type": "string"
+            },
+            "network": {
+              "const": false,
+              "type": "boolean"
+            },
+            "outputLimitBytes": {
+              "maximum": 16777216,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "phase": {
+              "const": "safe_lint_fix"
+            },
+            "timeoutMillis": {
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+)$",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "allowedCompanionPaths": {
+              "description": "Portable repository-relative paths a Writer may change in addition to the current ChangeBatch paths; validation commands must leave this empty.",
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 0,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "argv": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array"
+            },
+            "diagnosticParserVersion": {
+              "type": "null"
+            },
+            "environment": {
+              "items": {
+                "$ref": "#/$defs/ValidationEnvironmentVariable"
+              },
+              "maxItems": 5,
+              "minItems": 0,
+              "type": "array"
+            },
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "type": "string"
+            },
+            "network": {
+              "const": false,
+              "type": "boolean"
+            },
+            "outputLimitBytes": {
+              "maximum": 16777216,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "phase": {
+              "const": "codegen"
+            },
+            "timeoutMillis": {
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+)$",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "allowedCompanionPaths": {
+              "description": "Portable repository-relative paths a Writer may change in addition to the current ChangeBatch paths; validation commands must leave this empty.",
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 0,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "argv": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array"
+            },
+            "diagnosticParserVersion": {
+              "type": "null"
+            },
+            "environment": {
+              "items": {
+                "$ref": "#/$defs/ValidationEnvironmentVariable"
+              },
+              "maxItems": 5,
+              "minItems": 0,
+              "type": "array"
+            },
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "type": "string"
+            },
+            "network": {
+              "const": false,
+              "type": "boolean"
+            },
+            "outputLimitBytes": {
+              "maximum": 16777216,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "phase": {
+              "const": "lockfile_sync"
+            },
+            "timeoutMillis": {
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+)$",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "allowedCompanionPaths": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "argv": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "type": "array"
+            },
+            "environment": {
+              "items": {
+                "$ref": "#/$defs/ValidationEnvironmentVariable"
+              },
+              "maxItems": 5,
+              "minItems": 0,
+              "type": "array"
+            },
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "type": "string"
+            },
+            "network": {
+              "const": false,
+              "type": "boolean"
+            },
+            "outputLimitBytes": {
+              "maximum": 16777216,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "phase": {
+              "const": "validation"
+            },
+            "timeoutMillis": {
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "workingDirectory": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+)$",
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "allowedCompanionPaths": {
+          "description": "Portable repository-relative paths a Writer may change in addition to the current ChangeBatch paths; validation commands must leave this empty.",
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "argv": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "type": "array"
+        },
+        "diagnosticParserVersion": {
+          "description": "Explicit parser for structured validation output; omitted or null means status-only output. Writer commands must omit it or use null.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DiagnosticParserVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment": {
+          "items": {
+            "$ref": "#/$defs/ValidationEnvironmentVariable"
+          },
+          "maxItems": 5,
+          "minItems": 0,
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/$defs/ValidationCommandLanguage"
+        },
+        "network": {
+          "const": false,
+          "type": "boolean"
+        },
+        "outputLimitBytes": {
+          "maximum": 16777216,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "phase": {
+          "$ref": "#/$defs/ValidationCommandPhase"
+        },
+        "timeoutMillis": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workingDirectory": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?:\\.|(?!/)(?!.*(?:^|/)(?:\\.{1,2}|\\.[Gg][Ii][Tt])(?:/|$))(?!.*//)(?!.*[\\\\:<>\"|?*])(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))(?!.*[ .](?:/|$)).+)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "phase",
+        "language",
+        "argv",
+        "workingDirectory",
+        "environment",
+        "network",
+        "timeoutMillis",
+        "outputLimitBytes",
+        "allowedCompanionPaths"
+      ],
+      "type": "object"
+    },
+    "ValidationConfiguration": {
+      "additionalProperties": false,
+      "description": "Canonical .winwincode/validation.toml shape. Exactly one changed, fast, affected, and final profile and at least one TypeScript, Rust, and Python command are required by the canonical parser.",
+      "oneOf": [
+        {
+          "properties": {
+            "commands": {
+              "items": {},
+              "maxItems": 128,
+              "minItems": 3,
+              "type": "array"
+            },
+            "profiles": {
+              "items": {},
+              "maxItems": 4,
+              "minItems": 4,
+              "type": "array"
+            },
+            "schemaVersion": {
+              "const": 1
+            }
+          }
+        }
+      ],
+      "properties": {
+        "commands": {
+          "items": {
+            "$ref": "#/$defs/ValidationCommandSpec"
+          },
+          "maxItems": 128,
+          "minItems": 3,
+          "type": "array"
+        },
+        "profiles": {
+          "items": {
+            "$ref": "#/$defs/ValidationProfile"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        "schemaVersion": {
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "commands",
+        "profiles"
+      ],
+      "type": "object"
+    },
+    "ValidationEnvironmentName": {
+      "description": "Closed command environment allowlist. LANG and LC_ALL values are explicit; runtime replaces PATH, HOME, and TMPDIR from its trusted tool and scratch authority.",
+      "enum": [
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "TMPDIR"
+      ],
+      "type": "string"
+    },
+    "ValidationEnvironmentVariable": {
+      "additionalProperties": false,
+      "description": "One bounded environment request. PATH, HOME, and TMPDIR values never select an executable or write scope and are replaced by trusted runtime values; duplicate names are rejected by the canonical parser.",
+      "oneOf": [
+        {
+          "properties": {
+            "value": {
+              "maxLength": 4096,
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/ValidationEnvironmentName"
+        },
+        "value": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ValidationProfile": {
+      "additionalProperties": false,
+      "description": "One ordered profile referencing only commands declared by the same configuration.",
+      "oneOf": [
+        {
+          "properties": {
+            "commandIds": {
+              "items": {
+                "maxLength": 100,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "type": "string"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            }
+          }
+        }
+      ],
+      "properties": {
+        "commandIds": {
+          "items": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "name": {
+          "$ref": "#/$defs/ValidationProfileName"
+        }
+      },
+      "required": [
+        "name",
+        "commandIds"
+      ],
+      "type": "object"
+    },
+    "ValidationProfileName": {
+      "description": "Closed validation profile ladder. changed is path-scoped, fast is the bounded pre-review gate, affected expands to impacted suites, and final is the explicit full gate.",
+      "enum": [
+        "changed",
+        "fast",
+        "affected",
+        "final"
+      ],
+      "type": "string"
+    },
+    "ValidationProfileSelection": {
+      "additionalProperties": false,
+      "description": "Deterministic selection result. Suggestions carry no commands and cannot authorize execution.",
+      "oneOf": [
+        {
+          "properties": {
+            "commandIds": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            "configurationDigest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "executable": {
+              "const": true
+            },
+            "reasonCode": {
+              "const": "explicit_profile"
+            },
+            "source": {
+              "const": "explicit_configuration"
+            }
+          },
+          "required": [
+            "configurationDigest"
+          ]
+        },
+        {
+          "not": {
+            "properties": {
+              "configurationDigest": {}
+            },
+            "required": [
+              "configurationDigest"
+            ]
+          },
+          "properties": {
+            "commandIds": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "executable": {
+              "const": false
+            },
+            "profile": {
+              "const": "affected"
+            },
+            "reasonCode": {
+              "const": "lockfile_changed"
+            },
+            "source": {
+              "const": "automatic_suggestion"
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "configurationDigest": {}
+            },
+            "required": [
+              "configurationDigest"
+            ]
+          },
+          "properties": {
+            "commandIds": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "executable": {
+              "const": false
+            },
+            "profile": {
+              "const": "affected"
+            },
+            "reasonCode": {
+              "const": "mixed_languages"
+            },
+            "source": {
+              "const": "automatic_suggestion"
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "configurationDigest": {}
+            },
+            "required": [
+              "configurationDigest"
+            ]
+          },
+          "properties": {
+            "commandIds": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "executable": {
+              "const": false
+            },
+            "profile": {
+              "const": "changed"
+            },
+            "reasonCode": {
+              "const": "single_language"
+            },
+            "source": {
+              "const": "automatic_suggestion"
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "configurationDigest": {}
+            },
+            "required": [
+              "configurationDigest"
+            ]
+          },
+          "properties": {
+            "commandIds": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "executable": {
+              "const": false
+            },
+            "profile": {
+              "const": "changed"
+            },
+            "reasonCode": {
+              "const": "no_changed_paths"
+            },
+            "source": {
+              "const": "automatic_suggestion"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "changedPathsDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "commandIds": {
+          "items": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "configurationDigest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "executable": {
+          "type": "boolean"
+        },
+        "profile": {
+          "$ref": "#/$defs/ValidationProfileName"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ValidationProfileSelectionReasonCode"
+        },
+        "source": {
+          "$ref": "#/$defs/ValidationSelectionSource"
+        }
+      },
+      "required": [
+        "profile",
+        "source",
+        "executable",
+        "changedPathsDigest",
+        "commandIds",
+        "reasonCode"
+      ],
+      "type": "object"
+    },
+    "ValidationProfileSelectionReasonCode": {
+      "enum": [
+        "explicit_profile",
+        "lockfile_changed",
+        "mixed_languages",
+        "single_language",
+        "no_changed_paths"
+      ],
+      "type": "string"
+    },
+    "ValidationReceipt": {
+      "additionalProperties": false,
+      "description": "Bounded validation outcome with summaries and Artifact references only.",
+      "oneOf": [
+        {
+          "not": {
+            "properties": {
+              "resultRevision": {}
+            },
+            "required": [
+              "resultRevision"
+            ]
+          },
+          "properties": {
+            "checks": {
+              "items": {},
+              "maxItems": 0,
+              "minItems": 0,
+              "type": "array"
+            },
+            "durationMillis": {
+              "const": 0
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "not_run"
+            }
+          }
+        },
+        {
+          "properties": {
+            "checks": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "passed"
+            }
+          },
+          "required": [
+            "resultRevision"
+          ]
+        },
+        {
+          "properties": {
+            "checks": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "failed"
+            }
+          },
+          "required": [
+            "resultRevision"
+          ]
+        },
+        {
+          "properties": {
+            "checks": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "infrastructure_error"
+            }
+          },
+          "required": [
+            "resultRevision"
+          ]
+        },
+        {
+          "properties": {
+            "checks": {
+              "items": {},
+              "maxItems": 64,
+              "minItems": 0,
+              "type": "array"
+            },
+            "resultRevision": {
+              "$ref": "#/$defs/WorkspaceRevision"
+            },
+            "status": {
+              "const": "cancelled"
+            }
+          },
+          "required": [
+            "resultRevision"
+          ]
+        }
+      ],
+      "properties": {
+        "artifactRefs": {
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          },
+          "maxItems": 16,
+          "minItems": 0,
+          "type": "array"
+        },
+        "baseRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/ValidationCheckSummary"
+          },
+          "maxItems": 64,
+          "minItems": 0,
+          "type": "array"
+        },
+        "durationMillis": {
+          "maximum": 604800000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "profile": {
+          "$ref": "#/$defs/ValidationProfileName"
+        },
+        "resultRevision": {
+          "$ref": "#/$defs/WorkspaceRevision"
+        },
+        "status": {
+          "$ref": "#/$defs/ValidationReceiptStatus"
+        }
+      },
+      "required": [
+        "profile",
+        "status",
+        "baseRevision",
+        "checks",
+        "durationMillis",
+        "artifactRefs"
+      ],
+      "type": "object"
+    },
+    "ValidationReceiptStatus": {
+      "enum": [
+        "not_run",
+        "passed",
+        "failed",
+        "infrastructure_error",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ValidationSelectionSource": {
+      "description": "Only an explicit configuration selection is executable; automatic inference is advisory.",
+      "enum": [
+        "explicit_configuration",
+        "automatic_suggestion"
+      ],
       "type": "string"
     },
     "WorkerCapabilitiesMessage": {
@@ -15697,6 +18140,11 @@
       "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$",
       "type": "string"
     },
+    "WorkspaceRevision": {
+      "description": "Exact Git tree object identity for a workspace snapshot. SHA-1 repositories use 40 lowercase hexadecimal digits and SHA-256 repositories use 64.",
+      "pattern": "^git-tree:(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
     "WorkspaceScope": {
       "additionalProperties": false,
       "properties": {
@@ -15727,7 +18175,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:27d7223d7ac698476019d0b9049266aa634d4e3da7d3c959c52ba9e4c693854a",
+  "x-source-digest": "sha256:75d937f0a5048af2832e16c900a76696aafa604fe934633acb37df0da9ff4760",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {

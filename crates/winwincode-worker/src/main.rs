@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use winwincode_codex::{
-    HelperReleaseManifest, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
+    ExecutionMode, HelperReleaseManifest, ObserverMode, ProductionCodexAdapter,
+    ProductionCodexConfig, ProductionCodexOptions,
 };
 use winwincode_domain::{Instant, Sha256Digest, WorkerId, WorkerInstanceId};
 use winwincode_execution_port::action_enforcement::ActionEnforcementSigningKey;
@@ -19,6 +20,7 @@ use winwincode_execution_port::generated::{
     ModelGatewayRoute, WorkerCapabilityFeature, WorkerCapabilitySet, WorkerCapabilitySetPlatform,
 };
 use winwincode_worker::remote_transport::{RemoteWorkerPort, RemoteWorkerTransportHandle};
+use winwincode_worker::validation_artifact::DurableValidationArtifactStore;
 use winwincode_worker::workspace_runtime::JobWorkspaceRuntime;
 use winwincode_worker::{WorkerConfig, WorkerLifecycleState, WorkerMain};
 
@@ -74,8 +76,11 @@ async fn run_remote() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(15),
     )?;
     let codex = production_codex(&data_directory, capabilities.clone())?;
+    let validation_artifacts =
+        DurableValidationArtifactStore::open(data_directory.join("worker-validation-artifacts"))?;
     let workspaces =
-        JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?;
+        JobWorkspaceRuntime::open(data_directory.join("worker-workspaces"), &source_directory)?
+            .with_validation_artifact_port(validation_artifacts);
     let config = WorkerConfig {
         worker_id,
         worker_instance_id: worker_instance_id.clone(),
@@ -179,10 +184,32 @@ fn production_codex(
             version: 1,
             digest: Sha256Digest(required("WWC_WORKER_EXECUTION_ENVELOPE_DIGEST")?),
         },
+        execution_mode: configured_execution_mode("WWC_WORKER_EXECUTION_MODE")?,
+        observer_mode: configured_observer_mode("WWC_WORKER_OBSERVER_MODE")?,
     };
     Ok(ProductionCodexAdapter::open(
         ProductionCodexConfig::try_new(options)?,
     )?)
+}
+
+fn configured_execution_mode(name: &str) -> Result<ExecutionMode, Box<dyn std::error::Error>> {
+    let value = optional_configuration(name, "react")?;
+    ExecutionMode::from_config(&value)
+        .ok_or_else(|| format!("{name} contains an unsupported execution mode").into())
+}
+
+fn configured_observer_mode(name: &str) -> Result<ObserverMode, Box<dyn std::error::Error>> {
+    let value = optional_configuration(name, "off")?;
+    ObserverMode::from_config(&value)
+        .ok_or_else(|| format!("{name} contains an unsupported observer mode").into())
+}
+
+fn optional_configuration(name: &str, default: &str) -> Result<String, Box<dyn std::error::Error>> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(default.to_owned()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn worker_capabilities() -> Result<WorkerCapabilitySet, Box<dyn std::error::Error>> {

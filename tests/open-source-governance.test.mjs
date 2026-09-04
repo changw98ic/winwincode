@@ -260,6 +260,49 @@ test('release source and package metadata retain the Apache-2.0 project boundary
 
 test('upstream records distinguish current dependencies from historical attribution', () => {
   const sourceLock = JSON.parse(read('upstream/sources.lock.json'))
+  const codexMetadata = JSON.parse(read('third_party/codex.UPSTREAM.json'))
+  for (const field of [
+    'repository',
+    'tag',
+    'version',
+    'commit',
+    'archiveSha256',
+    'license',
+  ]) {
+    assert.equal(codexMetadata[field], sourceLock.codex[field], field)
+  }
+  const codexPatchRecords = sourceLock.patches
+    .filter(({ file, planned }) => file.startsWith('upstream/patches/codex/') && !planned)
+  const codexPatches = codexPatchRecords.map(({ file }) => file)
+  assert.deepEqual(codexMetadata.patchesApplied, codexPatches)
+  const kernelSource = read('crates/kernel/src/lib.rs')
+  const kernelPatchSet = kernelSource.match(
+    /pub const CODEX_PATCH_SET: &\[&str\] = &\[(?<patches>[\s\S]*?)\n\];/u,
+  )
+  assert.notEqual(kernelPatchSet, null)
+  const kernelPatches = [
+    ...kernelPatchSet.groups.patches.matchAll(/"(?<patch>[^"]+\.patch)"/gu),
+  ].map(match => match.groups.patch)
+  assert.deepEqual(kernelPatches, codexPatches)
+  assert.match(kernelSource, new RegExp(
+    `pub const CODEX_COMMIT: &str = "${sourceLock.codex.commit}";`,
+    'u',
+  ))
+  assert.match(kernelSource, new RegExp(
+    `pub const CODEX_TAG: &str = "${sourceLock.codex.tag}";`,
+    'u',
+  ))
+  for (const { file, targets } of codexPatchRecords) {
+    assert.equal(existsSync(join(root, file)), true, file)
+    const patchTargets = [...read(file).matchAll(
+      /^diff --git a\/(?<source>\S+) b\/(?<target>\S+)$/gmu,
+    )].map(match => {
+      assert.equal(match.groups.source, match.groups.target, file)
+      return match.groups.target
+    })
+    assert.equal(new Set(patchTargets).size, patchTargets.length, file)
+    assert.deepEqual(patchTargets.toSorted(), targets.toSorted(), file)
+  }
   assert.equal(Object.hasOwn(sourceLock, 'dsh'), false)
   assert.equal(sourceLock.patches.some(({ id }) => id === 'dsh-winwincode-profile'), false)
   assert.deepEqual(sourceLock.historicalSources, [

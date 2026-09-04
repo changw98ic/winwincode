@@ -64,6 +64,7 @@ Codex 的 Thread、Turn、Plan、Agent Graph、工具、Shell、沙箱、权限�
 | `codex/0003-export-config-builder.patch` | `codex-rs/core-api/src/lib.rs` | 导出上游已有 `ConfigBuilder` |
 | `codex/0005-remount-split-bwrap-root-read-only.patch` | `codex-rs/linux-sandbox/src/bwrap.rs` | 完成批准挂载后把合成根重新挂为只读 |
 | `codex/0006-tool-gate-and-exact-turn-replay.patch` | `codex-rs/core` 及对应 lock/module 文件 | 固定工具调用门禁和精确 Turn replay |
+| `codex/0007-bind-tool-gate-executable-identity.patch` | `codex-rs/core` 与 `core-api` | 把工具门禁回执绑定到同一绝对可执行文件和参数，执行前不再经 PATH 二次解析 |
 
 每个补丁必须能对记录的上游身份精确应用。补丁失败表示上游边界已经改变，需要重新审查，不能放宽断言或保留第二条旧路径。
 

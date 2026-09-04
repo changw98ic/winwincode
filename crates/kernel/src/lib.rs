@@ -46,12 +46,15 @@ use codex_core_api::SteerSubmission;
 use codex_core_api::ThreadId;
 use codex_core_api::ThreadManager;
 use codex_core_api::ToolCallGate;
+use codex_core_api::ToolCallGateAuthorization;
+use codex_core_api::ToolCallGateExecutableAuthorization;
 use codex_core_api::ToolCallGateFileOperation;
 use codex_core_api::ToolCallGatePayload;
 use codex_core_api::ToolCallGateRejection;
 use codex_core_api::ToolCallGateRequest;
 use codex_core_api::TurnInputRequest;
 use codex_core_api::TurnInputSubmission;
+use codex_core_api::TurnStartOptions;
 use codex_core_api::UserInput;
 use codex_core_api::build_models_manager;
 use codex_core_api::empty_extension_registry;
@@ -68,13 +71,15 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+pub use winwincode_execution_port::generated::{
+    RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
+};
 
 use crate::model_port::KernelModelStreamTransport;
 
@@ -87,6 +92,70 @@ pub struct KernelActionRequest {
     pub namespace: Option<String>,
     pub tool_name: String,
     pub payload: KernelActionPayload,
+}
+
+/// Host receipt retained from admission through the final Core execution
+/// boundary. The optional executable is the only program identity a delegated
+/// read may launch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KernelActionAuthorization {
+    request_binding: String,
+    executable: Option<KernelExecutableAuthorization>,
+}
+
+impl KernelActionAuthorization {
+    #[must_use]
+    pub fn new(request_binding: String, executable: Option<KernelExecutableAuthorization>) -> Self {
+        Self {
+            request_binding,
+            executable,
+        }
+    }
+
+    #[must_use]
+    pub fn request_binding(&self) -> &str {
+        &self.request_binding
+    }
+
+    #[must_use]
+    pub fn executable(&self) -> Option<&KernelExecutableAuthorization> {
+        self.executable.as_ref()
+    }
+}
+
+/// Canonical absolute executable and opaque immutable identity selected by the
+/// host action authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KernelExecutableAuthorization {
+    canonical_absolute_path: String,
+    arguments: Vec<String>,
+    identity: String,
+}
+
+impl KernelExecutableAuthorization {
+    #[must_use]
+    pub fn new(canonical_absolute_path: String, arguments: Vec<String>, identity: String) -> Self {
+        Self {
+            canonical_absolute_path,
+            arguments,
+            identity,
+        }
+    }
+
+    #[must_use]
+    pub fn canonical_absolute_path(&self) -> &str {
+        &self.canonical_absolute_path
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
 }
 
 /// Exact Codex tool payload retained only for in-process pre-action authorization.
@@ -164,8 +233,15 @@ impl fmt::Debug for KernelActionPayload {
 
 /// Required host admission boundary for every embedded Codex tool call.
 pub trait KernelActionGate: Send + Sync {
-    fn authorize(&self, request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>>;
-    fn revalidate(&self, request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>>;
+    fn authorize(
+        &self,
+        request: KernelActionRequest,
+    ) -> BoxFuture<'static, KernelResult<KernelActionAuthorization>>;
+    fn revalidate(
+        &self,
+        request: KernelActionRequest,
+        authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, KernelResult<()>>;
 }
 
 /// Explicit fail-closed gate for surfaces that have not installed an action authority.
@@ -173,7 +249,10 @@ pub trait KernelActionGate: Send + Sync {
 pub struct RejectingKernelActionGate;
 
 impl KernelActionGate for RejectingKernelActionGate {
-    fn authorize(&self, _request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>> {
+    fn authorize(
+        &self,
+        _request: KernelActionRequest,
+    ) -> BoxFuture<'static, KernelResult<KernelActionAuthorization>> {
         Box::pin(async {
             Err(KernelFailure::new(
                 "ACTION_GATE_UNAVAILABLE",
@@ -182,7 +261,11 @@ impl KernelActionGate for RejectingKernelActionGate {
         })
     }
 
-    fn revalidate(&self, _request: KernelActionRequest) -> BoxFuture<'static, KernelResult<()>> {
+    fn revalidate(
+        &self,
+        _request: KernelActionRequest,
+        _authorization: KernelActionAuthorization,
+    ) -> BoxFuture<'static, KernelResult<()>> {
         Box::pin(async {
             Err(KernelFailure::new(
                 "ACTION_GATE_UNAVAILABLE",
@@ -200,11 +283,12 @@ impl ToolCallGate for CoreToolCallGate {
     fn authorize(
         &self,
         request: ToolCallGateRequest,
-    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
+    ) -> BoxFuture<'static, Result<ToolCallGateAuthorization, ToolCallGateRejection>> {
         let host = Arc::clone(&self.host);
         Box::pin(async move {
             host.authorize(kernel_action_request(request))
                 .await
+                .map(tool_call_gate_authorization)
                 .map_err(|_| {
                     ToolCallGateRejection::new(
                         "HOST_ACTION_REJECTED",
@@ -217,19 +301,53 @@ impl ToolCallGate for CoreToolCallGate {
     fn revalidate(
         &self,
         request: ToolCallGateRequest,
+        authorization: ToolCallGateAuthorization,
     ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>> {
         let host = Arc::clone(&self.host);
         Box::pin(async move {
-            host.revalidate(kernel_action_request(request))
-                .await
-                .map_err(|_| {
-                    ToolCallGateRejection::new(
-                        "HOST_ACTION_STALE",
-                        "host action authority is no longer current",
-                    )
-                })
+            host.revalidate(
+                kernel_action_request(request),
+                kernel_action_authorization(&authorization),
+            )
+            .await
+            .map_err(|_| {
+                ToolCallGateRejection::new(
+                    "HOST_ACTION_STALE",
+                    "host action authority is no longer current",
+                )
+            })
         })
     }
+}
+
+fn tool_call_gate_authorization(
+    authorization: KernelActionAuthorization,
+) -> ToolCallGateAuthorization {
+    ToolCallGateAuthorization::new(
+        authorization.request_binding,
+        authorization.executable.map(|executable| {
+            ToolCallGateExecutableAuthorization::new(
+                executable.canonical_absolute_path,
+                executable.arguments,
+                executable.identity,
+            )
+        }),
+    )
+}
+
+fn kernel_action_authorization(
+    authorization: &ToolCallGateAuthorization,
+) -> KernelActionAuthorization {
+    KernelActionAuthorization::new(
+        authorization.request_binding().to_owned(),
+        authorization.executable().map(|executable| {
+            KernelExecutableAuthorization::new(
+                executable.canonical_absolute_path().to_owned(),
+                executable.arguments().to_vec(),
+                executable.identity().to_owned(),
+            )
+        }),
+    )
 }
 
 fn kernel_action_request(request: ToolCallGateRequest) -> KernelActionRequest {
@@ -279,7 +397,7 @@ pub const CODEX_COMMIT: &str = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 /// Exact embedded Codex release tag.
 pub const CODEX_TAG: &str = "rust-v0.149.0";
 /// Native contract version, independent of the application package version.
-pub const INTERFACE_VERSION: u32 = 6;
+pub const INTERFACE_VERSION: u32 = 9;
 /// Patches applied to the embedded source in deterministic order.
 pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0001-export-client-mcp-extensions.patch",
@@ -287,9 +405,10 @@ pub const CODEX_PATCH_SET: &[&str] = &[
     "upstream/patches/codex/0003-export-config-builder.patch",
     "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
     "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
+    "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
 ];
 
-const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 1;
+const ROLE_SESSION_POLICY_SCHEMA_VERSION: u32 = 2;
 
 const DEFAULT_EVENT_CAPACITY: usize = 256;
 const MIN_EVENT_CAPACITY: usize = 16;
@@ -350,7 +469,7 @@ impl KernelOptions {
 }
 
 /// Options shared by create, resume, and fork operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionOptions {
     /// Absolute workspace path.
     pub cwd: PathBuf,
@@ -362,30 +481,26 @@ pub struct SessionOptions {
     pub role_policy: Option<RoleSessionPolicy>,
 }
 
-/// Minimal `StrongFlow` role policy accepted only when it matches the canonical workspace matrix.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RoleSessionPolicy {
-    pub schema_version: u32,
-    pub role_id: String,
-    pub workspace_mode: String,
-    pub developer_instructions: String,
-}
-
-impl RoleSessionPolicy {
-    /// Parse the strict role envelope without granting authority for missing or extra fields.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed failure when the JSON is invalid, incomplete, or contains extra fields.
-    pub fn from_json(value: &str) -> KernelResult<Self> {
-        serde_json::from_str(value).map_err(|error| {
-            KernelFailure::new(
-                "INVALID_ROLE_POLICY",
-                format!("StrongFlow role policy is invalid: {error}"),
-            )
-        })
+/// Parses the generated canonical role envelope at the native boundary.
+///
+/// # Errors
+///
+/// Returns a typed failure when the JSON is invalid, incomplete, contains
+/// extra fields, or does not use the current role-policy schema version.
+pub fn parse_role_session_policy(value: &str) -> KernelResult<RoleSessionPolicy> {
+    let policy: RoleSessionPolicy = serde_json::from_str(value).map_err(|error| {
+        KernelFailure::new(
+            "INVALID_ROLE_POLICY",
+            format!("StrongFlow role policy is invalid: {error}"),
+        )
+    })?;
+    if policy.schema_version != i64::from(ROLE_SESSION_POLICY_SCHEMA_VERSION) {
+        return Err(KernelFailure::new(
+            "INVALID_ROLE_POLICY",
+            "StrongFlow role policy schema version is unsupported",
+        ));
     }
+    Ok(policy)
 }
 
 /// Optional configuration replacements applied while forking a live session.
@@ -479,6 +594,17 @@ pub struct SubmissionInfo {
     pub turn_id: Option<String>,
     /// Core-provided reason when not accepted.
     pub reason: Option<String>,
+}
+
+/// Immutable options that identify one submitted turn independently of its
+/// prompt text. Every Kernel submission entry point requires this value so a
+/// structured-output turn cannot be started or steered through an untyped
+/// fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnSubmissionOptions {
+    /// Exact JSON Schema passed to Codex Core for the final model output.
+    /// Ordinary React turns use `None`.
+    pub final_output_json_schema: Option<Value>,
 }
 
 /// Typed result of reconciling one host-reserved turn against durable rollout state.
@@ -576,22 +702,63 @@ struct CanonicalRolePolicy {
     workspace_write: bool,
 }
 
-fn canonical_role_policy(role_id: &str) -> Option<CanonicalRolePolicy> {
-    Some(match role_id {
-        "requirements" | "solution" | "planner" => CanonicalRolePolicy {
+fn canonical_role_policy(
+    role_id: &RoleSessionPolicyRoleId,
+    execution_mode: &RoleExecutionMode,
+) -> CanonicalRolePolicy {
+    let mut policy = match role_id {
+        RoleSessionPolicyRoleId::Requirements
+        | RoleSessionPolicyRoleId::Solution
+        | RoleSessionPolicyRoleId::Planner => CanonicalRolePolicy {
             workspace_mode: "source-read-only",
             workspace_write: false,
         },
-        "executor" | "remediator" => CanonicalRolePolicy {
-            workspace_mode: "candidate-write",
-            workspace_write: true,
-        },
-        "reviewer" | "verifier" | "adversarial-verifier" => CanonicalRolePolicy {
+        RoleSessionPolicyRoleId::Executor | RoleSessionPolicyRoleId::Remediator => {
+            CanonicalRolePolicy {
+                workspace_mode: "candidate-write",
+                workspace_write: true,
+            }
+        }
+        RoleSessionPolicyRoleId::Reviewer
+        | RoleSessionPolicyRoleId::Verifier
+        | RoleSessionPolicyRoleId::AdversarialVerifier => CanonicalRolePolicy {
             workspace_mode: "candidate-read-only",
             workspace_write: false,
         },
-        _ => return None,
-    })
+    };
+    if execution_mode == &RoleExecutionMode::DelegatedBatch
+        && matches!(
+            role_id,
+            RoleSessionPolicyRoleId::Executor | RoleSessionPolicyRoleId::Remediator
+        )
+    {
+        policy = CanonicalRolePolicy {
+            workspace_mode: "candidate-read-only",
+            workspace_write: false,
+        };
+    }
+    policy
+}
+
+const fn role_id_name(role_id: &RoleSessionPolicyRoleId) -> &'static str {
+    match role_id {
+        RoleSessionPolicyRoleId::Requirements => "requirements",
+        RoleSessionPolicyRoleId::Solution => "solution",
+        RoleSessionPolicyRoleId::Planner => "planner",
+        RoleSessionPolicyRoleId::Executor => "executor",
+        RoleSessionPolicyRoleId::Reviewer => "reviewer",
+        RoleSessionPolicyRoleId::Verifier => "verifier",
+        RoleSessionPolicyRoleId::AdversarialVerifier => "adversarial-verifier",
+        RoleSessionPolicyRoleId::Remediator => "remediator",
+    }
+}
+
+const fn workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) -> &'static str {
+    match mode {
+        RoleSessionPolicyWorkspaceMode::SourceReadOnly => "source-read-only",
+        RoleSessionPolicyWorkspaceMode::CandidateReadOnly => "candidate-read-only",
+        RoleSessionPolicyWorkspaceMode::CandidateWrite => "candidate-write",
+    }
 }
 
 /// Process-local embedded Codex kernel.
@@ -875,24 +1042,19 @@ impl Kernel {
     fn validate_role_session_policy(
         policy: &RoleSessionPolicy,
     ) -> KernelResult<CanonicalRolePolicy> {
-        if policy.schema_version != ROLE_SESSION_POLICY_SCHEMA_VERSION {
+        if policy.schema_version != i64::from(ROLE_SESSION_POLICY_SCHEMA_VERSION) {
             return Err(KernelFailure::new(
                 "INVALID_ROLE_POLICY",
                 "StrongFlow role policy schema version is unsupported",
             ));
         }
-        let canonical = canonical_role_policy(&policy.role_id).ok_or_else(|| {
-            KernelFailure::new(
-                "INVALID_ROLE_POLICY",
-                format!("unknown StrongFlow role {}", policy.role_id),
-            )
-        })?;
-        if policy.workspace_mode != canonical.workspace_mode {
+        let canonical = canonical_role_policy(&policy.role_id, &policy.execution_mode);
+        if workspace_mode_name(&policy.workspace_mode) != canonical.workspace_mode {
             return Err(KernelFailure::new(
                 "INVALID_ROLE_POLICY",
                 format!(
                     "role {} does not match its canonical workspace mode",
-                    policy.role_id
+                    role_id_name(&policy.role_id)
                 ),
             ));
         }
@@ -1051,6 +1213,7 @@ impl Kernel {
         &self,
         session_id: &str,
         text: String,
+        options: TurnSubmissionOptions,
     ) -> KernelResult<SubmissionInfo> {
         Self::guard(async {
             if text.trim().is_empty() {
@@ -1064,7 +1227,7 @@ impl Kernel {
             self.enforce_private_permissions()?;
             let submission = session
                 .thread
-                .start_or_steer_turn(user_text_request(text))
+                .start_or_steer_turn(user_text_request(text, &options))
                 .await
                 .map_err(|error| KernelFailure::new("TURN_SUBMIT_FAILED", error.to_string()))?;
             self.enforce_private_permissions()?;
@@ -1087,6 +1250,7 @@ impl Kernel {
         session_id: &str,
         turn_id: String,
         text: String,
+        options: TurnSubmissionOptions,
     ) -> KernelResult<ExactTurnReconciliation> {
         Self::guard(async {
             if turn_id.trim().is_empty() || text.trim().is_empty() {
@@ -1129,7 +1293,7 @@ impl Kernel {
                     } else {
                         session
                             .thread
-                            .start_turn_with_id_if_idle(user_text_request(text), turn_id)
+                            .start_turn_with_id_if_idle(user_text_request(text, &options), turn_id)
                             .await
                     }
                     .map_err(|_| {
@@ -1158,6 +1322,7 @@ impl Kernel {
         session_id: &str,
         expected_turn_id: String,
         text: String,
+        options: TurnSubmissionOptions,
     ) -> KernelResult<SubmissionInfo> {
         Self::guard(async {
             if text.trim().is_empty() {
@@ -1171,7 +1336,7 @@ impl Kernel {
             self.enforce_private_permissions()?;
             let submission = session
                 .thread
-                .steer_turn(user_text_request(text), expected_turn_id)
+                .steer_turn(user_text_request(text, &options), expected_turn_id)
                 .await
                 .map_err(|error| KernelFailure::new("TURN_STEER_FAILED", error.to_string()))?;
             self.enforce_private_permissions()?;
@@ -1616,11 +1781,15 @@ pub const fn descriptor() -> KernelDescriptor {
     }
 }
 
-fn user_text_request(text: String) -> TurnInputRequest {
+fn user_text_request(text: String, options: &TurnSubmissionOptions) -> TurnInputRequest {
     TurnInputRequest::user_input(vec![UserInput::Text {
         text,
         text_elements: Vec::new(),
     }])
+    .on_start(TurnStartOptions {
+        final_output_json_schema: options.final_output_json_schema.clone(),
+        ..TurnStartOptions::default()
+    })
 }
 
 fn submission_info(submission: TurnInputSubmission) -> SubmissionInfo {
@@ -1858,7 +2027,11 @@ mod tests {
     use super::ModelPortStream;
     use super::PermissionProfile;
     use super::RejectingKernelActionGate;
+    use super::RoleExecutionMode;
     use super::RoleSessionPolicy;
+    use super::RoleSessionPolicyRoleId;
+    use super::RoleSessionPolicyWorkspaceMode;
+    use super::TurnSubmissionOptions;
     use super::canonical_role_policy;
     use super::codex_review_decision;
     use super::descriptor;
@@ -1866,6 +2039,7 @@ mod tests {
     use super::model_route;
     use super::serialize_codex_event;
     use super::set_workspace;
+    use super::user_text_request;
 
     const EXPECTED_ROLE_POLICIES: &[(&str, &str, bool)] = &[
         ("requirements", "source-read-only", false),
@@ -1877,6 +2051,29 @@ mod tests {
         ("adversarial-verifier", "candidate-read-only", false),
         ("remediator", "candidate-write", true),
     ];
+
+    fn generated_role_id(role: &str) -> RoleSessionPolicyRoleId {
+        match role {
+            "requirements" => RoleSessionPolicyRoleId::Requirements,
+            "solution" => RoleSessionPolicyRoleId::Solution,
+            "planner" => RoleSessionPolicyRoleId::Planner,
+            "executor" => RoleSessionPolicyRoleId::Executor,
+            "reviewer" => RoleSessionPolicyRoleId::Reviewer,
+            "verifier" => RoleSessionPolicyRoleId::Verifier,
+            "adversarial-verifier" => RoleSessionPolicyRoleId::AdversarialVerifier,
+            "remediator" => RoleSessionPolicyRoleId::Remediator,
+            _ => panic!("unknown test role"),
+        }
+    }
+
+    fn generated_workspace_mode(workspace: &str) -> RoleSessionPolicyWorkspaceMode {
+        match workspace {
+            "source-read-only" => RoleSessionPolicyWorkspaceMode::SourceReadOnly,
+            "candidate-read-only" => RoleSessionPolicyWorkspaceMode::CandidateReadOnly,
+            "candidate-write" => RoleSessionPolicyWorkspaceMode::CandidateWrite,
+            _ => panic!("unknown test workspace"),
+        }
+    }
 
     #[derive(Debug)]
     struct UnusedModelPort;
@@ -1995,7 +2192,7 @@ mod tests {
         .expect("construct kernel");
         let build = kernel.build_info();
         assert_eq!(build.interface_version, INTERFACE_VERSION);
-        assert_eq!(build.interface_version, 6);
+        assert_eq!(build.interface_version, 9);
         assert_eq!(build.codex_commit, CODEX_COMMIT);
         assert_eq!(
             build.patch_set,
@@ -2005,10 +2202,34 @@ mod tests {
                 "upstream/patches/codex/0003-export-config-builder.patch",
                 "upstream/patches/codex/0005-remount-split-bwrap-root-read-only.patch",
                 "upstream/patches/codex/0006-tool-gate-and-exact-turn-replay.patch",
+                "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
             ]
         );
         assert_eq!(build.event_capacity, 16);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn turn_submission_options_are_attached_to_every_turn_request() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+        });
+        let request = user_text_request(
+            "return structured output".to_owned(),
+            &TurnSubmissionOptions {
+                final_output_json_schema: Some(schema.clone()),
+            },
+        );
+        assert_eq!(request.start.final_output_json_schema, Some(schema));
+        assert_eq!(
+            user_text_request("react".to_owned(), &TurnSubmissionOptions::default())
+                .start
+                .final_output_json_schema,
+            None
+        );
     }
 
     #[tokio::test]
@@ -2061,11 +2282,10 @@ mod tests {
     #[test]
     fn defines_the_exact_eight_role_workspace_matrix() {
         for &(role, workspace, writer) in EXPECTED_ROLE_POLICIES {
-            let policy = canonical_role_policy(role).expect("known StrongFlow role");
+            let policy = canonical_role_policy(&generated_role_id(role), &RoleExecutionMode::React);
             assert_eq!(policy.workspace_mode, workspace, "{role}");
             assert_eq!(policy.workspace_write, writer, "{role}");
         }
-        assert!(canonical_role_policy("unknown").is_none());
     }
 
     #[tokio::test]
@@ -2092,9 +2312,10 @@ mod tests {
 
         for &(role, workspace_mode, writer) in EXPECTED_ROLE_POLICIES {
             let policy = RoleSessionPolicy {
-                schema_version: 1,
-                role_id: role.to_string(),
-                workspace_mode: workspace_mode.to_string(),
+                schema_version: 2,
+                role_id: generated_role_id(role),
+                workspace_mode: generated_workspace_mode(workspace_mode),
+                execution_mode: RoleExecutionMode::React,
                 developer_instructions: format!("Act only as the {role} role."),
             };
             let mut config = base.clone();
@@ -2128,15 +2349,16 @@ mod tests {
         }
 
         let valid = RoleSessionPolicy {
-            schema_version: 1,
-            role_id: "requirements".to_string(),
-            workspace_mode: "source-read-only".to_string(),
+            schema_version: 2,
+            role_id: RoleSessionPolicyRoleId::Requirements,
+            workspace_mode: RoleSessionPolicyWorkspaceMode::SourceReadOnly,
+            execution_mode: RoleExecutionMode::React,
             developer_instructions: "Gather requirements.".to_string(),
         };
         let mut unknown_role = valid.clone();
-        unknown_role.role_id = "unknown".to_string();
+        unknown_role.schema_version = 3;
         let mut changed_workspace = valid.clone();
-        changed_workspace.workspace_mode = "candidate-write".to_string();
+        changed_workspace.workspace_mode = RoleSessionPolicyWorkspaceMode::CandidateWrite;
         let mut empty_instructions = valid;
         empty_instructions.developer_instructions = "  ".to_string();
         for policy in [unknown_role, changed_workspace, empty_instructions] {
@@ -2149,11 +2371,81 @@ mod tests {
 
     #[test]
     fn rejects_extra_role_policy_fields_at_the_native_boundary() {
-        let error = RoleSessionPolicy::from_json(
-            r#"{"schemaVersion":1,"roleId":"verifier","workspaceMode":"candidate-read-only","developerInstructions":"Verify.","tool":"extra"}"#,
+        let error = super::parse_role_session_policy(
+            r#"{"schemaVersion":2,"roleId":"verifier","workspaceMode":"candidate-read-only","executionMode":"react","developerInstructions":"Verify.","tool":"extra"}"#,
         )
         .expect_err("extra role policy fields must fail");
         assert_eq!(error.code(), "INVALID_ROLE_POLICY");
+    }
+
+    #[tokio::test]
+    async fn delegated_executor_and_remediator_are_read_only_composers() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-delegated-role-policy-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&home).expect("create home");
+        let mut base = ConfigBuilder::default()
+            .codex_home(home.clone())
+            .fallback_cwd(Some(home))
+            .strict_config(true)
+            .build()
+            .await
+            .expect("build fixture config");
+        set_workspace(&mut base, &workspace).expect("select role workspace");
+        base.agents_enabled = true;
+        base.update_plan_enabled = true;
+
+        for role in ["executor", "remediator"] {
+            let policy = RoleSessionPolicy {
+                schema_version: 2,
+                role_id: generated_role_id(role),
+                workspace_mode: RoleSessionPolicyWorkspaceMode::CandidateReadOnly,
+                execution_mode: RoleExecutionMode::DelegatedBatch,
+                developer_instructions: format!("Compose a change batch as {role}."),
+            };
+            let mut config = base.clone();
+            Kernel::apply_role_session_policy(&mut config, &policy)
+                .expect("apply delegated composer policy");
+            assert_eq!(
+                config.permissions.permission_profile(),
+                &PermissionProfile::read_only(),
+                "{role}"
+            );
+            assert!(config.agents_enabled, "{role}");
+            assert!(config.update_plan_enabled, "{role}");
+
+            let mut writable = policy;
+            writable.workspace_mode = RoleSessionPolicyWorkspaceMode::CandidateWrite;
+            let error = Kernel::apply_role_session_policy(&mut base.clone(), &writable)
+                .expect_err("delegated composer cannot request candidate-write authority");
+            assert_eq!(error.code(), "INVALID_ROLE_POLICY", "{role}");
+        }
+        std::fs::remove_dir_all(root).expect("remove delegated role-policy fixture");
+    }
+
+    #[test]
+    fn role_policy_v2_requires_the_exact_execution_mode() {
+        let v1 = super::parse_role_session_policy(
+            r#"{"schemaVersion":1,"roleId":"executor","workspaceMode":"candidate-write","executionMode":"react","developerInstructions":"Execute."}"#,
+        )
+        .expect_err("v1 policy is no longer a runtime contract");
+        assert_eq!(v1.code(), "INVALID_ROLE_POLICY");
+
+        let unknown = super::parse_role_session_policy(
+            r#"{"schemaVersion":2,"roleId":"executor","workspaceMode":"candidate-read-only","executionMode":"composer","developerInstructions":"Compose."}"#,
+        )
+        .expect_err("unknown execution mode must fail");
+        assert_eq!(unknown.code(), "INVALID_ROLE_POLICY");
+
+        let policy = super::parse_role_session_policy(
+            r#"{"schemaVersion":2,"roleId":"executor","workspaceMode":"candidate-read-only","executionMode":"delegated_batch","developerInstructions":"Compose."}"#,
+        )
+        .expect("canonical v2 policy");
+        assert_eq!(policy.execution_mode, RoleExecutionMode::DelegatedBatch);
     }
 
     #[cfg(unix)]

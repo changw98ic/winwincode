@@ -7,9 +7,7 @@ use std::{
     },
 };
 
-use winwincode_api::generated::{
-    Actor, CommandEnvelope, CommandName, RepositoryScope, Scope, UserActor,
-};
+use winwincode_api::generated::{Actor, CommandEnvelope, CommandName, Scope};
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, DeliveryVerdictCommitError, EventPublishError,
     EventPublisher, OutboxEvent,
@@ -33,6 +31,7 @@ use winwincode_domain::{
     DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_storage::{
     AggregateJournalKey, AggregateJournalPublication, AggregateJournalRecord, NewOutboxEvent,
     ProductStateStorage, ReceiptActorKey, ReceiptIdentity, ReceiptScopeKey, SqliteStorage,
@@ -61,7 +60,7 @@ fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {
     CommandEnvelope {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: CommandName::DeliverySubmitVerdict,
         expected_revision: Revision(
@@ -76,7 +75,7 @@ fn verdict_command(seed: u64, fixture: &VerdictFixture) -> CommandEnvelope {
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::RepositoryScope(RepositoryScope {
-            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            kind: winwincode_domain::RepositoryScopeKind::Repository,
             organization_id: OrganizationId(canonical_id("org", seed)),
             workspace_id: WorkspaceId(canonical_id("wsp", seed)),
             project_id: ProjectId(canonical_id("prj", seed)),

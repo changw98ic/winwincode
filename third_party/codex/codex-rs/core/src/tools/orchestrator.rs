@@ -58,6 +58,7 @@ impl ToolOrchestrator {
         tool_ctx: &ToolCtx,
         attempt: &SandboxAttempt<'_>,
         managed_network_active: bool,
+        action_authorization: Option<&crate::ToolCallGateAuthorization>,
     ) -> (Result<Out, ToolError>, Option<DeferredNetworkApproval>)
     where
         T: ToolRuntime<Rq, Out>,
@@ -99,6 +100,7 @@ impl ToolOrchestrator {
             network_proxy: network_approval
                 .as_ref()
                 .map(ActiveNetworkApproval::execution_proxy),
+            action_authorization,
         };
         if let Some(payload) = tool.action_gate_payload(req)
             && let Some(attachment) = tool_ctx
@@ -108,7 +110,10 @@ impl ToolOrchestrator {
                 .get::<crate::ToolCallGateAttachment>()
             && let Err(error) = attachment
                 .gate()
-                .revalidate(action_gate_request(tool_ctx, payload))
+                .revalidate(
+                    action_gate_request(tool_ctx, payload),
+                    action_authorization.cloned().unwrap_or_default(),
+                )
                 .await
         {
             return (Err(ToolError::Rejected(error.to_string())), None);
@@ -238,19 +243,23 @@ impl ToolOrchestrator {
             }
         }
 
-        if let Some(payload) = tool.action_gate_payload(req)
+        let action_authorization = if let Some(payload) = tool.action_gate_payload(req)
             && let Some(attachment) = tool_ctx
                 .session
                 .services
                 .thread_extension_data
                 .get::<crate::ToolCallGateAttachment>()
         {
-            attachment
-                .gate()
-                .authorize(action_gate_request(tool_ctx, payload))
-                .await
-                .map_err(|error| ToolError::Rejected(error.to_string()))?;
-        }
+            Some(
+                attachment
+                    .gate()
+                    .authorize(action_gate_request(tool_ctx, payload))
+                    .await
+                    .map_err(|error| ToolError::Rejected(error.to_string()))?,
+            )
+        } else {
+            None
+        };
 
         // 2) First attempt under the selected sandbox.
         let sandbox_override = sandbox_override_for_first_attempt(
@@ -303,6 +312,7 @@ impl ToolOrchestrator {
                 .windows_sandbox_private_desktop,
             network_denial_cancellation_token: None,
             network_proxy: None,
+            action_authorization: None,
         };
 
         let initial_attempt_start = Instant::now();
@@ -312,6 +322,7 @@ impl ToolOrchestrator {
             tool_ctx,
             &initial_attempt,
             managed_network_active,
+            action_authorization.as_ref(),
         )
         .await;
         let initial_duration = initial_attempt_start.elapsed();
@@ -487,13 +498,20 @@ impl ToolOrchestrator {
                         .windows_sandbox_private_desktop,
                     network_denial_cancellation_token: None,
                     network_proxy: None,
+                    action_authorization: None,
                 };
 
                 // Second attempt.
                 let escalated_attempt_start = Instant::now();
-                let (retry_result, retry_deferred_network_approval) =
-                    Self::run_attempt(tool, req, tool_ctx, &retry_attempt, managed_network_active)
-                        .await;
+                let (retry_result, retry_deferred_network_approval) = Self::run_attempt(
+                    tool,
+                    req,
+                    tool_ctx,
+                    &retry_attempt,
+                    managed_network_active,
+                    action_authorization.as_ref(),
+                )
+                .await;
                 let escalated_duration = escalated_attempt_start.elapsed();
                 match retry_result {
                     Ok(output) => {

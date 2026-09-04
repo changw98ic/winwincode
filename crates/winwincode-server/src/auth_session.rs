@@ -806,11 +806,9 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
-    use winwincode_api::generated::{
-        Actor, OrganizationScope, OrganizationScopeKind, Scope, UserActor, UserActorKind,
-    };
+    use winwincode_api::generated::{Actor, OrganizationScope, OrganizationScopeKind, Scope};
     use winwincode_control_plane::ExternalIdentityPrincipal;
-    use winwincode_domain::{ExternalIdentityId, OrganizationId, UserId};
+    use winwincode_domain::{ExternalIdentityId, OrganizationId, UserActor, UserActorKind, UserId};
 
     use super::*;
 

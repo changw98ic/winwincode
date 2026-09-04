@@ -125,6 +125,8 @@ pub use thread_manager::local_agent_graph_store_from_state_db;
 pub use thread_manager::thread_store_from_config;
 pub use tool_call_gate::ToolCallGate;
 pub use tool_call_gate::ToolCallGateAttachment;
+pub use tool_call_gate::ToolCallGateAuthorization;
+pub use tool_call_gate::ToolCallGateExecutableAuthorization;
 pub use tool_call_gate::ToolCallGateFileChange;
 pub use tool_call_gate::ToolCallGateFileOperation;
 pub use tool_call_gate::ToolCallGatePayload;

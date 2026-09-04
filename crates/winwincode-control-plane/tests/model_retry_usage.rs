@@ -8,8 +8,7 @@ use std::thread;
 
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceService, DurableProviderRetrySettlement, FrozenModelRetryPlan,
@@ -24,12 +23,13 @@ use winwincode_control_plane::{
     ModelUsageFilter, ProviderCatalogRequest, ProviderCatalogService, ProviderDescriptor,
     ProviderEnterpriseUsageErrorKind, ProviderEnterpriseUsageReconciler, ProviderGatewayIdentity,
     ProviderGatewaySettlement, ProviderGatewayTerminalOutcome, ProviderStreamFailureKind,
-    ProviderTokenUsage,
+    ProviderTokenUsage, StructuredOutputSupport,
 };
 use winwincode_domain::{
     CredentialReferenceId, DeliveryId, Instant, ModelExchangeId, OrganizationId, ProductSessionId,
     ProjectId, RepositoryId, RequestId, Revision, SchemaVersion, Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{
     AggregateJournalKey, CommitReceipt, EnterpriseUsageFilter as EnterpriseLedgerFilter,
     LoadedAggregateJournal, OutboxEvent, ProductStateStorage, ProjectionEventCursor,
@@ -103,6 +103,7 @@ fn register_provider(storage: &mut SqliteStorage, seed: u64, expected_version: u
                     context_window_tokens: 128_000,
                     max_output_tokens: 16_000,
                     tool_support: ModelToolSupport::Parallel,
+                    structured_output_support: StructuredOutputSupport::Unsupported,
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },

@@ -189,14 +189,14 @@ impl ToolCallRuntime {
                         tool_name: dispatch_call.tool_name.name.clone(),
                         payload,
                     };
-                    attachment
+                    let authorization = attachment
                         .gate()
                         .authorize(request.clone())
                         .await
                         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
                     attachment
                         .gate()
-                        .revalidate(request)
+                        .revalidate(request, authorization)
                         .await
                         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
                 }

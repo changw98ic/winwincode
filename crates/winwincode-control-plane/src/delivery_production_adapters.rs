@@ -19,7 +19,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandName, DeliveryAdvancePayload, DeliveryCreatePayload,
-    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, RepositoryScope, Scope,
+    DeliveryResolveAttentionPayload, DeliveryUpdateSpecPayload, Scope,
 };
 use winwincode_delivery::{
     application::{
@@ -34,6 +34,7 @@ use winwincode_delivery::{
         RepositoryKind, RepositoryRef, SessionBindingId, StageRunStatus,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     AttentionItemId, ExecutionJobId, ProductSessionId, RequestId, Sha256Digest, StageRunId,
 };

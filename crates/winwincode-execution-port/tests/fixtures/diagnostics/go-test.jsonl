@@ -1,0 +1,2 @@
+{"Time":"2026-09-02T00:00:00Z","Action":"run","Package":"example.test","Test":"TestOne"}
+{"Time":"2026-09-02T00:00:01Z","Action":"fail","Package":"example.test","Test":"TestOne","Elapsed":0.1}

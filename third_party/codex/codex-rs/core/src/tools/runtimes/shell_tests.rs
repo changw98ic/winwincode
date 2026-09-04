@@ -86,4 +86,24 @@ async fn approval_key_uses_path_uri_and_includes_environment_id() {
         .cache_keys();
 
     assert_ne!(original_key, other_key);
+
+    request.command = vec![
+        "/bin/zsh".to_string(),
+        "-lc".to_string(),
+        "cat src/lib.rs".to_string(),
+    ];
+    assert_eq!(
+        runtime.action_gate_payload(&request),
+        Some(crate::ToolCallGatePayload::Shell {
+            program: "cat".to_string(),
+            args: vec!["src/lib.rs".to_string()],
+            working_directory: cwd.to_string_lossy().into_owned(),
+        })
+    );
+
+    request.command[2] = "cat src/lib.rs; rm src/lib.rs".to_string();
+    assert!(matches!(
+        runtime.action_gate_payload(&request),
+        Some(crate::ToolCallGatePayload::Shell { ref program, .. }) if program == "/bin/zsh"
+    ));
 }

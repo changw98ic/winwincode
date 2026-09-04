@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::future::BoxFuture;
@@ -23,7 +25,8 @@ use winwincode_execution_port::{
     generated::{ActionEnforcementDecision, ActionEnforcementReceiptMessage, ExecutionPortMessage},
 };
 use winwincode_kernel::{
-    KernelActionGate, KernelActionPayload, KernelActionRequest, KernelFileOperation,
+    KernelActionAuthorization, KernelActionGate, KernelActionPayload, KernelActionRequest,
+    KernelExecutableAuthorization, KernelFileOperation,
 };
 
 use crate::{ActionRequestTransport, model_bridge::ModelRunBinding};
@@ -39,6 +42,8 @@ struct ActionGateState {
     verifier: ActionEnforcementVerifier,
     receipt_store: Mutex<FileActionReceiptUseStore>,
     bindings: RwLock<HashMap<String, ModelRunBinding>>,
+    read_only_runs: RwLock<HashMap<String, PathBuf>>,
+    trusted_read_programs: HashMap<String, TrustedReadProgram>,
     session_generations: Mutex<HashMap<String, u64>>,
     trusted_now: Mutex<Option<Instant>>,
     pending: Mutex<HashMap<String, PendingAction>>,
@@ -69,6 +74,24 @@ struct PreparedToolRequest {
     observed: ObservedAction,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrustedReadProgram {
+    canonical_path: PathBuf,
+    identity: ExecutableIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    owner: u32,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    content_sha256: [u8; 32],
+}
+
 #[derive(Clone)]
 struct CompletedAction {
     receipt_signature: Sha256Digest,
@@ -93,6 +116,8 @@ impl ExecutionPortActionGate {
                 verifier: signing_key.into_verifier(),
                 receipt_store: Mutex::new(receipt_store),
                 bindings: RwLock::new(HashMap::new()),
+                read_only_runs: RwLock::new(HashMap::new()),
+                trusted_read_programs: resolve_trusted_read_programs(),
                 session_generations: Mutex::new(HashMap::new()),
                 trusted_now: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
@@ -112,8 +137,23 @@ impl ExecutionPortActionGate {
     pub(crate) fn install_binding(
         &self,
         binding: ModelRunBinding,
+        read_only_workspace: Option<&Path>,
     ) -> Result<(), ActionBridgeError> {
-        self.install_binding_mode(binding, true)
+        let run_key = binding.run_key.clone();
+        self.install_binding_mode(binding, true)?;
+        let mut read_only_runs = self
+            .state
+            .read_only_runs
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?;
+        if let Some(workspace) = read_only_workspace {
+            let workspace =
+                std::fs::canonicalize(workspace).map_err(|_| ActionBridgeError::Unavailable)?;
+            read_only_runs.insert(run_key, workspace);
+        } else {
+            read_only_runs.remove(&run_key);
+        }
+        Ok(())
     }
 
     /// Installs a descendant binding without allowing it to overwrite an
@@ -172,7 +212,7 @@ impl ExecutionPortActionGate {
                         existing.canonical_thread_id.0.clone(),
                     ]
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<HashSet<_>>();
             if fence_lineage {
                 // A replacement root fences the complete run lineage.  Do not
                 // preserve descendants merely because they share the run key:
@@ -231,13 +271,18 @@ impl ExecutionPortActionGate {
                         candidate.canonical_thread_id.0.clone(),
                     ]
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<HashSet<_>>();
             bindings.retain(|_, candidate| candidate.run_key != binding.run_key);
             session_ids
         };
         for session_id in session_ids {
             self.cancel_session(&session_id)?;
         }
+        self.state
+            .read_only_runs
+            .write()
+            .map_err(|_| ActionBridgeError::Unavailable)?
+            .remove(&binding.run_key);
         Ok(())
     }
 
@@ -508,7 +553,7 @@ impl KernelActionGate for ExecutionPortActionGate {
     fn authorize(
         &self,
         request: KernelActionRequest,
-    ) -> BoxFuture<'static, winwincode_kernel::KernelResult<()>> {
+    ) -> BoxFuture<'static, winwincode_kernel::KernelResult<KernelActionAuthorization>> {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             authorize_action(&state, request)
@@ -520,10 +565,11 @@ impl KernelActionGate for ExecutionPortActionGate {
     fn revalidate(
         &self,
         request: KernelActionRequest,
+        authorization: KernelActionAuthorization,
     ) -> BoxFuture<'static, winwincode_kernel::KernelResult<()>> {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
-            revalidate_action(&state, &request)
+            revalidate_action(&state, &request, &authorization)
                 .map_err(|_| winwincode_kernel::KernelFailure::action_rejected())
         })
     }
@@ -532,8 +578,11 @@ impl KernelActionGate for ExecutionPortActionGate {
 async fn authorize_action(
     state: &Arc<ActionGateState>,
     request: KernelActionRequest,
-) -> Result<(), ActionBridgeError> {
+) -> Result<KernelActionAuthorization, ActionBridgeError> {
     let (binding, now) = current_binding_and_time(state, &request.session_id)?;
+    if let Some(authorization) = delegated_read_only_authorization(state, &binding, &request)? {
+        return Ok(authorization);
+    }
     let generation = current_generation(state, &request.session_id)?;
     let tool_requests = prepare_tool_requests(state, &binding, &request)?;
     let request_digest = kernel_request_digest(&request);
@@ -556,7 +605,8 @@ async fn authorize_action(
         }
         (request_ids, receivers)
     };
-    await_action_receivers(state, request_ids, receivers).await
+    await_action_receivers(state, request_ids, receivers).await?;
+    Ok(bound_authorization(&request, None))
 }
 
 fn prepare_tool_requests(
@@ -801,8 +851,21 @@ fn current_binding_and_time(
 fn revalidate_action(
     state: &ActionGateState,
     request: &KernelActionRequest,
+    authorization: &KernelActionAuthorization,
 ) -> Result<(), ActionBridgeError> {
+    if authorization.request_binding() != request_binding(request) {
+        return Err(ActionBridgeError::StaleAuthority);
+    }
     let (binding, _) = current_binding_and_time(state, &request.session_id)?;
+    if let Some(current) = delegated_read_only_authorization(state, &binding, request)? {
+        if &current != authorization {
+            return Err(ActionBridgeError::StaleAuthority);
+        }
+        return Ok(());
+    }
+    if authorization.executable().is_some() {
+        return Err(ActionBridgeError::StaleAuthority);
+    }
     let generation = current_generation(state, &request.session_id)?;
     let tool_requests = canonical_tool_requests(request)?;
     let digest = kernel_request_digest(request);
@@ -822,6 +885,301 @@ fn revalidate_action(
         }
     }
     Ok(())
+}
+
+fn delegated_read_only_authorization(
+    state: &ActionGateState,
+    binding: &ModelRunBinding,
+    request: &KernelActionRequest,
+) -> Result<Option<KernelActionAuthorization>, ActionBridgeError> {
+    let workspace = state
+        .read_only_runs
+        .read()
+        .map_err(|_| ActionBridgeError::Unavailable)?
+        .get(&binding.run_key)
+        .cloned();
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    if is_request_user_input(request) {
+        return Ok(Some(bound_authorization(request, None)));
+    }
+    if let Some(executable) = explicit_read_only_shell_authorization(state, request, &workspace) {
+        return Ok(Some(bound_authorization(request, Some(executable))));
+    }
+    Err(ActionBridgeError::Rejected)
+}
+
+fn is_request_user_input(request: &KernelActionRequest) -> bool {
+    request.tool_name == "request_user_input"
+        && request
+            .namespace
+            .as_deref()
+            .is_none_or(|namespace| namespace.is_empty() || namespace == "functions")
+        && matches!(request.payload, KernelActionPayload::Function { .. })
+}
+
+fn explicit_read_only_shell_authorization(
+    state: &ActionGateState,
+    request: &KernelActionRequest,
+    workspace: &Path,
+) -> Option<KernelExecutableAuthorization> {
+    let KernelActionPayload::Shell {
+        program,
+        args,
+        working_directory,
+    } = &request.payload
+    else {
+        return None;
+    };
+    if !matches!(request.tool_name.as_str(), "shell_command" | "exec_command")
+        || request
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| !namespace.is_empty() && namespace != "functions")
+        || args.iter().any(|arg| shell_read_arg_is_unsafe(arg))
+    {
+        return None;
+    }
+    let requested_program = Path::new(program);
+    let requested_cwd = Path::new(working_directory);
+    if requested_program.is_absolute()
+        && (requested_program.starts_with(workspace)
+            || requested_program.starts_with(requested_cwd))
+    {
+        return None;
+    }
+    let (program, executable) = trusted_read_program(&state.trusted_read_programs, program)?;
+    if !read_paths_stay_in_workspace(working_directory, args, workspace) {
+        return None;
+    }
+    read_only_program_arguments(program, args).then(|| {
+        KernelExecutableAuthorization::new(
+            executable.canonical_path.to_string_lossy().into_owned(),
+            args.clone(),
+            executable_identity_string(&executable.identity),
+        )
+    })
+}
+
+fn read_only_program_arguments(program: &str, args: &[String]) -> bool {
+    match program {
+        "cat" | "head" | "tail" | "wc" | "ls" | "pwd" | "stat" => true,
+        "grep" => !args.iter().any(|arg| {
+            matches!(arg.as_str(), "-f" | "--file")
+                || arg.starts_with("--file=")
+                || (arg.starts_with("-f") && arg.len() > 2)
+        }),
+        "rg" => !args.iter().any(|arg| {
+            arg == "--pre"
+                || arg.starts_with("--pre=")
+                || arg == "--pre-glob"
+                || arg.starts_with("--pre-glob=")
+                || arg == "--config"
+                || arg.starts_with("--config=")
+                || arg == "--hostname-bin"
+                || arg.starts_with("--hostname-bin=")
+                || matches!(arg.as_str(), "-z" | "--search-zip")
+                || matches!(arg.as_str(), "-f" | "--file" | "--ignore-file")
+                || arg.starts_with("--file=")
+                || arg.starts_with("--ignore-file=")
+                || (arg.starts_with("-f") && arg.len() > 2)
+        }),
+        _ => false,
+    }
+}
+
+fn resolve_trusted_read_programs() -> HashMap<String, TrustedReadProgram> {
+    const PROGRAMS: &[&str] = &[
+        "cat", "head", "tail", "wc", "ls", "pwd", "stat", "grep", "rg",
+    ];
+    PROGRAMS
+        .iter()
+        .filter(|name| {
+            **name != "rg"
+                || std::env::var_os("RIPGREP_CONFIG_PATH").is_none_or(|value| value.is_empty())
+        })
+        .filter_map(|name| {
+            protected_program_directories()
+                .iter()
+                .find_map(|directory| {
+                    let candidate = directory.join(name);
+                    let canonical_path = std::fs::canonicalize(candidate).ok()?;
+                    protected_executable(&canonical_path).then_some(())?;
+                    let identity = executable_identity(&canonical_path)?;
+                    Some((
+                        (*name).to_owned(),
+                        TrustedReadProgram {
+                            canonical_path,
+                            identity,
+                        },
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn trusted_read_program<'a>(
+    trusted: &'a HashMap<String, TrustedReadProgram>,
+    program: &str,
+) -> Option<(&'a str, &'a TrustedReadProgram)> {
+    let path = Path::new(program);
+    let selected = if path.components().count() == 1
+        && matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        trusted.get_key_value(program)
+    } else if path.is_absolute() {
+        let canonical = std::fs::canonicalize(path).ok()?;
+        trusted
+            .iter()
+            .find(|(_, fixed)| fixed.canonical_path == canonical)
+    } else {
+        None
+    }?;
+    if selected.0 == "rg"
+        && std::env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|value| !value.is_empty())
+    {
+        return None;
+    }
+    let current = executable_identity(&selected.1.canonical_path)?;
+    (current == selected.1.identity && protected_executable(&selected.1.canonical_path))
+        .then_some((selected.0.as_str(), selected.1))
+}
+
+#[cfg(target_os = "macos")]
+fn protected_program_directories() -> [PathBuf; 4] {
+    ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from)
+}
+
+#[cfg(target_os = "linux")]
+fn protected_program_directories() -> [PathBuf; 2] {
+    ["/usr/bin", "/bin"].map(PathBuf::from)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn protected_program_directories() -> [PathBuf; 0] {
+    []
+}
+
+#[cfg(unix)]
+fn protected_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o111 == 0
+        || metadata.mode() & 0o022 != 0
+    {
+        return false;
+    }
+    path.ancestors().skip(1).all(|ancestor| {
+        std::fs::metadata(ancestor).is_ok_and(|metadata| {
+            metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+        })
+    })
+}
+
+#[cfg(not(unix))]
+fn protected_executable(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn executable_identity(path: &Path) -> Option<ExecutableIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(ExecutableIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+        owner: metadata.uid(),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        content_sha256: Sha256::digest(bytes).into(),
+    })
+}
+
+#[cfg(not(unix))]
+fn executable_identity(_path: &Path) -> Option<ExecutableIdentity> {
+    None
+}
+
+fn executable_identity_string(identity: &ExecutableIdentity) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"winwincode-delegated-read-executable.v1\0");
+    digest.update(identity.device.to_be_bytes());
+    digest.update(identity.inode.to_be_bytes());
+    digest.update(identity.mode.to_be_bytes());
+    digest.update(identity.owner.to_be_bytes());
+    digest.update(identity.length.to_be_bytes());
+    digest.update(identity.modified_seconds.to_be_bytes());
+    digest.update(identity.modified_nanoseconds.to_be_bytes());
+    digest.update(identity.content_sha256);
+    format!("sha256:{}", hex_bytes(&digest.finalize()))
+}
+
+fn bound_authorization(
+    request: &KernelActionRequest,
+    executable: Option<KernelExecutableAuthorization>,
+) -> KernelActionAuthorization {
+    KernelActionAuthorization::new(request_binding(request), executable)
+}
+
+fn request_binding(request: &KernelActionRequest) -> String {
+    format!("sha256:{}", hex_bytes(&kernel_request_digest(request)))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn read_paths_stay_in_workspace(
+    working_directory: &str,
+    args: &[String],
+    workspace: &Path,
+) -> bool {
+    let Ok(working_directory) = std::fs::canonicalize(working_directory) else {
+        return false;
+    };
+    if !working_directory.starts_with(workspace) {
+        return false;
+    }
+    args.iter().all(|arg| {
+        [
+            Some(arg.as_str()),
+            arg.split_once('=').map(|(_, value)| value),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|candidate| {
+            let path = Path::new(candidate);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| component == Component::ParentDir)
+            {
+                return false;
+            }
+            let candidate = working_directory.join(path);
+            !candidate.exists()
+                || std::fs::canonicalize(candidate)
+                    .is_ok_and(|canonical| canonical.starts_with(workspace))
+        })
+    })
+}
+
+fn shell_read_arg_is_unsafe(arg: &str) -> bool {
+    matches!(arg, ">" | ">>" | "<" | "<<" | "|" | "||" | "&&" | ";")
+        || arg.contains('\n')
+        || arg.contains('\r')
 }
 
 fn authorize_capability(
@@ -1099,6 +1457,7 @@ mod tests {
     use super::ExecutionPortActionGate;
     use crate::model_bridge::ModelRunBinding;
     use crate::model_port_client::ModelLeaseAuthority;
+    use std::path::Path;
     use winwincode_domain::{
         CodexThreadId, ExecutionJobId, ExecutionMessageId, FencingToken, Instant, LeaseId,
         OrganizationId, ProductSessionId, ProjectId, RepositoryId, RepositoryScope,
@@ -1121,8 +1480,8 @@ mod tests {
         },
     };
     use winwincode_kernel::{
-        KernelActionGate as _, KernelActionPayload, KernelActionRequest, KernelFileChange,
-        KernelFileOperation,
+        KernelActionAuthorization, KernelActionGate as _, KernelActionPayload, KernelActionRequest,
+        KernelFileChange, KernelFileOperation,
     };
 
     fn id(prefix: &str, value: char) -> String {
@@ -1173,6 +1532,43 @@ mod tests {
                 },
             },
             opened_at: Instant("2030-01-01T00:00:00.000Z".to_owned()),
+        }
+    }
+
+    fn shell_request(
+        operation_id: &str,
+        program: &str,
+        args: &[&str],
+        working_directory: &Path,
+    ) -> KernelActionRequest {
+        KernelActionRequest {
+            session_id: "kernel-session-action".to_owned(),
+            turn_id: "turn-read-only".to_owned(),
+            operation_id: operation_id.to_owned(),
+            namespace: Some("functions".to_owned()),
+            tool_name: "exec_command".to_owned(),
+            payload: KernelActionPayload::Shell {
+                program: program.to_owned(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                working_directory: working_directory.to_string_lossy().into_owned(),
+            },
+        }
+    }
+
+    fn patch_request(marker: &Path) -> KernelActionRequest {
+        KernelActionRequest {
+            session_id: "kernel-session-action".to_owned(),
+            turn_id: "turn-read-only".to_owned(),
+            operation_id: "call-patch".to_owned(),
+            namespace: Some("functions".to_owned()),
+            tool_name: "apply_patch".to_owned(),
+            payload: KernelActionPayload::Files {
+                changes: vec![KernelFileChange {
+                    operation: KernelFileOperation::Write,
+                    path: marker.to_string_lossy().into_owned(),
+                    move_path: None,
+                }],
+            },
         }
     }
 
@@ -1241,10 +1637,11 @@ mod tests {
     async fn assert_consumed_action_is_fenced(
         gate: &ExecutionPortActionGate,
         action_request: KernelActionRequest,
+        authorization: KernelActionAuthorization,
         receipt: &ActionEnforcementReceiptMessage,
         now: &Instant,
     ) {
-        gate.revalidate(action_request.clone())
+        gate.revalidate(action_request.clone(), authorization.clone())
             .await
             .expect("current permit revalidates immediately before runtime");
         assert_eq!(
@@ -1269,7 +1666,9 @@ mod tests {
         gate.cancel_session("kernel-session-action")
             .expect("cancel exact session generation");
         assert!(
-            gate.revalidate(action_request.clone()).await.is_err(),
+            gate.revalidate(action_request.clone(), authorization.clone())
+                .await
+                .is_err(),
             "a cancelled permit cannot reach the side-effect seam"
         );
 
@@ -1289,7 +1688,11 @@ mod tests {
         assert!(gate.take_messages().expect("no denied message").is_empty());
         gate.update_now(&Instant("2030-01-01T01:00:00.000Z".to_owned()))
             .expect("advance trusted time to lease boundary");
-        assert!(gate.revalidate(action_request.clone()).await.is_err());
+        assert!(
+            gate.revalidate(action_request.clone(), authorization.clone())
+                .await
+                .is_err()
+        );
         gate.update_now(now)
             .expect("ignore an out-of-order older trusted time");
         assert_eq!(
@@ -1302,7 +1705,90 @@ mod tests {
         );
         gate.remove_binding(&binding())
             .expect("cancel exact binding");
-        assert!(gate.revalidate(action_request).await.is_err());
+        assert!(
+            gate.revalidate(action_request, authorization)
+                .await
+                .is_err()
+        );
+    }
+
+    fn delegated_rejected_requests(
+        root: &Path,
+        outside: &Path,
+        marker: &Path,
+    ) -> Vec<KernelActionRequest> {
+        let mut requests = vec![
+            shell_request(
+                "call-shell",
+                "sh",
+                &["-c", "printf changed > marker.txt"],
+                root,
+            ),
+            patch_request(marker),
+            shell_request("call-find-delete", "find", &[".", "-delete"], root),
+            shell_request("call-tree-write", "tree", &["-o", "tree.txt"], root),
+            shell_request("call-codegen", "python3", &["generate.py"], root),
+            shell_request("call-external-read", "cat", &["/etc/passwd"], root),
+            shell_request("call-outside-cwd", "cat", &["secret.txt"], outside),
+            shell_request("call-rg-pre", "rg", &["--pre=sh", "fixture"], root),
+            shell_request(
+                "call-rg-config",
+                "rg",
+                &["--config=rg.conf", "fixture"],
+                root,
+            ),
+            shell_request(
+                "call-parent-read",
+                "grep",
+                &["fixture", "../outside.txt"],
+                root,
+            ),
+            shell_request(
+                "call-git-pager",
+                "git",
+                &["grep", "--open-files-in-pager=sh", "fixture"],
+                root,
+            ),
+            shell_request(
+                "call-git-write",
+                "git",
+                &["checkout", "--", "marker.txt"],
+                root,
+            ),
+        ];
+        #[cfg(unix)]
+        {
+            requests.push(shell_request(
+                "call-symlink-read",
+                "cat",
+                &["outside-link/secret.txt"],
+                root,
+            ));
+            requests.push(shell_request(
+                "call-candidate-executable",
+                &root.join("candidate-cat").to_string_lossy(),
+                &["marker.txt"],
+                root,
+            ));
+        }
+        requests
+    }
+
+    async fn assert_delegated_requests_rejected(
+        gate: &ExecutionPortActionGate,
+        requests: Vec<KernelActionRequest>,
+    ) {
+        for request in requests {
+            assert_eq!(
+                gate.authorize(request.clone()).await,
+                Err(winwincode_kernel::KernelFailure::action_rejected())
+            );
+            assert_eq!(
+                gate.revalidate(request, KernelActionAuthorization::default())
+                    .await,
+                Err(winwincode_kernel::KernelFailure::action_rejected())
+            );
+        }
     }
 
     #[tokio::test]
@@ -1320,7 +1806,8 @@ mod tests {
             signing_key(),
         )
         .expect("open action gate");
-        gate.install_binding(binding()).expect("install binding");
+        gate.install_binding(binding(), None)
+            .expect("install binding");
         let now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
 
@@ -1350,11 +1837,174 @@ mod tests {
         let receipt = signed_permit(request, &now);
         gate.accept_receipt(&receipt, &now)
             .expect("accept signed permit");
-        task.await
+        let authorization = task
+            .await
             .expect("Kernel authorization task")
             .expect("Kernel action authorized");
-        assert_consumed_action_is_fenced(&gate, action_request, &receipt, &now).await;
+        assert_consumed_action_is_fenced(&gate, action_request, authorization, &receipt, &now)
+            .await;
         std::fs::remove_dir_all(root).expect("remove action fixture");
+    }
+
+    #[tokio::test]
+    async fn delegated_composer_allows_only_explicit_reads_before_the_action_queue() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-codex-action-read-only-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create read-only action fixture");
+        let marker = root.join("marker.txt");
+        std::fs::write(&marker, "unchanged").expect("write marker");
+        let outside = root.with_extension("outside");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("create outside read fixture");
+        std::fs::write(outside.join("secret.txt"), "outside").expect("write outside read fixture");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("outside-link"))
+            .expect("create outside symlink fixture");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/bin/cat", root.join("candidate-cat"))
+            .expect("create candidate executable symlink");
+        let gate = ExecutionPortActionGate::open(
+            &root,
+            catalog(),
+            ExecutionEnvelopeToken {
+                version: 1,
+                digest: Sha256Digest(format!("sha256:{}", "c".repeat(64))),
+            },
+            signing_key(),
+        )
+        .expect("open action gate");
+        gate.install_binding(binding(), Some(&root))
+            .expect("install delegated binding");
+        gate.update_now(&Instant("2030-01-01T00:00:02.000Z".to_owned()))
+            .expect("install trusted time");
+
+        let read = shell_request("call-read", "cat", &["marker.txt"], &root);
+        let authorization = gate
+            .authorize(read.clone())
+            .await
+            .expect("allow explicit repository search");
+        let executable = authorization
+            .executable()
+            .expect("delegated read binds one executable");
+        assert!(Path::new(executable.canonical_absolute_path()).is_absolute());
+        assert!(executable.identity().starts_with("sha256:"));
+        assert_eq!(executable.arguments(), ["marker.txt"]);
+        gate.revalidate(read, authorization)
+            .await
+            .expect("revalidate explicit repository search");
+
+        #[cfg(unix)]
+        {
+            let late = shell_request("call-late-link", "cat", &["late-link"], &root);
+            let authorization = gate
+                .authorize(late.clone())
+                .await
+                .expect("admit path before it exists");
+            std::os::unix::fs::symlink(&outside, root.join("late-link"))
+                .expect("replace read path with outside symlink");
+            assert!(
+                gate.revalidate(late, authorization).await.is_err(),
+                "the final pre-execution check must reject a changed path"
+            );
+        }
+
+        assert_delegated_requests_rejected(
+            &gate,
+            delegated_rejected_requests(&root, &outside, &marker),
+        )
+        .await;
+        assert!(gate.take_messages().expect("no queued actions").is_empty());
+        assert!(
+            gate.state
+                .pending
+                .lock()
+                .expect("no pending actions")
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("read unchanged marker"),
+            "unchanged"
+        );
+        std::fs::remove_dir_all(root).expect("remove read-only action fixture");
+        std::fs::remove_dir_all(outside).expect("remove outside read fixture");
+    }
+
+    #[test]
+    fn delegated_shell_read_allowlist_is_closed_against_execution_and_codegen() {
+        for (program, args) in [
+            ("cat", &["src/lib.rs"][..]),
+            ("rg", &["fixture", "src"][..]),
+            ("grep", &["fixture", "src/lib.rs"][..]),
+        ] {
+            assert!(super::read_only_program_arguments(
+                program,
+                &args.iter().map(ToString::to_string).collect::<Vec<_>>()
+            ));
+        }
+        for (program, args) in [
+            ("sh", &["-c", "cat src/lib.rs"][..]),
+            ("sed", &["-i", "s/a/b/", "src/lib.rs"][..]),
+            ("cargo", &["build"][..]),
+            ("python3", &["generate.py"][..]),
+            ("rg", &["--pre=tool", "fixture"][..]),
+            ("rg", &["--pre-glob=*.rs", "fixture"][..]),
+            ("rg", &["--config=rg.conf", "fixture"][..]),
+            ("rg", &["--search-zip", "fixture"][..]),
+            ("rg", &["-z", "fixture"][..]),
+            ("rg", &["--hostname-bin=sh", "fixture"][..]),
+            ("find", &[".", "-exec", "rm", "{}", ";"][..]),
+            ("find", &[".", "-delete"][..]),
+            ("find", &[".", "-fprint", "paths.txt"][..]),
+            ("find", &[".", "-fprintf", "paths.txt", "%p"][..]),
+            ("find", &[".", "-fprint0", "paths.bin"][..]),
+            ("find", &[".", "-fls", "paths.txt"][..]),
+            ("tree", &["-o", "tree.txt"][..]),
+            ("git", &["grep", "--open-files-in-pager=sh", "fixture"][..]),
+        ] {
+            assert!(!super::read_only_program_arguments(
+                program,
+                &args.iter().map(ToString::to_string).collect::<Vec<_>>()
+            ));
+        }
+        let trusted = super::resolve_trusted_read_programs();
+        let (_, cat) =
+            super::trusted_read_program(&trusted, "cat").expect("platform system cat is protected");
+        assert!(cat.canonical_path.is_absolute());
+        assert_eq!(cat.identity.owner, 0);
+        assert!(cat.identity.mode & 0o111 != 0);
+        assert!(super::trusted_read_program(&trusted, "./cat").is_none());
+        assert!(super::trusted_read_program(&trusted, "/tmp/malicious/cat").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_detects_symlink_and_in_place_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "winwincode-executable-identity-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create executable identity fixture");
+        let first = root.join("first");
+        let second = root.join("second");
+        let link = root.join("program");
+        std::fs::write(&first, b"first").expect("write first executable");
+        std::fs::write(&second, b"second").expect("write second executable");
+        std::os::unix::fs::symlink(&first, &link).expect("link first executable");
+        let first_identity = super::executable_identity(&link).expect("first identity");
+        std::fs::remove_file(&link).expect("remove first link");
+        std::os::unix::fs::symlink(&second, &link).expect("link second executable");
+        let second_identity = super::executable_identity(&link).expect("second identity");
+        assert_ne!(first_identity, second_identity);
+        std::fs::write(&second, b"changed in place").expect("replace executable bytes");
+        assert_ne!(
+            second_identity,
+            super::executable_identity(&link).expect("changed identity")
+        );
+        std::fs::remove_dir_all(root).expect("remove executable identity fixture");
     }
 
     #[tokio::test]
@@ -1375,7 +2025,7 @@ mod tests {
         )
         .expect("open action gate");
         let original = binding();
-        gate.install_binding(original.clone())
+        gate.install_binding(original.clone(), None)
             .expect("install binding");
         let now = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&now).expect("install trusted time");
@@ -1401,7 +2051,7 @@ mod tests {
         child.authority.session_identity.codex_thread_id = child.canonical_thread_id.clone();
         gate.install_child_binding(child.clone())
             .expect("install descendant binding");
-        gate.install_binding(original.clone())
+        gate.install_binding(original.clone(), None)
             .expect("idempotent root rebind preserves descendant");
         assert!(
             gate.state
@@ -1413,7 +2063,7 @@ mod tests {
 
         let mut replacement = original.clone();
         replacement.kernel_session_id = "kernel-session-rebound".to_owned();
-        gate.install_binding(replacement.clone())
+        gate.install_binding(replacement.clone(), None)
             .expect("replace binding");
         assert!(task.await.expect("authorization task").is_err());
         assert!(
@@ -1437,7 +2087,9 @@ mod tests {
             assert!(bindings.get(&child.canonical_thread_id.0).is_none());
         }
         assert!(
-            gate.revalidate(request).await.is_err(),
+            gate.revalidate(request, KernelActionAuthorization::default())
+                .await
+                .is_err(),
             "replaced binding cannot reuse an old permit"
         );
         std::fs::remove_dir_all(root).expect("remove action fixture");
@@ -1460,7 +2112,8 @@ mod tests {
             signing_key(),
         )
         .expect("open action gate");
-        gate.install_binding(binding()).expect("install binding");
+        gate.install_binding(binding(), None)
+            .expect("install binding");
         let issued = Instant("2030-01-01T00:00:02.000Z".to_owned());
         gate.update_now(&issued).expect("install trusted time");
         let task = tokio::spawn(gate.authorize(KernelActionRequest {

@@ -170,7 +170,11 @@ pub fn prepare_candidate_artifact(
             "candidate Job requires a candidate-write workspace",
         ));
     }
-    winwincode_codex::stage_product::role_session_policy(&active.job).map_err(|_| {
+    winwincode_codex::stage_product::role_session_policy(
+        &active.job,
+        winwincode_codex::RoleExecutionMode::React,
+    )
+    .map_err(|_| {
         CandidateProductError::new(
             CandidateProductErrorCode::InvalidScope,
             "candidate Job is missing its exact sealed stage input",
@@ -230,7 +234,11 @@ pub fn prepare_verification_artifact(
             "verification Job requires a read-only workspace",
         ));
     }
-    winwincode_codex::stage_product::role_session_policy(&active.job).map_err(|_| {
+    winwincode_codex::stage_product::role_session_policy(
+        &active.job,
+        winwincode_codex::RoleExecutionMode::React,
+    )
+    .map_err(|_| {
         CandidateProductError::new(
             CandidateProductErrorCode::InvalidScope,
             "verification Job is missing its exact sealed stage input",

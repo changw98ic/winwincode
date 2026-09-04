@@ -252,6 +252,26 @@
         "codex-rs/core/src/tools/sandboxing.rs",
         "codex-rs/core/tests/suite/turn_input_submission.rs"
       ]
+    },
+    {
+      "id": "codex-bind-tool-gate-executable-identity",
+      "file": "upstream/patches/codex/0007-bind-tool-gate-executable-identity.patch",
+      "planned": false,
+      "targets": [
+        "codex-rs/core-api/src/lib.rs",
+        "codex-rs/core/src/lib.rs",
+        "codex-rs/core/src/tool_call_gate.rs",
+        "codex-rs/core/src/tools/orchestrator.rs",
+        "codex-rs/core/src/tools/parallel.rs",
+        "codex-rs/core/src/tools/runtimes/apply_patch_tests.rs",
+        "codex-rs/core/src/tools/runtimes/mod.rs",
+        "codex-rs/core/src/tools/runtimes/mod_tests.rs",
+        "codex-rs/core/src/tools/runtimes/shell.rs",
+        "codex-rs/core/src/tools/runtimes/shell_tests.rs",
+        "codex-rs/core/src/tools/runtimes/unified_exec.rs",
+        "codex-rs/core/src/tools/sandboxing.rs",
+        "codex-rs/core/src/tools/sandboxing_tests.rs"
+      ]
     }
   ],
   "licenseObligations": {

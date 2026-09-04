@@ -4,8 +4,8 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::domain::{Delivery, FrozenDeliveryCandidate};
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{DeliveryId, PublicationId, Revision, Sha256Digest};
 use winwincode_publication::{
     Publication, PublicationError, PublicationErrorKind, PublicationReadLedger,
@@ -718,7 +718,7 @@ mod tests {
 
     fn scope() -> RepositoryScope {
         RepositoryScope {
-            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            kind: winwincode_domain::RepositoryScopeKind::Repository,
             organization_id: OrganizationId("org_01J00000000000000000000000".to_owned()),
             workspace_id: WorkspaceId("wsp_01J00000000000000000000000".to_owned()),
             project_id: ProjectId("prj_01J00000000000000000000000".to_owned()),
@@ -729,7 +729,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     fn publication_scope() -> RepositoryScope {
         RepositoryScope {
-            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            kind: winwincode_domain::RepositoryScopeKind::Repository,
             organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
             workspace_id: WorkspaceId("wsp_00000000000000000000000001".to_owned()),
             project_id: ProjectId("prj_00000000000000000000000001".to_owned()),

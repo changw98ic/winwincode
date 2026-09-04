@@ -248,6 +248,7 @@ async fn file_system_sandbox_context_preserves_executor_workspace_permissions() 
         windows_sandbox_private_desktop: true,
         network_denial_cancellation_token: None,
         network_proxy: None,
+        action_authorization: None,
     };
 
     let sandbox = ApplyPatchRuntime::file_system_sandbox_context_for_attempt(&req, &attempt)
@@ -317,6 +318,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
         windows_sandbox_private_desktop: false,
         network_denial_cancellation_token: None,
         network_proxy: None,
+        action_authorization: None,
     };
 
     assert_eq!(

@@ -14,23 +14,27 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use winwincode_domain::{
-    ArtifactId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence, ExecutionEventId,
-    ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant, LeaseId,
-    ProductSessionId, RepositoryId, RequestId, SchemaVersion, Sha256Digest, StageRunId, WorkerId,
-    WorkerInstanceId, WorkerSessionId,
+    ArtifactId, ChangeBatchId, CodexThreadId, DeliveryId, DeliveryTaskId, ExecutionAckSequence,
+    ExecutionEventId, ExecutionJobId, ExecutionMessageId, ExecutionSequence, FencingToken, Instant,
+    LeaseId, ProductSessionId, RepositoryId, RequestId, SchemaVersion, Sha256Digest, StageRunId,
+    WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceRevision,
 };
+use winwincode_execution_port::change_batch_identity::derive_change_batch_id;
 use winwincode_execution_port::generated::{
-    ArtifactAckMessage, ArtifactAckMessageKind, ArtifactChunkMessage, ArtifactChunkMessageKind,
-    ArtifactDescriptor, ArtifactKind, ArtifactOpenMessage, ArtifactOpenMessageKind,
-    ArtifactReference, DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
+    AppliedFileOperation, AppliedFileSummary, ArtifactAckMessage, ArtifactAckMessageKind,
+    ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
+    ArtifactOpenMessage, ArtifactOpenMessageKind, ArtifactReference, ChangeBatchIdentity,
+    ChangeBatchProgressEvent, ChangeBatchProgressState, ChangeBatchProposal,
+    ChangeBatchProposalDisposition, ChangeBatchProposalEvent,
+    DeliveryStageAcceptanceCriterionInput, DeliveryStageExecutionScope,
     DeliveryStageExecutionScopeKind, DeliveryStageInput, DeliveryStageTaskInput, EncodedPayload,
     ExecutionEventCategory, ExecutionEventRecord, ExecutionJob, ExecutionJobReplacementAuthority,
-    ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeUsage, ExecutionPortMessage,
-    ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode, JobCancelAckMessageStatus,
-    JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason, JobDispatchMessage,
-    JobDispatchMessageKind, JobDispatchResultMessageStatus, LeaseWriteStatus,
+    ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcomeStatus, ExecutionOutcomeUsage,
+    ExecutionPortMessage, ExecutionScope, ExecutionWorkspace, ExecutionWorkspaceWriteMode,
+    JobCancelAckMessageStatus, JobCancelMessage, JobCancelMessageKind, JobCancelMessageReason,
+    JobDispatchMessage, JobDispatchMessageKind, JobDispatchResultMessageStatus, LeaseWriteStatus,
     ProductSessionExecutionScope, ProductSessionExecutionScopeKind, RuntimeEventMessage,
-    RuntimeEventMessageKind, WorkerCapabilityFeature, WorkerCapabilitySet,
+    RuntimeEventMessageKind, ValidationProfileName, WorkerCapabilityFeature, WorkerCapabilitySet,
     WorkerCapabilitySetPlatform, WorkerRegistrationResultMessage,
     WorkerRegistrationResultMessageKind, WorkerRegistrationResultMessageLeaseRecovery,
     WorkerRegistrationResultMessageStatus,
@@ -40,10 +44,14 @@ use winwincode_execution_port::transport::{
 };
 use winwincode_worker::{
     CandidateArtifactAckOutcome, CandidateArtifactAuthority, CandidateArtifactUpload,
-    CodexCoreAdapter, CodexPoll, CodexThreadStart, CodexTurnCompletion, DurableExecutionDelivery,
-    RetainedCandidateArtifact, WorkerConfig, WorkerErrorCode, WorkerExecutionPort,
-    WorkerLifecycleState, WorkerMain, secret_safe_runtime_summary,
-    workspace_runtime::JobWorkspaceRuntime,
+    CodexCoreAdapter, CodexPoll, CodexRunKey, CodexThreadStart, CodexTurnCompletion,
+    DelegatedPollOutcome, DurableExecutionDelivery, RetainedCandidateArtifact, WorkerConfig,
+    WorkerErrorCode, WorkerExecutionPort, WorkerLifecycleState, WorkerMain,
+    secret_safe_runtime_summary,
+    workspace_runtime::{
+        ChangeBatchExecutionRequest, ChangeBatchExecutionResult, ChangeBatchExecutor,
+        ChangeBatchExecutorFuture, JobWorkspaceRuntime,
+    },
 };
 
 const NOW: &str = "2027-01-15T08:00:02.000Z";
@@ -86,6 +94,7 @@ struct CodexState {
     calls: Vec<String>,
     threads: VecDeque<CodexThreadId>,
     workspaces: HashMap<String, PathBuf>,
+    workspace_revisions: HashMap<String, WorkspaceRevision>,
     polls: HashMap<String, VecDeque<Result<CodexPoll, ()>>>,
     failures: HashSet<FailurePoint>,
     durable_deliveries: Vec<DurableExecutionDelivery>,
@@ -111,6 +120,61 @@ enum FailurePoint {
 #[derive(Clone, Default)]
 struct FakeCodex {
     state: Arc<Mutex<CodexState>>,
+}
+
+#[derive(Clone, Debug)]
+struct AppliedBatchExecutor {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl ChangeBatchExecutor for AppliedBatchExecutor {
+    fn execute<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.calls.lock().expect("batch calls").push("execute");
+        std::fs::write(request.checkout.join("delegated.txt"), b"fixture\n")
+            .expect("write applied ChangeBatch fixture");
+        Box::pin(async { Ok(applied_batch_result()) })
+    }
+
+    fn recover<'operation>(
+        &'operation mut self,
+        request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.calls.lock().expect("batch calls").push("recover");
+        std::fs::write(request.checkout.join("delegated.txt"), b"fixture\n")
+            .expect("recover applied ChangeBatch fixture");
+        Box::pin(async { Ok(applied_batch_result()) })
+    }
+
+    fn cancel<'operation>(
+        &'operation mut self,
+        _request: ChangeBatchExecutionRequest<'operation>,
+    ) -> ChangeBatchExecutorFuture<'operation> {
+        self.calls.lock().expect("batch calls").push("cancel");
+        Box::pin(async { Ok(ChangeBatchExecutionResult::RolledBack { artifact_ref: None }) })
+    }
+}
+
+fn applied_batch_result() -> ChangeBatchExecutionResult {
+    ChangeBatchExecutionResult::Applied {
+        files: vec![AppliedFileSummary {
+            after_sha256: Some(Sha256Digest(format!(
+                "sha256:{:x}",
+                Sha256::digest(b"fixture\n")
+            ))),
+            before_sha256: None,
+            bytes_after: 8,
+            bytes_before: 0,
+            mode_after: Some("0644".to_owned()),
+            mode_before: None,
+            move_path: None,
+            operation: AppliedFileOperation::Create,
+            path: "delegated.txt".to_owned(),
+        }],
+        artifact_ref: None,
+    }
 }
 
 impl FakeCodex {
@@ -145,6 +209,16 @@ impl FakeCodex {
             .workspaces
             .get(&thread_id.0)
             .expect("captured Job workspace")
+            .clone()
+    }
+
+    fn workspace_revision(&self, thread_id: &CodexThreadId) -> WorkspaceRevision {
+        self.state
+            .lock()
+            .expect("FakeCodex state")
+            .workspace_revisions
+            .get(&thread_id.0)
+            .expect("captured Job workspace revision")
             .clone()
     }
 
@@ -197,6 +271,10 @@ impl CodexCoreAdapter for FakeCodex {
         state.workspaces.insert(
             start.run_key.canonical_thread_id().expect("thread").0,
             start.workspace.to_path_buf(),
+        );
+        state.workspace_revisions.insert(
+            start.run_key.canonical_thread_id().expect("thread").0,
+            start.workspace_revision.clone(),
         );
         let result = if state.failures.contains(&FailurePoint::Ensure) {
             Err(())
@@ -867,7 +945,7 @@ fn product_scope(suffix: char) -> ExecutionScope {
 }
 
 fn thread(suffix: char) -> CodexThreadId {
-    winwincode_worker::CodexRunKey::from_dispatch(&dispatch(suffix, product_scope(suffix)))
+    CodexRunKey::from_dispatch(&dispatch(suffix, product_scope(suffix)))
         .canonical_thread_id()
         .expect("canonical fixture thread")
 }
@@ -1552,7 +1630,7 @@ async fn sealed_replacement_reuses_the_writer_checkout_and_auto_emits_one_candid
     let original_candidate_frames = observed_candidate_messages(&first_messages);
     let original_artifact = observed_candidate_reference(&first_messages);
     let replacement = replacement_dispatch(&predecessor);
-    let successor_thread = winwincode_worker::CodexRunKey::from_dispatch(&replacement)
+    let successor_thread = CodexRunKey::from_dispatch(&replacement)
         .canonical_thread_id()
         .expect("successor thread");
     let (_, successor_codex) = first.into_parts();
@@ -1765,6 +1843,445 @@ async fn retained_trace_and_terminal_outcome_preserve_exact_session_order() {
     )));
 }
 
+const DELEGATED_PATCH: &str =
+    "*** Begin Patch\n*** Add File: delegated.txt\n+fixture\n*** End Patch\n";
+
+fn delegated_identity(
+    active: &winwincode_worker::ActiveJob,
+    workspace_revision: WorkspaceRevision,
+) -> ChangeBatchIdentity {
+    let run_key = CodexRunKey {
+        job_id: active.job.job_id.clone(),
+        attempt: active.job.attempt,
+        fencing_token: active.lease.fencing_token.clone(),
+        payload_digest: active.job.payload_digest.clone(),
+    }
+    .canonical_digest()
+    .expect("canonical delegated run key")
+    .0;
+    let patch_digest = Sha256Digest(format!(
+        "sha256:{:x}",
+        Sha256::digest(DELEGATED_PATCH.as_bytes())
+    ));
+    ChangeBatchIdentity {
+        attempt: active.job.attempt,
+        batch_id: derive_change_batch_id(&run_key, "turn-fixture", None, &patch_digest)
+            .expect("canonical delegated batch id"),
+        call_id: None,
+        fencing_token: active.lease.fencing_token.clone(),
+        job_id: active.job.job_id.clone(),
+        lease_id: active.lease.lease_id.clone(),
+        patch_digest,
+        repository_id: active.job.workspace.repository_id.clone(),
+        run_key,
+        session_identity: active.session_identity.clone(),
+        turn_id: "turn-fixture".to_owned(),
+        workspace_revision,
+    }
+}
+
+fn delegated_progress(
+    identity: ChangeBatchIdentity,
+    sequence: i64,
+    state: ChangeBatchProgressState,
+) -> ChangeBatchProgressEvent {
+    ChangeBatchProgressEvent {
+        artifact_refs: Vec::new(),
+        identity,
+        occurred_at: now(),
+        sequence,
+        state,
+        summary: "bounded change batch progress".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn delegated_proposal_is_executed_once_and_job_remains_active() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let workspaces = test_workspaces().with_change_batch_executor(AppliedBatchExecutor {
+        calls: Arc::clone(&calls),
+    });
+    let mut worker = WorkerMain::new(worker_config(1), port, codex, workspaces);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let identity = delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProposed(Box::new(
+            ChangeBatchProposalEvent {
+                identity: identity.clone(),
+                occurred_at: now(),
+                proposal: ChangeBatchProposal {
+                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    disposition: ChangeBatchProposalDisposition::Final,
+                    patch: DELEGATED_PATCH.to_owned(),
+                    schema_version: 1,
+                    validation_profile: ValidationProfileName::Changed,
+                },
+            },
+        ))),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    assert_eq!(worker.active_jobs().len(), 1);
+    assert!(observed_outcomes(&messages).is_empty());
+    assert_eq!(*calls.lock().expect("batch calls"), vec!["execute"]);
+    let outcomes = worker.take_delegated_poll_outcomes();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [
+                DelegatedPollOutcome::ChangeBatchProposed(_),
+                DelegatedPollOutcome::ChangeBatchProgress(proposed),
+                DelegatedPollOutcome::ChangeBatchProgress(authorized),
+                DelegatedPollOutcome::ChangeBatchProgress(started),
+                DelegatedPollOutcome::ChangeBatchProgress(applied),
+                DelegatedPollOutcome::ChangeBatchReceipt(_)
+            ]
+            if proposed.state == ChangeBatchProgressState::Proposed
+                && authorized.state == ChangeBatchProgressState::Authorized
+                && started.state == ChangeBatchProgressState::ApplyStarted
+                && applied.state == ChangeBatchProgressState::Applied
+        ),
+        "unexpected delegated outcomes: {outcomes:#?}"
+    );
+    assert!(worker.take_delegated_poll_outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn delegated_codex_poll_rejects_foreign_authority_before_return() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let workspaces = test_workspaces().with_change_batch_executor(AppliedBatchExecutor {
+        calls: Arc::clone(&calls),
+    });
+    let mut worker = WorkerMain::new(
+        worker_config(1),
+        RecordingPort::default(),
+        codex,
+        workspaces,
+    );
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let mut identity =
+        delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    identity.repository_id = RepositoryId(id("repo", 'Z'));
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProposed(Box::new(
+            ChangeBatchProposalEvent {
+                identity,
+                occurred_at: now(),
+                proposal: ChangeBatchProposal {
+                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    disposition: ChangeBatchProposalDisposition::Final,
+                    patch: DELEGATED_PATCH.to_owned(),
+                    schema_version: 1,
+                    validation_profile: ValidationProfileName::Changed,
+                },
+            },
+        ))),
+    );
+
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert!(worker.take_delegated_poll_outcomes().is_empty());
+    assert!(calls.lock().expect("batch calls").is_empty());
+}
+
+#[tokio::test]
+async fn delegated_poll_rejects_a_rederived_foreign_run_key() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let mut identity =
+        delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    identity.run_key = format!("sha256:{}", "b".repeat(64));
+    identity.batch_id = derive_change_batch_id(
+        &identity.run_key,
+        &identity.turn_id,
+        identity.call_id.as_deref(),
+        &identity.patch_digest,
+    )
+    .expect("rederive foreign batch identity");
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(identity, 1, ChangeBatchProgressState::Proposed),
+        ))),
+    );
+
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert!(worker.take_delegated_poll_outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn delegated_poll_rejects_a_noncanonical_batch_derivation() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let mut identity =
+        delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    identity.batch_id = ChangeBatchId(format!("sha256:{}", "c".repeat(64)));
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(identity, 1, ChangeBatchProgressState::Proposed),
+        ))),
+    );
+
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert!(worker.take_delegated_poll_outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn delegated_proposal_rejects_patch_bytes_outside_the_sealed_identity() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let identity = delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProposed(Box::new(
+            ChangeBatchProposalEvent {
+                identity,
+                occurred_at: now(),
+                proposal: ChangeBatchProposal {
+                    acceptance_criteria_ids: vec!["criterion-fixture".to_owned()],
+                    disposition: ChangeBatchProposalDisposition::Final,
+                    patch:
+                        "*** Begin Patch\n*** Add File: delegated.txt\n+changed\n*** End Patch\n"
+                            .to_owned(),
+                    schema_version: 1,
+                    validation_profile: ValidationProfileName::Changed,
+                },
+            },
+        ))),
+    );
+
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert!(worker.take_delegated_poll_outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn delegated_progress_rejects_an_out_of_order_initial_sequence() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(
+                delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id)),
+                2,
+                ChangeBatchProgressState::Proposed,
+            ),
+        ))),
+    );
+
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert!(worker.take_delegated_poll_outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn delegated_progress_rejects_identity_change_within_one_batch() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let identity = delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(identity.clone(), 1, ChangeBatchProgressState::Proposed),
+        ))),
+    );
+    let mut changed = identity;
+    changed.turn_id = "turn-changed".to_owned();
+    pump.queue_poll(
+        &active.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(changed, 2, ChangeBatchProgressState::Authorized),
+        ))),
+    );
+
+    worker.poll_codex_boxed().await.unwrap();
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert_eq!(worker.take_delegated_poll_outcomes().len(), 1);
+}
+
+#[tokio::test]
+async fn delegated_progress_rejects_a_successor_after_terminal_state() {
+    let codex = FakeCodex::with_threads([thread('A')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), RecordingPort::default(), codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let active = worker.active_jobs()[0].clone();
+    let identity = delegated_identity(&active, pump.workspace_revision(&active.codex_thread_id));
+    for (sequence, state) in [
+        (1, ChangeBatchProgressState::Proposed),
+        (2, ChangeBatchProgressState::RepairRequired),
+        (3, ChangeBatchProgressState::Authorized),
+    ] {
+        pump.queue_poll(
+            &active.codex_thread_id,
+            Ok(CodexPoll::ChangeBatchProgress(Box::new(
+                delegated_progress(identity.clone(), sequence, state),
+            ))),
+        );
+    }
+
+    worker.poll_codex_boxed().await.unwrap();
+    worker.poll_codex_boxed().await.unwrap();
+    let error = worker.poll_codex_boxed().await.unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::DelegatedPollMismatch);
+    assert_eq!(worker.take_delegated_poll_outcomes().len(), 2);
+}
+
+#[tokio::test]
+async fn delegated_outcome_survives_job_end_and_new_run_progress_starts_fresh() {
+    let port = RecordingPort::default();
+    let messages = Rc::clone(&port.messages);
+    let codex = FakeCodex::with_threads([thread('A'), thread('B')]);
+    let pump = codex.clone();
+    let mut worker = test_worker(worker_config(1), port, codex);
+    register(&mut worker).await;
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('A', delivery_scope('A'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let first = worker.active_jobs()[0].clone();
+    let batch_id =
+        delegated_identity(&first, pump.workspace_revision(&first.codex_thread_id)).batch_id;
+    pump.queue_poll(
+        &first.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(
+                delegated_identity(&first, pump.workspace_revision(&first.codex_thread_id)),
+                1,
+                ChangeBatchProgressState::Proposed,
+            ),
+        ))),
+    );
+    pump.queue_poll(
+        &first.codex_thread_id,
+        Ok(CodexPoll::Inconclusive(
+            secret_safe_runtime_summary("delegated proposal was inconclusive").unwrap(),
+        )),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+    worker.poll_codex_boxed().await.unwrap();
+    assert!(worker.active_jobs().is_empty());
+    assert_eq!(
+        observed_outcomes(&messages)[0].outcome.status,
+        ExecutionOutcomeStatus::Failed
+    );
+
+    worker
+        .accept_control(
+            &ExecutionPortMessage::JobDispatchMessage(dispatch('B', delivery_scope('B'))),
+            now(),
+        )
+        .await
+        .unwrap();
+    let second = worker.active_jobs()[0].clone();
+    let second_identity =
+        delegated_identity(&second, pump.workspace_revision(&second.codex_thread_id));
+    assert_ne!(second_identity.batch_id, batch_id);
+    pump.queue_poll(
+        &second.codex_thread_id,
+        Ok(CodexPoll::ChangeBatchProgress(Box::new(
+            delegated_progress(second_identity, 1, ChangeBatchProgressState::Proposed),
+        ))),
+    );
+    worker.poll_codex_boxed().await.unwrap();
+
+    let outcomes = worker.take_delegated_poll_outcomes();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, DelegatedPollOutcome::ChangeBatchProgress(_)))
+    );
+}
+
 #[tokio::test]
 async fn writer_outcome_waits_for_one_exact_final_candidate_ack() {
     let port = RecordingPort::default();
@@ -1849,7 +2366,7 @@ async fn writer_outcome_waits_for_one_exact_final_candidate_ack() {
     assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
     assert_eq!(
         outcomes[0].outcome.status,
-        winwincode_execution_port::generated::ExecutionOutcomeStatus::Succeeded
+        ExecutionOutcomeStatus::Succeeded
     );
     assert!(worker.active_jobs().is_empty());
 }
@@ -2041,7 +2558,13 @@ async fn accepted_candidate_survives_outcome_retention_restart_before_workspace_
         .await
         .expect("recover accepted candidate before cleanup");
     let outcomes = observed_outcomes(&restart_messages);
-    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "calls={:?} messages={:#?}",
+        pump.calls(),
+        restart_messages.borrow()
+    );
     assert_eq!(outcomes[0].outcome.artifacts, vec![artifact]);
     assert!(
         !checkout.exists(),
@@ -2191,10 +2714,7 @@ async fn cancelling_a_writer_before_completion_emits_no_candidate_product() {
             _ => None,
         })
         .expect("cancelled outcome");
-    assert_eq!(
-        outcome.outcome.status,
-        winwincode_execution_port::generated::ExecutionOutcomeStatus::Cancelled
-    );
+    assert_eq!(outcome.outcome.status, ExecutionOutcomeStatus::Cancelled);
     assert!(outcome.outcome.artifacts.is_empty());
     assert_no_candidate_product(&messages);
 }
@@ -2279,7 +2799,7 @@ async fn failed_candidate_cancel_is_retryable_and_never_flushes_a_post_cancel_ar
     assert_eq!(outcomes.len(), 1);
     assert_eq!(
         outcomes[0].outcome.status,
-        winwincode_execution_port::generated::ExecutionOutcomeStatus::Cancelled
+        ExecutionOutcomeStatus::Cancelled
     );
     assert!(outcomes[0].outcome.artifacts.is_empty());
 }
@@ -2343,7 +2863,7 @@ async fn durable_codex_infrastructure_terminal_emits_stopped_before_one_outcome(
         .unwrap();
     assert_eq!(
         outcome.outcome.status,
-        winwincode_execution_port::generated::ExecutionOutcomeStatus::InfrastructureError
+        ExecutionOutcomeStatus::InfrastructureError
     );
     assert_eq!(
         outcome.outcome.summary,

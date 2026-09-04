@@ -12,13 +12,16 @@
 use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use winwincode_domain::{SchemaVersion, Sha256Digest};
 use winwincode_execution_port::generated::{
     DeliveryStageInput, ExecutionEventCategory, ExecutionJob, ExecutionScope,
     ExecutionWorkspaceWriteMode,
 };
-use winwincode_kernel::RoleSessionPolicy;
+use winwincode_kernel::{
+    RoleExecutionMode, RoleSessionPolicy, RoleSessionPolicyRoleId, RoleSessionPolicyWorkspaceMode,
+};
 
 /// Media type consumed by the production Planning-to-PlanReview authority.
 pub const PLANNER_SOLUTION_MEDIA_TYPE: &str = "application/vnd.winwincode.planner-solution+json";
@@ -35,10 +38,54 @@ pub const VERIFICATION_SESSION_POLICY_PROTOCOL: &str = "winwincode.verification-
 /// Final independent verification result protocol.
 pub const VERIFICATION_RESULT_PROTOCOL: &str = "winwincode.independent-verification-result.v1";
 
-const ROLE_POLICY_SCHEMA_VERSION: u32 = 1;
+const ROLE_POLICY_SCHEMA_VERSION: u32 = 2;
 const PLANNER_SOLUTION_SCHEMA_VERSION: u8 = 1;
 const MAX_PLANNER_SOLUTION_BYTES: usize = 1024 * 1024;
 const MAX_STAGE_PROMPT_BYTES: usize = 1024 * 1024;
+const DELEGATED_EXECUTOR_INSTRUCTIONS: &str = "Produce only one bounded ChangeBatch proposal from the approved delivery plan in the read-only candidate workspace. Return the canonical proposal and content-addressed Artifact references. Do not modify workspace files, apply the patch, approve, or verify your own work.";
+const DELEGATED_REMEDIATOR_INSTRUCTIONS: &str = "Produce only one bounded Repair proposal from reviewed findings in the read-only candidate workspace. Return the canonical RepairEnvelope, ChangeBatch proposal, and content-addressed Artifact references. Do not modify workspace files, apply the repair, broaden scope, approve, or verify your own work.";
+
+/// Fixed structured-output schema for the generated canonical
+/// `ChangeBatchProposal` DTO. Bounds and closed fields mirror the execution
+/// port contract; the schema is constructed in Rust so a turn never reads a
+/// mutable repository schema file at runtime.
+#[must_use]
+pub fn change_batch_proposal_json_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "acceptanceCriteriaIds",
+            "disposition",
+            "patch",
+            "schemaVersion",
+            "validationProfile"
+        ],
+        "properties": {
+            "acceptanceCriteriaIds": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+                }
+            },
+            "disposition": {
+                "type": "string",
+                "enum": ["final", "continue", "probe"]
+            },
+            "patch": {
+                "type": "string"
+            },
+            "schemaVersion": {"type": "integer", "enum": [1]},
+            "validationProfile": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+            }
+        }
+    })
+}
 
 /// Stable stage-product failure categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +226,7 @@ impl PreparedStageProduct {
 /// Delivery-stage job.
 pub fn role_session_policy(
     job: &ExecutionJob,
+    execution_mode: RoleExecutionMode,
 ) -> Result<Option<RoleSessionPolicy>, StageProductError> {
     match &job.scope {
         ExecutionScope::ProductSessionExecutionScope(_) => {
@@ -198,7 +246,14 @@ pub fn role_session_policy(
                     "Delivery-stage execution profile is not a canonical StrongFlow role",
                 )
             })?;
-            let expected_write_mode = if matches!(role.workspace_mode, "candidate-write") {
+            let workspace_mode = if execution_mode == RoleExecutionMode::DelegatedBatch
+                && matches!(job.execution_profile.as_str(), "executor" | "remediator")
+            {
+                "candidate-read-only"
+            } else {
+                role.workspace_mode
+            };
+            let expected_write_mode = if matches!(workspace_mode, "candidate-write") {
                 ExecutionWorkspaceWriteMode::Candidate
             } else {
                 ExecutionWorkspaceWriteMode::ReadOnly
@@ -209,13 +264,137 @@ pub fn role_session_policy(
                     "Delivery role and workspace write mode do not agree",
                 ));
             }
+            let developer_instructions = match (&execution_mode, job.execution_profile.as_str()) {
+                (RoleExecutionMode::DelegatedBatch, "executor") => DELEGATED_EXECUTOR_INSTRUCTIONS,
+                (RoleExecutionMode::DelegatedBatch, "remediator") => {
+                    DELEGATED_REMEDIATOR_INSTRUCTIONS
+                }
+                _ => role.developer_instructions,
+            };
             Ok(Some(RoleSessionPolicy {
-                schema_version: ROLE_POLICY_SCHEMA_VERSION,
-                role_id: job.execution_profile.clone(),
-                workspace_mode: role.workspace_mode.to_owned(),
-                developer_instructions: role.developer_instructions.to_owned(),
+                schema_version: i64::from(ROLE_POLICY_SCHEMA_VERSION),
+                role_id: role_policy_role_id(&job.execution_profile).ok_or_else(invalid_job)?,
+                workspace_mode: role_policy_workspace_mode(workspace_mode)
+                    .ok_or_else(invalid_job)?,
+                execution_mode,
+                developer_instructions: developer_instructions.to_owned(),
             }))
         }
+    }
+}
+
+/// Result of the sole persisted role-policy migration entry.
+pub(crate) struct MigratedRoleSessionPolicy {
+    pub policy: Option<RoleSessionPolicy>,
+    pub migrated: bool,
+}
+
+/// Converts one durable pre-v2 role policy to the generated canonical v2
+/// shape. Version 1 is accepted only here and always becomes `React` before
+/// the caller saves the containing record. Runtime policy parsing never calls
+/// this function.
+pub(crate) fn migrate_persisted_role_session_policy_v1(
+    job: &ExecutionJob,
+    persisted: Option<&Value>,
+) -> Result<MigratedRoleSessionPolicy, StageProductError> {
+    if let Some(value) = persisted {
+        if value.is_null() {
+            let policy = role_session_policy(job, RoleExecutionMode::React)?;
+            if policy.is_some() {
+                return Err(invalid_job());
+            }
+            return Ok(MigratedRoleSessionPolicy {
+                policy: None,
+                migrated: false,
+            });
+        }
+        if let Ok(policy) = serde_json::from_value::<RoleSessionPolicy>(value.clone()) {
+            let expected = role_session_policy(job, policy.execution_mode.clone())?;
+            if expected.as_ref() != Some(&policy) {
+                return Err(invalid_job());
+            }
+            return Ok(MigratedRoleSessionPolicy {
+                policy: Some(policy),
+                migrated: false,
+            });
+        }
+        let legacy: LegacyRoleSessionPolicyV1 =
+            serde_json::from_value(value.clone()).map_err(|_| invalid_job())?;
+        if legacy.schema_version != 1 {
+            return Err(invalid_job());
+        }
+        let expected = role_session_policy(job, RoleExecutionMode::React)?;
+        let Some(expected) = expected else {
+            return Err(invalid_job());
+        };
+        if legacy.role_id != role_policy_role_id_name(&expected.role_id)
+            || legacy.workspace_mode != role_policy_workspace_mode_name(&expected.workspace_mode)
+            || legacy.developer_instructions != expected.developer_instructions
+        {
+            return Err(invalid_job());
+        }
+        return Ok(MigratedRoleSessionPolicy {
+            policy: Some(expected),
+            migrated: true,
+        });
+    }
+
+    Ok(MigratedRoleSessionPolicy {
+        policy: role_session_policy(job, RoleExecutionMode::React)?,
+        migrated: true,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyRoleSessionPolicyV1 {
+    schema_version: i64,
+    role_id: String,
+    workspace_mode: String,
+    developer_instructions: String,
+}
+
+fn role_policy_role_id(role: &str) -> Option<RoleSessionPolicyRoleId> {
+    Some(match role {
+        "requirements" => RoleSessionPolicyRoleId::Requirements,
+        "solution" => RoleSessionPolicyRoleId::Solution,
+        "planner" => RoleSessionPolicyRoleId::Planner,
+        "executor" => RoleSessionPolicyRoleId::Executor,
+        "reviewer" => RoleSessionPolicyRoleId::Reviewer,
+        "verifier" => RoleSessionPolicyRoleId::Verifier,
+        "adversarial-verifier" => RoleSessionPolicyRoleId::AdversarialVerifier,
+        "remediator" => RoleSessionPolicyRoleId::Remediator,
+        _ => return None,
+    })
+}
+
+fn role_policy_workspace_mode(workspace: &str) -> Option<RoleSessionPolicyWorkspaceMode> {
+    Some(match workspace {
+        "source-read-only" => RoleSessionPolicyWorkspaceMode::SourceReadOnly,
+        "candidate-read-only" => RoleSessionPolicyWorkspaceMode::CandidateReadOnly,
+        "candidate-write" => RoleSessionPolicyWorkspaceMode::CandidateWrite,
+        _ => return None,
+    })
+}
+
+const fn role_policy_role_id_name(role: &RoleSessionPolicyRoleId) -> &'static str {
+    match role {
+        RoleSessionPolicyRoleId::Requirements => "requirements",
+        RoleSessionPolicyRoleId::Solution => "solution",
+        RoleSessionPolicyRoleId::Planner => "planner",
+        RoleSessionPolicyRoleId::Executor => "executor",
+        RoleSessionPolicyRoleId::Reviewer => "reviewer",
+        RoleSessionPolicyRoleId::Verifier => "verifier",
+        RoleSessionPolicyRoleId::AdversarialVerifier => "adversarial-verifier",
+        RoleSessionPolicyRoleId::Remediator => "remediator",
+    }
+}
+
+const fn role_policy_workspace_mode_name(mode: &RoleSessionPolicyWorkspaceMode) -> &'static str {
+    match mode {
+        RoleSessionPolicyWorkspaceMode::SourceReadOnly => "source-read-only",
+        RoleSessionPolicyWorkspaceMode::CandidateReadOnly => "candidate-read-only",
+        RoleSessionPolicyWorkspaceMode::CandidateWrite => "candidate-write",
     }
 }
 
@@ -455,13 +634,13 @@ pub fn prepare_planner_solution_activity(
     job: &ExecutionJob,
     final_message: &[u8],
 ) -> Result<PreparedStageProduct, StageProductError> {
-    let Some(policy) = role_session_policy(job)? else {
+    let Some(policy) = role_session_policy(job, RoleExecutionMode::React)? else {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidScope,
             "Planner product requires a Delivery-stage execution scope",
         ));
     };
-    if policy.role_id != "planner" {
+    if policy.role_id != RoleSessionPolicyRoleId::Planner {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidRole,
             "Planner product requires the planner execution profile",
@@ -616,15 +795,17 @@ pub fn prepare_verification_result_activity(
 }
 
 fn ensure_verification_role(job: &ExecutionJob) -> Result<(), StageProductError> {
-    let Some(policy) = role_session_policy(job)? else {
+    let Some(policy) = role_session_policy(job, RoleExecutionMode::React)? else {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidScope,
             "verification product requires a Delivery-stage execution scope",
         ));
     };
     if !matches!(
-        policy.role_id.as_str(),
-        "reviewer" | "verifier" | "adversarial-verifier"
+        policy.role_id,
+        RoleSessionPolicyRoleId::Reviewer
+            | RoleSessionPolicyRoleId::Verifier
+            | RoleSessionPolicyRoleId::AdversarialVerifier
     ) {
         return Err(StageProductError::new(
             StageProductErrorCode::InvalidRole,
@@ -1197,12 +1378,19 @@ mod tests {
             ("adversarial-verifier", "candidate-read-only"),
             ("remediator", "candidate-write"),
         ] {
-            let policy = role_session_policy(&delivery_job(role))
+            let policy = role_session_policy(&delivery_job(role), RoleExecutionMode::React)
                 .expect("canonical role policy")
                 .expect("Delivery role");
-            assert_eq!(policy.schema_version, 1);
-            assert_eq!(policy.role_id, role);
-            assert_eq!(policy.workspace_mode, mode);
+            assert_eq!(policy.schema_version, 2);
+            assert_eq!(
+                policy.role_id,
+                role_policy_role_id(role).expect("test role")
+            );
+            assert_eq!(
+                policy.workspace_mode,
+                role_policy_workspace_mode(mode).expect("test workspace")
+            );
+            assert_eq!(policy.execution_mode, RoleExecutionMode::React);
             assert!(!policy.developer_instructions.trim().is_empty());
         }
     }
@@ -1212,7 +1400,7 @@ mod tests {
         let mut executor = delivery_job("executor");
         executor.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
         assert_eq!(
-            role_session_policy(&executor)
+            role_session_policy(&executor, RoleExecutionMode::React)
                 .expect_err("writer role cannot use a read-only checkout")
                 .code(),
             StageProductErrorCode::InvalidScope
@@ -1221,11 +1409,113 @@ mod tests {
         let mut reviewer = delivery_job("reviewer");
         reviewer.workspace.write_mode = ExecutionWorkspaceWriteMode::Candidate;
         assert_eq!(
-            role_session_policy(&reviewer)
+            role_session_policy(&reviewer, RoleExecutionMode::React)
                 .expect_err("read-only role cannot use a writable checkout")
                 .code(),
             StageProductErrorCode::InvalidScope
         );
+    }
+
+    #[test]
+    fn delegated_executor_and_remediator_require_read_only_candidate_workspaces() {
+        for (role, expected_instructions) in [
+            ("executor", DELEGATED_EXECUTOR_INSTRUCTIONS),
+            ("remediator", DELEGATED_REMEDIATOR_INSTRUCTIONS),
+        ] {
+            let writable = delivery_job(role);
+            assert_eq!(
+                role_session_policy(&writable, RoleExecutionMode::DelegatedBatch)
+                    .expect_err("delegated Composer cannot open candidate-write workspace")
+                    .code(),
+                StageProductErrorCode::InvalidScope,
+                "{role}"
+            );
+
+            let mut read_only = writable;
+            read_only.workspace.write_mode = ExecutionWorkspaceWriteMode::ReadOnly;
+            let policy = role_session_policy(&read_only, RoleExecutionMode::DelegatedBatch)
+                .expect("delegated role policy")
+                .expect("Delivery role");
+            assert_eq!(policy.schema_version, 2, "{role}");
+            assert_eq!(
+                policy.workspace_mode,
+                RoleSessionPolicyWorkspaceMode::CandidateReadOnly,
+                "{role}"
+            );
+            assert_eq!(
+                policy.execution_mode,
+                RoleExecutionMode::DelegatedBatch,
+                "{role}"
+            );
+            assert_eq!(
+                policy.developer_instructions, expected_instructions,
+                "{role}"
+            );
+            assert!(
+                !policy.developer_instructions.contains("Implement only"),
+                "{role}"
+            );
+            assert!(
+                !policy.developer_instructions.contains("Apply only"),
+                "{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_v1_role_policy_migrates_once_to_canonical_v2_replay() {
+        let job = delivery_job("executor");
+        let current = role_session_policy(&job, RoleExecutionMode::React)
+            .expect("current role policy")
+            .expect("Delivery role");
+        let mut legacy = serde_json::to_value(&current).expect("encode current policy");
+        let object = legacy.as_object_mut().expect("policy object");
+        object.insert("schemaVersion".to_owned(), serde_json::json!(1));
+        object.remove("executionMode");
+
+        let migrated = migrate_persisted_role_session_policy_v1(&job, Some(&legacy))
+            .expect("migrate exact v1 policy");
+        assert!(migrated.migrated);
+        let policy = migrated.policy.expect("migrated Delivery policy");
+        assert_eq!(policy.schema_version, 2);
+        assert_eq!(policy.execution_mode, RoleExecutionMode::React);
+        assert_eq!(
+            policy.developer_instructions,
+            canonical_role("executor")
+                .expect("executor role")
+                .developer_instructions
+        );
+
+        let canonical = serde_json::to_value(&policy).expect("encode migrated policy");
+        let replayed = migrate_persisted_role_session_policy_v1(&job, Some(&canonical))
+            .expect("replay canonical v2 policy");
+        assert!(!replayed.migrated);
+        assert_eq!(replayed.policy, Some(policy));
+    }
+
+    #[test]
+    fn persisted_v1_role_policy_rejects_tampering_and_extra_fields() {
+        let job = delivery_job("executor");
+        let current = role_session_policy(&job, RoleExecutionMode::React)
+            .expect("current role policy")
+            .expect("Delivery role");
+        let mut legacy = serde_json::to_value(&current).expect("encode current policy");
+        let object = legacy.as_object_mut().expect("policy object");
+        object.insert("schemaVersion".to_owned(), serde_json::json!(1));
+        object.remove("executionMode");
+        object.insert(
+            "workspaceMode".to_owned(),
+            serde_json::json!("candidate-read-only"),
+        );
+        assert!(migrate_persisted_role_session_policy_v1(&job, Some(&legacy)).is_err());
+
+        let object = legacy.as_object_mut().expect("policy object");
+        object.insert(
+            "workspaceMode".to_owned(),
+            serde_json::json!("candidate-write"),
+        );
+        object.insert("extra".to_owned(), serde_json::json!(true));
+        assert!(migrate_persisted_role_session_policy_v1(&job, Some(&legacy)).is_err());
     }
 
     #[test]
@@ -1362,8 +1652,63 @@ mod tests {
                 ),
             },
         );
-        let error = role_session_policy(&job).expect_err("foreign scope");
+        let error = role_session_policy(&job, RoleExecutionMode::React).expect_err("foreign scope");
         assert_eq!(error.code(), StageProductErrorCode::InvalidScope);
+    }
+
+    #[test]
+    fn delegated_change_batch_schema_is_closed_and_bounded() {
+        fn collect_keywords(value: &Value, keywords: &mut std::collections::BTreeSet<String>) {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            for (key, nested) in object {
+                keywords.insert(key.clone());
+                if key == "properties" {
+                    if let Some(properties) = nested.as_object() {
+                        for schema in properties.values() {
+                            collect_keywords(schema, keywords);
+                        }
+                    }
+                } else if key == "items" {
+                    collect_keywords(nested, keywords);
+                }
+            }
+        }
+
+        let schema = change_batch_proposal_json_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["acceptanceCriteriaIds"]["maxItems"],
+            256
+        );
+        assert_eq!(
+            schema["properties"]["schemaVersion"]["enum"],
+            serde_json::json!([1])
+        );
+        assert_eq!(
+            schema["properties"]["validationProfile"]["pattern"],
+            "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        );
+        assert_eq!(
+            schema["properties"]["acceptanceCriteriaIds"]["items"]["pattern"],
+            "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+        );
+        let mut keywords = std::collections::BTreeSet::new();
+        collect_keywords(&schema, &mut keywords);
+        assert!(keywords.iter().all(|keyword| matches!(
+            keyword.as_str(),
+            "type"
+                | "additionalProperties"
+                | "required"
+                | "properties"
+                | "items"
+                | "enum"
+                | "minItems"
+                | "maxItems"
+                | "pattern"
+        )));
+        assert!(serde_json::to_vec(&schema).expect("serialize schema").len() < 4_096);
     }
 
     #[test]

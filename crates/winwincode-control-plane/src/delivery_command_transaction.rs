@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, ControlPlaneWebSocketDeliveryChangedEvent,
     DeliveryAdvancePayload, DeliveryCreatePayload, DeliveryResolveAttentionPayload,
-    DeliverySpecInput, DeliveryUpdateSpecPayload, RepositoryScope, Scope,
+    DeliverySpecInput, DeliveryUpdateSpecPayload, Scope,
 };
 use winwincode_delivery::{
     application::{
@@ -27,6 +27,7 @@ use winwincode_delivery::{
         ResolveDeliveryAttention, StartDeliveryStage,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{DeliveryId, Sha256Digest};
 use winwincode_storage::{CommitReceipt, ProductStateStorage, ReceiptIdentity, StorageError};
 

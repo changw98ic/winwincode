@@ -7,11 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::Connection;
 use winwincode_api::generated::{
     Actor, ChatSubmitCommand, ChatSubmitCommandCommand, ChatSubmitPayload, ModelRoute, PageRequest,
-    RepositoryScope, RepositoryScopeKind, SessionCloseCommand, SessionCloseCommandCommand,
-    SessionClosePayload, SessionCreateCommand, SessionCreateCommandCommand, SessionCreatePayload,
-    SessionGetParameters, SessionGetQuery, SessionGetQueryQuery, SessionListParameters,
-    SessionListQuery, SessionListQueryQuery, SessionMessagesListParameters,
-    SessionMessagesListQuery, SessionMessagesListQueryQuery, UserActor, UserActorKind,
+    SessionCloseCommand, SessionCloseCommandCommand, SessionClosePayload, SessionCreateCommand,
+    SessionCreateCommandCommand, SessionCreatePayload, SessionGetParameters, SessionGetQuery,
+    SessionGetQueryQuery, SessionListParameters, SessionListQuery, SessionListQueryQuery,
+    SessionMessagesListParameters, SessionMessagesListQuery, SessionMessagesListQueryQuery,
 };
 use winwincode_control_plane::{
     ProductSessionApiClock, ProductSessionApiService, ProductSessionExecutionConfig,
@@ -20,6 +19,7 @@ use winwincode_domain::{
     CredentialReferenceId, Instant, OrganizationId, ProductSessionId, ProjectId, RepositoryId,
     RequestId, Revision, SchemaVersion, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);

@@ -9,8 +9,7 @@ use rusqlite::Connection;
 use winwincode_api::generated::{
     AcceptanceCriterionInput, Actor, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
     DeliveryAdvancePayload, DeliveryCreateCommand, DeliveryCreateCommandCommand,
-    DeliveryCreatePayload, DeliverySpecInput, RepositoryScope, RepositoryScopeKind, UserActor,
-    UserActorKind,
+    DeliveryCreatePayload, DeliverySpecInput,
 };
 use winwincode_control_plane::{
     ControlPlane, ControlPlaneConfig, EventPublishError, EventPublisher,
@@ -20,6 +19,7 @@ use winwincode_domain::{
     DeliveryId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 
 struct NoopPublisher;
 

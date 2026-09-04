@@ -12591,6 +12591,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwincode-change-batch"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "codex-apply-patch",
+ "codex-exec-server",
+ "codex-utils-path-uri",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "winwincode-domain",
+ "winwincode-execution-port",
+]
+
+[[package]]
 name = "winwincode-cli"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -12610,6 +12626,7 @@ name = "winwincode-codex"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
+ "codex-apply-patch",
  "codex-protocol",
  "ed25519-dalek",
  "futures",
@@ -12617,6 +12634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "time",
  "tokio",
  "uuid",
  "winwincode-domain",
@@ -12694,9 +12712,11 @@ dependencies = [
 name = "winwincode-execution-port"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "quick-xml",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "toml 0.9.11+spec-1.1.0",
  "winwincode-domain",
 ]
 
@@ -12733,6 +12753,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "winwincode-execution-port",
 ]
 
 [[package]]
@@ -12884,12 +12905,15 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "winwincode-api",
+ "winwincode-change-batch",
  "winwincode-codex",
  "winwincode-control-plane",
  "winwincode-delivery",

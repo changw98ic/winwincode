@@ -9,9 +9,9 @@
 
 use std::fmt;
 
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::application::stage::SessionBindingAuthority;
 use winwincode_delivery::domain::{Delivery, SessionBindingSourceKind, StageRunStatus};
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     ExecutionJobId, ExecutionMessageId, Instant, RequestId, SchemaVersion, SessionIdentity,
     WorkerSessionId,

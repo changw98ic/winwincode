@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, SchemaVersion, Scope, UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_codex::{
     HelperReleaseManifest, ProductionCodexAdapter, ProductionCodexConfig, ProductionCodexOptions,
@@ -32,11 +31,14 @@ use winwincode_control_plane::{
     ProductSessionExecutionConfig, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
     ProviderCatalogService, ProviderDescriptor, ResolvedSecret, SecretStorePort,
     StandaloneModelExecutionApplication, StandaloneModelExecutionConfig, StandaloneProviderConfig,
-    TrustedProtocolParty, local_loopback_retry_policy,
+    StructuredOutputSupport, TrustedProtocolParty, local_loopback_retry_policy,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision,
     Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+};
+use winwincode_domain::{
+    RepositoryScope, RepositoryScopeKind, SchemaVersion, UserActor, UserActorKind,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
@@ -631,6 +633,24 @@ impl LocalModelRoute {
     }
 }
 
+fn local_provider_descriptor(model_route: &LocalModelRoute) -> ProviderDescriptor {
+    ProviderDescriptor {
+        provider_id: model_route.provider.clone(),
+        display_name: "WinWinCode local loopback Provider".to_owned(),
+        adapter_kind: "deterministic-loopback".to_owned(),
+        credential_reference_id: model_route.credential_reference.clone(),
+        models: vec![ModelCapability {
+            model_id: model_route.model.clone(),
+            display_name: "WinWinCode local loopback model".to_owned(),
+            context_window_tokens: 128_000,
+            max_output_tokens: 16_000,
+            tool_support: ModelToolSupport::Parallel,
+            structured_output_support: StructuredOutputSupport::JsonSchemaStrict,
+            reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
+        }],
+    }
+}
+
 fn configure_local_model_authority(
     storage: &mut SqliteStorage,
     subject: &str,
@@ -680,20 +700,7 @@ fn configure_local_model_authority(
         ResolvedSecret::from_bytes(b"winwincode-local-loopback-secret".to_vec())?,
     )?;
 
-    let descriptor = ProviderDescriptor {
-        provider_id: model_route.provider.clone(),
-        display_name: "WinWinCode local loopback Provider".to_owned(),
-        adapter_kind: "deterministic-loopback".to_owned(),
-        credential_reference_id: model_route.credential_reference.clone(),
-        models: vec![ModelCapability {
-            model_id: model_route.model.clone(),
-            display_name: "WinWinCode local loopback model".to_owned(),
-            context_window_tokens: 128_000,
-            max_output_tokens: 16_000,
-            tool_support: ModelToolSupport::Parallel,
-            reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
-        }],
-    };
+    let descriptor = local_provider_descriptor(model_route);
     let catalog = ProviderCatalogService::new(storage).project(&organization)?;
     let provider_matches = catalog.providers.iter().any(|provider| {
         provider.provider_id == descriptor.provider_id
@@ -817,6 +824,16 @@ fn open_production_codex(
         discovered_capabilities: Vec::new(),
         action_signing_key,
         execution_envelope,
+        execution_mode: winwincode_codex::ExecutionMode::from_config(&required_environment_or(
+            "WWC_SERVER_EXECUTION_MODE",
+            "react",
+        )?)
+        .ok_or("WWC_SERVER_EXECUTION_MODE contains an unsupported execution mode")?,
+        observer_mode: winwincode_codex::ObserverMode::from_config(&required_environment_or(
+            "WWC_SERVER_OBSERVER_MODE",
+            "off",
+        )?)
+        .ok_or("WWC_SERVER_OBSERVER_MODE contains an unsupported observer mode")?,
     })?;
     Ok(ProductionCodexAdapter::open(codex_config)?)
 }

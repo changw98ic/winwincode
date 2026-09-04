@@ -24,8 +24,7 @@ use winwincode_api::generated::{
     EnterpriseOrganizationUpdateCommandCommand, EnterpriseOrganizationUpdatePayload,
     EnterprisePermission, EnterpriseRoleAssignment, EnterpriseRolePermissionRule,
     EnterpriseRoleUpdateCommand, EnterpriseRoleUpdateCommandCommand, EnterpriseRoleUpdatePayload,
-    OrganizationScope, OrganizationScopeKind, PageRequest, RepositoryScope, RepositoryScopeKind,
-    Scope, UserActor, UserActorKind,
+    OrganizationScope, OrganizationScopeKind, PageRequest, Scope,
 };
 use winwincode_control_plane::{
     CollaborationActivityRecordRequest, CollaborationClock, CollaborationClockError,
@@ -37,6 +36,7 @@ use winwincode_domain::{
     OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId, Revision, SchemaVersion,
     Sha256Digest, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
 
 const NOW_MILLIS: u64 = 1_700_000_000_000;

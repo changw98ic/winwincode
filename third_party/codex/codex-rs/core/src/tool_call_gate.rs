@@ -112,16 +112,77 @@ impl fmt::Display for ToolCallGateRejection {
 
 impl std::error::Error for ToolCallGateRejection {}
 
+/// Host authorization retained across admission and the final pre-execution
+/// revalidation.  An executable authorization is deliberately an absolute
+/// path plus an opaque host identity: runtimes must execute that path instead
+/// of resolving the model-provided program through `PATH` again.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ToolCallGateAuthorization {
+    request_binding: String,
+    executable: Option<ToolCallGateExecutableAuthorization>,
+}
+
+impl ToolCallGateAuthorization {
+    pub fn new(
+        request_binding: String,
+        executable: Option<ToolCallGateExecutableAuthorization>,
+    ) -> Self {
+        Self {
+            request_binding,
+            executable,
+        }
+    }
+
+    pub fn request_binding(&self) -> &str {
+        &self.request_binding
+    }
+
+    pub fn executable(&self) -> Option<&ToolCallGateExecutableAuthorization> {
+        self.executable.as_ref()
+    }
+}
+
+/// Exact executable selected by the host action authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallGateExecutableAuthorization {
+    canonical_absolute_path: String,
+    arguments: Vec<String>,
+    identity: String,
+}
+
+impl ToolCallGateExecutableAuthorization {
+    pub fn new(canonical_absolute_path: String, arguments: Vec<String>, identity: String) -> Self {
+        Self {
+            canonical_absolute_path,
+            arguments,
+            identity,
+        }
+    }
+
+    pub fn canonical_absolute_path(&self) -> &str {
+        &self.canonical_absolute_path
+    }
+
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+}
+
 /// Typed host admission boundary invoked before every Codex tool handler.
 pub trait ToolCallGate: Send + Sync {
     fn authorize(
         &self,
         request: ToolCallGateRequest,
-    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>>;
+    ) -> BoxFuture<'static, Result<ToolCallGateAuthorization, ToolCallGateRejection>>;
 
     fn revalidate(
         &self,
         request: ToolCallGateRequest,
+        authorization: ToolCallGateAuthorization,
     ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>>;
 }
 

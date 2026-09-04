@@ -1,0 +1,514 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+index 37424c3..c2bf1b2 100644
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -54,6 +54,8 @@ pub use codex_core::ThreadManager;
+ pub use codex_core::ThreadShutdownReport;
+ pub use codex_core::ToolCallGate;
+ pub use codex_core::ToolCallGateAttachment;
++pub use codex_core::ToolCallGateAuthorization;
++pub use codex_core::ToolCallGateExecutableAuthorization;
+ pub use codex_core::ToolCallGateFileChange;
+ pub use codex_core::ToolCallGateFileOperation;
+ pub use codex_core::ToolCallGatePayload;
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 1b048e5..cdb7254 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -125,6 +125,8 @@ pub use thread_manager::local_agent_graph_store_from_state_db;
+ pub use thread_manager::thread_store_from_config;
+ pub use tool_call_gate::ToolCallGate;
+ pub use tool_call_gate::ToolCallGateAttachment;
++pub use tool_call_gate::ToolCallGateAuthorization;
++pub use tool_call_gate::ToolCallGateExecutableAuthorization;
+ pub use tool_call_gate::ToolCallGateFileChange;
+ pub use tool_call_gate::ToolCallGateFileOperation;
+ pub use tool_call_gate::ToolCallGatePayload;
+diff --git a/codex-rs/core/src/tool_call_gate.rs b/codex-rs/core/src/tool_call_gate.rs
+index 569f12b..bcb6225 100644
+--- a/codex-rs/core/src/tool_call_gate.rs
++++ b/codex-rs/core/src/tool_call_gate.rs
+@@ -112,16 +112,77 @@ impl fmt::Display for ToolCallGateRejection {
+ 
+ impl std::error::Error for ToolCallGateRejection {}
+ 
++/// Host authorization retained across admission and the final pre-execution
++/// revalidation.  An executable authorization is deliberately an absolute
++/// path plus an opaque host identity: runtimes must execute that path instead
++/// of resolving the model-provided program through `PATH` again.
++#[derive(Clone, Debug, Default, Eq, PartialEq)]
++pub struct ToolCallGateAuthorization {
++    request_binding: String,
++    executable: Option<ToolCallGateExecutableAuthorization>,
++}
++
++impl ToolCallGateAuthorization {
++    pub fn new(
++        request_binding: String,
++        executable: Option<ToolCallGateExecutableAuthorization>,
++    ) -> Self {
++        Self {
++            request_binding,
++            executable,
++        }
++    }
++
++    pub fn request_binding(&self) -> &str {
++        &self.request_binding
++    }
++
++    pub fn executable(&self) -> Option<&ToolCallGateExecutableAuthorization> {
++        self.executable.as_ref()
++    }
++}
++
++/// Exact executable selected by the host action authority.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ToolCallGateExecutableAuthorization {
++    canonical_absolute_path: String,
++    arguments: Vec<String>,
++    identity: String,
++}
++
++impl ToolCallGateExecutableAuthorization {
++    pub fn new(canonical_absolute_path: String, arguments: Vec<String>, identity: String) -> Self {
++        Self {
++            canonical_absolute_path,
++            arguments,
++            identity,
++        }
++    }
++
++    pub fn canonical_absolute_path(&self) -> &str {
++        &self.canonical_absolute_path
++    }
++
++    pub fn identity(&self) -> &str {
++        &self.identity
++    }
++
++    pub fn arguments(&self) -> &[String] {
++        &self.arguments
++    }
++}
++
+ /// Typed host admission boundary invoked before every Codex tool handler.
+ pub trait ToolCallGate: Send + Sync {
+     fn authorize(
+         &self,
+         request: ToolCallGateRequest,
+-    ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>>;
++    ) -> BoxFuture<'static, Result<ToolCallGateAuthorization, ToolCallGateRejection>>;
+ 
+     fn revalidate(
+         &self,
+         request: ToolCallGateRequest,
++        authorization: ToolCallGateAuthorization,
+     ) -> BoxFuture<'static, Result<(), ToolCallGateRejection>>;
+ }
+ 
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index 2073067..264baba 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -58,6 +58,7 @@ impl ToolOrchestrator {
+         tool_ctx: &ToolCtx,
+         attempt: &SandboxAttempt<'_>,
+         managed_network_active: bool,
++        action_authorization: Option<&crate::ToolCallGateAuthorization>,
+     ) -> (Result<Out, ToolError>, Option<DeferredNetworkApproval>)
+     where
+         T: ToolRuntime<Rq, Out>,
+@@ -99,6 +100,7 @@ impl ToolOrchestrator {
+             network_proxy: network_approval
+                 .as_ref()
+                 .map(ActiveNetworkApproval::execution_proxy),
++            action_authorization,
+         };
+         if let Some(payload) = tool.action_gate_payload(req)
+             && let Some(attachment) = tool_ctx
+@@ -108,7 +110,10 @@ impl ToolOrchestrator {
+                 .get::<crate::ToolCallGateAttachment>()
+             && let Err(error) = attachment
+                 .gate()
+-                .revalidate(action_gate_request(tool_ctx, payload))
++                .revalidate(
++                    action_gate_request(tool_ctx, payload),
++                    action_authorization.cloned().unwrap_or_default(),
++                )
+                 .await
+         {
+             return (Err(ToolError::Rejected(error.to_string())), None);
+@@ -238,19 +243,23 @@ impl ToolOrchestrator {
+             }
+         }
+ 
+-        if let Some(payload) = tool.action_gate_payload(req)
++        let action_authorization = if let Some(payload) = tool.action_gate_payload(req)
+             && let Some(attachment) = tool_ctx
+                 .session
+                 .services
+                 .thread_extension_data
+                 .get::<crate::ToolCallGateAttachment>()
+         {
+-            attachment
+-                .gate()
+-                .authorize(action_gate_request(tool_ctx, payload))
+-                .await
+-                .map_err(|error| ToolError::Rejected(error.to_string()))?;
+-        }
++            Some(
++                attachment
++                    .gate()
++                    .authorize(action_gate_request(tool_ctx, payload))
++                    .await
++                    .map_err(|error| ToolError::Rejected(error.to_string()))?,
++            )
++        } else {
++            None
++        };
+ 
+         // 2) First attempt under the selected sandbox.
+         let sandbox_override = sandbox_override_for_first_attempt(
+@@ -303,6 +312,7 @@ impl ToolOrchestrator {
+                 .windows_sandbox_private_desktop,
+             network_denial_cancellation_token: None,
+             network_proxy: None,
++            action_authorization: None,
+         };
+ 
+         let initial_attempt_start = Instant::now();
+@@ -312,6 +322,7 @@ impl ToolOrchestrator {
+             tool_ctx,
+             &initial_attempt,
+             managed_network_active,
++            action_authorization.as_ref(),
+         )
+         .await;
+         let initial_duration = initial_attempt_start.elapsed();
+@@ -487,13 +498,20 @@ impl ToolOrchestrator {
+                         .windows_sandbox_private_desktop,
+                     network_denial_cancellation_token: None,
+                     network_proxy: None,
++                    action_authorization: None,
+                 };
+ 
+                 // Second attempt.
+                 let escalated_attempt_start = Instant::now();
+-                let (retry_result, retry_deferred_network_approval) =
+-                    Self::run_attempt(tool, req, tool_ctx, &retry_attempt, managed_network_active)
+-                        .await;
++                let (retry_result, retry_deferred_network_approval) = Self::run_attempt(
++                    tool,
++                    req,
++                    tool_ctx,
++                    &retry_attempt,
++                    managed_network_active,
++                    action_authorization.as_ref(),
++                )
++                .await;
+                 let escalated_duration = escalated_attempt_start.elapsed();
+                 match retry_result {
+                     Ok(output) => {
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 5cd3a9c..c525cfc 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -189,14 +189,14 @@ impl ToolCallRuntime {
+                         tool_name: dispatch_call.tool_name.name.clone(),
+                         payload,
+                     };
+-                    attachment
++                    let authorization = attachment
+                         .gate()
+                         .authorize(request.clone())
+                         .await
+                         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                     attachment
+                         .gate()
+-                        .revalidate(request)
++                        .revalidate(request, authorization)
+                         .await
+                         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                 }
+diff --git a/codex-rs/core/src/tools/runtimes/apply_patch_tests.rs b/codex-rs/core/src/tools/runtimes/apply_patch_tests.rs
+index d4b33da..d304396 100644
+--- a/codex-rs/core/src/tools/runtimes/apply_patch_tests.rs
++++ b/codex-rs/core/src/tools/runtimes/apply_patch_tests.rs
+@@ -248,6 +248,7 @@ async fn file_system_sandbox_context_preserves_executor_workspace_permissions()
+         windows_sandbox_private_desktop: true,
+         network_denial_cancellation_token: None,
+         network_proxy: None,
++        action_authorization: None,
+     };
+ 
+     let sandbox = ApplyPatchRuntime::file_system_sandbox_context_for_attempt(&req, &attempt)
+@@ -317,6 +318,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
+         windows_sandbox_private_desktop: false,
+         network_denial_cancellation_token: None,
+         network_proxy: None,
++        action_authorization: None,
+     };
+ 
+     assert_eq!(
+diff --git a/codex-rs/core/src/tools/runtimes/mod.rs b/codex-rs/core/src/tools/runtimes/mod.rs
+index 34ed397..849b615 100644
+--- a/codex-rs/core/src/tools/runtimes/mod.rs
++++ b/codex-rs/core/src/tools/runtimes/mod.rs
+@@ -28,6 +28,7 @@ use codex_protocol::config_types::WindowsSandboxLevel;
+ use codex_protocol::models::AdditionalPermissionProfile;
+ use codex_protocol::shell_environment::is_non_inheritable_env_var;
+ use codex_sandboxing::SandboxCommand;
++use codex_shell_command::bash::parse_shell_lc_plain_commands;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::PathUri;
+ use std::collections::HashMap;
+@@ -38,6 +39,57 @@ pub(crate) mod apply_patch;
+ pub(crate) mod shell;
+ pub(crate) mod unified_exec;
+ 
++/// Replaces only `argv[0]` with the exact executable admitted by the host.
++/// Arguments and working directory remain the handler-parsed values that were
++/// bound into the gate request.
++pub(crate) fn command_with_authorized_executable(
++    command: &[String],
++    attempt: &crate::tools::sandboxing::SandboxAttempt<'_>,
++) -> Result<Vec<String>, ToolError> {
++    let Some(executable) = attempt
++        .action_authorization
++        .and_then(crate::ToolCallGateAuthorization::executable)
++    else {
++        return Ok(command.to_vec());
++    };
++    let path = executable.canonical_absolute_path();
++    if !std::path::Path::new(path).is_absolute()
++        || executable.identity().is_empty()
++        || attempt
++            .action_authorization
++            .is_none_or(|authorization| authorization.request_binding().is_empty())
++    {
++        return Err(ToolError::Rejected(
++            "host executable authorization is invalid".to_string(),
++        ));
++    }
++    let mut authorized = Vec::with_capacity(executable.arguments().len() + 1);
++    authorized.push(path.to_string());
++    authorized.extend_from_slice(executable.arguments());
++    Ok(authorized)
++}
++
++pub(crate) fn has_authorized_executable(
++    attempt: &crate::tools::sandboxing::SandboxAttempt<'_>,
++) -> bool {
++    attempt
++        .action_authorization
++        .and_then(crate::ToolCallGateAuthorization::executable)
++        .is_some()
++}
++
++/// Returns the one plain command represented by a shell wrapper. Complex
++/// scripts remain wrapped and therefore cannot match a delegated executable
++/// allowlist.
++pub(crate) fn command_for_action_gate(command: &[String]) -> Vec<String> {
++    if let Some(commands) = parse_shell_lc_plain_commands(command)
++        && let [single] = commands.as_slice()
++    {
++        return single.clone();
++    }
++    command.to_vec()
++}
++
+ /// Shared helper to construct sandbox transform inputs from a tokenized command line and native
+ /// working directory. Validates that at least a program is present.
+ pub(crate) fn build_sandbox_command(
+diff --git a/codex-rs/core/src/tools/runtimes/mod_tests.rs b/codex-rs/core/src/tools/runtimes/mod_tests.rs
+index b4e4c9d..6ba111c 100644
+--- a/codex-rs/core/src/tools/runtimes/mod_tests.rs
++++ b/codex-rs/core/src/tools/runtimes/mod_tests.rs
+@@ -119,6 +119,7 @@ async fn explicit_escalation_prepares_exec_without_managed_network() -> anyhow::
+         windows_sandbox_private_desktop: false,
+         network_denial_cancellation_token: None,
+         network_proxy: None,
++        action_authorization: None,
+     };
+ 
+     let exec_request = attempt
+diff --git a/codex-rs/core/src/tools/runtimes/shell.rs b/codex-rs/core/src/tools/runtimes/shell.rs
+index 754f2cc..f8f97d7 100644
+--- a/codex-rs/core/src/tools/runtimes/shell.rs
++++ b/codex-rs/core/src/tools/runtimes/shell.rs
+@@ -158,7 +158,8 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+     }
+ 
+     fn action_gate_payload(&self, req: &ShellRequest) -> Option<crate::ToolCallGatePayload> {
+-        let (program, args) = req.command.split_first()?;
++        let command = super::command_for_action_gate(&req.command);
++        let (program, args) = command.split_first()?;
+         Some(crate::ToolCallGatePayload::Shell {
+             program: program.clone(),
+             args: args.to_vec(),
+@@ -206,6 +207,12 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+         attempt: &SandboxAttempt<'_>,
+         ctx: &ToolCtx,
+     ) -> Result<ExecToolCallOutput, ToolError> {
++        if req.turn_environment.environment.is_remote() && super::has_authorized_executable(attempt)
++        {
++            return Err(ToolError::Rejected(
++                "host executable authorization cannot be used in a remote environment".to_string(),
++            ));
++        }
+         let session_shell = ctx.session.user_shell();
+         let shell = req
+             .turn_environment
+@@ -250,14 +257,19 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+         };
+         #[cfg(not(unix))]
+         let runtime_path_prepends = RuntimePathPrepends::default();
+-        let command = maybe_wrap_shell_lc_with_snapshot(
+-            &req.command,
+-            shell,
+-            shell_snapshot_location.as_ref(),
+-            &explicit_env_overrides,
+-            &env,
+-            &runtime_path_prepends,
+-        );
++        let authorized_command = super::command_with_authorized_executable(&req.command, attempt)?;
++        let command = if super::has_authorized_executable(attempt) {
++            authorized_command
++        } else {
++            maybe_wrap_shell_lc_with_snapshot(
++                &authorized_command,
++                shell,
++                shell_snapshot_location.as_ref(),
++                &explicit_env_overrides,
++                &env,
++                &runtime_path_prepends,
++            )
++        };
+         let command = disable_powershell_profile_for_elevated_windows_sandbox(
+             &command,
+             req.shell_type.as_ref(),
+@@ -270,7 +282,9 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+             command
+         };
+ 
+-        let zsh_fork_output = if self.backend == ShellRuntimeBackend::ShellCommandZshFork {
++        let zsh_fork_output = if self.backend == ShellRuntimeBackend::ShellCommandZshFork
++            && !super::has_authorized_executable(attempt)
++        {
+             match zsh_fork_backend::maybe_run_shell_command(
+                 req,
+                 attempt,
+diff --git a/codex-rs/core/src/tools/runtimes/shell_tests.rs b/codex-rs/core/src/tools/runtimes/shell_tests.rs
+index 179363d..5dcd7ce 100644
+--- a/codex-rs/core/src/tools/runtimes/shell_tests.rs
++++ b/codex-rs/core/src/tools/runtimes/shell_tests.rs
+@@ -86,4 +86,24 @@ async fn approval_key_uses_path_uri_and_includes_environment_id() {
+         .cache_keys();
+ 
+     assert_ne!(original_key, other_key);
++
++    request.command = vec![
++        "/bin/zsh".to_string(),
++        "-lc".to_string(),
++        "cat src/lib.rs".to_string(),
++    ];
++    assert_eq!(
++        runtime.action_gate_payload(&request),
++        Some(crate::ToolCallGatePayload::Shell {
++            program: "cat".to_string(),
++            args: vec!["src/lib.rs".to_string()],
++            working_directory: cwd.to_string_lossy().into_owned(),
++        })
++    );
++
++    request.command[2] = "cat src/lib.rs; rm src/lib.rs".to_string();
++    assert!(matches!(
++        runtime.action_gate_payload(&request),
++        Some(crate::ToolCallGatePayload::Shell { ref program, .. }) if program == "/bin/zsh"
++    ));
+ }
+diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+index c381e39..5235891 100644
+--- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
++++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+@@ -202,7 +202,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+     }
+ 
+     fn action_gate_payload(&self, req: &UnifiedExecRequest) -> Option<crate::ToolCallGatePayload> {
+-        let (program, args) = req.command.split_first()?;
++        let command = super::command_for_action_gate(&req.command);
++        let (program, args) = command.split_first()?;
+         Some(crate::ToolCallGatePayload::Shell {
+             program: program.clone(),
+             args: args.to_vec(),
+@@ -258,7 +259,14 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+         attempt: &SandboxAttempt<'_>,
+         ctx: &ToolCtx,
+     ) -> Result<UnifiedExecAttempt, ToolError> {
+-        let base_command = &req.command;
++        if req.turn_environment.environment.is_remote() && super::has_authorized_executable(attempt)
++        {
++            return Err(ToolError::Rejected(
++                "host executable authorization cannot be used in a remote environment".to_string(),
++            ));
++        }
++        let authorized_command = super::command_with_authorized_executable(&req.command, attempt)?;
++        let base_command = &authorized_command;
+         let windows_sandbox_proxy_settings_mode = ctx.session.windows_sandbox_proxy_settings_mode;
+         let session_shell = ctx.session.user_shell();
+         let shell = req
+@@ -378,7 +386,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+         };
+         #[cfg(not(unix))]
+         let runtime_path_prepends = RuntimePathPrepends::default();
+-        let command = if environment_is_remote {
++        let command = if super::has_authorized_executable(attempt) || environment_is_remote {
+             base_command.to_vec()
+         } else {
+             maybe_wrap_shell_lc_with_snapshot(
+@@ -409,7 +417,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+             sidecar_permissions.as_ref(),
+         );
+ 
+-        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode {
++        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode
++            && !super::has_authorized_executable(attempt)
++        {
+             let command = build_unified_exec_sandbox_command(
+                 &command,
+                 &req.cwd,
+diff --git a/codex-rs/core/src/tools/sandboxing.rs b/codex-rs/core/src/tools/sandboxing.rs
+index 6143450..cb069be 100644
+--- a/codex-rs/core/src/tools/sandboxing.rs
++++ b/codex-rs/core/src/tools/sandboxing.rs
+@@ -401,6 +401,9 @@ pub(crate) struct SandboxAttempt<'a> {
+     pub windows_sandbox_private_desktop: bool,
+     pub network_denial_cancellation_token: Option<CancellationToken>,
+     pub(crate) network_proxy: Option<&'a NetworkProxy>,
++    /// Exact host authorization for this attempt. Shell runtimes use its
++    /// canonical absolute executable instead of resolving `argv[0]` again.
++    pub(crate) action_authorization: Option<&'a crate::ToolCallGateAuthorization>,
+ }
+ 
+ pub(crate) fn executor_windows_sandbox_level(
+diff --git a/codex-rs/core/src/tools/sandboxing_tests.rs b/codex-rs/core/src/tools/sandboxing_tests.rs
+index e909850..00fbec0 100644
+--- a/codex-rs/core/src/tools/sandboxing_tests.rs
++++ b/codex-rs/core/src/tools/sandboxing_tests.rs
+@@ -261,6 +261,7 @@ fn windows_sandbox_env_preserves_denied_reads_or_rejects_unsupported_backend() {
+         windows_sandbox_private_desktop: false,
+         network_denial_cancellation_token: None,
+         network_proxy: None,
++        action_authorization: None,
+     };
+     let command = || SandboxCommand {
+         program: "cmd.exe".into(),
+@@ -332,6 +333,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
+         windows_sandbox_private_desktop: false,
+         network_denial_cancellation_token: None,
+         network_proxy: None,
++        action_authorization: None,
+     };
+     let managed_network = ManagedNetworkSandboxContext {
+         loopback_ports: vec![43123],

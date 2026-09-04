@@ -23,7 +23,7 @@ use winwincode_api::generated::{
     DeliverySubmitVerdictCompletedResponseCommand, DeliverySubmitVerdictCompletedResponseOutcome,
     DeliveryTaskCountsProjection, DeliveryUpdateSpecCommand, DeliveryUpdateSpecCompletedResponse,
     DeliveryUpdateSpecCompletedResponseCommand, DeliveryUpdateSpecCompletedResponseOutcome,
-    ErrorCode, PageInfo, RepositoryScope, Scope,
+    ErrorCode, PageInfo, Scope,
 };
 use winwincode_delivery::{
     application::{
@@ -38,6 +38,7 @@ use winwincode_delivery::{
     },
     store::{DeliveryQuery, DeliveryQueryPort, DeliveryStore},
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{
     Count, DeliveryId, OpaqueCursor, RequestId, Revision, SchemaVersion, Sha256Digest,
 };

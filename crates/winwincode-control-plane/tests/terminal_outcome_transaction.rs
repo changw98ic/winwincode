@@ -12,7 +12,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, DeliveryAdvanceCommand, DeliveryAdvanceCommandCommand,
-    DeliveryAdvancePayload, RepositoryScope, Scope, UserActor,
+    DeliveryAdvancePayload, Scope,
 };
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::{
@@ -45,6 +45,7 @@ use winwincode_domain::{
     SessionIdentity, Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId,
     WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_execution_port::generated::{
     ArtifactReference, DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, ExecutionJob,
     ExecutionLeaseStamp, ExecutionLimits, ExecutionOutcome, ExecutionOutcomeStatus,
@@ -135,7 +136,7 @@ impl EventPublisher for FailingPublisher {
 
 fn repository_scope(seed: u64) -> RepositoryScope {
     RepositoryScope {
-        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        kind: winwincode_domain::RepositoryScopeKind::Repository,
         organization_id: OrganizationId(canonical_id("org", seed)),
         workspace_id: WorkspaceId(canonical_id("wsp", seed)),
         project_id: ProjectId(canonical_id("prj", seed)),
@@ -1197,7 +1198,7 @@ fn advance_command(
     DeliveryAdvanceCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: DeliveryAdvanceCommandCommand::DeliveryAdvance,
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),
@@ -1298,7 +1299,7 @@ fn verdict_command(
     CommandEnvelope {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: CommandName::DeliverySubmitVerdict,
         expected_revision: Revision(i64::try_from(delivery.revision()).expect("revision")),

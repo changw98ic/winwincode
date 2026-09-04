@@ -289,6 +289,26 @@ test('shared scalar values reject null, invalid versions, unsafe revisions, and 
   assertValid(schema, 'Sha256Digest', `sha256:${'a'.repeat(64)}`)
   assertInvalid(schema, 'Sha256Digest', `sha256:${'A'.repeat(64)}`)
   assertInvalid(schema, 'Sha256Digest', 'a'.repeat(64))
+
+  assertValid(schema, 'ChangeBatchId', `sha256:${'b'.repeat(64)}`)
+  assertInvalid(schema, 'ChangeBatchId', 'batch-1')
+  assertInvalid(schema, 'ChangeBatchId', `sha256:${'B'.repeat(64)}`)
+
+  assertValid(schema, 'WorkspaceRevision', `git-tree:${'a'.repeat(40)}`)
+  assertValid(schema, 'WorkspaceRevision', `git-tree:${'b'.repeat(64)}`)
+  for (const invalid of [
+    'HEAD',
+    'main',
+    'a'.repeat(40),
+    `git-commit:${'a'.repeat(40)}`,
+    `git-tree:${'A'.repeat(40)}`,
+    `git-tree:${'a'.repeat(39)}`,
+    `git-tree:${'a'.repeat(41)}`,
+    `git-tree:${'a'.repeat(63)}`,
+    `git-tree:${'a'.repeat(65)}`,
+  ]) {
+    assertInvalid(schema, 'WorkspaceRevision', invalid)
+  }
 })
 
 test('Actor and Scope keep identity kind and ownership ancestry explicit', async () => {
@@ -665,4 +685,45 @@ test('fixed positive and negative samples pin missing, null, enum, version, and 
       `${sample.name}: ${JSON.stringify(validate.errors)}`,
     )
   }
+})
+
+test('StructuredOutputSupport is a closed canonical capability enum', async () => {
+  const schema = await loadSchema()
+  const schemaCollection = JSON.parse(await readFile(
+    join(root, 'schema/winwincode/v1/schema-collection.generated.json'),
+    'utf8',
+  ))
+  const openapi = JSON.parse(await readFile(
+    join(root, 'schema/winwincode/v1/openapi.generated.json'),
+    'utf8',
+  ))
+  const typescript = await readFile(
+    join(root, 'apps/client/src/generated/contracts.ts'),
+    'utf8',
+  )
+  const rust = await readFile(
+    join(root, 'crates/winwincode-api/src/generated.rs'),
+    'utf8',
+  )
+
+  assert.deepEqual(schema.$defs.StructuredOutputSupport, {
+    type: 'string',
+    enum: ['unsupported', 'json_schema_strict'],
+    description: 'Closed model capability for strict structured final output. unsupported rejects strict JSON Schema requests before credentials or Provider calls; json_schema_strict admits them.',
+  })
+  assertValid(schema, 'StructuredOutputSupport', 'unsupported')
+  assertValid(schema, 'StructuredOutputSupport', 'json_schema_strict')
+  assertInvalid(schema, 'StructuredOutputSupport', 'json_schema')
+  assertInvalid(schema, 'StructuredOutputSupport', null)
+  assertInvalid(schema, 'StructuredOutputSupport', { kind: 'unsupported' })
+  assert.deepEqual(
+    schemaCollection.$defs.StructuredOutputSupport,
+    schema.$defs.StructuredOutputSupport,
+  )
+  assert.deepEqual(
+    openapi.components.schemas.StructuredOutputSupport,
+    schema.$defs.StructuredOutputSupport,
+  )
+  assert.match(typescript, /export enum StructuredOutputSupport \{\s+Unsupported = "unsupported",\s+JsonSchemaStrict = "json_schema_strict",\s+\}/u)
+  assert.match(rust, /pub enum StructuredOutputSupport \{\s+#\[serde\(rename = "unsupported"\)\]\s+Unsupported,\s+#\[serde\(rename = "json_schema_strict"\)\]\s+JsonSchemaStrict,\s+\}/u)
 })

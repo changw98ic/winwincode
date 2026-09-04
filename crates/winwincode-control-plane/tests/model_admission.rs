@@ -8,8 +8,7 @@ use std::thread;
 
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
 };
 use winwincode_control_plane::{
     CredentialReferenceResolution, CredentialReferenceService, DurableProviderGatewayAdmission,
@@ -25,7 +24,7 @@ use winwincode_control_plane::{
     ModelSettingsTarget, ModelSettingsValues, ModelToolSupport, ProductionModelPolicySource,
     ProviderAdmissionOpenRequest, ProviderAdmissionReservationConfig, ProviderCatalogRequest,
     ProviderCatalogService, ProviderDescriptor, ProviderGatewayAdmissionPort,
-    ProviderGatewayIdentity, ProviderTokenUsage, ResolvedModelCapability,
+    ProviderGatewayIdentity, ProviderTokenUsage, ResolvedModelCapability, StructuredOutputSupport,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, ExecutionJobId, ExecutionMessageId, FencingToken,
@@ -33,6 +32,7 @@ use winwincode_domain::{
     RequestId, Revision, SchemaVersion, SessionIdentity, Sha256Digest, UserId, WorkerId,
     WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     EncodedPayload, ExecutionLeaseStamp, ModelGatewayRoute, ModelOpenMessage, ModelOpenMessageKind,
 };
@@ -91,6 +91,7 @@ fn model_capability() -> ModelCapability {
         context_window_tokens: 128_000,
         max_output_tokens: 16_000,
         tool_support: ModelToolSupport::Parallel,
+        structured_output_support: StructuredOutputSupport::Unsupported,
         reasoning_efforts: vec!["high".to_owned()],
     }
 }

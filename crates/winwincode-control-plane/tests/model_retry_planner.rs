@@ -8,9 +8,8 @@ use std::{
 
 use winwincode_api::generated::{
     Actor, CredentialReferenceCreateCommand, CredentialReferenceCreateCommandCommand,
-    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind,
-    RepositoryScope, RepositoryScopeKind, Scope, ServiceAccountActor, ServiceAccountActorKind,
-    UserActor, UserActorKind,
+    CredentialReferenceCreatePayload, ModelRoute, OrganizationScope, OrganizationScopeKind, Scope,
+    ServiceAccountActor, ServiceAccountActorKind,
 };
 use winwincode_control_plane::{
     ConfiguredModelRetryPlanAuthority, CredentialReferenceService, DurableModelRetryPreOpenPlanner,
@@ -18,7 +17,7 @@ use winwincode_control_plane::{
     ModelRetryPlanAuthorityPort, ModelRetryPlannerError, ModelRetryPlannerErrorKind,
     ModelRetryPreOpenPlannerPort, ModelRetryStep, ModelSettingsProjection, ModelSettingsTarget,
     ModelToolSupport, ProviderAdmissionOpenReceipt, ProviderCatalogRequest, ProviderCatalogService,
-    ProviderDescriptor, ProviderGatewayIdentity, command_receipt_identity,
+    ProviderDescriptor, ProviderGatewayIdentity, StructuredOutputSupport, command_receipt_identity,
 };
 use winwincode_domain::{
     CodexThreadId, CredentialReferenceId, DeliveryId, ExecutionJobId, ExecutionMessageId,
@@ -26,6 +25,7 @@ use winwincode_domain::{
     RepositoryId, RequestId, Revision, SchemaVersion, ServiceAccountId, SessionIdentity,
     Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{
     DeliveryStageExecutionScope, DeliveryStageExecutionScopeKind, EncodedPayload, ExecutionJob,
     ExecutionLeaseStamp, ExecutionLimits, ExecutionScope, ExecutionWorkspace,
@@ -98,6 +98,7 @@ fn register_provider(storage: &mut SqliteStorage) {
                     context_window_tokens: 128_000,
                     max_output_tokens: 16_000,
                     tool_support: ModelToolSupport::Parallel,
+                    structured_output_support: StructuredOutputSupport::Unsupported,
                     reasoning_efforts: vec!["high".to_owned()],
                 }],
             },
@@ -180,6 +181,7 @@ fn alternate_authority(root: &std::path::Path) -> FrozenModelRouteAuthority {
                     context_window_tokens: 64_000,
                     max_output_tokens: 8_000,
                     tool_support: ModelToolSupport::Serial,
+                    structured_output_support: StructuredOutputSupport::Unsupported,
                     reasoning_efforts: vec!["medium".to_owned()],
                 }],
             },

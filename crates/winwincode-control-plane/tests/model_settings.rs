@@ -13,20 +13,20 @@ use std::{
 use rusqlite::Connection;
 use winwincode_api::generated::{
     Actor, EmptyParameters, ModelRoute, OrganizationScope, OrganizationScopeKind, PageRequest,
-    ProjectScope, ProjectScopeKind, RepositoryScope, RepositoryScopeKind, Scope, SettingsGetQuery,
-    SettingsGetQueryQuery, SettingsPatch, SettingsUpdateCommand, SettingsUpdateCommandCommand,
-    SettingsUpdatePayload, UserActor, UserActorKind,
+    ProjectScope, ProjectScopeKind, Scope, SettingsGetQuery, SettingsGetQueryQuery, SettingsPatch,
+    SettingsUpdateCommand, SettingsUpdateCommandCommand, SettingsUpdatePayload,
 };
 use winwincode_control_plane::{
     CredentialLeakGate, CredentialOutputBoundary, ModelCapability, ModelSettingsChange,
     ModelSettingsErrorKind, ModelSettingsRequest, ModelSettingsService, ModelSettingsTarget,
     ModelSettingsValues, ModelToolSupport, ProductStateStorage, ProviderCatalogRequest,
-    ProviderCatalogService, ProviderDescriptor, ResolvedSecret,
+    ProviderCatalogService, ProviderDescriptor, ResolvedSecret, StructuredOutputSupport,
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProductSessionId, ProjectId, RepositoryId, RequestId,
     Revision, SchemaVersion, UserId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_storage::SqliteStorage;
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -181,6 +181,7 @@ fn descriptor(provider_id: &str, model_id: &str, credential_seed: u64) -> Provid
             context_window_tokens: 128_000,
             max_output_tokens: 16_000,
             tool_support: ModelToolSupport::Parallel,
+            structured_output_support: StructuredOutputSupport::Unsupported,
             reasoning_efforts: vec!["high".to_owned(), "medium".to_owned()],
         }],
     }

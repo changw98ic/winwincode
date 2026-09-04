@@ -13,7 +13,7 @@ use winwincode_api::generated::{
     Actor, CommandEnvelope, CommandName, DeliveryResolveAttentionCommand,
     DeliveryResolveAttentionCommandCommand, DeliveryResolveAttentionPayload,
     DeliverySubmitVerdictCommand, DeliverySubmitVerdictCommandCommand,
-    DeliverySubmitVerdictPayload, RepositoryScope, Scope, UserActor,
+    DeliverySubmitVerdictPayload, Scope,
 };
 use winwincode_audit::{AuditEvent, AuditExecutionSubjectKind, AuditScope};
 use winwincode_control_plane::delivery_execution::{
@@ -49,6 +49,7 @@ use winwincode_domain::{
     SchemaVersion, SessionBindingSourceIdentity, SessionBindingSourceIdentityKind, SessionIdentity,
     Sha256Digest, StageRunId, UserId, WorkerId, WorkerInstanceId, WorkerSessionId, WorkspaceId,
 };
+use winwincode_domain::{RepositoryScope, UserActor};
 use winwincode_execution_port::generated::{
     ArtifactChunkMessage, ArtifactChunkMessageKind, ArtifactDescriptor, ArtifactKind,
     ArtifactOpenMessage, ArtifactOpenMessageKind, ArtifactReference, EncodedPayload,
@@ -273,7 +274,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
     CommandEnvelope {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: CommandName::DeliveryAdvance,
         expected_revision: Revision(1),
@@ -281,7 +282,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
         request_id: RequestId(canonical_id("req", seed)),
         schema_version: SchemaVersion::WinwincodeV1,
         scope: Scope::RepositoryScope(RepositoryScope {
-            kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+            kind: winwincode_domain::RepositoryScopeKind::Repository,
             organization_id: OrganizationId(canonical_id("org", seed)),
             workspace_id: WorkspaceId(canonical_id("wsp", seed)),
             project_id: ProjectId(canonical_id("prj", seed)),
@@ -292,7 +293,7 @@ fn delivery_advance_command(seed: u64) -> CommandEnvelope {
 
 fn audit_repository_scope(seed: u64) -> RepositoryScope {
     RepositoryScope {
-        kind: winwincode_api::generated::RepositoryScopeKind::Repository,
+        kind: winwincode_domain::RepositoryScopeKind::Repository,
         organization_id: OrganizationId(canonical_id("org", seed)),
         workspace_id: WorkspaceId(canonical_id("wsp", seed)),
         project_id: ProjectId(canonical_id("prj", seed)),
@@ -3055,7 +3056,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let next_command = winwincode_api::generated::DeliveryAdvanceCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: winwincode_api::generated::DeliveryAdvanceCommandCommand::DeliveryAdvance,
         expected_revision: Revision(i64::try_from(active.revision()).expect("revision")),
@@ -3199,7 +3200,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let review_advance = winwincode_api::generated::DeliveryAdvanceCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: winwincode_api::generated::DeliveryAdvanceCommandCommand::DeliveryAdvance,
         expected_revision: Revision(i64::try_from(verifying.revision()).expect("revision")),
@@ -3347,7 +3348,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let submit_verdict = DeliverySubmitVerdictCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: DeliverySubmitVerdictCommandCommand::DeliverySubmitVerdict,
         expected_revision: Revision(
@@ -3378,7 +3379,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let delivery_review_advance = winwincode_api::generated::DeliveryAdvanceCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: winwincode_api::generated::DeliveryAdvanceCommandCommand::DeliveryAdvance,
         expected_revision: Revision(
@@ -3429,7 +3430,7 @@ fn control_plane_rebuilds_the_candidate_from_its_exact_artifact_and_successful_o
     let resolve_attention = DeliveryResolveAttentionCommand {
         actor: Actor::UserActor(UserActor {
             id: UserId(canonical_id("usr", seed)),
-            kind: winwincode_api::generated::UserActorKind::User,
+            kind: winwincode_domain::UserActorKind::User,
         }),
         command: DeliveryResolveAttentionCommandCommand::DeliveryResolveAttention,
         expected_revision: Revision(

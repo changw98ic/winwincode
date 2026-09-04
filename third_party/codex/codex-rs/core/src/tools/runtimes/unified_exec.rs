@@ -202,7 +202,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
     }
 
     fn action_gate_payload(&self, req: &UnifiedExecRequest) -> Option<crate::ToolCallGatePayload> {
-        let (program, args) = req.command.split_first()?;
+        let command = super::command_for_action_gate(&req.command);
+        let (program, args) = command.split_first()?;
         Some(crate::ToolCallGatePayload::Shell {
             program: program.clone(),
             args: args.to_vec(),
@@ -258,7 +259,14 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
     ) -> Result<UnifiedExecAttempt, ToolError> {
-        let base_command = &req.command;
+        if req.turn_environment.environment.is_remote() && super::has_authorized_executable(attempt)
+        {
+            return Err(ToolError::Rejected(
+                "host executable authorization cannot be used in a remote environment".to_string(),
+            ));
+        }
+        let authorized_command = super::command_with_authorized_executable(&req.command, attempt)?;
+        let base_command = &authorized_command;
         let windows_sandbox_proxy_settings_mode = ctx.session.windows_sandbox_proxy_settings_mode;
         let session_shell = ctx.session.user_shell();
         let shell = req
@@ -378,7 +386,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         };
         #[cfg(not(unix))]
         let runtime_path_prepends = RuntimePathPrepends::default();
-        let command = if environment_is_remote {
+        let command = if super::has_authorized_executable(attempt) || environment_is_remote {
             base_command.to_vec()
         } else {
             maybe_wrap_shell_lc_with_snapshot(
@@ -409,7 +417,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             sidecar_permissions.as_ref(),
         );
 
-        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode {
+        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode
+            && !super::has_authorized_executable(attempt)
+        {
             let command = build_unified_exec_sandbox_command(
                 &command,
                 &req.cwd,

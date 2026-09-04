@@ -4,7 +4,6 @@
 
 use std::fmt;
 
-use winwincode_api::generated::RepositoryScope;
 use winwincode_delivery::{
     application::stage::DeliveryTerminalOutcomeFacts,
     domain::{
@@ -12,6 +11,7 @@ use winwincode_delivery::{
         candidate::freeze_delivery_candidate_from_source,
     },
 };
+use winwincode_domain::RepositoryScope;
 use winwincode_domain::{ArtifactId, DeliveryId, Sha256Digest};
 use winwincode_storage::{
     ArtifactAccess, ArtifactError, ArtifactProvenance, ArtifactStore, CandidateGitRetentionError,

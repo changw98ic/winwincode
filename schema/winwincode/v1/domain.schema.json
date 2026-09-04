@@ -45,6 +45,16 @@
       "pattern": "^job_[0-9A-HJKMNP-TV-Z]{26}$",
       "description": "Identity of one scheduler-owned execution job."
     },
+    "ChangeBatchId": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Content-derived identity of one ChangeBatch: SHA-256 over the canonical run key, turn id, optional call id, and patch digest."
+    },
+    "WorkspaceRevision": {
+      "type": "string",
+      "pattern": "^git-tree:(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "Exact Git tree object identity for a workspace snapshot. SHA-1 repositories use 40 lowercase hexadecimal digits and SHA-256 repositories use 64."
+    },
     "InputRequestId": {
       "type": "string",
       "pattern": "^inp_[0-9A-HJKMNP-TV-Z]{26}$",
@@ -177,6 +187,14 @@
     "Sha256Digest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "StructuredOutputSupport": {
+      "type": "string",
+      "enum": [
+        "unsupported",
+        "json_schema_strict"
+      ],
+      "description": "Closed model capability for strict structured final output. unsupported rejects strict JSON Schema requests before credentials or Provider calls; json_schema_strict admits them."
     },
     "InteractiveInputMode": {
       "type": "string",

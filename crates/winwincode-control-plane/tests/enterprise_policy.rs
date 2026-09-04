@@ -8,7 +8,6 @@ use winwincode_api::generated::{
     EnterprisePolicyListQueryQuery, EnterprisePolicyRule, EnterprisePolicyUpdateCommand,
     EnterprisePolicyUpdateCommandCommand, EnterprisePolicyUpdatePayload,
     EnterprisePolicyVersionReference, OrganizationScope, OrganizationScopeKind, PageRequest, Scope,
-    UserActor, UserActorKind,
 };
 use winwincode_control_plane::{
     EnterprisePolicyApiErrorKind, EnterprisePolicyApiService, EnterprisePolicyClock,
@@ -17,6 +16,7 @@ use winwincode_domain::{
     EnterprisePolicyId, Instant, OpaqueCursor, OrganizationId, RequestId, Revision, SchemaVersion,
     Sha256Digest, UserId,
 };
+use winwincode_domain::{UserActor, UserActorKind};
 use winwincode_storage::{ProductStateStorage, SqliteStorage};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);

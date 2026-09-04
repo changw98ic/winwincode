@@ -1,0 +1,35 @@
+{
+  "created": 0,
+  "duration": 0.1,
+  "exitcode": 1,
+  "root": ".",
+  "summary": {
+    "failed": 2
+  },
+  "tests": [
+    {
+      "nodeid": "tests/test_import.py::test_import",
+      "outcome": "failed",
+      "call": {
+        "crash": {
+          "path": "tests/test_import.py",
+          "lineno": 4,
+          "message": "ModuleNotFoundError: No module named 'missing'"
+        },
+        "longrepr": "ModuleNotFoundError"
+      }
+    },
+    {
+      "nodeid": "tests/test_name.py::test_name",
+      "outcome": "failed",
+      "call": {
+        "crash": {
+          "path": "tests/test_name.py",
+          "lineno": 9,
+          "message": "NameError: name 'missing' is not defined"
+        },
+        "longrepr": "NameError"
+      }
+    }
+  ]
+}

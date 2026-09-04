@@ -1804,6 +1804,7 @@ fn gateway_kind(kind: ProviderGatewayErrorKind) -> &'static str {
         ProviderGatewayErrorKind::ProviderDisabled => "provider_disabled",
         ProviderGatewayErrorKind::ModelNotFound => "model_not_found",
         ProviderGatewayErrorKind::ModelDisabled => "model_disabled",
+        ProviderGatewayErrorKind::StructuredOutputUnsupported => "structured_output_unsupported",
         ProviderGatewayErrorKind::CredentialUnavailable => "credential_unavailable",
         ProviderGatewayErrorKind::CredentialScopeMismatch => "credential_scope_mismatch",
         ProviderGatewayErrorKind::AdapterNotRegistered => "adapter_not_registered",

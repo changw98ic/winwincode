@@ -6,12 +6,11 @@ use std::{fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use winwincode_api::generated::{
-    Actor, RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind,
-};
+use winwincode_api::generated::Actor;
 use winwincode_domain::{
     DeliveryId, ExecutionJobId, ModelExchangeId, ProductSessionId, RequestId, Sha256Digest,
 };
+use winwincode_domain::{RepositoryScope, RepositoryScopeKind, UserActor, UserActorKind};
 use winwincode_execution_port::generated::{ExecutionScope, ModelOpenMessage};
 use winwincode_storage::{
     NewOutboxEvent, ProductStateStorage, PublicEventActor, PublicEventScope, ReceiptActorKey,

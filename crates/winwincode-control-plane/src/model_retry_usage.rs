@@ -300,6 +300,7 @@ impl ModelAttemptFailureFact {
             | ProviderGatewayErrorKind::ProviderDisabled
             | ProviderGatewayErrorKind::ModelNotFound
             | ProviderGatewayErrorKind::ModelDisabled
+            | ProviderGatewayErrorKind::StructuredOutputUnsupported
             | ProviderGatewayErrorKind::AdapterNotRegistered
             | ProviderGatewayErrorKind::ExchangeConflict
             | ProviderGatewayErrorKind::ExchangeNotFound
