@@ -10,5 +10,7 @@
     "lockState": "locked",
     "reason": "user_initiated",
     "changedAt": "2026-09-01T09:50:00.000Z"
-  }
+  },
+  "expectedRevision": 12,
+  "idempotencyKey": "idem-client-client_lock-0001"
 }

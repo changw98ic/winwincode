@@ -9,7 +9,7 @@
   "expectedRevision": 18,
   "idempotencyKey": "idem-client-occupancy-force-fence-0004",
   "occupancyLeaseId": "lse_000000000000000000000001",
-  "occupancyFencingToken": 4,
+  "occupancyFencingToken": "4",
   "payload": {
     "clientOccupancyLeaseId": "lse_000000000000000000000001",
     "holderUserId": "usr_00000000000000000000000a",

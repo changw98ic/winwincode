@@ -57,13 +57,22 @@ const KIND_TO_DIRECTION = Object.freeze(new Map([
   ...SERVER_TO_CLIENT_KINDS.map(kind => [kind, 'server-to-client']),
 ]))
 
-// Server→Client deliveries that are pure notifications: the plan does not
-// require expectedRevision/idempotencyKey on them, so the golden fixtures must
-// not add those fields either.
-const NOTIFICATION_KINDS = Object.freeze(new Set([
-  'client.enrollment_accepted',
-  'client.access.challenge',
-  'client.client_lock',
+// Pure-fact deliveries carry no command fields. Per the frozen protocol
+// contract (docs/contracts/client-control-port-v1.md), client.heartbeat is the
+// only such kind: every other envelope in both directions is a command and
+// must carry expectedRevision + idempotencyKey.
+const FACT_KINDS = Object.freeze(new Set([
+  'client.heartbeat',
+]))
+
+// Repository traffic is stamped only when an active occupancy lease exists
+// (`C + L（活动占用时）`), so its fencing fields are optional rather than
+// forbidden.
+const OPTIONAL_FENCING_KINDS = Object.freeze(new Set([
+  'client.repository.upsert',
+  'client.repository.removed',
+  'client.repository.status',
+  'client.repository.rescan',
 ]))
 
 // Occupancy, worker, and candidate traffic always rides on an occupancy lease,
@@ -84,6 +93,9 @@ const ENVELOPE_REQUIRED_FIELDS = Object.freeze([
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u
 const COMMAND_FIELDS = Object.freeze(['expectedRevision', 'idempotencyKey'])
 const FENCING_FIELDS = Object.freeze(['occupancyLeaseId', 'occupancyFencingToken'])
+// Mirrors ExecutionPort's FencingToken $def: a monotonically increasing
+// decimal token encoded as a string to preserve 64-bit precision.
+const FENCING_TOKEN_PATTERN = /^[1-9][0-9]{0,19}$/u
 
 function isFilledString(value) {
   return typeof value === 'string' && value.length > 0
@@ -149,10 +161,10 @@ function collectViolations(envelope) {
     violations.push('envelope.invalid_payload')
   }
 
-  if (NOTIFICATION_KINDS.has(kind)) {
+  if (FACT_KINDS.has(kind)) {
     for (const field of COMMAND_FIELDS) {
       if (envelope[field] !== undefined) {
-        violations.push(`notification.unexpected_field:${field}`)
+        violations.push(`fact.unexpected_field:${field}`)
       }
     }
   } else {
@@ -169,12 +181,12 @@ function collectViolations(envelope) {
       violations.push('fencing.missing:occupancyLeaseId')
     }
     if (
-      !Number.isInteger(envelope.occupancyFencingToken) ||
-      envelope.occupancyFencingToken <= 0
+      !isFilledString(envelope.occupancyFencingToken) ||
+      !FENCING_TOKEN_PATTERN.test(envelope.occupancyFencingToken)
     ) {
       violations.push('fencing.missing:occupancyFencingToken')
     }
-  } else {
+  } else if (!OPTIONAL_FENCING_KINDS.has(kind)) {
     for (const field of FENCING_FIELDS) {
       if (envelope[field] !== undefined) {
         violations.push(`fencing.unexpected_field:${field}`)
@@ -244,7 +256,7 @@ test('every valid envelope satisfies the structural contract', () => {
 test('command envelopes carry expectedRevision and idempotencyKey', () => {
   for (const file of validFiles) {
     const envelope = readJson(join(fixturesDir, file))
-    if (NOTIFICATION_KINDS.has(envelope.kind)) {
+    if (FACT_KINDS.has(envelope.kind)) {
       assert.equal(envelope.expectedRevision, undefined, file)
       assert.equal(envelope.idempotencyKey, undefined, file)
       continue
@@ -276,10 +288,10 @@ test('occupancy, worker, and candidate envelopes carry lease fencing fields', ()
       `${file} needs occupancyLeaseId`,
     )
     assert.equal(
-      Number.isInteger(envelope.occupancyFencingToken) &&
-        envelope.occupancyFencingToken > 0,
+      isFilledString(envelope.occupancyFencingToken) &&
+        FENCING_TOKEN_PATTERN.test(envelope.occupancyFencingToken),
       true,
-      `${file} needs a positive occupancyFencingToken`,
+      `${file} needs a decimal-string occupancyFencingToken`,
     )
   }
 })

@@ -11,5 +11,7 @@
     "publicClientId": "100200300401",
     "enrolledAt": "2026-09-01T09:30:01.000Z",
     "heartbeatIntervalSeconds": 15
-  }
+  },
+  "expectedRevision": 12,
+  "idempotencyKey": "idem-client-enrollment_accepted-0001"
 }

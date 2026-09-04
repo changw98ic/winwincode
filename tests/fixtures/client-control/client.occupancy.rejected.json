@@ -9,7 +9,7 @@
   "expectedRevision": 14,
   "idempotencyKey": "idem-client-occupancy-rejected-0001",
   "occupancyLeaseId": "lse_000000000000000000000001",
-  "occupancyFencingToken": 3,
+  "occupancyFencingToken": "3",
   "payload": {
     "clientOccupancyLeaseId": "lse_000000000000000000000001",
     "holderUserId": "usr_00000000000000000000000a",

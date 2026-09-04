@@ -6,8 +6,6 @@
   "sequence": 403,
   "occurredAt": "2026-09-01T09:30:15.000Z",
   "kind": "client.heartbeat",
-  "expectedRevision": 12,
-  "idempotencyKey": "idem-client-heartbeat-0403",
   "payload": {
     "lastHeartbeatAt": "2026-09-01T09:30:15.000Z",
     "presenceState": "online",

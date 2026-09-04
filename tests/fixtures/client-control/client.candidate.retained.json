@@ -9,7 +9,7 @@
   "expectedRevision": 16,
   "idempotencyKey": "idem-client-candidate-retained-0001",
   "occupancyLeaseId": "lse_000000000000000000000001",
-  "occupancyFencingToken": 3,
+  "occupancyFencingToken": "3",
   "payload": {
     "localCandidateReceiptId": "lcr_000000000000000000000001",
     "candidateRef": "cand_000000000000000000000001",
