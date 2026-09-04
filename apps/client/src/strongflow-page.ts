@@ -49,6 +49,10 @@ import {
   createStrongFlowReviewAnnotations,
   mountStrongFlowReviewPanel,
 } from './strongflow-review-annotations.js'
+import {
+  createStrongFlowReceiptLoader,
+  mountStrongFlowReviewDetailPanel,
+} from './strongflow-review-detail.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -122,6 +126,11 @@ export interface StrongFlowPageOptions {
   readonly onComparisonSelectionChange?: (request: CandidateComparisonRequest) => void
   /** Canonical Evidence read/query and typed-route boundary. */
   readonly evidence: StrongFlowEvidenceOptions
+  /**
+   * Copy seam for the technical review summary; defaults to the browser
+   * clipboard. Injection keeps the summary testable without a real clipboard.
+   */
+  readonly copy?: (text: string) => Promise<void> | void
   /** One-based changed-file line requested by the typed route seam. */
   readonly candidateLine?: number | null
   readonly onCandidateLineChange?: (line: number | null) => void
@@ -902,6 +911,27 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     readOnly,
     isHistoricalReviewOpen: () => historicalReviewOpen,
   })
+  // UI-409: the delivery conclusion stays in the main view while the technical
+  // identity, the per-criterion Verdict results and the Publication receipt are
+  // one disclosure away. The receipt is read through the side-effect-free
+  // publication.get query only; this panel never writes anywhere.
+  const reviewDetail = mountStrongFlowReviewDetailPanel({
+    document,
+    root: strongFlowElement(document, 'section', 'wwc-strongflow-review-detail-host'),
+    model: options.model,
+    receipts: options.evidence === undefined
+      ? null
+      : createStrongFlowReceiptLoader({
+        client: options.evidence.client,
+        actor: options.evidence.actor,
+        scope: options.evidence.scope,
+        nextRequestId: options.evidence.nextRequestId,
+      }),
+    limits: { evidence: limits.evidence },
+    readOnly,
+    onOpenEvidence: openEvidence,
+    ...(options.copy === undefined ? {} : { copy: options.copy }),
+  })
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -1192,7 +1222,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   tasksSection.append(tasksHeading, tasks, tasksEmpty, tasksOmitted)
   stagesSection.append(stagesHeading, stages, stagesEmpty, stagesOmitted)
   attentionSection.append(attentionHeading, attention, attentionOmitted)
-  details.append(empty, overview)
+  details.append(empty, overview, reviewDetail.root)
   // Static guidance text: its content never mutates while visible, so it is
   // deliberately not a live region — the page's single polite status stays the
   // only live announcement while a historical review is open.
@@ -2216,6 +2246,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     renderProjection(state.projection, state.status, state.candidateFiles)
     renderActions(state)
     reviewPanel.update()
+    reviewDetail.update()
     renderLayout(strongFlowLayoutMode(viewport.width))
   }
 
@@ -2250,6 +2281,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       historyNavigation.close()
       runDetail.close()
       reviewPanel.close()
+      reviewDetail.close()
       deliveryListPage.close()
       options.deliveryList.close()
       diagrams.close()
