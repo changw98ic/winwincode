@@ -36,7 +36,8 @@ use winwincode_control_plane::{
 };
 use winwincode_domain::{
     CredentialReferenceId, OrganizationId, ProjectId, RepositoryId, RequestId, Revision,
-    Sha256Digest, UserId, WorkerId, WorkerInstanceId, WorkspaceId,
+    Sha256Digest, UserAccount, UserAccountRole, UserAccountState, UserId, WorkerId,
+    WorkerInstanceId, WorkspaceId,
 };
 use winwincode_execution_port::{
     action_enforcement::{ActionEnforcementIssuer, ActionEnforcementSigningKey},
@@ -53,11 +54,12 @@ use winwincode_server::{
     DurableEventPublisher, EnterpriseIdentityManagementApplication,
     EnterpriseIdentityProtocolApplication, EnterpriseRbacManagementApplication,
     EnterpriseRequestAuthenticator, FileRemoteWorkerAuthenticator, GeneratedContractDispatcher,
-    LocalRuntimeSupervisor, ProductionRemoteWorkerExchange, RemoteWorkerExchangePort,
-    RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig, ServerExecutionPortCore,
-    ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
+    LocalRuntimeSupervisor, OwnerInitializationHook, ProductionRemoteWorkerExchange,
+    RemoteWorkerExchangePort, RepositoryRuntimeScheduler, RequestAuthenticator, ServerConfig,
+    ServerExecutionPortCore, ServerTls, SqliteAuthSessionManager, StandaloneApplicationClock,
     StandaloneControlPlaneApplication, SystemStandaloneApplicationClock,
-    UnavailableEnterpriseManagementApplication, start_server, start_server_with_remote_worker,
+    UnavailableEnterpriseManagementApplication, UserAccountService, start_server,
+    start_server_with_remote_worker,
 };
 use winwincode_storage::{
     ProductStateStorage, SqliteStorage, WorkerOutboundQueueConfig, WorkerPoolId,
@@ -92,7 +94,6 @@ struct ProductionStartup {
     repository_scope: RepositoryScope,
     source_root: PathBuf,
     execution_config: ProductSessionExecutionConfig,
-    subject: String,
     model_route: LocalModelRoute,
     auth_bootstrap: AuthSessionBootstrap,
     auth_config: AuthSessionConfig,
@@ -102,13 +103,38 @@ struct ProductionApplicationComposition {
     config: ServerConfig,
     repository_scope: RepositoryScope,
     source_root: PathBuf,
-    subject: String,
     model_route: LocalModelRoute,
-    auth_bootstrap: AuthSessionBootstrap,
-    auth_config: AuthSessionConfig,
+    auth_sessions: Arc<SqliteAuthSessionManager>,
+    owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
     identities: Arc<EnterpriseIdentityService>,
     rbac: Arc<EnterpriseRbacService>,
+}
+
+/// Runs the startup-time local model authority configuration once the first
+/// Owner account exists, closing the gap for Servers that were uninitialized
+/// when the process started.
+struct DeferredModelAuthority {
+    data_directory: PathBuf,
+    repository_scope: RepositoryScope,
+    model_route: LocalModelRoute,
+    secret_directory: PathBuf,
+}
+
+impl OwnerInitializationHook for DeferredModelAuthority {
+    fn owner_initialized(&self, owner: &UserId) -> Result<(), String> {
+        let mut storage =
+            SqliteStorage::open(&self.data_directory).map_err(|error| error.to_string())?;
+        let result = configure_local_model_authority(
+            &mut storage,
+            owner,
+            &self.repository_scope,
+            &self.model_route,
+            self.secret_directory.clone(),
+        );
+        let _ = Box::new(storage).close();
+        result.map_err(|error| error.to_string())
+    }
 }
 
 struct ComposedApplication {
@@ -136,16 +162,8 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         optional_i64("WWC_SERVER_MAX_ARTIFACT_BYTES", 1_073_741_824)?,
     )?;
     let bootstrap_proof = required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?;
-    let subject = required_environment("WWC_SERVER_AUTH_SUBJECT")?;
     let model_route = LocalModelRoute::from_environment()?;
-    let auth_bootstrap = AuthSessionBootstrap::new(
-        bootstrap_proof,
-        Actor::UserActor(UserActor {
-            kind: UserActorKind::User,
-            id: UserId(subject.clone()),
-        }),
-        vec![Scope::RepositoryScope(repository_scope.clone())],
-    )?;
+    let auth_bootstrap = AuthSessionBootstrap::new(bootstrap_proof)?;
     let auth_config = AuthSessionConfig::new(
         optional_duration_seconds("WWC_SERVER_BOOTSTRAP_WINDOW_SECONDS", 10 * 60)?,
         optional_duration_seconds("WWC_SERVER_SESSION_TTL_SECONDS", 8 * 60 * 60)?,
@@ -157,11 +175,42 @@ fn load_production_startup() -> Result<ProductionStartup, Box<dyn std::error::Er
         repository_scope,
         source_root,
         execution_config,
-        subject,
         model_route,
         auth_bootstrap,
         auth_config,
     })
+}
+
+/// Opens the durable account authority, session manager, and resolves the
+/// first Owner account behind the initialization marker.
+type OpenedAccountsAuthority = (Arc<SqliteAuthSessionManager>, Option<UserAccount>);
+
+#[allow(clippy::type_complexity)]
+fn open_accounts_authority(
+    config: &ServerConfig,
+    repository_scope: RepositoryScope,
+    model_route: LocalModelRoute,
+    auth_bootstrap: AuthSessionBootstrap,
+    auth_config: AuthSessionConfig,
+) -> Result<OpenedAccountsAuthority, Box<dyn std::error::Error>> {
+    let accounts = Arc::new(UserAccountService::open(config.data_directory())?);
+    let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
+        config.data_directory().join("auth-sessions"),
+        vec![auth_bootstrap],
+        vec![Scope::RepositoryScope(repository_scope.clone())],
+        auth_config,
+        Arc::clone(&accounts),
+        Some(Arc::new(DeferredModelAuthority {
+            data_directory: config.data_directory().to_path_buf(),
+            repository_scope,
+            model_route,
+            secret_directory: PathBuf::from(required_environment("SECRET_DIRECTORY")?),
+        })),
+    )?);
+    Ok((
+        Arc::clone(&auth_sessions),
+        resolved_owner(&auth_sessions, &accounts)?,
+    ))
 }
 
 fn open_production_application(
@@ -174,7 +223,6 @@ fn open_production_application(
         repository_scope,
         source_root,
         execution_config,
-        subject,
         model_route,
         auth_bootstrap,
         auth_config,
@@ -203,13 +251,25 @@ fn open_production_application(
             return Err(Box::new(error));
         }
     };
-    configure_local_model_authority(
-        &mut storage,
-        &subject,
-        &repository_scope,
-        &model_route,
-        PathBuf::from(required_environment("SECRET_DIRECTORY")?),
+    let (auth_sessions, owner) = open_accounts_authority(
+        &config,
+        repository_scope.clone(),
+        model_route.clone(),
+        auth_bootstrap,
+        auth_config,
     )?;
+    // The durable first Owner is the single-subject authority for startup
+    // model configuration; an uninitialized Server defers that configuration
+    // to the OwnerInitializationHook.
+    if let Some(owner) = &owner {
+        configure_local_model_authority(
+            &mut storage,
+            &owner.user_id,
+            &repository_scope,
+            &model_route,
+            PathBuf::from(required_environment("SECRET_DIRECTORY")?),
+        )?;
+    }
     let worker_outbound_storage = match SqliteStorage::open(config.data_directory()) {
         Ok(storage) => storage,
         Err(error) => {
@@ -247,14 +307,33 @@ fn open_production_application(
         config,
         repository_scope,
         source_root,
-        subject,
         model_route,
-        auth_bootstrap,
-        auth_config,
+        auth_sessions,
+        owner,
         application,
         identities,
         rbac,
     })
+}
+
+/// Resolves the durable first Owner account behind the initialization marker.
+fn resolved_owner(
+    auth_sessions: &SqliteAuthSessionManager,
+    accounts: &UserAccountService,
+) -> Result<Option<UserAccount>, Box<dyn std::error::Error>> {
+    let Some(user_id) = auth_sessions.initialized_owner() else {
+        return Ok(None);
+    };
+    let account = accounts
+        .find(&user_id)?
+        .ok_or("durable initialization marker names a missing Owner account")?;
+    if account.role != UserAccountRole::Owner {
+        return Err("durable initialization marker does not name an Owner account".into());
+    }
+    if account.state != UserAccountState::Active {
+        return Err("the durable first Owner account is disabled".into());
+    }
+    Ok(Some(account))
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -270,10 +349,9 @@ async fn run_composed_server(
         config,
         repository_scope,
         source_root,
-        subject,
         model_route,
-        auth_bootstrap,
-        auth_config,
+        auth_sessions,
+        owner,
         application,
         identities,
         rbac,
@@ -323,7 +401,10 @@ async fn run_composed_server(
         scheduler_generation,
         Duration::from_secs(30),
     )?
-    .with_admission_identity(UserId(subject.clone()), worker_pool_id)?;
+    .with_admission_identity(
+        owner.as_ref().map(|owner| owner.user_id.clone()),
+        worker_pool_id,
+    )?;
     let worker_mode = required_environment_or("WWC_SERVER_WORKER_MODE", "local")?;
     if worker_mode != "local" && worker_mode != "remote" {
         return Err("WWC_SERVER_WORKER_MODE must be local or remote".into());
@@ -332,9 +413,8 @@ async fn run_composed_server(
         return Box::pin(run_remote_composition(RemoteRuntimeComposition {
             config,
             repository_scope,
-            subject,
-            auth_bootstrap,
-            auth_config,
+            auth_sessions,
+            owner,
             application,
             identities,
             rbac,
@@ -348,10 +428,9 @@ async fn run_composed_server(
     Box::pin(run_local_composition(LocalRuntimeComposition {
         config,
         repository_scope,
-        subject,
         model_route,
-        auth_bootstrap,
-        auth_config,
+        auth_sessions,
+        owner,
         application,
         identities,
         rbac,
@@ -369,10 +448,9 @@ async fn run_composed_server(
 struct LocalRuntimeComposition {
     config: ServerConfig,
     repository_scope: RepositoryScope,
-    subject: String,
     model_route: LocalModelRoute,
-    auth_bootstrap: AuthSessionBootstrap,
-    auth_config: AuthSessionConfig,
+    auth_sessions: Arc<SqliteAuthSessionManager>,
+    owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
     identities: Arc<EnterpriseIdentityService>,
     rbac: Arc<EnterpriseRbacService>,
@@ -391,10 +469,9 @@ async fn run_local_composition(
     let LocalRuntimeComposition {
         config,
         repository_scope,
-        subject,
         model_route,
-        auth_bootstrap,
-        auth_config,
+        auth_sessions,
+        owner,
         application,
         identities,
         rbac,
@@ -420,17 +497,12 @@ async fn run_local_composition(
     let application =
         Arc::new(application.with_runtime_health(Arc::new(supervisor.health_handle())));
     let api = Arc::new(GeneratedContractDispatcher::new(application));
-    let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
-        config.data_directory().join("auth-sessions"),
-        vec![auth_bootstrap],
-        auth_config,
-    )?);
     let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
         EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
     );
     let enterprise_identity = compose_enterprise_identity_protocol(
         &config,
-        &subject,
+        owner.as_ref(),
         &repository_scope.organization_id,
         Arc::clone(&auth_sessions),
         identities,
@@ -450,9 +522,8 @@ async fn run_local_composition(
 struct RemoteRuntimeComposition<Core> {
     config: ServerConfig,
     repository_scope: RepositoryScope,
-    subject: String,
-    auth_bootstrap: AuthSessionBootstrap,
-    auth_config: AuthSessionConfig,
+    auth_sessions: Arc<SqliteAuthSessionManager>,
+    owner: Option<UserAccount>,
     application: StandaloneControlPlaneApplication,
     identities: Arc<EnterpriseIdentityService>,
     rbac: Arc<EnterpriseRbacService>,
@@ -472,9 +543,8 @@ where
     let RemoteRuntimeComposition {
         config,
         repository_scope,
-        subject,
-        auth_bootstrap,
-        auth_config,
+        auth_sessions,
+        owner,
         application,
         identities,
         rbac,
@@ -513,17 +583,12 @@ where
             execution_port,
         ));
     let api = Arc::new(GeneratedContractDispatcher::new(Arc::new(application)));
-    let auth_sessions = Arc::new(SqliteAuthSessionManager::open(
-        config.data_directory().join("auth-sessions"),
-        vec![auth_bootstrap],
-        auth_config,
-    )?);
     let authenticator: Arc<dyn RequestAuthenticator> = Arc::new(
         EnterpriseRequestAuthenticator::new(Arc::clone(&auth_sessions), Arc::clone(&identities)),
     );
     let enterprise_identity = compose_enterprise_identity_protocol(
         &config,
-        &subject,
+        owner.as_ref(),
         &repository_scope.organization_id,
         Arc::clone(&auth_sessions),
         identities,
@@ -634,7 +699,7 @@ impl LocalModelRoute {
 #[allow(clippy::too_many_lines)]
 fn configure_local_model_authority(
     storage: &mut SqliteStorage,
-    subject: &str,
+    owner_user_id: &UserId,
     repository_scope: &RepositoryScope,
     model_route: &LocalModelRoute,
     secret_directory: PathBuf,
@@ -642,7 +707,7 @@ fn configure_local_model_authority(
     let occurred_at = SystemStandaloneApplicationClock.now_instant();
     let actor = Actor::UserActor(UserActor {
         kind: UserActorKind::User,
-        id: UserId(subject.to_owned()),
+        id: owner_user_id.clone(),
     });
     let organization_scope = OrganizationScope {
         kind: OrganizationScopeKind::Organization,
@@ -948,7 +1013,7 @@ fn compose_production_application(
 
 fn compose_enterprise_identity_protocol(
     config: &ServerConfig,
-    management_subject: &str,
+    owner: Option<&UserAccount>,
     organization_id: &OrganizationId,
     auth_sessions: Arc<SqliteAuthSessionManager>,
     identities: Arc<EnterpriseIdentityService>,
@@ -957,6 +1022,11 @@ fn compose_enterprise_identity_protocol(
     if !enterprise_identity_mode_enabled()? {
         return Ok(None);
     }
+    // The enterprise identity management actor keeps its single-subject
+    // semantics only under the durable first Owner account.
+    let owner = owner.ok_or(
+        "enterprise identity mode requires an initialized Owner account; complete server initialization first",
+    )?;
     let tls_root = fs::read(required_environment(
         "WWC_SERVER_IDENTITY_VERIFIER_TLS_ROOT_DER_FILE",
     )?)?;
@@ -989,7 +1059,7 @@ fn compose_enterprise_identity_protocol(
     let (oidc, saml, scim) = verifiers.into_verifiers();
     let management_actor = Actor::UserActor(UserActor {
         kind: UserActorKind::User,
-        id: UserId(management_subject.to_owned()),
+        id: owner.user_id.clone(),
     });
     let lifecycle = CanonicalEnterpriseIdentityLifecycle::new(
         identities,

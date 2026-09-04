@@ -42,6 +42,7 @@ license = "Apache-2.0"
 repository = "https://github.com/changw98ic/winwincode"
 
 [workspace.dependencies]
+argon2 = "=0.5.3"
 axum = { version = "=0.8.8", features = ["json", "ws"] }
 axum-server = { version = "=0.8.0", features = ["tls-rustls"] }
 base64 = "=0.22.1"

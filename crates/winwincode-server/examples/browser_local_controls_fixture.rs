@@ -37,7 +37,7 @@ use winwincode_server::{
     AuthSessionBootstrap, AuthSessionConfig, AuthenticatedPrincipal, DurableEventHub,
     DurableEventHubConfig, DurableEventPublisher, GeneratedContractDispatcher,
     RequestAuthenticator, ServerConfig, ServerTls, SqliteAuthSessionManager,
-    StandaloneControlPlaneApplication, start_server,
+    StandaloneControlPlaneApplication, UserAccountService, start_server,
 };
 use winwincode_session::SessionBindingIdentity;
 use winwincode_storage::{
@@ -96,14 +96,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         )?,
     )?);
     let api = Arc::new(GeneratedContractDispatcher::new(application));
+    let accounts = Arc::new(UserAccountService::open(config.data_directory())?);
     let sessions = Arc::new(SqliteAuthSessionManager::open(
         config.data_directory().join("auth-sessions"),
-        vec![AuthSessionBootstrap::new(
-            required_environment("WWC_SERVER_BOOTSTRAP_PROOF")?,
-            actor.clone(),
-            vec![scope.clone()],
-        )?],
+        vec![AuthSessionBootstrap::new(required_environment(
+            "WWC_SERVER_BOOTSTRAP_PROOF",
+        )?)?],
+        vec![scope.clone()],
         AuthSessionConfig::new(Duration::from_mins(10), Duration::from_hours(8))?,
+        accounts,
+        None,
     )?);
     let authenticator: Arc<dyn RequestAuthenticator> = sessions.clone();
     let principal = AuthenticatedPrincipal::new(actor.clone(), vec![scope.clone()])?;

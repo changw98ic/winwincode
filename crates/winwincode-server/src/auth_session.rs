@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Browser session bootstrap, persistence, authentication, and revocation.
+//! Browser session initialization, login, persistence, authentication, and
+//! revocation.
+//!
+//! The bootstrap proof is a one-time initialization credential: an
+//! uninitialized Server accepts exactly one proof (within the bootstrap
+//! window) to create the first Owner account, and then initialization closes
+//! permanently — in memory and through a durable marker that survives
+//! restarts. Daily sign-in is username plus Argon2id password. Every session
+//! binds to one durable `UserAccount` userId, renews its TTL while in use,
+//! and is revoked immediately when its account is disabled.
 
 use std::fmt;
 use std::fs::OpenOptions;
@@ -16,23 +25,25 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use winwincode_api::generated::{Actor, AuthSessionResponse, Scope};
+use winwincode_api::generated::{Actor, AuthSessionResponse, Scope, UserActor, UserActorKind};
 use winwincode_control_plane::{
     BrowserSessionLifecycleError, BrowserSessionLifecyclePort, ExternalAuthenticationOutcome,
 };
-use winwincode_domain::{Instant, SchemaVersion};
+use winwincode_domain::{Instant, SchemaVersion, UserId};
 
+use crate::login_rate_limiter::LoginRateLimiter;
 use crate::transport::{
     AuthError, AuthenticatedPrincipal, RequestAuthenticator, TransportCredentials,
 };
+use crate::user_accounts::{CredentialRejection, UserAccountService, UserAccountServiceErrorKind};
 
 const SESSION_COOKIE_NAME: &str = "wwc_session";
 const SESSION_TOKEN_BYTES: usize = 32;
 const MAX_BOOTSTRAP_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 const MAX_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 
-/// Explicit lifetime limits for bootstrap proofs and browser sessions.
+/// Explicit lifetime limits for the initialization window and browser
+/// sessions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthSessionConfig {
     bootstrap_window: Duration,
@@ -111,23 +122,20 @@ impl AuthSessionTokenGenerator for SystemAuthSessionTokenGenerator {
     }
 }
 
-/// One short-window bootstrap proof bound to an exact Actor and Scope set.
+/// One short-window bootstrap proof: the Server's one-time initialization
+/// credential.
 ///
-/// The proof deliberately has no `Debug`, serialization, or getter surface.
+/// The proof deliberately has no `Debug`, serialization, or getter surface;
+/// it stays write-only, is compared in constant time, and is never echoed.
 pub struct AuthSessionBootstrap {
     proof: String,
-    principal: AuthenticatedPrincipal,
 }
 
 impl AuthSessionBootstrap {
     /// # Errors
     ///
-    /// Rejects malformed proof material or an invalid authorization context.
-    pub fn new(
-        proof: impl Into<String>,
-        actor: Actor,
-        authorized_scopes: Vec<Scope>,
-    ) -> Result<Self, AuthSessionError> {
+    /// Rejects malformed proof material.
+    pub fn new(proof: impl Into<String>) -> Result<Self, AuthSessionError> {
         let proof = proof.into();
         if proof.is_empty()
             || proof.len() > 4096
@@ -136,21 +144,36 @@ impl AuthSessionBootstrap {
         {
             return Err(AuthSessionError::configuration());
         }
-        let scopes = canonical_scopes(authorized_scopes)?;
-        let principal = AuthenticatedPrincipal::new(actor, scopes)
-            .map_err(|_| AuthSessionError::configuration())?;
-        Ok(Self { proof, principal })
+        Ok(Self { proof })
     }
+}
+
+/// Runs once when the first Owner account is created.
+pub trait OwnerInitializationHook: Send + Sync {
+    /// # Errors
+    ///
+    /// Reports a secret-free failure reason.
+    fn owner_initialized(&self, owner: &UserId) -> Result<(), String>;
 }
 
 /// The canonical standalone browser-session implementation.
 pub struct SqliteAuthSessionManager {
     connection: Mutex<Connection>,
-    bootstraps: Vec<AuthSessionBootstrap>,
+    initialization: Mutex<InitializationGate>,
+    accounts: Arc<UserAccountService>,
+    session_authority: Vec<Scope>,
+    login_limiter: LoginRateLimiter,
+    owner_hook: Option<Arc<dyn OwnerInitializationHook>>,
     opened_at_millis: i64,
     config: AuthSessionConfig,
     clock: Arc<dyn AuthSessionClock>,
     token_generator: Arc<dyn AuthSessionTokenGenerator>,
+}
+
+struct InitializationGate {
+    proofs: Vec<String>,
+    /// In-memory half of the permanent close marker.
+    closed: bool,
 }
 
 /// Maps one verified external authentication outcome into the canonical
@@ -232,25 +255,36 @@ impl SqliteAuthSessionManager {
     ///
     /// # Errors
     ///
-    /// Rejects invalid configuration or unavailable durable storage.
+    /// Rejects invalid configuration, unavailable durable storage, or an
+    /// unavailable account authority.
     pub fn open(
         directory: impl AsRef<Path>,
         bootstraps: Vec<AuthSessionBootstrap>,
+        session_authority: Vec<Scope>,
         config: AuthSessionConfig,
+        accounts: Arc<UserAccountService>,
+        owner_hook: Option<Arc<dyn OwnerInitializationHook>>,
     ) -> Result<Self, AuthSessionError> {
         Self::open_with_dependencies(
             directory.as_ref(),
             bootstraps,
+            session_authority,
             config,
+            accounts,
+            owner_hook,
             Arc::new(SystemAuthSessionClock),
             Arc::new(SystemAuthSessionTokenGenerator),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_with_dependencies(
         directory: &Path,
         bootstraps: Vec<AuthSessionBootstrap>,
+        session_authority: Vec<Scope>,
         config: AuthSessionConfig,
+        accounts: Arc<UserAccountService>,
+        owner_hook: Option<Arc<dyn OwnerInitializationHook>>,
         clock: Arc<dyn AuthSessionClock>,
         token_generator: Arc<dyn AuthSessionTokenGenerator>,
     ) -> Result<Self, AuthSessionError> {
@@ -258,6 +292,7 @@ impl SqliteAuthSessionManager {
             return Err(AuthSessionError::configuration());
         }
         AuthSessionConfig::new(config.bootstrap_window, config.session_ttl)?;
+        let session_authority = canonical_scopes(session_authority)?;
         for (index, bootstrap) in bootstraps.iter().enumerate() {
             if bootstraps[..index].iter().any(|candidate| {
                 constant_time_equal(candidate.proof.as_bytes(), bootstrap.proof.as_bytes())
@@ -302,14 +337,41 @@ impl SqliteAuthSessionManager {
                      CHECK(revoked_at_millis IS NULL OR revoked_at_millis >= created_at_millis)
                  );
                  CREATE INDEX IF NOT EXISTS auth_sessions_expiry
-                   ON auth_sessions(expires_at_millis);",
+                   ON auth_sessions(expires_at_millis);
+                 CREATE TABLE IF NOT EXISTS server_initialization (
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                   owner_user_id TEXT NOT NULL,
+                   initialized_at_millis INTEGER NOT NULL
+                 );",
             )
             .map_err(|_| AuthSessionError::storage())?;
         ensure_session_context_columns(&connection)?;
         let opened_at_millis = clock.unix_millis()?;
+        // The durable marker is the persistent half of the permanent close;
+        // once present, initialization stays closed across restarts no matter
+        // which proof is presented.
+        let closed = connection
+            .query_row(
+                "SELECT singleton FROM server_initialization WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| AuthSessionError::storage())?
+            .is_some();
         Ok(Self {
             connection: Mutex::new(connection),
-            bootstraps,
+            initialization: Mutex::new(InitializationGate {
+                proofs: bootstraps
+                    .into_iter()
+                    .map(|bootstrap| bootstrap.proof)
+                    .collect(),
+                closed,
+            }),
+            accounts,
+            session_authority,
+            login_limiter: LoginRateLimiter::default(),
+            owner_hook,
             opened_at_millis,
             config,
             clock,
@@ -317,15 +379,51 @@ impl SqliteAuthSessionManager {
         })
     }
 
-    /// Exchange an in-memory bootstrap proof for an independent random cookie.
+    /// Returns the userId of the durable first Owner, or `None` while the
+    /// Server is still uninitialized.
+    #[must_use]
+    pub fn initialized_owner(&self) -> Option<UserId> {
+        let closed = self.with_initialization(|gate| gate.closed);
+        if !closed {
+            return None;
+        }
+        self.connection
+            .lock()
+            .ok()?
+            .query_row(
+                "SELECT owner_user_id FROM server_initialization WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(UserId)
+    }
+
+    /// Exposes the canonical account authority for Owner administration.
+    #[must_use]
+    pub const fn accounts(&self) -> &Arc<UserAccountService> {
+        &self.accounts
+    }
+
+    /// One-time initialization: exchange the bootstrap proof for the first
+    /// Owner account and its independent random cookie session.
+    ///
+    /// The proof stays write-only and is never echoed. After the Owner is
+    /// created, initialization closes permanently — in memory and through a
+    /// durable marker — and every later attempt is rejected, including after
+    /// restart.
     ///
     /// # Errors
     ///
-    /// Rejects non-bearer credentials, bad or late proofs, entropy failure, and
-    /// unavailable durable storage.
-    pub(crate) fn bootstrap(
+    /// Rejects non-bearer credentials, bad or late proofs, already-completed
+    /// initialization, invalid account input, and unavailable storage.
+    pub(crate) fn initialize(
         &self,
         credentials: &TransportCredentials,
+        username: &str,
+        password: &str,
     ) -> Result<IssuedBrowserSession, AuthSessionError> {
         if credentials.session_cookie().is_some() {
             return Err(AuthSessionError::authentication());
@@ -338,14 +436,128 @@ impl SqliteAuthSessionManager {
         if now > self.opened_at_millis.saturating_add(window) {
             return Err(AuthSessionError::authentication());
         }
-        let mut matched = None;
-        for bootstrap in &self.bootstraps {
-            if constant_time_equal(proof.as_bytes(), bootstrap.proof.as_bytes()) {
-                matched = Some(bootstrap.principal.clone());
+        // The gate lock stays held for the whole flow so concurrent
+        // initialization attempts serialize behind the durable close.
+        let mut gate = self
+            .initialization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if gate.closed {
+            return Err(AuthSessionError::already_initialized());
+        }
+        if !gate
+            .proofs
+            .iter()
+            .any(|candidate| constant_time_equal(proof.as_bytes(), candidate.as_bytes()))
+        {
+            return Err(AuthSessionError::authentication());
+        }
+        let normalized = UserAccountService::normalize_username(username)
+            .map_err(|_| AuthSessionError::invalid_request())?;
+        if UserAccountService::validate_password(password).is_err() {
+            return Err(AuthSessionError::invalid_request());
+        }
+        let occurred_at = instant_from_millis(now)?;
+        let account = self
+            .accounts
+            .initialize_owner(username, password, &occurred_at)
+            .map_err(|error| match error.kind() {
+                UserAccountServiceErrorKind::AlreadyInitialized
+                | UserAccountServiceErrorKind::Conflict => AuthSessionError::already_initialized(),
+                UserAccountServiceErrorKind::InvalidInput => AuthSessionError::invalid_request(),
+                _ => AuthSessionError::storage(),
+            })?;
+        if normalized != account.normalized_username {
+            return Err(AuthSessionError::storage());
+        }
+        self.connection
+            .lock()
+            .map_err(|_| AuthSessionError::storage())?
+            .execute(
+                "INSERT INTO server_initialization (singleton, owner_user_id, initialized_at_millis)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(singleton) DO NOTHING",
+                params![account.user_id.0, now],
+            )
+            .map_err(|_| AuthSessionError::storage())?;
+        gate.closed = true;
+        if let Some(hook) = &self.owner_hook
+            && let Err(reason) = hook.owner_initialized(&account.user_id)
+        {
+            eprintln!("winwincode-server: Owner initialization hook failed: {reason}");
+            return Err(AuthSessionError::storage());
+        }
+        self.issue_for_user(&account.user_id)
+    }
+
+    /// Daily username + Argon2id password login for one active account.
+    ///
+    /// Failures are rate limited per (normalized username, client) pair; once
+    /// the budget is exhausted, further attempts fail with an explicit
+    /// rate-limit error.
+    ///
+    /// # Errors
+    ///
+    /// Rejects bearer credentials, unknown/wrong/disabled credentials, rate
+    /// limited clients, and storage failure.
+    pub(crate) fn login(
+        &self,
+        credentials: &TransportCredentials,
+        client: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<IssuedBrowserSession, AuthSessionError> {
+        if credentials.bearer().is_some() {
+            return Err(AuthSessionError::authentication());
+        }
+        if !self.initialization_is_closed() {
+            return Err(AuthSessionError::authentication());
+        }
+        let Ok(normalized) = UserAccountService::normalize_username(username) else {
+            return Err(AuthSessionError::invalid_request());
+        };
+        if password.is_empty() {
+            return Err(AuthSessionError::invalid_request());
+        }
+        let now = self.clock.unix_millis()?;
+        if self.login_limiter.rejected(client, &normalized, now) {
+            return Err(AuthSessionError::rate_limited());
+        }
+        let verified = self
+            .accounts
+            .verify_credentials(username, password)
+            .map_err(|_| AuthSessionError::storage())?;
+        match verified {
+            Ok(account) => {
+                self.login_limiter.clear(client, &normalized);
+                self.issue_for_user(&account.user_id)
+            }
+            Err(CredentialRejection::AccountDisabled) => Err(AuthSessionError::authentication()),
+            Err(CredentialRejection::UnknownAccount | CredentialRejection::BadPassword) => {
+                self.login_limiter.record_failure(client, &normalized, now);
+                Err(AuthSessionError::authentication())
             }
         }
-        let principal = matched.ok_or_else(AuthSessionError::authentication)?;
-        self.issue_principal(principal)
+    }
+
+    fn initialization_is_closed(&self) -> bool {
+        self.with_initialization(|gate| gate.closed)
+    }
+
+    fn with_initialization<T>(&self, operation: impl FnOnce(&mut InitializationGate) -> T) -> T {
+        let mut guard = self
+            .initialization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        operation(&mut guard)
+    }
+
+    fn issue_for_user(&self, user_id: &UserId) -> Result<IssuedBrowserSession, AuthSessionError> {
+        let actor = Actor::UserActor(UserActor {
+            kind: UserActorKind::User,
+            id: user_id.clone(),
+        });
+        self.issue_authenticated(actor, self.session_authority.clone())
     }
 
     fn issue_authenticated(
@@ -398,7 +610,7 @@ impl SqliteAuthSessionManager {
         })
     }
 
-    /// Revoke the exact current cookie digest.
+    /// Revoke the exact current cookie digest (logout).
     ///
     /// # Errors
     ///
@@ -470,9 +682,30 @@ impl SqliteAuthSessionManager {
         if principal.subject() != stored.0 {
             return Err(AuthSessionError::storage());
         }
+        // Sliding renewal: extend a live session back to the full TTL once a
+        // quarter of the TTL has been consumed, so a session in active use
+        // never expires mid-use.
+        let ttl = duration_millis(self.config.session_ttl)?;
+        let renewed_expires_at_millis = now.saturating_add(ttl);
+        let expires_at_millis = if renewed_expires_at_millis.saturating_sub(stored.3) > ttl / 4 {
+            self.connection
+                .lock()
+                .map_err(|_| AuthSessionError::storage())?
+                .execute(
+                    "UPDATE auth_sessions
+                         SET expires_at_millis = ?2
+                         WHERE session_digest = ?1
+                           AND revoked_at_millis IS NULL",
+                    params![session_digest(cookie), renewed_expires_at_millis],
+                )
+                .map_err(|_| AuthSessionError::storage())?;
+            renewed_expires_at_millis
+        } else {
+            stored.3
+        };
         Ok(CurrentBrowserSession {
             principal,
-            expires_at_millis: stored.3,
+            expires_at_millis,
         })
     }
 
@@ -528,6 +761,9 @@ impl SqliteAuthSessionManager {
     }
 
     /// Revoke every live session for one exact Actor.
+    ///
+    /// This is the disable-user kill switch: disabling an account revokes all
+    /// of its sessions immediately.
     ///
     /// # Errors
     ///
@@ -637,6 +873,9 @@ pub struct AuthSessionError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AuthSessionErrorKind {
     Authentication,
+    AlreadyInitialized,
+    RateLimited,
+    InvalidRequest,
     Clock,
     Configuration,
     Entropy,
@@ -647,6 +886,24 @@ impl AuthSessionError {
     const fn authentication() -> Self {
         Self {
             kind: AuthSessionErrorKind::Authentication,
+        }
+    }
+
+    const fn already_initialized() -> Self {
+        Self {
+            kind: AuthSessionErrorKind::AlreadyInitialized,
+        }
+    }
+
+    const fn rate_limited() -> Self {
+        Self {
+            kind: AuthSessionErrorKind::RateLimited,
+        }
+    }
+
+    const fn invalid_request() -> Self {
+        Self {
+            kind: AuthSessionErrorKind::InvalidRequest,
         }
     }
 
@@ -682,12 +939,30 @@ impl AuthSessionError {
     pub(crate) const fn is_authentication(self) -> bool {
         matches!(self.kind, AuthSessionErrorKind::Authentication)
     }
+
+    #[must_use]
+    pub(crate) const fn is_already_initialized(self) -> bool {
+        matches!(self.kind, AuthSessionErrorKind::AlreadyInitialized)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_rate_limited(self) -> bool {
+        matches!(self.kind, AuthSessionErrorKind::RateLimited)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_invalid_request(self) -> bool {
+        matches!(self.kind, AuthSessionErrorKind::InvalidRequest)
+    }
 }
 
 impl fmt::Display for AuthSessionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self.kind {
             AuthSessionErrorKind::Authentication => "browser session authentication failed",
+            AuthSessionErrorKind::AlreadyInitialized => "server initialization already completed",
+            AuthSessionErrorKind::RateLimited => "login attempts are rate limited",
+            AuthSessionErrorKind::InvalidRequest => "login request is invalid",
             AuthSessionErrorKind::Clock => "browser session clock is unavailable",
             AuthSessionErrorKind::Configuration => "browser session configuration is invalid",
             AuthSessionErrorKind::Entropy => "browser session entropy is unavailable",
@@ -762,19 +1037,31 @@ fn session_response(
     principal: &AuthenticatedPrincipal,
     expires_at_millis: i64,
 ) -> Result<AuthSessionResponse, AuthSessionError> {
-    let unix_nanos = i128::from(expires_at_millis)
-        .checked_mul(1_000_000)
-        .ok_or_else(AuthSessionError::clock)?;
-    let expires_at = OffsetDateTime::from_unix_timestamp_nanos(unix_nanos)
-        .map_err(|_| AuthSessionError::clock())?
-        .format(&Rfc3339)
-        .map_err(|_| AuthSessionError::clock())?;
+    let expires_at = instant_from_millis(expires_at_millis)?;
     Ok(AuthSessionResponse {
         schema_version: SchemaVersion::WinwincodeV1,
-        expires_at: Instant(expires_at),
+        expires_at,
         actor: principal.actor().clone(),
         authorized_scopes: principal.authorized_scopes().to_vec(),
     })
+}
+
+fn instant_from_millis(millis: i64) -> Result<Instant, AuthSessionError> {
+    // Canonical `Instant` text is exactly `yyyy-MM-ddTHH:mm:ss.mmmZ`, so the
+    // millisecond field is rendered explicitly (RFC 3339 drops `.000`).
+    let seconds = millis.div_euclid(1_000);
+    let millisecond = millis.rem_euclid(1_000);
+    let at = OffsetDateTime::from_unix_timestamp(seconds).map_err(|_| AuthSessionError::clock())?;
+    Ok(Instant(format!(
+        "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        millisecond
+    )))
 }
 
 fn duration_millis(duration: Duration) -> Result<i64, AuthSessionError> {
@@ -806,11 +1093,9 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
-    use winwincode_api::generated::{
-        Actor, OrganizationScope, OrganizationScopeKind, Scope, UserActor, UserActorKind,
-    };
+    use winwincode_api::generated::{OrganizationScope, OrganizationScopeKind};
     use winwincode_control_plane::ExternalIdentityPrincipal;
-    use winwincode_domain::{ExternalIdentityId, OrganizationId, UserId};
+    use winwincode_domain::{ExternalIdentityId, OrganizationId, UserAccountRole};
 
     use super::*;
 
@@ -855,10 +1140,10 @@ mod tests {
         directory
     }
 
-    fn actor(value: u8) -> Actor {
+    fn actor_of(subject: &str) -> Actor {
         Actor::UserActor(UserActor {
             kind: UserActorKind::User,
-            id: UserId(format!("usr_{value:026}")),
+            id: UserId(subject.to_owned()),
         })
     }
 
@@ -869,48 +1154,90 @@ mod tests {
         })
     }
 
-    fn bootstrap(proof: &str, actor_value: u8, scopes: Vec<Scope>) -> AuthSessionBootstrap {
-        AuthSessionBootstrap::new(proof, actor(actor_value), scopes).expect("bootstrap context")
+    fn manager(directory: &Path, clock: Arc<ManualClock>, proof: &str) -> SqliteAuthSessionManager {
+        manager_with_sequence(directory, clock, proof, 7)
     }
 
-    fn manager(
+    fn manager_with_sequence(
         directory: &Path,
         clock: Arc<ManualClock>,
-        bootstraps: Vec<AuthSessionBootstrap>,
-    ) -> Result<SqliteAuthSessionManager, AuthSessionError> {
+        proof: &str,
+        first_token: u8,
+    ) -> SqliteAuthSessionManager {
+        let accounts = Arc::new(
+            UserAccountService::open(directory.join("accounts")).expect("account service"),
+        );
         SqliteAuthSessionManager::open_with_dependencies(
             directory,
-            bootstraps,
-            AuthSessionConfig::new(Duration::from_secs(10), Duration::from_mins(1))?,
+            vec![AuthSessionBootstrap::new(proof).expect("initialization proof")],
+            vec![scope(1), scope(2)],
+            AuthSessionConfig::new(Duration::from_secs(10), Duration::from_mins(1))
+                .expect("config"),
+            accounts,
+            None,
             clock,
-            Arc::new(SequenceToken::new(7)),
+            Arc::new(SequenceToken::new(first_token)),
+        )
+        .expect("manager")
+    }
+
+    fn initialize(
+        manager: &SqliteAuthSessionManager,
+        username: &str,
+        password: &str,
+    ) -> IssuedBrowserSession {
+        manager
+            .initialize(
+                &TransportCredentials::new(Some("initialization-proof".to_owned()), None),
+                username,
+                password,
+            )
+            .expect("initialization")
+    }
+
+    fn login(
+        manager: &SqliteAuthSessionManager,
+        client: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<IssuedBrowserSession, AuthSessionError> {
+        manager.login(
+            &TransportCredentials::new(None, None),
+            client,
+            username,
+            password,
         )
     }
 
-    fn issue(manager: &SqliteAuthSessionManager, proof: &str) -> IssuedBrowserSession {
+    fn add_member(
+        manager: &SqliteAuthSessionManager,
+        username: &str,
+    ) -> winwincode_domain::UserAccount {
+        let now = Instant("2027-05-01T08:00:00.000Z".to_owned());
         manager
-            .bootstrap(&TransportCredentials::new(Some(proof.to_owned()), None))
-            .expect("bootstrap")
+            .accounts()
+            .create_user(username, UserAccountRole::Member, "member-password-1", &now)
+            .expect("member account")
     }
 
     #[test]
-    fn bootstrap_persists_digest_and_secret_free_context_then_revokes() {
+    fn initialization_persists_digest_and_secret_free_context_then_revokes() {
         let directory = test_directory("lifecycle");
         let clock = Arc::new(ManualClock::new(1_000));
-        let manager = manager(
-            &directory,
-            Arc::clone(&clock),
-            vec![bootstrap("bootstrap-proof", 1, vec![scope(2), scope(1)])],
-        )
-        .expect("manager");
-        let issued = issue(&manager, "bootstrap-proof");
+        let manager = manager(&directory, Arc::clone(&clock), "initialization-proof");
+        let issued = initialize(&manager, "Wen", "initial-owner-password");
         let raw = issued.cookie_value.clone();
         let response = issued.response().expect("response");
+        let owner_subject = match &response.actor {
+            Actor::UserActor(user) => user.id.0.clone(),
+            _ => panic!("user actor"),
+        };
+        assert!(owner_subject.starts_with("usr_"));
 
-        assert_ne!(raw, "bootstrap-proof");
+        assert_ne!(raw, "initialization-proof");
         assert!(raw.len() >= 43);
-        assert_eq!(response.expires_at.0, "1970-01-01T00:01:01Z");
-        assert_eq!(response.actor, actor(1));
+        assert_eq!(response.expires_at.0, "1970-01-01T00:01:01.000Z");
+        assert_eq!(response.actor, actor_of(&owner_subject));
         assert_eq!(response.authorized_scopes, vec![scope(1), scope(2)]);
         assert!(
             issued
@@ -957,10 +1284,10 @@ mod tests {
             )
             .expect("session row");
         assert_eq!(row.0, session_digest(&raw));
-        assert_eq!(row.1, "usr_00000000000000000000000001");
+        assert_eq!(row.1, owner_subject);
         assert_eq!(
             decode_json::<Actor>(&row.2).expect("stored Actor"),
-            actor(1)
+            actor_of(&owner_subject)
         );
         assert_eq!(
             decode_json::<Vec<Scope>>(&row.3).expect("stored Scopes"),
@@ -975,9 +1302,10 @@ mod tests {
         );
         assert!(
             !dump
-                .windows("bootstrap-proof".len())
-                .any(|window| window == b"bootstrap-proof")
+                .windows("initialization-proof".len())
+                .any(|window| window == b"initialization-proof")
         );
+        drop(connection);
 
         let credentials = TransportCredentials::new(None, Some(raw));
         assert_eq!(manager.current(&credentials).expect("current"), response);
@@ -994,60 +1322,101 @@ mod tests {
     }
 
     #[test]
-    fn multi_user_scopes_shrink_and_actor_revocation_are_exact() {
+    fn initialization_closes_permanently_and_login_survives_restart() {
+        let directory = test_directory("one-shot");
+        let clock = Arc::new(ManualClock::new(1_000));
+        let first = manager(&directory, Arc::clone(&clock), "initialization-proof");
+        let issued = initialize(&first, "Wen", "initial-owner-password");
+        let raw = issued.cookie_value.clone();
+        assert!(first.initialized_owner().is_some());
+        let second_error = first
+            .initialize(
+                &TransportCredentials::new(Some("initialization-proof".to_owned()), None),
+                "Second",
+                "second-owner-password",
+            )
+            .err()
+            .expect("second initialization must fail");
+        assert!(second_error.is_already_initialized());
+        drop(first);
+
+        // A restarted Server keeps initialization closed even for a fresh
+        // proof, while the issued session and login stay usable.
+        let restarted =
+            manager_with_sequence(&directory, Arc::clone(&clock), "after-restart-proof", 60);
+        let error = restarted
+            .initialize(
+                &TransportCredentials::new(Some("after-restart-proof".to_owned()), None),
+                "Second",
+                "second-owner-password",
+            )
+            .err()
+            .expect("initialization after restart must fail");
+        assert!(error.is_already_initialized());
+        let credentials = TransportCredentials::new(None, Some(raw.clone()));
+        let restored = restarted.current(&credentials).expect("persisted session");
+        assert!(matches!(restored.actor, Actor::UserActor(_)));
+        let login = login(&restarted, "203.0.113.5", "wen", "initial-owner-password")
+            .expect("login after restart");
+        assert_ne!(login.cookie_value, raw);
+    }
+
+    #[test]
+    fn login_issues_isolated_sessions_and_actor_revocation_stays_exact() {
         let directory = test_directory("multi-user");
         let clock = Arc::new(ManualClock::new(2_000));
-        let manager = manager(
-            &directory,
-            clock,
-            vec![
-                bootstrap("proof-user-one", 1, vec![scope(1), scope(2)]),
-                bootstrap("proof-user-two", 2, vec![scope(2)]),
-            ],
-        )
-        .expect("manager");
-        let first =
-            TransportCredentials::new(None, Some(issue(&manager, "proof-user-one").cookie_value));
-        let second =
-            TransportCredentials::new(None, Some(issue(&manager, "proof-user-two").cookie_value));
+        let manager = manager(&directory, clock, "initialization-proof");
+        let owner = initialize(&manager, "Wen", "initial-owner-password");
+        let member_account = add_member(&manager, "Ada");
+        let member_actor = actor_of(&member_account.user_id.0);
+        let member =
+            login(&manager, "203.0.113.9", "Ada", "member-password-1").expect("member login");
 
-        assert_eq!(manager.current(&first).expect("first").actor, actor(1));
-        assert_eq!(manager.current(&second).expect("second").actor, actor(2));
-        assert!(
-            manager
-                .bootstrap(&TransportCredentials::new(
-                    Some("proof-user-one".to_owned()),
-                    second.session_cookie().map(str::to_owned),
-                ))
-                .is_err()
+        let owner_credentials = TransportCredentials::new(None, Some(owner.cookie_value.clone()));
+        let member_credentials = TransportCredentials::new(None, Some(member.cookie_value.clone()));
+        assert_eq!(
+            manager.current(&owner_credentials).expect("owner").actor,
+            owner.principal.actor().clone()
         );
         assert_eq!(
+            manager.current(&member_credentials).expect("member").actor,
+            member_actor
+        );
+        assert!(login(&manager, "203.0.113.9", "Ada", "wrong-password-1").is_err());
+
+        assert_eq!(
             manager
-                .replace_authorized_scopes(&actor(1), vec![scope(2)])
-                .expect("shrink"),
+                .replace_authorized_scopes(owner.principal.actor(), vec![scope(2)])
+                .expect("shrink owner"),
             1
         );
         assert_eq!(
-            manager.current(&first).expect("shrunk").authorized_scopes,
-            vec![scope(2)]
-        );
-        assert_eq!(
             manager
-                .current(&second)
-                .expect("other unchanged")
+                .current(&owner_credentials)
+                .expect("shrunk")
                 .authorized_scopes,
             vec![scope(2)]
         );
         assert_eq!(
             manager
-                .replace_authorized_scopes(&actor(1), Vec::new())
-                .expect("empty authorization revokes Actor"),
+                .current(&member_credentials)
+                .expect("member unchanged")
+                .authorized_scopes,
+            vec![scope(1), scope(2)]
+        );
+        assert_eq!(
+            manager
+                .replace_authorized_scopes(owner.principal.actor(), Vec::new())
+                .expect("empty authorization revokes the Actor"),
             1
         );
-        assert!(manager.current(&first).is_err());
+        assert!(manager.current(&owner_credentials).is_err());
         assert_eq!(
-            manager.current(&second).expect("other active").actor,
-            actor(2)
+            manager
+                .current(&member_credentials)
+                .expect("member still active")
+                .actor,
+            member_actor
         );
     }
 
@@ -1055,18 +1424,15 @@ mod tests {
     fn external_identity_principal_uses_canonical_session_store_and_lifecycle_port() {
         let directory = test_directory("external-identity");
         let clock = Arc::new(ManualClock::new(3_000));
-        let session_manager = Arc::new(
-            manager(
-                &directory,
-                Arc::clone(&clock),
-                vec![bootstrap("unused-bootstrap", 2, vec![scope(2)])],
-            )
-            .expect("manager"),
-        );
+        let session_manager = Arc::new(manager(
+            &directory,
+            Arc::clone(&clock),
+            "initialization-proof",
+        ));
         let session_issuer = ExternalIdentitySessionIssuer::new(Arc::clone(&session_manager));
         let outcome = ExternalAuthenticationOutcome {
             principal: ExternalIdentityPrincipal {
-                actor: actor(1),
+                actor: actor_of("usr_00000000000000000000000001"),
                 authorized_scopes: vec![scope(2), scope(1)],
                 organization_id: OrganizationId("org_00000000000000000000000001".to_owned()),
                 external_identity_id: ExternalIdentityId(
@@ -1122,7 +1488,10 @@ mod tests {
         let lifecycle: &dyn BrowserSessionLifecyclePort = session_manager.as_ref();
         assert_eq!(
             lifecycle
-                .replace_authorized_scopes(&actor(1), vec![scope(2)])
+                .replace_authorized_scopes(
+                    &actor_of("usr_00000000000000000000000001"),
+                    vec![scope(2)]
+                )
                 .expect("shrink through lifecycle port"),
             1
         );
@@ -1135,69 +1504,125 @@ mod tests {
         );
         assert_eq!(
             lifecycle
-                .revoke_actor_sessions(&actor(1))
+                .revoke_actor_sessions(&actor_of("usr_00000000000000000000000001"))
                 .expect("revoke through lifecycle port"),
             1
         );
         assert!(session_manager.current(&credentials).is_err());
-
-        drop(session_issuer);
-        drop(session_manager);
-        let restarted = manager(
-            &directory,
-            clock,
-            vec![bootstrap("after-restart", 2, vec![scope(2)])],
-        )
-        .expect("restart manager");
-        assert!(restarted.current(&credentials).is_err());
     }
 
     #[test]
-    fn expiry_and_restart_restore_only_persisted_current_context() {
-        let directory = test_directory("restart");
-        let first_clock = Arc::new(ManualClock::new(5_000));
-        let first = manager(
-            &directory,
-            Arc::clone(&first_clock),
-            vec![bootstrap("proof-before-restart", 1, vec![scope(1)])],
-        )
-        .expect("first manager");
-        let raw = issue(&first, "proof-before-restart").cookie_value;
-        drop(first);
+    fn sliding_renewal_extends_live_sessions_and_expiry_still_closes_them() {
+        let directory = test_directory("renewal");
+        let clock = Arc::new(ManualClock::new(5_000));
+        let manager = manager(&directory, Arc::clone(&clock), "initialization-proof");
+        let issued = initialize(&manager, "Wen", "initial-owner-password");
+        let credentials = TransportCredentials::new(None, Some(issued.cookie_value));
 
-        let restarted = manager(
-            &directory,
-            Arc::new(ManualClock::new(6_000)),
-            vec![bootstrap("proof-after-restart", 2, vec![scope(2)])],
-        )
-        .expect("restarted manager");
-        let credentials = TransportCredentials::new(None, Some(raw));
-        let restored = restarted.current(&credentials).expect("persisted session");
-        assert_eq!(restored.actor, actor(1));
-        assert_eq!(restored.authorized_scopes, vec![scope(1)]);
-
-        first_clock.set(65_000);
-        let expiry_directory = test_directory("expiry");
-        let expiry_clock = Arc::new(ManualClock::new(10_000));
-        let expiry = manager(
-            &expiry_directory,
-            Arc::clone(&expiry_clock),
-            vec![bootstrap("expiry-proof", 1, vec![scope(1)])],
-        )
-        .expect("expiry manager");
-        let expiring =
-            TransportCredentials::new(None, Some(issue(&expiry, "expiry-proof").cookie_value));
-        expiry_clock.set(70_000);
-        assert!(expiry.current(&expiring).is_err());
-        expiry_clock.set(20_001);
-        assert!(
-            expiry
-                .bootstrap(&TransportCredentials::new(
-                    Some("expiry-proof".to_owned()),
-                    None,
-                ))
-                .is_err()
+        // Early in the TTL the expiry stays fixed (renews at most once per
+        // quarter TTL).
+        clock.set(20_000);
+        assert_eq!(
+            manager.current(&credentials).expect("current").expires_at.0,
+            "1970-01-01T00:01:05.000Z"
         );
+        // Past the quarter mark the session slides back to the full TTL.
+        clock.set(30_000);
+        assert_eq!(
+            manager.current(&credentials).expect("renewed").expires_at.0,
+            "1970-01-01T00:01:30.000Z"
+        );
+        clock.set(31_000);
+        assert_eq!(
+            manager
+                .current(&credentials)
+                .expect("still fixed")
+                .expires_at
+                .0,
+            "1970-01-01T00:01:30.000Z"
+        );
+        // An unused session still expires.
+        clock.set(91_000);
+        assert!(manager.current(&credentials).is_err());
+        // And a late initialization outside the bootstrap window is refused.
+        let error = manager
+            .initialize(
+                &TransportCredentials::new(Some("initialization-proof".to_owned()), None),
+                "Late",
+                "late-owner-password",
+            )
+            .err()
+            .expect("late initialization must fail");
+        assert!(error.is_authentication());
+    }
+
+    #[test]
+    fn login_rate_limiting_blocks_a_pair_until_the_window_passes() {
+        let directory = test_directory("rate-limit");
+        let clock = Arc::new(ManualClock::new(2_000));
+        let manager = manager(&directory, clock, "initialization-proof");
+        initialize(&manager, "Wen", "initial-owner-password");
+        for attempt in 0..crate::login_rate_limiter::MAX_LOGIN_FAILURES {
+            let error = login(&manager, "203.0.113.9", "wen", "wrong-password-1")
+                .err()
+                .expect("wrong password must fail");
+            assert!(error.is_authentication(), "attempt {attempt}");
+        }
+        let limited = login(&manager, "203.0.113.9", "wen", "initial-owner-password")
+            .err()
+            .expect("rate limited");
+        assert!(limited.is_rate_limited());
+        // A different client is not affected.
+        assert!(login(&manager, "198.51.100.4", "wen", "initial-owner-password").is_ok());
+        // A different username on the limited client is not affected.
+        let member = add_member(&manager, "Ada");
+        assert!(
+            login(&manager, "203.0.113.9", "ada", "member-password-1").is_ok(),
+            "member {member:?} should log in",
+        );
+    }
+
+    #[test]
+    fn disabled_accounts_reject_new_logins_and_the_kill_switch_revokes_live_sessions() {
+        let directory = test_directory("disabled");
+        let clock = Arc::new(ManualClock::new(4_000));
+        let manager = manager(&directory, clock, "initialization-proof");
+        initialize(&manager, "Wen", "initial-owner-password");
+        let member = add_member(&manager, "Ada");
+        let member_actor = actor_of(&member.user_id.0);
+        let member_credentials = TransportCredentials::new(
+            None,
+            Some(
+                login(&manager, "203.0.113.9", "ada", "member-password-1")
+                    .expect("login")
+                    .cookie_value,
+            ),
+        );
+        assert!(manager.current(&member_credentials).is_ok());
+
+        let now = Instant("2027-05-01T08:00:00.000Z".to_owned());
+        manager
+            .accounts()
+            .set_state(
+                &member.user_id,
+                &member.revision,
+                winwincode_domain::UserAccountState::Disabled,
+                &now,
+            )
+            .expect("disable");
+        // New logins are refused immediately.
+        let error = login(&manager, "203.0.113.9", "ada", "member-password-1")
+            .err()
+            .expect("disabled login must fail");
+        assert!(error.is_authentication());
+        // The disable kill switch revokes every live session of the account.
+        assert_eq!(
+            manager
+                .revoke_actor_sessions(&member_actor)
+                .expect("kill switch"),
+            1
+        );
+        assert!(manager.current(&member_credentials).is_err());
     }
 
     #[test]
@@ -1220,7 +1645,10 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO auth_sessions VALUES (?1, ?2, 0, 60000, NULL)",
-                params![session_digest("legacy-cookie"), actor_subject(&actor(1))],
+                params![
+                    session_digest("legacy-cookie"),
+                    "usr_00000000000000000000000001"
+                ],
             )
             .expect("legacy row");
         drop(connection);
@@ -1228,9 +1656,8 @@ mod tests {
         let manager = manager(
             &directory,
             Arc::new(ManualClock::new(1_000)),
-            vec![bootstrap("new-proof", 1, vec![scope(1)])],
-        )
-        .expect("upgraded manager");
+            "initialization-proof",
+        );
         let legacy = TransportCredentials::new(None, Some("legacy-cookie".to_owned()));
         assert!(manager.current(&legacy).is_err());
         assert!(manager.authenticate(&legacy).is_err());

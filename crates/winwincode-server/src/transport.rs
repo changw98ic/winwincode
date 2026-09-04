@@ -5,6 +5,7 @@ use std::fmt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use winwincode_api::generated::{Actor, Scope};
+use winwincode_domain::UserId;
 
 /// Credentials extracted from HTTP headers. Debug/serialization are omitted so
 /// transports cannot accidentally log or return them.
@@ -80,6 +81,16 @@ impl AuthenticatedPrincipal {
     #[must_use]
     pub fn authorized_scopes(&self) -> &[Scope] {
         &self.authorized_scopes
+    }
+
+    /// Returns the durable `UserAccount` userId when this principal is a user
+    /// actor, or `None` for service and system actors.
+    #[must_use]
+    pub fn actor_user_id(&self) -> Option<UserId> {
+        match &self.actor {
+            Actor::UserActor(user) => Some(user.id.clone()),
+            Actor::ServiceAccountActor(_) | Actor::SystemActor(_) => None,
+        }
     }
 
     #[must_use]
