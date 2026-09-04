@@ -45,6 +45,10 @@ import {
 } from './strongflow-delivery-list-page.js'
 import type { StrongFlowDeliveryListViewModel } from './strongflow-delivery-list-view-model.js'
 import { mountStrongFlowHeader } from './strongflow-header.js'
+import {
+  createStrongFlowReviewAnnotations,
+  mountStrongFlowReviewPanel,
+} from './strongflow-review-annotations.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -885,6 +889,19 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   let candidateViewMode: CandidateDiffViewMode = options.candidateView ?? 'unified'
   let diagramSelection: StrongFlowDiagramSelection | null = null
   let candidateLine = options.candidateLine ?? null
+  // UI-408: browser-owned review notes. They stay out of the Delivery
+  // aggregate and leave the browser only as part of one existing review
+  // command, so the panel never adds a second mutation authority.
+  const stagedNotes = createStrongFlowReviewAnnotations()
+  const reviewPanel = mountStrongFlowReviewPanel({
+    document,
+    root: strongFlowElement(document, 'section', 'wwc-strongflow-review-draft-host'),
+    draft: stagedNotes,
+    model: options.model,
+    limits: { tasks: limits.tasks, attention: limits.attention },
+    readOnly,
+    isHistoricalReviewOpen: () => historicalReviewOpen,
+  })
 
   function updateOmitted(node: HTMLElement, count: number, label: string): void {
     node.hidden = count === 0
@@ -1185,6 +1202,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     actionsHeading,
     historyBlockedNote,
     solutionActions,
+    reviewPanel.root,
     approveTasks,
     submitVerdict,
     attentionActions,
@@ -2197,6 +2215,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     renderDeliveries(state)
     renderProjection(state.projection, state.status, state.candidateFiles)
     renderActions(state)
+    reviewPanel.update()
     renderLayout(strongFlowLayoutMode(viewport.width))
   }
 
@@ -2230,6 +2249,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       attentionCollection.close()
       historyNavigation.close()
       runDetail.close()
+      reviewPanel.close()
       deliveryListPage.close()
       options.deliveryList.close()
       diagrams.close()
