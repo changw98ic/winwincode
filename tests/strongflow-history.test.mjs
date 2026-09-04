@@ -846,6 +846,67 @@ test('the read-only historical run detail shows exact identity, binding, runtime
   view.close()
 })
 
+test('historical Candidate review keeps the latest selection when responses finish out of order', async () => {
+  const document = new FakeDocument()
+  const first = historicalCandidateItem(failedRunId)
+  const second = {
+    ...first,
+    candidate: {
+      ...first.candidate,
+      candidateRef: 'refs/winwincode/candidate/attempt-2',
+      candidateCommitId: '6666666666666666666666666666666666666666',
+      candidateTreeId: '7777777777777777777777777777777777777777',
+      diffSha256: `sha256:${'8'.repeat(64)}`,
+    },
+  }
+  let resolveFirst
+  let resolveSecond
+  const firstReview = new Promise(resolve => {
+    resolveFirst = resolve
+  })
+  const secondReview = new Promise(resolve => {
+    resolveSecond = resolve
+  })
+  const reviewFor = item => ({
+    ...historicalCandidateReview(item.candidate),
+    candidate: item.candidate,
+  })
+  const view = mountStrongFlowRunDetail({
+    document,
+    limits,
+    loaders: {
+      loadRuntime: async stageRunId => historicalRuntimeSnapshot(stageRunId),
+      loadCandidates: async () => [first, second],
+      loadCandidateReview: identity => (
+        identity.candidateRef === first.candidate.candidateRef ? firstReview : secondReview
+      ),
+    },
+  })
+  document.createElement('section').append(view.root)
+  view.update({
+    tree: strongFlowHistoryTree(historyProjection(), limits),
+    selection: { taskId: 'task:1', stageRunId: failedRunId },
+  })
+  await nextTick()
+
+  const buttons = findAllByClass(view.root, 'wwc-strongflow-history-candidate')
+  buttons[0].emit('click')
+  buttons[1].emit('click')
+  resolveSecond(reviewFor(second))
+  await nextTick()
+  const review = findByClass(view.root, 'wwc-strongflow-history-review')
+  assert.match(allText(review), new RegExp(second.candidate.candidateCommitId, 'u'))
+
+  resolveFirst(reviewFor(first))
+  await nextTick()
+  assert.match(
+    allText(review),
+    new RegExp(second.candidate.candidateCommitId, 'u'),
+    'a stale response must not replace the latest Candidate selection',
+  )
+  view.close()
+})
+
 class FakeStrongFlowViewModel {
   constructor(initialState) {
     this.state = initialState
@@ -1235,6 +1296,54 @@ test('a crossed task/run deep link is normalized onto the canonical association 
     [failedRunId],
   )
 
+  mounted.close()
+})
+
+test('an unchanged historical selection reloads exact payloads when the snapshot cut advances', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const initial = historyProjection()
+  initial.delivery.readCursor = { token: 'read-cut-1' }
+  initial.metadata.readCursor = initial.delivery.readCursor
+  const model = new FakeStrongFlowViewModel({
+    status: 'ready',
+    realtime: 'subscribed',
+    projection: initial,
+    interaction: { status: 'idle', error: null },
+    error: null,
+  })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    historyLocation: new FakeHistoryLocation(
+      `#/strongflow?delivery=${deliveryId}&task=task%3A1&run=${failedRunId}`,
+    ),
+  })
+  assert.equal(
+    model.calls.filter(([name]) => name === 'loadStageRunRuntime').length,
+    1,
+  )
+  assert.equal(
+    model.calls.filter(([name]) => name === 'loadStageRunCandidates').length,
+    1,
+  )
+
+  const advanced = structuredClone(initial)
+  advanced.delivery.readCursor = { token: 'read-cut-2' }
+  advanced.metadata.readCursor = advanced.delivery.readCursor
+  model.publish({ ...model.state, projection: advanced })
+
+  assert.equal(
+    model.calls.filter(([name]) => name === 'loadStageRunRuntime').length,
+    2,
+    'the exact RuntimeProjection must follow the selected snapshot cut',
+  )
+  assert.equal(
+    model.calls.filter(([name]) => name === 'loadStageRunCandidates').length,
+    2,
+    'historical Candidate availability must follow the selected snapshot cut',
+  )
   mounted.close()
 })
 

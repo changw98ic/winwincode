@@ -1742,7 +1742,11 @@ test('historical review reads go through the canonical facade at the snapshot cu
   assert.deepEqual(items.map(item => item.candidate.candidateRef), [olderCandidateRef])
   const listCall = client.calls.at(-1)
   assert.equal(listCall.query, 'candidate.list')
-  assert.equal(listCall.parameters.readPageLimit, 50)
+  assert.equal(
+    listCall.parameters.readPageLimit,
+    1,
+    'readPageLimit must match the delivery.get limit sealed into atCursor',
+  )
   assert.equal(listCall.page.limit, 50)
   assert.deepEqual(listCall.parameters.atCursor, deliveryValue.readCursor)
 
@@ -1769,6 +1773,7 @@ test('historical review reads go through the canonical facade at the snapshot cu
   assert.equal(review.displayOnly, true)
   assert.equal(review.currentAuthorization, false)
   assert.equal(client.calls.at(-1).query, 'candidate.review.get')
+  assert.equal(client.calls.at(-1).parameters.readPageLimit, 1)
 
   // A response naming another Candidate fails closed instead of rendering it.
   client.enqueue('candidate.review.get', response('candidate.review.get', {
@@ -1789,5 +1794,106 @@ test('historical review reads go through the canonical facade at the snapshot cu
     error => error.code === 'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
   )
 
+  model.close()
+})
+
+test('a historical Candidate review from another read cut fails closed', async () => {
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+  const candidate = deliveryValue.currentCandidate
+  const identity = {
+    candidateRef: candidate.candidateRef,
+    candidateTreeId: candidate.candidateTreeId,
+    diffSha256: candidate.diffSha256,
+  }
+  client.enqueue('candidate.review.get', response('candidate.review.get', {
+    availability: 'available',
+    candidate,
+    currentAuthorization: false,
+    displayOnly: true,
+    evidence: [],
+    firstSeenDeliveryRevision: deliveryValue.deliveryRevision,
+    kind: 'candidate_historical_review',
+    lastSeenDeliveryRevision: deliveryValue.deliveryRevision,
+    readCursor: {
+      ...deliveryValue.readCursor,
+      token: `${deliveryValue.readCursor.token}-another-cut`,
+    },
+    reviewDeliveryRevision: null,
+    verdict: null,
+  }))
+
+  await assert.rejects(
+    model.loadCandidateHistoricalReview(identity),
+    error => error.code === 'STRONGFLOW_CANDIDATE_REVIEW_MISMATCH',
+  )
+  model.close()
+})
+
+test('historical Candidate lookup follows canonical pages before reporting a run empty', async () => {
+  const selectedRunId = 'run_00000000000000000000000009'
+  const selectedSessionId = 'psn_00000000000000000000000009'
+  const { client, model } = view()
+  const deliveryValue = delivery()
+  deliveryValue.stages.unshift({
+    id: selectedRunId,
+    actorType: 'codex',
+    attempt: 1,
+    deliveryTaskId: 'tsk_00000000000000000000000001',
+    finishedAt: '2026-08-27T00:57:00.000Z',
+    role: 'implementer',
+    sessionBinding: sessionBinding(selectedSessionId, selectedRunId, '09'),
+    stage: 'executing',
+    startedAt: '2026-08-27T00:50:00.000Z',
+    status: 'failed',
+  })
+  client.responses.set('delivery.get', response('delivery.get', deliveryValue))
+  await model.start()
+
+  const item = {
+    availability: 'released',
+    candidate: {
+      candidateCommitId: '4444444444444444444444444444444444444444',
+      candidateRef: 'refs/winwincode/candidate/9',
+      candidateTreeId: '5555555555555555555555555555555555555555',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      diffSha256: `sha256:${'9'.repeat(64)}`,
+      frozenAt: '2026-08-27T00:56:00.000Z',
+      producerSessionBindingId: 'binding:strongflow:09',
+      producerStageRunId: selectedRunId,
+    },
+    firstSeenDeliveryRevision: 1,
+    isCurrentAtReadCursor: false,
+    lastSeenDeliveryRevision: 1,
+    reviewDeliveryRevision: null,
+  }
+  client.enqueue('candidate.list', {
+    ...response('candidate.list', {
+      kind: 'candidate_history_page',
+      items: [],
+      readCursor: deliveryValue.readCursor,
+    }),
+    page: { hasMore: true, nextCursor: 'candidate-page-2' },
+  })
+  client.enqueue('candidate.list', {
+    ...response('candidate.list', {
+      kind: 'candidate_history_page',
+      items: [item],
+      readCursor: deliveryValue.readCursor,
+    }),
+    page: page(),
+  })
+
+  const items = await model.loadStageRunCandidates(selectedRunId)
+  assert.deepEqual(items.map(entry => entry.candidate.candidateRef), [
+    item.candidate.candidateRef,
+  ])
+  assert.deepEqual(
+    client.calls.filter(call => call.query === 'candidate.list').map(call => call.page.cursor),
+    [null, 'candidate-page-2'],
+  )
   model.close()
 })
