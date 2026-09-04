@@ -1079,6 +1079,113 @@ test('a command server failure is still exposed after an unrelated event reload'
   assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
 })
 
+test('a command server failure landing during an in-flight reload is not erased by the reload completion', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let failCommand = () => {}
+  client.command = async () => {
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      failCommand = () => reject(new ControlPlaneClientError({
+        kind: 'terminal',
+        code: 'REVISION_CONFLICT',
+        message: 'The Delivery revision changed.',
+        requestId: null,
+        retryable: false,
+      }))
+    })
+  }
+  let runtimeQueries = 0
+  let releaseReloadRuntime = () => {}
+  const reloadRuntimeGate = new Promise(resolve => { releaseReloadRuntime = resolve })
+  const baseQuery = client.query.bind(client)
+  client.query = async request => {
+    if (request.query === 'runtime.projection.get') {
+      runtimeQueries += 1
+      if (runtimeQueries === 2) await reloadRuntimeGate
+    }
+    return baseQuery(request)
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+  const reloadPending = client.subscription.onEvent({
+    sequence: 2,
+    event: {
+      type: 'delivery.changed.v1',
+      deliveryId,
+      revision: 2,
+      changeKind: 'advanced',
+    },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  failCommand()
+  await commandPending
+  releaseReloadRuntime()
+  await reloadPending
+
+  assert.equal(model.state.status, 'ready')
+  assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
+})
+
+test('a trusted-facts retry paused across an unrelated reload does not drop the command silently', async () => {
+  const client = new FakeClient()
+  let attempts = 0
+  client.command = async request => {
+    attempts += 1
+    throw new ControlPlaneClientError({
+      kind: 'server',
+      code: 'TRUSTED_FACTS_UNAVAILABLE',
+      message: 'Trusted facts are still catching up.',
+      requestId: request.requestId,
+      retryable: true,
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+
+  const startTime = Date.now()
+  mock.timers.enable({ apis: ['Date', 'setTimeout'], now: startTime })
+  try {
+    const pending = model.advanceDelivery()
+    await Promise.resolve()
+    await client.subscription.onEvent({
+      sequence: 2,
+      event: {
+        type: 'delivery.changed.v1',
+        deliveryId,
+        revision: 2,
+        changeKind: 'advanced',
+      },
+    })
+    mock.timers.tick(50)
+    await pending
+  } finally {
+    mock.timers.reset()
+  }
+
+  assert.equal(attempts, 1)
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(model.state.interaction.error.code, 'TRUSTED_FACTS_UNAVAILABLE')
+})
+
 test('closing during an unrelated reload keeps an in-flight command settlement silent', async () => {
   const client = new FakeClient()
   let commandStartedResolve
