@@ -729,6 +729,79 @@ test('read-only Settings disables mutation controls and ignores synthetic submit
   mounted.close()
 })
 
+test('an accepted model route stays pending across a completed stale settings snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = new FakeElement(document, 'div')
+  const calls = []
+  let current = pageState()
+  let listener = () => {}
+  const model = {
+    draftScope: pageDraftScope,
+    get state() { return current },
+    subscribe(next) {
+      listener = next
+      next(current)
+      return () => { listener = () => {} }
+    },
+    async start() {},
+    async refresh() {},
+    async updateSettings(input) { calls.push(input) },
+    async createCredentialReference() {},
+    async rotateCredentialReference() {},
+    async revokeCredentialReference() {},
+    cancelPending() {},
+    reconnect() {},
+    close() {},
+  }
+  const mounted = mountSettingsPage({ root: rootElement, model })
+  const provider = byClass(rootElement, 'wwc-settings-provider')
+  const routeModel = byClass(rootElement, 'wwc-settings-model')
+  const credentialChoice = byClass(rootElement, 'wwc-settings-credential')
+  const concurrency = byClass(rootElement, 'wwc-settings-concurrency')
+  const routeForm = byClass(rootElement, 'wwc-settings-route-form')
+  const saveRoute = byClass(rootElement, 'wwc-settings-save-route')
+
+  provider.value = 'openai-compatible'
+  provider.dispatch('input')
+  routeModel.value = 'gpt-test'
+  routeModel.dispatch('input')
+  credentialChoice.value = credentialId
+  credentialChoice.dispatch('change')
+  concurrency.value = '3'
+  concurrency.dispatch('input')
+  routeForm.dispatch('submit')
+
+  current = pageState({
+    interaction: { status: 'waiting', operation: 'settings.update', error: null },
+  })
+  listener(current)
+  current = pageState({ status: 'refreshing', realtime: 'reloading' })
+  listener(current)
+  current = pageState()
+  listener(current)
+  routeForm.dispatch('submit')
+
+  assert.deepEqual({ calls: calls.length, disabled: saveRoute.disabled }, {
+    calls: 1,
+    disabled: true,
+  })
+
+  current = pageState({
+    settings: {
+      revision: 2,
+      defaultModelRoute: {
+        providerId: 'openai-compatible',
+        modelId: 'gpt-test',
+        credentialReferenceId: credentialId,
+      },
+      workerConcurrencyLimit: 3,
+    },
+  })
+  listener(current)
+  assert.equal(saveRoute.disabled, false)
+  mounted.close()
+})
+
 test('an accepted Credential create keeps its submission until the refreshed snapshot confirms success', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
