@@ -4,6 +4,7 @@ mod doctor;
 mod git;
 mod launcher;
 mod model;
+mod user_admin;
 
 pub use cli::{WwcCliExit, render_help, run_cli};
 pub use community_gate::{
@@ -16,4 +17,8 @@ pub use model::{
     AttachRequest, Attachment, AttachmentOutcome, BaselineChoice, BaselineSource,
     DiagnosticCategory, DiagnosticCheck, DiagnosticReport, DiagnosticStatus, DoctorRequest,
     InitRequest, LauncherError, RepositoryInspection, SetupOutcome,
+};
+pub use user_admin::{
+    UserAccountAdmin, UserAccountView, UserAdminError, UserAdminOutcome,
+    generate_temporary_password,
 };

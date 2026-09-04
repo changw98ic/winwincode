@@ -3,7 +3,9 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use winwincode_domain::{UserAccountRole, UserAccountState};
 
+use crate::user_admin::{UserAccountAdmin, UserAdminError, UserAdminOutcome};
 use crate::{
     AttachRequest, BaselineChoice, DiagnosticCategory, DiagnosticReport, DiagnosticStatus,
     DoctorRequest, InitRequest, LauncherError, LocalLauncherPort, SetupOutcome,
@@ -49,10 +51,17 @@ pub fn render_help() -> String {
         "  wwc init [PATH] [--confirm-git-init] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
         "  wwc repo attach [PATH] [--baseline head|snapshot|cancel] [--confirm-snapshot] [--json]",
         "  wwc doctor [PATH] [--json]",
+        "  wwc user create <USERNAME> [--role owner|member] [--data-dir PATH] [--json]",
+        "  wwc user disable <USERNAME> [--data-dir PATH] [--json]",
+        "  wwc user enable <USERNAME> [--data-dir PATH] [--json]",
+        "  wwc user reset-password <USERNAME> [--data-dir PATH] [--json]",
         "  wwc help",
         "",
         "Git 初始化和 Snapshot 都需要显式确认。Snapshot 使用专用 ref，不会修改当前分支、索引或 stash。",
         "没有 Remote 也可以接入和完成本地交付。",
+        "用户管理直接操作 Server 产品状态数据库：--data-dir 与 Server 的 WWC_SERVER_DATA_DIRECTORY 一致。",
+        "临时密码只显示一次，绝不再次展示。禁用用户不触达浏览器会话：会话撤销由 Server 负责，",
+        "与正在运行的 Server 共库时需重启 Server 或经 HTTP 端点操作才即时生效。",
         "",
     ]
     .join("\n")
@@ -80,6 +89,7 @@ fn run(arguments: &[String], launcher: &dyn LocalLauncherPort) -> Result<WwcCliE
         "init" => run_init(&arguments[1..], launcher),
         "repo" => run_repo(&arguments[1..], launcher),
         "doctor" => run_doctor(&arguments[1..], launcher),
+        "user" => run_user(&arguments[1..]),
         other => Err(UsageError(format!("未知命令 {other}。"))),
     }
 }
@@ -154,6 +164,158 @@ fn run_doctor(
         }),
         Err(error) => Ok(error_exit(&error)),
     }
+}
+
+/// Parses and runs one `wwc user ...` administration command against the
+/// Server product-state directory.
+fn run_user(arguments: &[String]) -> Result<WwcCliExit, UsageError> {
+    let Some(action) = arguments.first().map(String::as_str) else {
+        return Err(UsageError(
+            "user 后需要 create、disable、enable 或 reset-password。".into(),
+        ));
+    };
+    if !matches!(action, "create" | "disable" | "enable" | "reset-password") {
+        return Err(UsageError(format!("未知 user 命令 {action}。")));
+    }
+    let parsed = parse(&arguments[1..], &["json"])?;
+    reject_unknown(&parsed, &["data-dir", "role"], &["json"])?;
+    let data_directory = data_directory(&parsed)?;
+    let json = parsed.switches.contains("json");
+    let admin = UserAccountAdmin::open(data_directory);
+    let result = match action {
+        "create" => {
+            let username = single_username(&parsed)?;
+            admin.create(username, user_role(&parsed)?)
+        }
+        "disable" => admin.set_state(single_username(&parsed)?, UserAccountState::Disabled),
+        "enable" => admin.set_state(single_username(&parsed)?, UserAccountState::Active),
+        _ => admin.reset_password(single_username(&parsed)?),
+    };
+    Ok(user_exit(result, json))
+}
+
+fn user_exit(result: Result<UserAdminOutcome, UserAdminError>, json: bool) -> WwcCliExit {
+    match result {
+        Ok(outcome) => WwcCliExit {
+            code: EXIT_SUCCESS,
+            stdout: if json {
+                render_json(&outcome)
+            } else {
+                render_user(&outcome)
+            },
+            stderr: String::new(),
+        },
+        Err(UserAdminError::InitializationRequired) => WwcCliExit {
+            code: EXIT_ACTION_REQUIRED,
+            stdout: if json {
+                render_json(&UserAdminOutcome::InitializationRequired)
+            } else {
+                render_initialization_guidance()
+            },
+            stderr: String::new(),
+        },
+        Err(UserAdminError::Failed { code, message }) => WwcCliExit {
+            code: EXIT_SERVICE,
+            stdout: String::new(),
+            stderr: format!("用户管理问题 [{code}]：{message}\n"),
+        },
+    }
+}
+
+fn render_user(outcome: &UserAdminOutcome) -> String {
+    match outcome {
+        UserAdminOutcome::UserCreated {
+            user,
+            temporary_password,
+        } => format!(
+            "用户已创建。\n用户：{}\nID：{}\n角色：{}\n临时密码：{temporary_password}\n说明：临时密码只显示这一次，请立即通过安全渠道转交该用户；关闭本输出后无法找回。\n",
+            user.username,
+            user.user_id,
+            user.role.as_str()
+        ),
+        UserAdminOutcome::PasswordReset {
+            user,
+            temporary_password,
+        } => format!(
+            "密码已重置。\n用户：{}\nID：{}\n新临时密码：{temporary_password}\n说明：新临时密码只显示这一次，请立即转交该用户；原密码立即失效。\n",
+            user.username, user.user_id
+        ),
+        UserAdminOutcome::UserUpdated { user, changed } => render_user_update(user, *changed),
+        UserAdminOutcome::InitializationRequired => render_initialization_guidance(),
+    }
+}
+
+fn render_user_update(user: &crate::user_admin::UserAccountView, changed: bool) -> String {
+    let (headline, state) = match user.state {
+        UserAccountState::Disabled => ("用户已禁用。", "禁用"),
+        UserAccountState::Active => ("用户已启用。", "启用"),
+    };
+    let headline = if changed {
+        headline.to_owned()
+    } else {
+        format!("用户已处于{state}状态，未做修改。")
+    };
+    let mut output = format!(
+        "{headline}\n用户：{}\nID：{}\n",
+        user.username, user.user_id
+    );
+    if user.state == UserAccountState::Disabled {
+        output
+            .push_str("说明：浏览器会话撤销由 Server 负责，CLI 直连数据库路径，不触达在线会话。\n");
+        output.push_str("注意：如 Server 正在运行并与本目录共用数据库，已登录会话不会立即失效；需重启 Server 或改经 HTTP 端点操作才即时生效。\n");
+    }
+    output
+}
+
+fn render_initialization_guidance() -> String {
+    [
+        "Server 尚未初始化：该数据目录还没有 Owner。",
+        "请先通过浏览器完成一次性初始化（在 Server 登录页输入 bootstrap proof），或运行：",
+        "  wwc user create <USERNAME> --role owner --data-dir <数据目录>",
+        "",
+    ]
+    .join("\n")
+}
+
+fn data_directory(parsed: &ParsedArguments) -> Result<PathBuf, UsageError> {
+    let values = parsed.flags.get("data-dir").map_or(&[][..], Vec::as_slice);
+    if values.len() > 1 {
+        return Err(UsageError("--data-dir 不能重复。".into()));
+    }
+    if let Some(value) = values.first() {
+        return Ok(PathBuf::from(value));
+    }
+    if let Some(value) = std::env::var_os("WWC_SERVER_DATA_DIRECTORY") {
+        return Ok(PathBuf::from(value));
+    }
+    Err(UsageError(
+        "缺少 --data-dir：用户管理需要 Server 产品状态目录（与 Server 的 WWC_SERVER_DATA_DIRECTORY 相同）。".into(),
+    ))
+}
+
+fn user_role(parsed: &ParsedArguments) -> Result<UserAccountRole, UsageError> {
+    let values = parsed.flags.get("role").map_or(&[][..], Vec::as_slice);
+    if values.len() > 1 {
+        return Err(UsageError("--role 不能重复。".into()));
+    }
+    match values.first().map(String::as_str) {
+        None | Some("member") => Ok(UserAccountRole::Member),
+        Some("owner") => Ok(UserAccountRole::Owner),
+        Some(other) => Err(UsageError(format!(
+            "--role 只能是 owner 或 member，收到 {other}。"
+        ))),
+    }
+}
+
+fn single_username(parsed: &ParsedArguments) -> Result<&str, UsageError> {
+    if parsed.positionals.len() != 1 {
+        return Err(UsageError("需要且只需要一个用户名。".into()));
+    }
+    Ok(parsed
+        .positionals
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default())
 }
 
 fn setup_exit(result: Result<SetupOutcome, LauncherError>, json: bool) -> WwcCliExit {
