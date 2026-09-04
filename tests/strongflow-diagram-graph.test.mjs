@@ -34,11 +34,16 @@ const page = await import(`${pathToFileURL(resolve(
   root,
   '.cache/strongflow-page-tests/strongflow-page.js',
 )).href}`)
+const diagramsModule = await import(`${pathToFileURL(resolve(
+  root,
+  '.cache/strongflow-page-tests/strongflow-diagrams.js',
+)).href}`)
 const {
   mountStrongFlowDiagramGraph,
   strongFlowDiagramGraphLayout,
 } = graphModule
 const { mountStrongFlowPage } = page
+const { mountStrongFlowDiagrams } = diagramsModule
 
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
@@ -246,6 +251,44 @@ test('decorative node-kind icons stay out of the accessible name', () => {
   view.close()
 })
 
+test('unresolved and execution status signals use their own hidden icons', () => {
+  const document = new FakeDocument()
+  const nodes = solutionDiagramNodes().map(node => ({
+    ...node,
+    executionState: node.id === 'platform:dsh'
+      ? 'affected-live'
+      : node.id === 'platform:strongflow' ? 'affected-finished' : 'normal',
+    affectedFileCount: node.id === 'platform:dsh' || node.id === 'platform:strongflow' ? 1 : 0,
+  }))
+  const view = mountStrongFlowDiagramGraph({
+    document,
+    props: graphProps({ nodes }),
+  })
+  const graphNodes = findAllByClass(view.root, 'wwc-strongflow-graph-node')
+  const unresolved = graphNodes.find(node => node.dataset.id === 'component:api')
+  const affectedLive = graphNodes.find(node => node.dataset.id === 'platform:dsh')
+  const affectedFinished = graphNodes.find(node => node.dataset.id === 'platform:strongflow')
+  const statusBadges = [
+    findByClass(unresolved, 'wwc-strongflow-graph-node-badge'),
+    findByClass(affectedLive, 'wwc-strongflow-graph-node-execution'),
+    findByClass(affectedFinished, 'wwc-strongflow-graph-node-execution'),
+  ]
+  for (const badge of statusBadges) {
+    assert.ok(badge)
+    assert.equal(
+      badge.children.some(child => (
+        child.getAttribute('aria-hidden') === 'true' && child.textContent.length > 0
+      )),
+      true,
+      'each status needs its own decorative icon, hidden from assistive technology',
+    )
+  }
+  assert.match(textContentOf(unresolved), /Unresolved/u)
+  assert.match(textContentOf(affectedLive), /Affected live/u)
+  assert.match(textContentOf(affectedFinished), /Affected finished/u)
+  view.close()
+})
+
 test('keyed graph updates reject duplicate edge identities', () => {
   const document = new FakeDocument()
   const edges = solutionDiagramEdges()
@@ -387,6 +430,28 @@ test('zoom buttons and viewport keys scale the graph and fit restores it', () =>
   findByClass(view.root, 'wwc-strongflow-graph-zoom-in').emit('click')
   findByClass(view.root, 'wwc-strongflow-graph-overview').emit('click')
   assert.equal(viewport.getAttribute('data-zoom'), '0.6')
+  view.close()
+})
+
+test('fit shows a large bounded graph below the manual zoom minimum', () => {
+  const document = new FakeDocument()
+  const view = mountStrongFlowDiagramGraph({ document, props: graphProps() })
+  const viewport = findByClass(view.root, 'wwc-strongflow-graph-viewport')
+  const canvas = findByClass(view.root, 'wwc-strongflow-graph-canvas')
+  viewport.clientWidth = 300
+  viewport.clientHeight = 240
+  canvas.scrollWidth = 1_500
+  canvas.scrollHeight = 800
+
+  findByClass(view.root, 'wwc-strongflow-graph-fit').emit('click')
+
+  assert.equal(
+    viewport.getAttribute('data-zoom'),
+    '0.2',
+    'the full measured canvas must fit instead of stopping at the manual 0.5 limit',
+  )
+  assert.equal(viewport.scrollLeft, 0)
+  assert.equal(viewport.scrollTop, 0)
   view.close()
 })
 
@@ -972,6 +1037,74 @@ test('node selection links only exact canonical Task Attention Diff and Evidence
     findByClass(architecture, 'wwc-strongflow-graph-detail').textContent,
     /Task task:1.*Attention attention:1.*Diff src\/linked\.ts.*Evidence evidence:1/u,
   )
+  mounted.close()
+})
+
+test('node selection omits canonical identities absent from the current delivery cut', () => {
+  const document = new FakeDocument()
+  const current = projection()
+  const fileId = 'diagram-file:missing'
+  const executionNode = node => ({
+    nodeId: node.id,
+    state: node.id === 'node:1' ? 'affected-finished' : 'normal',
+    affectedFileCount: node.id === 'node:1' ? 1 : 0,
+    fileIds: node.id === 'node:1' ? [fileId] : [],
+  })
+  current.delivery.tasks = []
+  current.delivery.attention = []
+  current.attention = []
+  current.solutionReview.attentionItemId = 'attention:missing'
+  current.diagramExecution = {
+    schemaVersion: 1,
+    protocol: 'winwincode.diagram-execution-projection.v1',
+    deliveryId: current.delivery.deliveryId,
+    deliveryRevision: current.delivery.deliveryRevision,
+    reviewSetSha256: 'a'.repeat(64),
+    state: 'execution-finished',
+    architecture: {
+      diagramId: current.solutionReview.architectureDiagram.id,
+      kind: 'system-architecture',
+      nodes: current.solutionReview.architectureDiagram.nodes.map(executionNode),
+    },
+    process: {
+      diagramId: current.solutionReview.processDiagram.id,
+      kind: 'process-flow',
+      nodes: current.solutionReview.processDiagram.nodes.map(node => ({
+        nodeId: node.id,
+        state: 'normal',
+        affectedFileCount: 0,
+        fileIds: [],
+      })),
+    },
+    affectedFileCount: 1,
+    details: {
+      files: [{ id: fileId, path: 'src/missing.ts', nodeIds: ['node:1'] }],
+      provenance: {
+        deliveryTaskId: 'task:missing',
+        evidenceRefIds: ['evidence:missing'],
+      },
+    },
+    updatedAtMillis: 2,
+  }
+  let selected = null
+  const mounted = mountStrongFlowDiagrams({
+    document,
+    limits,
+    onSelectNode: value => { selected = value },
+  })
+  mounted.update({ projection: current, narrow: false })
+
+  findAllByClass(mounted.root, 'wwc-strongflow-graph-node')
+    .find(node => node.dataset.id === 'node:1')
+    .emit('click')
+  assert.deepEqual(selected, {
+    diagramId: current.solutionReview.architectureDiagram.id,
+    nodeId: 'node:1',
+    taskId: null,
+    attentionItemIds: [],
+    diffPaths: [],
+    evidenceRefIds: [],
+  })
   mounted.close()
 })
 
