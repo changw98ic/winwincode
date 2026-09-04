@@ -947,6 +947,8 @@
       "id": "client-application",
       "sourcePaths": [
         "apps/client/src/application.ts",
+        "apps/client/src/approval-risk-detail-view.ts",
+        "apps/client/src/approval-risk-detail.ts",
         "apps/client/src/attention-center-page.ts",
         "apps/client/src/attention-center-view-model.ts",
         "apps/client/src/attention-notifications.ts",

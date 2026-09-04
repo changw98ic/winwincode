@@ -12,6 +12,7 @@ import {
   type StatusTone,
 } from './components/index.js'
 import { mountKeyedCollection, type KeyedCollectionView } from './components/keyed-collection.js'
+import { boundApprovalText } from './approval-risk-detail.js'
 import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
 import type { StageRunId } from './generated/contracts.js'
 import type {
@@ -558,7 +559,8 @@ export function mountAttentionCenterPage(options: AttentionCenterPageOptions): A
       row.dataset.kind = item.kind
       row.dataset.urgency = item.urgency
       parts.kind.textContent = KIND_LABELS[item.kind]
-      parts.title.textContent = item.title
+      // Producer summaries are free-form, so the card never renders one raw.
+      parts.title.textContent = boundApprovalText(item.title).text
       parts.origin.hidden = item.kind === 'attention' || origin === undefined || disabled
       if (origin !== undefined && cardStageRunId !== null && item.kind !== 'attention' && !disabled) {
         parts.origin.href = attentionCenterOriginHash(
