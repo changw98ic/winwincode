@@ -7,9 +7,11 @@ import { join, resolve } from 'node:path'
 const root = resolve(import.meta.dirname, '..')
 
 // The TypeScript lane exercises the current Client and generated-contract
-// boundaries.  Product-process checks (Rust, Server API, and release assets)
-// have their own root scripts so this lane stays deterministic and does not
-// start a second process-boundary build.
+// boundaries.  Product-process checks (Rust build, Server API, and release
+// assets) have their own root scripts so this lane stays deterministic and
+// does not start a second process-boundary build.  The oracle gates at the
+// end are Node-authored; the trigger-aware differential executes the already
+// built integration target only when its trigger paths exist.
 //
 // The real-browser suites each rebuild the client into the shared
 // `apps/client/dist` tree, and this lane runs files concurrently, so the
@@ -97,18 +99,27 @@ for (const path of canonicalTestFiles) {
   }
 }
 
-const result = spawnSync(process.execPath, [
-  '--test',
-  '--test-concurrency=4',
-  ...canonicalTestFiles,
-], {
-  cwd: root,
-  stdio: 'inherit',
-})
-if (result.error !== undefined) throw result.error
-if (result.signal !== null) {
-  throw new Error(`canonical TypeScript test runner ended with ${result.signal}`)
+function runTests(arguments_) {
+  const result = spawnSync(process.execPath, arguments_, {
+    cwd: root,
+    stdio: 'inherit',
+  })
+  if (result.error !== undefined) throw result.error
+  if (result.signal !== null) {
+    throw new Error(`Node test runner ended with ${result.signal}`)
+  }
+  if (result.status !== 0) process.exit(result.status ?? 1)
 }
-if (result.status !== 0) process.exit(result.status ?? 1)
+
+runTests(['--test', '--test-concurrency=4', ...canonicalTestFiles])
+
+// The legacy ten-scenario oracle runs after the parallel Node suite and
+// reuses the TypeScript build already produced by test:ts.
+runTests(['scripts/export-delivery-strongflow-oracle.mjs', '--check'])
+
+// The trigger-aware Rust differential runs last so the generated contract
+// and its Rust producer stay one checked path.  Without its trigger paths
+// it validates the frozen plan contract-only instead of running Cargo.
+runTests(['scripts/run-delivery-strongflow-rust-differential.mjs', '--check'])
 
 process.stdout.write(`canonical TypeScript tests passed: ${canonicalTestFiles.length}\n`)
