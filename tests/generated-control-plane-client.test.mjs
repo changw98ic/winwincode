@@ -508,6 +508,43 @@ test('generic reset frames reject the removed fixed reload query list', async ()
   assert.equal(factory.sockets.length, 1)
 })
 
+test('WebSocket rejects a runtime invalidation that crosses the strict scope branch', async () => {
+  const factory = fakeWebSocketFactory()
+  const applied = []
+  const errors = []
+  const client = createControlPlaneWebSocketClient({
+    createSocket: factory.createSocket,
+    async onEvent(frame) {
+      applied.push(frame)
+    },
+    onError(error) {
+      errors.push(error)
+    },
+  })
+
+  client.subscribe('subscription-1', subscription({
+    kind: 'product-session',
+    productSessionId,
+  }))
+  factory.sockets[0].open()
+  factory.sockets[0].receive(runtimeEvent(1, {
+    type: 'runtime-projection.invalidated.v1',
+    scopeKind: 'product-session',
+    productSessionId,
+    deliveryId,
+    stageRunId,
+    projectionRevision: 1,
+    lastProjectionSequence: 1,
+    reloadQueries: ['runtime.projection.get'],
+  }, { kind: 'product-session', productSessionId }))
+  await flush()
+
+  assert.deepEqual(applied, [])
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].code, 'INVALID_WEBSOCKET_FRAME')
+  assert.equal(factory.sockets[0].sent.some(frame => frame.type === 'transport.ack.v1'), false)
+})
+
 test('StrongFlow reloads delivery then runtime at the exact returned read cursor before publishing', async () => {
   const queries = []
   const snapshots = []

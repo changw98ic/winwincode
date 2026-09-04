@@ -477,6 +477,53 @@ function isSocketCursor(value: unknown, eventIdMayBeNull: boolean): boolean {
     && (typeof value.eventId === 'string' || (eventIdMayBeNull && value.eventId === null))
 }
 
+function isRuntimeProjectionInvalidation(
+  value: unknown,
+): value is ControlPlaneWebSocketProductSessionRuntimeProjectionInvalidatedEvent
+  | ControlPlaneWebSocketDeliveryStageRuntimeProjectionInvalidatedEvent {
+  if (
+    !isRecord(value)
+    || value.type !== 'runtime-projection.invalidated.v1'
+    || typeof value.productSessionId !== 'string'
+    || value.productSessionId.length === 0
+    || !Number.isSafeInteger(value.projectionRevision)
+    || (value.projectionRevision as number) < 0
+    || !Number.isSafeInteger(value.lastProjectionSequence)
+    || (value.lastProjectionSequence as number) < 0
+    || !Array.isArray(value.reloadQueries)
+  ) return false
+  if (value.scopeKind === 'product-session') {
+    return hasExactKeys(value, [
+      'lastProjectionSequence',
+      'productSessionId',
+      'projectionRevision',
+      'reloadQueries',
+      'scopeKind',
+      'type',
+    ])
+      && value.reloadQueries.length === 1
+      && value.reloadQueries[0] === 'runtime.projection.get'
+  }
+  return value.scopeKind === 'delivery-stage'
+    && hasExactKeys(value, [
+      'deliveryId',
+      'lastProjectionSequence',
+      'productSessionId',
+      'projectionRevision',
+      'reloadQueries',
+      'scopeKind',
+      'stageRunId',
+      'type',
+    ])
+    && typeof value.deliveryId === 'string'
+    && value.deliveryId.length > 0
+    && typeof value.stageRunId === 'string'
+    && value.stageRunId.length > 0
+    && value.reloadQueries.length === 2
+    && value.reloadQueries[0] === 'delivery.get'
+    && value.reloadQueries[1] === 'runtime.projection.get'
+}
+
 function parseServerFrame(value: unknown): ControlPlaneWebSocketServerFrame {
   if (!isRecord(value) || typeof value.type !== 'string') {
     throw clientFailure('INVALID_WEBSOCKET_FRAME', 'The Control Plane sent an invalid event frame.')
@@ -508,6 +555,10 @@ function parseServerFrame(value: unknown): ControlPlaneWebSocketServerFrame {
         && Number.isSafeInteger(value.authorizationEpoch)
         && isRecord(value.event)
         && typeof value.event.type === 'string'
+        && (
+          value.event.type !== 'runtime-projection.invalidated.v1'
+          || isRuntimeProjectionInvalidation(value.event)
+        )
       break
     case 'transport.subscription-accepted.v1':
       valid = hasExactKeys(value, [
