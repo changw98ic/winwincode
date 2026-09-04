@@ -2095,17 +2095,29 @@ test('submitVerdict waits for active StageRuns and does not send early', async (
   assert.equal(model.state.interaction.error.code, 'STRONGFLOW_VERDICT_STAGES_ACTIVE')
 })
 
-test('a higher Delivery event absorbs self-event cancellation after publishing the new cut', async () => {
+test('a higher Delivery event leaves an in-flight command untouched and the published cut proves it landed', async () => {
   const client = new FakeClient()
   let commandStartedResolve
   const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
-  client.command = async (_request, options) => {
+  let completeCommand = () => {}
+  let commandSignal = null
+  client.command = async (request, options) => {
+    commandSignal = options.signal
     commandStartedResolve()
-    return new Promise((_resolve, reject) => {
+    return new Promise((resolve, reject) => {
+      completeCommand = result => resolve({
+        schemaVersion,
+        requestId: request.requestId,
+        command: request.command,
+        outcome: 'completed',
+        previousRevision: 1,
+        currentRevision: 2,
+        result,
+      })
       options.signal.addEventListener('abort', () => reject(new ControlPlaneClientError({
         kind: 'cancelled',
         code: 'REQUEST_CANCELLED',
-        message: 'The command request was superseded by the Delivery event.',
+        message: 'The command request was cancelled.',
         requestId: null,
         retryable: false,
       })), { once: true })
@@ -2113,21 +2125,6 @@ test('a higher Delivery event absorbs self-event cancellation after publishing t
   }
   const { model } = view(client)
   await model.start()
-  let cancellationReported = false
-  model.subscribe(state => {
-    if (
-      cancellationReported
-      || state.projection?.metadata.revisions.delivery !== 2
-    ) return
-    cancellationReported = true
-    client.subscription.onError(new ControlPlaneClientError({
-      kind: 'server',
-      code: 'REQUEST_CANCELLED',
-      message: 'The event handler observed the superseded command request.',
-      requestId: null,
-      retryable: false,
-    }))
-  })
 
   const commandPending = model.advanceDelivery()
   await commandStarted
@@ -2146,43 +2143,39 @@ test('a higher Delivery event absorbs self-event cancellation after publishing t
       changeKind: 'advanced',
     },
   })
+  completeCommand(nextDelivery)
   await commandPending
 
-  assert.equal(cancellationReported, true)
+  assert.equal(commandSignal.aborted, false)
   assert.equal(model.state.status, 'ready')
   assert.equal(model.state.realtime, 'subscribed')
-  assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+  assert.equal(model.state.projection.metadata.revisions.delivery >= 2, true)
   assert.equal(model.state.error, null)
   assert.equal(model.state.interaction.error, null)
 })
 
-test('a higher Delivery event absorbs a microtask-late self-event cancellation', async () => {
+test('a command server failure is still exposed after an unrelated event reload', async () => {
   const client = new FakeClient()
-  let cancellationReportedResolve
-  const cancellationReported = new Promise(resolve => {
-    cancellationReportedResolve = resolve
-  })
-  const { model } = view(client)
-  await model.start()
-  let cancellationScheduled = false
-  model.subscribe(state => {
-    if (
-      cancellationScheduled
-      || state.projection?.metadata.revisions.delivery !== 2
-    ) return
-    cancellationScheduled = true
-    queueMicrotask(() => {
-      client.subscription.onError(new ControlPlaneClientError({
-        kind: 'server',
-        code: 'REQUEST_CANCELLED',
-        message: 'The event handler reported the superseded request late.',
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let failCommand = () => {}
+  client.command = async () => {
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      failCommand = () => reject(new ControlPlaneClientError({
+        kind: 'terminal',
+        code: 'REVISION_CONFLICT',
+        message: 'The Delivery revision changed.',
         requestId: null,
         retryable: false,
       }))
-      cancellationReportedResolve()
     })
-  })
+  }
+  const { model } = view(client)
+  await model.start()
 
+  const commandPending = model.advanceDelivery()
+  await commandStarted
   const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
   client.enqueue('delivery.get', response('delivery.get', nextDelivery))
   client.enqueue('runtime.projection.get', response(
@@ -2198,13 +2191,261 @@ test('a higher Delivery event absorbs a microtask-late self-event cancellation',
       changeKind: 'advanced',
     },
   })
-  await cancellationReported
+  failCommand()
+  await commandPending
 
   assert.equal(model.state.status, 'ready')
-  assert.equal(model.state.realtime, 'subscribed')
   assert.equal(model.state.projection.metadata.revisions.delivery, 2)
-  assert.equal(model.state.error, null)
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
+})
+
+test('a command server failure landing during an in-flight reload is not erased by the reload completion', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let failCommand = () => {}
+  client.command = async () => {
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      failCommand = () => reject(new ControlPlaneClientError({
+        kind: 'terminal',
+        code: 'REVISION_CONFLICT',
+        message: 'The Delivery revision changed.',
+        requestId: null,
+        retryable: false,
+      }))
+    })
+  }
+  let runtimeQueries = 0
+  let releaseReloadRuntime = () => {}
+  const reloadRuntimeGate = new Promise(resolve => { releaseReloadRuntime = resolve })
+  const baseQuery = client.query.bind(client)
+  client.query = async request => {
+    if (request.query === 'runtime.projection.get') {
+      runtimeQueries += 1
+      if (runtimeQueries === 2) await reloadRuntimeGate
+    }
+    return baseQuery(request)
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+  const reloadPending = client.subscription.onEvent({
+    sequence: 2,
+    event: {
+      type: 'delivery.changed.v1',
+      deliveryId,
+      revision: 2,
+      changeKind: 'advanced',
+    },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  failCommand()
+  await commandPending
+  releaseReloadRuntime()
+  await reloadPending
+
+  assert.equal(model.state.status, 'ready')
+  assert.equal(model.state.projection.metadata.revisions.delivery, 2)
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(model.state.interaction.error.code, 'REVISION_CONFLICT')
+})
+
+test('a trusted-facts retry paused across an unrelated reload does not drop the command silently', async () => {
+  const client = new FakeClient()
+  let attempts = 0
+  client.command = async request => {
+    attempts += 1
+    throw new ControlPlaneClientError({
+      kind: 'server',
+      code: 'TRUSTED_FACTS_UNAVAILABLE',
+      message: 'Trusted facts are still catching up.',
+      requestId: request.requestId,
+      retryable: true,
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+
+  const startTime = Date.now()
+  mock.timers.enable({ apis: ['Date', 'setTimeout'], now: startTime })
+  try {
+    const pending = model.advanceDelivery()
+    await Promise.resolve()
+    await client.subscription.onEvent({
+      sequence: 2,
+      event: {
+        type: 'delivery.changed.v1',
+        deliveryId,
+        revision: 2,
+        changeKind: 'advanced',
+      },
+    })
+    mock.timers.tick(50)
+    await pending
+  } finally {
+    mock.timers.reset()
+  }
+
+  assert.equal(attempts, 1)
+  assert.equal(model.state.interaction.status, 'error')
+  assert.equal(model.state.interaction.error.code, 'TRUSTED_FACTS_UNAVAILABLE')
+})
+
+test('closing during an unrelated reload keeps an in-flight command settlement silent', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let commandSignal = null
+  client.command = async (_request, options) => {
+    commandSignal = options.signal
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new ControlPlaneClientError({
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'The command request was cancelled.',
+        requestId: null,
+        retryable: false,
+      })), { once: true })
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  const nextDelivery = delivery(2, 'refs/winwincode/candidate/2')
+  client.enqueue('delivery.get', response('delivery.get', nextDelivery))
+  client.enqueue('runtime.projection.get', response(
+    'runtime.projection.get',
+    runtime(nextDelivery),
+  ))
+  await client.subscription.onEvent({
+    sequence: 2,
+    event: {
+      type: 'delivery.changed.v1',
+      deliveryId,
+      revision: 2,
+      changeKind: 'advanced',
+    },
+  })
+  model.close()
+  await commandPending
+
+  assert.equal(commandSignal.aborted, true)
+  assert.equal(model.state.status, 'closed')
+  assert.equal(model.state.interaction.status, 'idle')
   assert.equal(model.state.interaction.error, null)
+})
+
+test('cancelPending aborts an in-flight command and reports the cancellation', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let commandSignal = null
+  client.command = async (_request, options) => {
+    commandSignal = options.signal
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new ControlPlaneClientError({
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'The command request was cancelled.',
+        requestId: null,
+        retryable: false,
+      })), { once: true })
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  model.cancelPending()
+  await commandPending
+
+  assert.equal(commandSignal.aborted, true)
+  assert.equal(model.state.status, 'cancelled')
+  assert.equal(model.state.realtime, 'inactive')
+})
+
+test('closing the view-model aborts an in-flight command', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let commandSignal = null
+  client.command = async (_request, options) => {
+    commandSignal = options.signal
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new ControlPlaneClientError({
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'The command request was cancelled.',
+        requestId: null,
+        retryable: false,
+      })), { once: true })
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  model.close()
+  await commandPending
+
+  assert.equal(commandSignal.aborted, true)
+  assert.equal(model.state.status, 'closed')
+  assert.equal(model.state.realtime, 'closed')
+})
+
+test('authorization revocation aborts an in-flight command', async () => {
+  const client = new FakeClient()
+  let commandStartedResolve
+  const commandStarted = new Promise(resolve => { commandStartedResolve = resolve })
+  let commandSignal = null
+  client.command = async (_request, options) => {
+    commandSignal = options.signal
+    commandStartedResolve()
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new ControlPlaneClientError({
+        kind: 'cancelled',
+        code: 'REQUEST_CANCELLED',
+        message: 'The command request was cancelled.',
+        requestId: null,
+        retryable: false,
+      })), { once: true })
+    })
+  }
+  const { model } = view(client)
+  await model.start()
+
+  const commandPending = model.advanceDelivery()
+  await commandStarted
+  await client.subscription.onAuthorizationRevoked()
+  await commandPending
+
+  assert.equal(commandSignal.aborted, true)
+  assert.equal(model.state.status, 'authentication-required')
+  assert.equal(model.state.realtime, 'access-revoked')
+  assert.equal(model.state.projection, null)
 })
 
 test('a same-generation subscription cancellation remains visible', async () => {

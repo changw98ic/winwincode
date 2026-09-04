@@ -1140,6 +1140,7 @@ export function createStrongFlowViewModel(
   const queryCache = createQueryCacheLifecycle(options)
   const operationControllers = new Set<AbortController>()
   const historicalControllers = new Set<AbortController>()
+  const commandControllers = new Set<AbortController>()
   const parentSignals = new Map<AbortController, {
     readonly signal: AbortSignal
     readonly onAbort: () => void
@@ -1168,7 +1169,6 @@ export function createStrongFlowViewModel(
     stageRunId: options.stageRunId,
   })
   let acceptedDeliveryRevision: number | null = null
-  let supersedingGeneration: number | null = null
   let candidateFilesCursor: OpaqueCursor | null = null
   let loadedCandidateIdentity: string | null = null
   let candidateFilesController: AbortController | null = null
@@ -1547,6 +1547,12 @@ export function createStrongFlowViewModel(
     await loadCandidateDiff(false)
   }
 
+  function commandController(): AbortController {
+    const value = new AbortController()
+    commandControllers.add(value)
+    return value
+  }
+
   function controller(
     parentSignal?: AbortSignal,
     owner: 'operation' | 'historical' = 'operation',
@@ -1577,6 +1583,11 @@ export function createStrongFlowViewModel(
     historicalControllers.delete(value)
   }
 
+  function releaseCommandController(value: AbortController): void {
+    releaseController(value)
+    commandControllers.delete(value)
+  }
+
   function abortRequests(): void {
     for (const active of operationControllers) active.abort()
     for (const active of [...operationControllers]) releaseController(active)
@@ -1585,6 +1596,13 @@ export function createStrongFlowViewModel(
   function abortHistoricalRequests(): void {
     for (const active of historicalControllers) active.abort()
     for (const active of [...historicalControllers]) releaseController(active)
+  }
+
+  function abortAllRequests(): void {
+    abortRequests()
+    abortHistoricalRequests()
+    for (const active of commandControllers) active.abort()
+    commandControllers.clear()
   }
 
   function closeRealtime(): void {
@@ -1756,7 +1774,6 @@ export function createStrongFlowViewModel(
     minimum: StrongFlowSnapshotMinimum = {},
   ): Promise<EventReadCursor | null> {
     const active = controller()
-    let published = false
     try {
       const snapshot = await querySnapshot(active.signal, minimum)
       if (!operationIsCurrent(ownGeneration)) return null
@@ -1779,7 +1796,9 @@ export function createStrongFlowViewModel(
         candidateFiles: candidateChanged
           ? clearedCandidateFilesState()
           : currentState.candidateFiles,
-        interaction: frozenInteraction('idle'),
+        interaction: currentState.interaction.status === 'error'
+          ? currentState.interaction
+          : frozenInteraction('idle'),
         error: null,
       })
       if (
@@ -1790,7 +1809,6 @@ export function createStrongFlowViewModel(
           file => file.path === currentState.candidateFiles.selectedPath,
         )
       ) void loadCandidateDiff(false)
-      published = true
       return projection.metadata.readCursor.eventCursor
     } catch (error) {
       if (!operationIsCurrent(ownGeneration)) return null
@@ -1808,7 +1826,6 @@ export function createStrongFlowViewModel(
       })
       throw normalized
     } finally {
-      if (supersedingGeneration === ownGeneration && !published) supersedingGeneration = null
       releaseController(active)
     }
   }
@@ -1878,7 +1895,6 @@ export function createStrongFlowViewModel(
         : {}
     generation += 1
     const ownGeneration = generation
-    supersedingGeneration = ownGeneration
     abortRequests()
     beginReload('refreshing', true)
     await completeSnapshot(ownGeneration, 'subscribed', minimum)
@@ -1886,9 +1902,7 @@ export function createStrongFlowViewModel(
 
   function accessRevoked(error: ControlPlaneClientError): void {
     generation += 1
-    supersedingGeneration = null
-    abortRequests()
-    abortHistoricalRequests()
+    abortAllRequests()
     closeRealtime()
     clearCandidateFileResources()
     publish({
@@ -1928,7 +1942,6 @@ export function createStrongFlowViewModel(
         )
         generation += 1
         const ownGeneration = generation
-        supersedingGeneration = ownGeneration
         abortRequests()
         beginReload('refreshing')
         const next = await completeSnapshot(ownGeneration, 'subscribed')
@@ -1954,15 +1967,6 @@ export function createStrongFlowViewModel(
           accessRevoked(error)
           return
         }
-        if (
-          error.code === 'REQUEST_CANCELLED'
-          && error.requestId === null
-          && supersedingGeneration === generation
-        ) {
-          supersedingGeneration = null
-          return
-        }
-        if (supersedingGeneration === generation) supersedingGeneration = null
         patch({ realtime: 'reconnecting', error })
       },
     })
@@ -2044,7 +2048,7 @@ export function createStrongFlowViewModel(
     const projection = commandProjection()
     if (projection === null) return
     const ownGeneration = generation
-    const active = controller()
+    const active = commandController()
     let requestId = options.nextRequestId()
     let commandRequest = request(projection, requestId)
     const trustedFactsRetryDeadline = Date.now()
@@ -2069,7 +2073,8 @@ export function createStrongFlowViewModel(
           ) throw error
           trustedFactsRetries += 1
           await waitForRetry(active.signal, TRUSTED_FACTS_COMMAND_RETRY_DELAY_MILLIS)
-          if (!operationIsCurrent(ownGeneration)) return
+          if (active.signal.aborted) return
+          if (!operationIsCurrent(ownGeneration)) throw error
           requestId = options.nextRequestId()
           commandRequest = { ...commandRequest, requestId }
         }
@@ -2078,10 +2083,10 @@ export function createStrongFlowViewModel(
       expectCompletedCommand(response, command, requestId)
       patch({ interaction: frozenInteraction('waiting') })
     } catch (error) {
-      if (!operationIsCurrent(ownGeneration)) return
+      if (active.signal.aborted) return
       patch({ interaction: frozenInteraction('error', normalizedError(error, active.signal)) })
     } finally {
-      releaseController(active)
+      releaseCommandController(active)
     }
   }
 
@@ -2468,9 +2473,7 @@ export function createStrongFlowViewModel(
     cancelPending() {
       if (closed) return
       generation += 1
-      supersedingGeneration = null
-      abortRequests()
-      abortHistoricalRequests()
+      abortAllRequests()
       closeRealtime()
       clearCandidateFileResources()
       publish({
@@ -2512,10 +2515,8 @@ export function createStrongFlowViewModel(
       closed = true
       queryCache.close()
       generation += 1
-      supersedingGeneration = null
       clearCandidateFileResources()
-      abortRequests()
-      abortHistoricalRequests()
+      abortAllRequests()
       closeRealtime()
       publish({
         status: 'closed',
