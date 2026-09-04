@@ -15,6 +15,9 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# RFC 3339 stamps for exchange envelopes and durable cursors; the same
+# formatting dependency the server side already uses.
+time.workspace = true
 # Direct path dependency on purpose: `winwincode-client-port` is not part of
 # `[workspace.dependencies]`, matching how `winwincode-server` and
 # `winwincode-local` reference sibling crates.

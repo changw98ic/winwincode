@@ -22,8 +22,12 @@ use std::thread;
 use std::time::{Duration, Instant as StdInstant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-
-use crate::StoreOutbox;
+use winwincode_client_port::exchange::{
+    CompactingOutbox, FrameCodec, FrameOutbox, OutboxSnapshot, StoredFrame,
+};
+use winwincode_client_port::messages::{
+    CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientToServerEnvelope, ClientToServerMessage,
+};
 
 /// Current schema version of the local device-client database.
 pub const CLIENT_STORE_SCHEMA_VERSION: i64 = 1;
@@ -36,6 +40,7 @@ const SQLITE_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 /// matches the durable-cursor bound used by `winwincode-storage`.
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ID_BYTES: usize = 200;
+const MAX_URL_BYTES: usize = 2048;
 const MAX_PATH_BYTES: usize = 4096;
 
 static SQLITE_OPEN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -194,11 +199,24 @@ pub struct ClientInboxCursor {
     pub updated_at: String,
 }
 
+/// The exchange sender stream the durable outbox is currently bound to.
+///
+/// The `ClientControlPort` contract keys the client-to-server sequence
+/// stream by `clientNodeId` (`sequence 按 clientNodeId 分流`), so outbox
+/// trait operations scope their SQL by node; the bound `clientInstanceId`
+/// stamps newly appended rows for the current process launch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OutboxStream {
+    client_node_id: String,
+    client_instance_id: String,
+}
+
 /// Local `SQLite` implementation of the device-client store.
 pub struct DeviceStore {
     connection: Option<Connection>,
     read_connection: Mutex<Connection>,
     database_path: PathBuf,
+    outbox_stream: Option<OutboxStream>,
 }
 
 impl DeviceStore {
@@ -265,6 +283,7 @@ impl DeviceStore {
             connection: Some(connection),
             read_connection: Mutex::new(read_connection),
             database_path,
+            outbox_stream: None,
         })
     }
 
@@ -278,6 +297,7 @@ impl DeviceStore {
             mut connection,
             read_connection,
             database_path: _,
+            outbox_stream: _,
         } = self;
         let read_connection = read_connection.into_inner().map_err(|_| {
             DeviceStoreError::adapter("SQLite device client read connection lock is poisoned")
@@ -548,12 +568,10 @@ impl DeviceStore {
     /// adapter-neutral error when the write fails or the store is closed.
     pub fn append_outbox_envelope(
         &mut self,
-        envelope: &winwincode_client_port::messages::ClientToServerEnvelope,
+        envelope: &ClientToServerEnvelope,
         kind: &str,
     ) -> Result<u64, DeviceStoreError> {
-        if envelope.schema_version
-            != winwincode_client_port::messages::CLIENT_CONTROL_PORT_SCHEMA_VERSION
-        {
+        if envelope.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
             return Err(DeviceStoreError::invalid(
                 "outbox envelope schema version is not the current ClientControlPort contract",
             ));
@@ -595,35 +613,7 @@ impl DeviceStore {
                 "outbox envelope sequence must strictly advance per sender",
             ));
         }
-        transaction
-            .execute(
-                "INSERT INTO client_outbox \
-                 (message_id, client_node_id, client_instance_id, envelope_sequence, \
-                  kind, payload, occurred_at, published) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
-                params![
-                    envelope.message_id,
-                    envelope.client_node_id,
-                    envelope.client_instance_id,
-                    i64::try_from(envelope.sequence).map_err(|_| DeviceStoreError::adapter(
-                        "envelope sequence is outside the SQLite integer range"
-                    ))?,
-                    kind,
-                    payload,
-                    envelope.occurred_at,
-                ],
-            )
-            .map_err(|error| match error {
-                rusqlite::Error::SqliteFailure(failure, _)
-                    if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    DeviceStoreError::conflict(format!(
-                        "outbox message id {} already exists",
-                        envelope.message_id
-                    ))
-                }
-                other => sql_error(other),
-            })?;
+        insert_outbox_row(&transaction, envelope, kind, &payload)?;
         let outbox_sequence = transaction.last_insert_rowid();
         transaction.commit().map_err(sql_error)?;
         u64::try_from(outbox_sequence)
@@ -674,27 +664,501 @@ impl DeviceStore {
         }
         Ok(())
     }
+
+    /// Re-issues one pending outbox row of a superseded instance under the
+    /// current launch instance (plan section 18.3 restart recovery).
+    ///
+    /// The stream sequence and message id are kept — the node stream must
+    /// stay contiguous and an already in-flight frame must stay a duplicate
+    /// for the receiver's dedup — while the payload bytes are rewritten with
+    /// the new `clientInstanceId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty identity
+    /// or payload, [`DeviceStoreErrorKind::NotFound`] when the pending row
+    /// does not exist, and an adapter-neutral error when the write fails or
+    /// the store is closed.
+    pub fn reissue_outbox_row(
+        &mut self,
+        message_id: &str,
+        client_instance_id: &str,
+        payload: &[u8],
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(message_id, "message id", MAX_ID_BYTES)?;
+        require_non_empty(client_instance_id, "client instance id", MAX_ID_BYTES)?;
+        if payload.is_empty() {
+            return Err(DeviceStoreError::invalid(
+                "reissued outbox payload must not be empty",
+            ));
+        }
+        let changed = self
+            .connection_mut()?
+            .execute(
+                "UPDATE client_outbox SET client_instance_id = ?2, payload = ?3                  WHERE message_id = ?1 AND published = 0",
+                params![message_id, client_instance_id, payload],
+            )
+            .map_err(sql_error)?;
+        if changed == 0 {
+            return Err(DeviceStoreError::not_found(format!(
+                "pending outbox message id {message_id} does not exist"
+            )));
+        }
+        Ok(())
+    }
 }
 
-/// COMPATIBILITY NOTE (awaiting alignment): implements the local outbox
-/// seam declared in [`crate`] until the canonical outbox trait from the
-/// `winwincode-client-port` lane lands; see the trait documentation.
-impl StoreOutbox for DeviceStore {
-    fn append_outbox_envelope(
+impl DeviceStore {
+    /// Binds the durable outbox to one sender stream: `clientNodeId` scopes
+    /// every [`FrameOutbox`] operation (the contract keys the sequence stream
+    /// by node), and `clientInstanceId` stamps newly appended rows for this
+    /// process launch.
+    ///
+    /// Must be called once per store before the daemon uses the outbox trait
+    /// operations; unbound calls fail with
+    /// [`DeviceStoreErrorKind::InvalidInput`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty node or
+    /// instance identity and [`DeviceStoreErrorKind::Closed`] after the store
+    /// closed.
+    pub fn bind_outbox_stream(
         &mut self,
-        envelope: &winwincode_client_port::messages::ClientToServerEnvelope,
-        kind: &str,
-    ) -> Result<u64, DeviceStoreError> {
-        DeviceStore::append_outbox_envelope(self, envelope, kind)
+        client_node_id: &str,
+        client_instance_id: &str,
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(client_node_id, "client node id", MAX_ID_BYTES)?;
+        require_non_empty(client_instance_id, "client instance id", MAX_ID_BYTES)?;
+        self.connection()?;
+        self.outbox_stream = Some(OutboxStream {
+            client_node_id: client_node_id.to_owned(),
+            client_instance_id: client_instance_id.to_owned(),
+        });
+        Ok(())
     }
 
-    fn pending_outbox_envelopes(&self) -> Result<Vec<ClientOutboxEntry>, DeviceStoreError> {
-        DeviceStore::pending_outbox_envelopes(self)
+    /// Inserts or replaces one server profile row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceStoreErrorKind::InvalidInput`] for an empty or
+    /// overlong identifier, URL, or display name, and an adapter-neutral
+    /// error when the write fails or the store is closed.
+    pub fn upsert_server_profile(
+        &mut self,
+        record: &ServerProfileRecord,
+    ) -> Result<(), DeviceStoreError> {
+        require_non_empty(&record.server_profile_id, "server profile id", MAX_ID_BYTES)?;
+        require_non_empty(&record.base_url, "server base url", MAX_URL_BYTES)?;
+        require_non_empty(&record.display_name, "server display name", MAX_ID_BYTES)?;
+        require_non_empty(
+            &record.created_at,
+            "server profile created at",
+            MAX_ID_BYTES,
+        )?;
+        if let Some(last_connected_at) = &record.last_connected_at {
+            require_non_empty(last_connected_at, "server last connected at", MAX_ID_BYTES)?;
+        }
+        let connection = self.connection_mut()?;
+        connection
+            .execute(
+                "INSERT INTO server_profile \
+                 (server_profile_id, base_url, display_name, created_at, last_connected_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT (server_profile_id) DO UPDATE SET \
+                 base_url = excluded.base_url, \
+                 display_name = excluded.display_name, \
+                 last_connected_at = excluded.last_connected_at",
+                params![
+                    record.server_profile_id,
+                    record.base_url,
+                    record.display_name,
+                    record.created_at,
+                    record.last_connected_at,
+                ],
+            )
+            .map_err(sql_error)?;
+        Ok(())
     }
 
-    fn mark_outbox_published(&mut self, message_id: &str) -> Result<(), DeviceStoreError> {
-        DeviceStore::mark_outbox_published(self, message_id)
+    /// Loads one server profile row by its identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-neutral error when the read fails or the store is
+    /// closed.
+    pub fn server_profile(
+        &self,
+        server_profile_id: &str,
+    ) -> Result<Option<ServerProfileRecord>, DeviceStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT server_profile_id, base_url, display_name, created_at, \
+                 last_connected_at \
+                 FROM server_profile WHERE server_profile_id = ?1",
+                params![server_profile_id],
+                |row| {
+                    Ok(ServerProfileRecord {
+                        server_profile_id: row.get(0)?,
+                        base_url: row.get(1)?,
+                        display_name: row.get(2)?,
+                        created_at: row.get(3)?,
+                        last_connected_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sql_error)
     }
+
+    fn outbox_stream(&self) -> Result<&OutboxStream, DeviceStoreError> {
+        self.outbox_stream.as_ref().ok_or_else(|| {
+            DeviceStoreError::invalid(
+                "the durable outbox stream is not bound; call bind_outbox_stream first",
+            )
+        })
+    }
+}
+
+/// One durable server profile row (`server_profile` table).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerProfileRecord {
+    pub server_profile_id: String,
+    pub base_url: String,
+    pub display_name: String,
+    pub created_at: String,
+    pub last_connected_at: Option<String>,
+}
+
+/// The durable sender-outbox adapter over the `client_outbox` table.
+///
+/// Mapping decisions (the eleven-table schema is frozen, so the adapter
+/// derives everything the [`FrameOutbox`] contract needs from existing
+/// columns):
+///
+/// - The stream scope is `clientNodeId` (`sequence 按 clientNodeId 分流`):
+///   snapshot cursors and retained frames aggregate every row of the bound
+///   node, whatever `clientInstanceId` produced it, and new rows carry the
+///   bound launch instance.
+/// - The `published` column doubles as the compaction marker: the peer
+///   acknowledgement watermark is the highest `published` envelope sequence,
+///   and [`CompactingOutbox::compact_through`] moves rows out of the delivery
+///   set by marking them published. Rows are retained after compaction so
+///   both durable cursors (acknowledgement and high-water mark) survive even
+///   a fully compacted stream; retention pruning is owned by a later lane.
+/// - `StoredFrame` rows are reconstructed from the stored canonical envelope
+///   bytes; the payload digest is re-derived from the decoded envelope so it
+///   always matches the digest convention both exchange peers compare.
+impl FrameOutbox for DeviceStore {
+    type Error = DeviceStoreError;
+
+    fn load(&mut self) -> Result<Option<OutboxSnapshot>, Self::Error> {
+        let stream = self.outbox_stream()?;
+        let connection = self.connection()?;
+        let (ack_sequence, highest_sequence) =
+            outbox_stream_cursor(connection, &stream.client_node_id)?;
+        let Some(highest_sequence) = highest_sequence else {
+            return Ok(None);
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT message_id, envelope_sequence, kind, payload, occurred_at \
+                 FROM client_outbox \
+                 WHERE client_node_id = ?1 AND published = 0 \
+                 ORDER BY envelope_sequence",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(params![stream.client_node_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        let mut frames = Vec::new();
+        for row in rows {
+            let (message_id, envelope_sequence, kind, payload, occurred_at) =
+                row.map_err(sql_error)?;
+            frames.push(stored_frame_from_row(
+                &stream.client_node_id,
+                &message_id,
+                envelope_sequence,
+                &kind,
+                payload,
+                &occurred_at,
+            )?);
+        }
+        Ok(Some(OutboxSnapshot {
+            ack_sequence: ack_sequence.unwrap_or(0),
+            highest_sequence,
+            frames,
+        }))
+    }
+
+    fn append(
+        &mut self,
+        expected_highest_sequence: u64,
+        frame: &StoredFrame,
+    ) -> Result<(), Self::Error> {
+        let stream = self.outbox_stream()?.clone();
+        let envelope = decode_outbox_envelope(&frame.frame)?;
+        if envelope.client_node_id != stream.client_node_id {
+            return Err(DeviceStoreError::invalid(format!(
+                "outbox frame names client node {} but the stream is bound to {}",
+                envelope.client_node_id, stream.client_node_id
+            )));
+        }
+        if envelope.client_instance_id != stream.client_instance_id {
+            return Err(DeviceStoreError::invalid(format!(
+                "outbox frame names client instance {} but the stream is bound to {}",
+                envelope.client_instance_id, stream.client_instance_id
+            )));
+        }
+        if envelope.message_id != frame.message_id || envelope.sequence != frame.sequence {
+            return Err(DeviceStoreError::invalid(
+                "outbox frame identity disagrees with its encoded envelope",
+            ));
+        }
+        let identity = FrameCodec::envelope_identity(&envelope).map_err(|error| {
+            DeviceStoreError::invalid(format!("outbox frame digest: {error:?}"))
+        })?;
+        if identity.payload_digest != frame.payload_digest {
+            return Err(DeviceStoreError::invalid(
+                "outbox frame payload digest does not match its encoded envelope",
+            ));
+        }
+        let kind = envelope_kind(&envelope.message)?;
+        let payload = serde_json::to_vec(&envelope).map_err(|error| {
+            DeviceStoreError::invalid(format!("outbox envelope is not encodable: {error}"))
+        })?;
+
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let (_, stored_highest) = outbox_stream_cursor(&transaction, &stream.client_node_id)?;
+        if stored_highest.unwrap_or(0) != expected_highest_sequence {
+            return Err(DeviceStoreError::conflict(format!(
+                "outbox append expected the durable high-water mark \
+                 {expected_highest_sequence}, found {}",
+                stored_highest.unwrap_or(0)
+            )));
+        }
+        insert_outbox_row(&transaction, &envelope, &kind, &payload)?;
+        transaction.commit().map_err(sql_error)
+    }
+
+    fn record_acknowledgement(
+        &mut self,
+        expected_ack_sequence: u64,
+        ack_sequence: u64,
+    ) -> Result<(), Self::Error> {
+        let stream = self.outbox_stream()?.clone();
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let (stored_ack, stored_highest) =
+            outbox_stream_cursor(&transaction, &stream.client_node_id)?;
+        if stored_ack.unwrap_or(0) != expected_ack_sequence {
+            return Err(DeviceStoreError::conflict(format!(
+                "outbox acknowledgement raced with the durable cursor: expected \
+                 {expected_ack_sequence}, found {}",
+                stored_ack.unwrap_or(0)
+            )));
+        }
+        let highest = stored_highest.unwrap_or(0);
+        if ack_sequence > highest {
+            return Err(DeviceStoreError::conflict(format!(
+                "outbox acknowledgement {ack_sequence} is beyond the retained \
+                 high-water mark {highest}"
+            )));
+        }
+        transaction
+            .execute(
+                "UPDATE client_outbox SET published = 1 \
+                 WHERE client_node_id = ?1 AND envelope_sequence <= ?2",
+                params![stream.client_node_id, i64_prefix(ack_sequence)?],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)
+    }
+}
+
+impl CompactingOutbox for DeviceStore {
+    fn compact_through(&mut self, ack_sequence: u64) -> Result<usize, Self::Error> {
+        let stream = self.outbox_stream()?.clone();
+        let connection = self.connection_mut()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let (_, stored_highest) = outbox_stream_cursor(&transaction, &stream.client_node_id)?;
+        let highest = stored_highest.unwrap_or(0);
+        if ack_sequence > highest {
+            return Err(DeviceStoreError::conflict(format!(
+                "outbox compaction {ack_sequence} is beyond the retained \
+                 high-water mark {highest}"
+            )));
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE client_outbox SET published = 1 \
+                 WHERE client_node_id = ?1 AND published = 0 AND envelope_sequence <= ?2",
+                params![stream.client_node_id, i64_prefix(ack_sequence)?],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(changed)
+    }
+}
+
+/// Reads the durable node-stream cursors: `(acknowledgement, highest)`.
+///
+/// `None` means the node stream has no rows yet.
+fn outbox_stream_cursor(
+    connection: &Connection,
+    client_node_id: &str,
+) -> Result<(Option<u64>, Option<u64>), DeviceStoreError> {
+    let to_cursor = |stored: Option<i64>| {
+        stored
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| DeviceStoreError::adapter("stored outbox sequence is negative"))
+    };
+    let highest: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(envelope_sequence) FROM client_outbox WHERE client_node_id = ?1",
+            params![client_node_id],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    let acknowledgement: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(envelope_sequence) FROM client_outbox \
+             WHERE client_node_id = ?1 AND published = 1",
+            params![client_node_id],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    Ok((to_cursor(acknowledgement)?, to_cursor(highest)?))
+}
+
+/// Inserts one pending (unpublished) outbox row inside an open transaction.
+fn insert_outbox_row(
+    transaction: &rusqlite::Transaction<'_>,
+    envelope: &ClientToServerEnvelope,
+    kind: &str,
+    payload: &[u8],
+) -> Result<(), DeviceStoreError> {
+    transaction
+        .execute(
+            "INSERT INTO client_outbox \
+             (message_id, client_node_id, client_instance_id, envelope_sequence, \
+              kind, payload, occurred_at, published) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            params![
+                envelope.message_id,
+                envelope.client_node_id,
+                envelope.client_instance_id,
+                i64::try_from(envelope.sequence).map_err(|_| DeviceStoreError::adapter(
+                    "envelope sequence is outside the SQLite integer range"
+                ))?,
+                kind,
+                payload,
+                envelope.occurred_at,
+            ],
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                DeviceStoreError::conflict(format!(
+                    "outbox message id {} already exists",
+                    envelope.message_id
+                ))
+            }
+            other => sql_error(other),
+        })?;
+    Ok(())
+}
+
+/// Converts a wire sequence into its SQLite integer encoding.
+fn i64_prefix(sequence: u64) -> Result<i64, DeviceStoreError> {
+    i64::try_from(sequence).map_err(|_| {
+        DeviceStoreError::adapter("outbox sequence is outside the SQLite integer range")
+    })
+}
+
+/// Decodes one stored canonical envelope, rejecting foreign schema versions.
+fn decode_outbox_envelope(payload: &[u8]) -> Result<ClientToServerEnvelope, DeviceStoreError> {
+    let envelope: ClientToServerEnvelope = serde_json::from_slice(payload).map_err(|error| {
+        DeviceStoreError::invalid(format!("stored envelope is corrupt: {error}"))
+    })?;
+    if envelope.schema_version != CLIENT_CONTROL_PORT_SCHEMA_VERSION {
+        return Err(DeviceStoreError::invalid(
+            "stored envelope schema version is not the current ClientControlPort contract",
+        ));
+    }
+    Ok(envelope)
+}
+
+/// Extracts the wire `kind` string of one typed message.
+pub(crate) fn envelope_kind(message: &ClientToServerMessage) -> Result<String, DeviceStoreError> {
+    let value = serde_json::to_value(message)
+        .map_err(|error| DeviceStoreError::invalid(format!("message is not encodable: {error}")))?;
+    value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| DeviceStoreError::invalid("encoded message carries no kind string"))
+}
+
+/// Rebuilds one [`StoredFrame`] from an unpublished `client_outbox` row,
+/// re-deriving the payload digest from the stored canonical envelope and
+/// fail-closing on any disagreement between the row columns and the decoded
+/// envelope.
+fn stored_frame_from_row(
+    client_node_id: &str,
+    message_id: &str,
+    envelope_sequence: i64,
+    kind: &str,
+    payload: Vec<u8>,
+    occurred_at: &str,
+) -> Result<StoredFrame, DeviceStoreError> {
+    let envelope = decode_outbox_envelope(&payload)?;
+    if envelope.client_node_id != client_node_id
+        || envelope.message_id != message_id
+        || envelope.occurred_at != occurred_at
+    {
+        return Err(DeviceStoreError::adapter(
+            "stored outbox row disagrees with its encoded envelope identity",
+        ));
+    }
+    let sequence = u64::try_from(envelope_sequence)
+        .map_err(|_| DeviceStoreError::adapter("stored outbox sequence is negative"))?;
+    if envelope.sequence != sequence {
+        return Err(DeviceStoreError::adapter(
+            "stored outbox row disagrees with its encoded envelope sequence",
+        ));
+    }
+    if envelope_kind(&envelope.message)? != kind {
+        return Err(DeviceStoreError::adapter(
+            "stored outbox row disagrees with its encoded envelope kind",
+        ));
+    }
+    let identity = FrameCodec::envelope_identity(&envelope)
+        .map_err(|error| DeviceStoreError::adapter(format!("stored frame digest: {error:?}")))?;
+    Ok(StoredFrame {
+        message_id: identity.message_id,
+        sequence: identity.sequence,
+        payload_digest: identity.payload_digest,
+        frame: payload,
+    })
 }
 
 fn row_to_path_mapping(row: &rusqlite::Row<'_>) -> rusqlite::Result<PathMappingRecord> {

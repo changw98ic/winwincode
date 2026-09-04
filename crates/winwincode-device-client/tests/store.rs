@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
+use winwincode_client_port::exchange::{FrameCodec, FrameOutbox, OutboxSession};
 use winwincode_client_port::messages::{
     CLIENT_CONTROL_PORT_SCHEMA_VERSION, ClientRepositoryRemovedPayload, ClientToServerEnvelope,
     ClientToServerMessage, CommandContext,
 };
 use winwincode_device_client::{
-    ClientInboxCursorUpdate, DeviceStore, DeviceStoreErrorKind, PathMappingRecord, StoreOutbox,
+    ClientInboxCursorUpdate, DeviceStore, DeviceStoreErrorKind, PathMappingRecord,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -362,13 +363,16 @@ fn outbox_append_publish_and_sender_sequence_rules_round_trip() {
     let other_instance = envelope("msg-three", "inst-b", 1);
 
     assert_eq!(
-        StoreOutbox::append_outbox_envelope(&mut store, &first, "client.repository.removed")
+        store
+            .append_outbox_envelope(&first, "client.repository.removed")
             .expect("first append"),
         1
     );
-    StoreOutbox::append_outbox_envelope(&mut store, &other_instance, "client.hello")
+    store
+        .append_outbox_envelope(&other_instance, "client.hello")
         .expect("other sender append");
-    StoreOutbox::append_outbox_envelope(&mut store, &second, "client.repository.removed")
+    store
+        .append_outbox_envelope(&second, "client.repository.removed")
         .expect("second append");
 
     let pending = store.pending_outbox_envelopes().expect("pending read");
@@ -521,4 +525,147 @@ fn sqlite_adapter_uses_no_dynamic_savepoint_or_sql_identifier_path() {
         }
     }
     assert!(include_str!("../src/store.rs").contains("params!["));
+}
+
+#[test]
+fn frame_outbox_maps_client_outbox_rows_to_stored_frames() {
+    let (root, mut store) = open_store("outbox-trait");
+    let codec = FrameCodec::default();
+    let session = OutboxSession::new();
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("bind the sender stream");
+
+    // An unbound stream is rejected before any mutation.
+    let mut unbound = DeviceStore::open(&root).expect("second store handle");
+    assert_eq!(
+        FrameOutbox::load(&mut unbound)
+            .expect_err("an unbound stream must be rejected")
+            .kind(),
+        DeviceStoreErrorKind::InvalidInput
+    );
+    unbound.close().expect("second store handle close");
+
+    // The stream starts empty and appends persist the exact frame bytes.
+    assert_eq!(session.next_sequence(&mut store).expect("next"), 1);
+    let stored = codec
+        .encode_envelope(&envelope("msg-one", "inst-a", 1))
+        .expect("seal frame");
+    session.enqueue(&mut store, 1, &stored).expect("append");
+    let stored = codec
+        .encode_envelope(&envelope("msg-two", "inst-a", 2))
+        .expect("seal frame");
+    session.enqueue(&mut store, 2, &stored).expect("append");
+
+    let snapshot = FrameOutbox::load(&mut store)
+        .expect("load")
+        .expect("the stream has rows");
+    assert_eq!(snapshot.ack_sequence, 0);
+    assert_eq!(snapshot.highest_sequence, 2);
+    assert_eq!(
+        snapshot
+            .frames
+            .iter()
+            .map(|frame| frame.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["msg-one", "msg-two"]
+    );
+    assert_eq!(snapshot.frames[0].sequence, 1);
+    assert!(
+        snapshot.frames[0].payload_digest.starts_with("sha256:"),
+        "the digest is re-derived from the stored envelope payload"
+    );
+    let decoded: ClientToServerEnvelope = codec
+        .decode(&snapshot.frames[0].frame)
+        .expect("stored bytes decode");
+    assert_eq!(decoded.message_id, "msg-one");
+
+    // A stale compare-and-append base is rejected.
+    let stored = codec
+        .encode_envelope(&envelope("msg-three", "inst-a", 3))
+        .expect("seal frame");
+    assert!(
+        session.enqueue(&mut store, 0, &stored).is_err(),
+        "append must verify the expected high-water mark"
+    );
+
+    store.close().expect("store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
+}
+
+#[test]
+fn frame_outbox_acknowledgement_compaction_and_cursors_stay_durable() {
+    let (root, mut store) = open_store("outbox-trait-cursors");
+    let session = OutboxSession::new();
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("bind the sender stream");
+    let codec = FrameCodec::default();
+    for (message_id, sequence) in [("msg-one", 1), ("msg-two", 2)] {
+        let stored = codec
+            .encode_envelope(&envelope(message_id, "inst-a", sequence))
+            .expect("seal frame");
+        session
+            .enqueue(&mut store, sequence, &stored)
+            .expect("append");
+    }
+
+    // The peer acknowledgement marks rows published; compaction moves them
+    // out of the delivery set while both durable cursors survive.
+    session.acknowledge(&mut store, 1).expect("acknowledge");
+    assert_eq!(
+        store
+            .pending_outbox_envelopes()
+            .expect("pending")
+            .iter()
+            .map(|entry| entry.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["msg-two"],
+        "only the acknowledged prefix left the delivery set"
+    );
+    session.compact_confirmed(&mut store).expect("compact");
+    let snapshot = FrameOutbox::load(&mut store)
+        .expect("load")
+        .expect("cursors survive compaction");
+    assert_eq!(snapshot.ack_sequence, 1);
+    assert_eq!(snapshot.highest_sequence, 2);
+    assert_eq!(
+        snapshot
+            .frames
+            .iter()
+            .map(|frame| frame.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["msg-two"],
+        "unconfirmed frames stay retained"
+    );
+
+    // Cursors survive a full close and reopen, even with rows retained.
+    store.close().expect("store close");
+    let mut store = DeviceStore::open(&root).expect("restarted store");
+    store
+        .bind_outbox_stream("node_local", "inst-a")
+        .expect("rebind the stream");
+    let snapshot = FrameOutbox::load(&mut store)
+        .expect("restarted load")
+        .expect("snapshot survives the restart");
+    assert_eq!(snapshot.ack_sequence, 1);
+    assert_eq!(snapshot.highest_sequence, 2);
+    assert_eq!(session.next_sequence(&mut store).expect("next"), 3);
+
+    // Another node's rows are never visible to this stream.
+    store
+        .append_outbox_envelope(&envelope("msg-other", "inst-b", 1), "client.hello")
+        .expect("other node append");
+    let mut other_node = DeviceStore::open(&root).expect("third store handle");
+    other_node
+        .bind_outbox_stream("node_other", "inst-a")
+        .expect("bind the other node");
+    assert!(
+        FrameOutbox::load(&mut other_node).expect("load").is_none(),
+        "rows of a foreign node stay out of this stream"
+    );
+    other_node.close().expect("third store handle close");
+
+    store.close().expect("restarted store close");
+    fs::remove_dir_all(root).expect("database directory should be released");
 }
