@@ -253,7 +253,25 @@ export function mountStrongFlowDeliveryList(
           item.className = 'wwc-delivery-kanban-card'
           const link = document.createElement('a')
           const deliveryStatus = document.createElement('span')
-          item.append(link, deliveryStatus)
+          // UI-604: drag and drop is the only way a Kanban card can move today, which
+          // locks every pointer-free user out of advancing a Delivery.  The button is
+          // the keyboard equivalent of the same drop handler and stays in the card so
+          // the two paths can never diverge.
+          const advance = document.createElement('button') as HTMLButtonElement
+          advance.type = 'button'
+          advance.className = 'wwc-delivery-kanban-advance'
+          advance.textContent = 'Advance'
+          advance.addEventListener('click', () => {
+            if (readOnly) return
+            const deliveryId = item.dataset.deliveryId
+            const revision = Number(item.dataset.revision ?? '0')
+            if (deliveryId === undefined || deliveryId.length === 0) return
+            void options.model.advanceDelivery(
+              deliveryId as DeliveryProjection['deliveryId'],
+              revision,
+            )
+          })
+          item.append(link, deliveryStatus, advance)
           item.addEventListener('dragstart', () => {
             dragCard = {
               deliveryId: item.dataset.deliveryId ?? '',
@@ -269,8 +287,13 @@ export function mountStrongFlowDeliveryList(
           item.dataset.revision = String(delivery.revision)
           item.dataset.status = delivery.status
           item.draggable = !readOnly
+          const advance = item.children[2] as HTMLButtonElement
+          advance.hidden = readOnly
+          advance.disabled = readOnly
+          advance.setAttribute('aria-label', `Advance ${delivery.title}`)
           const card = item.children
           const link = card[0] as HTMLAnchorElement
+          link.className = 'wwc-delivery-kanban-card-link'
           link.href = deliveryRoute(delivery.deliveryId, options.routeScope)
           link.textContent = delivery.title
           const deliveryStatus = card[1] as HTMLElement

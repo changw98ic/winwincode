@@ -524,6 +524,51 @@ test('kanban drops route through delivery.advance and never move the card themse
   page.close()
 })
 
+test('UI-604 every Kanban card advances by keyboard without drag and drop', async () => {
+  const { rootElement, model, page } = mounted(listState({
+    visible: [
+      summary(1, { status: 'ready-to-deliver', revision: 4 }),
+      summary(2, { status: 'draft', revision: 1 }),
+    ],
+    loadedCount: 2,
+  }), { view: 'kanban' })
+
+  const cards = findAllByClass(rootElement, 'wwc-delivery-kanban-card')
+  for (const card of cards) {
+    const advance = findByClass(card, 'wwc-delivery-kanban-advance')
+    assert.notEqual(advance, null, 'a card must offer the drop action without a pointer')
+    assert.equal(advance.tagName, 'BUTTON')
+    assert.equal(advance.type, 'button')
+    assert.equal(advance.disabled, false)
+    assert.match(advance.getAttribute('aria-label'), new RegExp(card.children[0].textContent, 'u'))
+  }
+
+  const readyCard = cards.find(card => card.dataset.deliveryId === 'dlv_00000000000000000000000001')
+  findByClass(readyCard, 'wwc-delivery-kanban-advance').click()
+  await new Promise(resolveTick => setTimeout(resolveTick, 0))
+  assert.deepEqual(model.calls.at(-1), [
+    'advanceDelivery',
+    'dlv_00000000000000000000000001',
+    4,
+  ])
+  page.close()
+})
+
+test('UI-604 read-only Kanban hides the advance control while keeping navigation', () => {
+  const { rootElement, page } = mounted(listState({
+    visible: [summary(1, { status: 'ready-to-deliver', revision: 4 })],
+    loadedCount: 1,
+  }), { view: 'kanban', readOnly: true })
+
+  const card = findByClass(rootElement, 'wwc-delivery-kanban-card')
+  const advance = findByClass(card, 'wwc-delivery-kanban-advance')
+  assert.notEqual(advance, null)
+  assert.equal(advance.hidden, true)
+  assert.equal(advance.disabled, true)
+  assert.notEqual(card.children[0].href, '')
+  page.close()
+})
+
 test('an advance rejection surfaces the server code and keeps the cards unchanged', async () => {
   const state = listState({
     visible: [summary(1, { status: 'ready-to-deliver', revision: 4 })],

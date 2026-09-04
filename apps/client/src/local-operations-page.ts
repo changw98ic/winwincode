@@ -169,7 +169,7 @@ function workerStateLabel(worker: WorkerProjection): string {
 /** Mount repository diagnostics and local Worker controls against the read/write view-model only. */
 export function mountLocalOperationsPage(options: LocalOperationsPageOptions): LocalOperationsPage {
   const document = options.root.ownerDocument
-  const layout = element(document, 'main', 'wwc-local-operations')
+  const layout = element(document, 'section', 'wwc-local-operations')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
     document,
@@ -177,7 +177,7 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       title: 'Repository and local Worker operations',
       eyebrow: 'Local diagnostics',
       description: 'Inspect secret-safe repository signals, reported capacity, and local Worker state.',
-      headingLevel: 1,
+      headingLevel: 2,
       className: 'wwc-local-operations-heading',
     },
   })
@@ -236,6 +236,7 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
     document,
     props: {
       id: 'wwc-local-repository',
+      headingLevel: 3,
       title: 'Repository diagnostics',
       description: 'Repository paths stay hidden; only bounded identity and Git-risk signals are shown.',
       className: 'wwc-local-repository',
@@ -249,6 +250,7 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
     document,
     props: {
       id: 'wwc-local-resources',
+      headingLevel: 3,
       title: 'Local resources',
       description: 'Reported capacity is kept separate from code and infrastructure failure signals.',
       className: 'wwc-local-resources',
@@ -270,6 +272,7 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
     document,
     props: {
       id: 'wwc-local-workers',
+      headingLevel: 3,
       title: 'Local Workers',
       description: 'Drain or enable a reported Worker without exposing host or repository paths.',
       className: 'wwc-local-workers',
@@ -285,13 +288,13 @@ export function mountLocalOperationsPage(options: LocalOperationsPageOptions): L
       title: 'No local Workers reported',
       detail: 'A local Worker will appear here after the Control Plane reports it.',
       className: 'wwc-local-worker-empty',
+      headingLevel: 3,
     },
   })
   let closed = false
 
   repositoryPanel.content.append(repositoryContent)
   resourcesPanel.content.append(resourceStatusBadge.root, resourcesContent)
-  workers.setAttribute('aria-live', 'polite')
   workersPanel.content.append(workers, workersEmpty.root)
   layout.append(
     heading,

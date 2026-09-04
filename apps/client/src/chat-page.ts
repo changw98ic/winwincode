@@ -272,6 +272,15 @@ function deliveryConversionError(state: ChatDeliveryCreatorState): string | null
   return 'The Delivery could not be created. The confirmed Chat draft is still here; retry it.'
 }
 
+const CONVERSION_DIALOG_HEADING_ID = 'wwc-chat-convert-heading'
+
+function focusableElement(value: Element | null | undefined): HTMLElement | null {
+  if (value === null || typeof value !== 'object') return null
+  return typeof Reflect.get(value, 'focus') === 'function'
+    ? value as HTMLElement
+    : null
+}
+
 /** Mount the default, keyboard-accessible Chat page against the read/write view-model only. */
 export function mountChatPage(options: ChatPageOptions): ChatPage {
   const readOnly = options.readOnly === true
@@ -352,6 +361,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   let closed = false
   let conversionOpen = false
   let conversionSessionId: ProductSessionId | null = null
+  let conversionFocusReturn: HTMLElement | null = null
 
   sessionHeading.textContent = 'Sessions'
   newSession.type = 'button'
@@ -391,6 +401,14 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   form.append(composerLabel, composer, controls)
   sessionPanel.append(sessionHeading, newSession, sessionList)
   conversion.hidden = true
+  // UI-604: the panel is a dialog in fact but was announced as plain page content,
+  // opened without moving focus, and could only be dismissed with the pointer.
+  conversion.setAttribute('role', 'dialog')
+  conversion.setAttribute('aria-modal', 'false')
+  conversionHeading.id = CONVERSION_DIALOG_HEADING_ID
+  conversion.setAttribute('aria-labelledby', CONVERSION_DIALOG_HEADING_ID)
+  convertDelivery.root.setAttribute('aria-controls', CONVERSION_DIALOG_HEADING_ID)
+  convertDelivery.root.setAttribute('aria-expanded', 'false')
   conversionHeading.textContent = 'Confirm StrongFlow Delivery'
   conversionDetail.textContent = 'Review the confirmed requirement and exact repository context before creating a Delivery.'
   conversionTitle.type = 'text'
@@ -725,10 +743,28 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
     messageCollection.update(state.messages)
   }
 
+  function closeConversion(): void {
+    if (!conversionOpen) return
+    conversionOpen = false
+    conversionSessionId = null
+    renderConversion(options.deliveryCreator?.state ?? { status: 'idle', error: null })
+  }
+
   function renderConversion(state: ChatDeliveryCreatorState): void {
     if (closed) return
     const busy = state.status === 'submitting' || state.status === 'waiting'
+    const wasOpen = !conversion.hidden
     conversion.hidden = !conversionOpen
+    convertDelivery.root.setAttribute('aria-expanded', String(conversionOpen))
+    if (conversionOpen && !wasOpen) {
+      // UI-604: a keyboard user activating the trigger has to land inside the
+      // dialog, and the trigger has to be remembered so closing restores them.
+      conversionFocusReturn = focusableElement(document.activeElement)
+      conversionTitle.focus()
+    } else if (!conversionOpen && wasOpen) {
+      conversionFocusReturn?.focus()
+      conversionFocusReturn = null
+    }
     conversionForm.setAttribute('aria-busy', String(busy))
     const visibleError = deliveryConversionError(state)
     conversionError.hidden = visibleError === null
@@ -752,13 +788,16 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
           options.deliveryCreator.cancelPending()
           return
         }
-        conversionOpen = false
-        conversion.hidden = true
-        conversionSessionId = null
+        closeConversion()
       },
     })
   }
 
+  const onConversionKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || !conversionOpen) return
+    event.preventDefault()
+    closeConversion()
+  }
   const onComposerInput = () => {
     send.disabled = readOnly || chatPagePresentation(options.model.state).composerDisabled
       || composer.value.trim().length === 0
@@ -835,6 +874,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
   composer.addEventListener('keydown', onComposerKeydown)
   form.addEventListener('submit', onComposerSubmit)
   conversionForm.addEventListener('submit', onConversionSubmit)
+  conversion.addEventListener('keydown', onConversionKeyDown)
   cancel.addEventListener('click', onCancel)
   newSession.addEventListener('click', onNewSession)
   retry.addEventListener('click', onRetry)
@@ -855,6 +895,7 @@ export function mountChatPage(options: ChatPageOptions): ChatPage {
       composer.removeEventListener('keydown', onComposerKeydown)
       form.removeEventListener('submit', onComposerSubmit)
       conversionForm.removeEventListener('submit', onConversionSubmit)
+      conversion.removeEventListener('keydown', onConversionKeyDown)
       cancel.removeEventListener('click', onCancel)
       newSession.removeEventListener('click', onNewSession)
       retry.removeEventListener('click', onRetry)

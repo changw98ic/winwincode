@@ -18,6 +18,24 @@
   font-size: var(--wwc-font-size-lg);
 }
 
+/* UI-604: the skip link is the keyboard bypass for the header navigation.  It
+   stays visually hidden until focused so pointer users see no change. */
+.wwc-skip-link {
+  position: absolute;
+  left: var(--wwc-space-2);
+  z-index: var(--wwc-layer-toast);
+  padding: var(--wwc-space-2) var(--wwc-space-3);
+  border-radius: var(--wwc-radius-md);
+  color: var(--wwc-color-on-header);
+  background: var(--wwc-color-action-strong);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.wwc-skip-link:focus-visible {
+  clip-path: none;
+}
+
 .wwc-navigation {
   display: flex;
   flex-wrap: wrap;

@@ -1028,7 +1028,9 @@
       "behaviorBaselineIds": [
         "success",
         "client-transport",
-        "first-run-vertical"
+        "first-run-vertical",
+        "ui604-a11y-shell",
+        "ui604-a11y-semantics"
       ]
     },
     {
@@ -1452,6 +1454,30 @@
         "a first run signs in, chooses one authorized repository Scope, selects a model route, creates the first Chat, submits the requirement, and opens StrongFlow from the created Delivery",
         "a mid-flow reload restores the same ProductSession and the same Delivery subscription from the URL",
         "every key command carries a fresh requestId, an exact expectedRevision, and the selected repository Scope"
+      ]
+    },
+    {
+      "id": "ui604-a11y-shell",
+      "scenario": "success",
+      "testFile": "tests/ui604-shell-a11y-browser.test.mjs",
+      "testName": "a real browser keeps one page heading, one live-region channel per page, and a keyboard bypass on every surface",
+      "expectedFacts": [
+        "every surface exposes exactly one main landmark, exactly one page h1, and no skipped heading level",
+        "the surface slot is not a live region and no collection container announces its own re-renders",
+        "a Skip to main content link is the first focusable element, stays hidden until focused, moves focus to main, and never changes the route",
+        "no surface scrolls sideways at 200 percent zoom or at a common narrow viewport"
+      ]
+    },
+    {
+      "id": "ui604-a11y-semantics",
+      "scenario": "success",
+      "testFile": "tests/ui604-a11y-audit.test.mjs",
+      "testName": "UI-604 keyboard, dialog, and table semantics for Kanban, Chat conversion, panels, and the Diff table",
+      "expectedFacts": [
+        "every Delivery Kanban card advances through delivery.advance by keyboard without drag and drop and hides that control when read-only",
+        "the Chat conversion confirmation is a named dialog that moves focus to its first field on open, closes on Escape, and returns focus to its trigger",
+        "a panel can nest one heading level below the page title so a page exposes a single top-level heading",
+        "the Diff table carries a caption naming the selected file and a header row whose columns follow the active unified or side-by-side layout"
       ]
     }
   ],

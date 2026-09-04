@@ -223,7 +223,7 @@ function enterprisePanel(
 ) {
   const panel = mountPanel({
     document,
-    props: { id, title, description, className },
+    props: { id, title, description, className, headingLevel: 3 },
   })
   panel.title.className = 'wwc-enterprise-section-heading'
   return panel
@@ -346,7 +346,7 @@ export function mountEnterpriseOperationsPage(
   options: EnterpriseOperationsPageOptions,
 ): EnterpriseOperationsPage {
   const document = options.root.ownerDocument
-  const layout = element(document, 'main', 'wwc-enterprise-operations')
+  const layout = element(document, 'section', 'wwc-enterprise-operations')
   layout.dataset.wwcPage = 'management'
   const pageHeader = mountPageHeader({
     document,
@@ -354,7 +354,7 @@ export function mountEnterpriseOperationsPage(
       title: 'Enterprise governance and operations',
       eyebrow: 'Enterprise administration',
       description: 'Review Policy, remote Worker fleets, usage, audit evidence, and Integrations.',
-      headingLevel: 1,
+      headingLevel: 2,
       className: 'wwc-enterprise-operations-heading',
     },
   })
@@ -556,7 +556,6 @@ function createPolicySection(
   heading.textContent = 'Policy and dry-run'
   section.setAttribute('aria-labelledby', heading.id)
   areaStatus.setAttribute('aria-live', 'polite')
-  list.setAttribute('aria-live', 'polite')
   legend.textContent = 'Save a closed Policy definition'
   id.input.pattern = 'pol_[0-9A-HJKMNP-TV-Z]{26}'
   conditionDigest.input.pattern = 'sha256:[0-9a-f]{64}'
@@ -668,7 +667,6 @@ function createFleetSection(
   heading.textContent = 'Remote Worker fleets'
   section.setAttribute('aria-labelledby', heading.id)
   areaStatus.setAttribute('aria-live', 'polite')
-  list.setAttribute('aria-live', 'polite')
   panel.content.append(areaStatus, list)
   return {
     section,
@@ -747,7 +745,7 @@ function createUsageSection(
   refresh.dataset.wwcComponent = 'button'
   refresh.dataset.variant = 'default'
   refresh.addEventListener('click', () => { void model.refresh('usage') })
-  list.setAttribute('aria-live', 'polite')
+
   panel.content.append(areaStatus, summary, refresh, list)
   return {
     section,
@@ -813,7 +811,7 @@ function createAuditSection(
     onExport?.('winwincode-enterprise-audit.csv', content)
     exportStatus.textContent = `Audit export ready · ${String(currentItems.length)} records`
   })
-  list.setAttribute('aria-live', 'polite')
+
   panel.content.append(areaStatus, exportButton, exportStatus, list)
   return {
     section,
@@ -876,7 +874,6 @@ function createIntegrationSection(
   heading.textContent = 'Integrations'
   section.setAttribute('aria-labelledby', heading.id)
   areaStatus.setAttribute('aria-live', 'polite')
-  list.setAttribute('aria-live', 'polite')
   legend.textContent = 'Save secret-free Integration settings'
   id.input.pattern = 'int_[0-9A-HJKMNP-TV-Z]{26}'
   endpoint.input.pattern = 'https://[^/?#]+(?::[0-9]{1,5})?'

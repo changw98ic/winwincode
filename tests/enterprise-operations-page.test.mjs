@@ -517,3 +517,26 @@ test('enterprise operations page has one view-model boundary and no raw transpor
   assert.match(source, /model\.execute\('fleet'/u)
   assert.match(source, /model\.execute\('integration'/u)
 })
+test('UI-604 enterprise collection containers are not live regions', async () => {
+  const fixture = createMountedFixture()
+  await waitFor(() => fixture.model.state.status !== 'loading', 'initial operations snapshot')
+
+  const liveValue = node => node.attributes?.get('aria-live') ?? null
+  const lists = descendants(fixture.rootElement).filter(node => (
+    typeof node.className === 'string' && /-list$/u.test(node.className)
+  ))
+  assert.equal(lists.length > 0, true, 'the page renders collection containers')
+  for (const list of lists) {
+    assert.equal(
+      liveValue(list),
+      null,
+      `${list.className} must not announce every realtime re-render`,
+    )
+  }
+  const statuses = descendants(fixture.rootElement).filter(node => liveValue(node) === 'polite')
+  assert.equal(statuses.length > 0, true, 'the page keeps its own status lines live')
+  for (const status of statuses) {
+    assert.match(status.className, /-status$/u, `${status.className} is not a status line`)
+  }
+  fixture.mounted.close()
+})

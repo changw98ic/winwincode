@@ -158,6 +158,9 @@ export function mountCandidateDiffViewer(
   const matchStatus = strongFlowElement(document, 'p', 'wwc-candidate-diff-match-status')
   const scroll = strongFlowElement(document, 'div', 'wwc-candidate-diff-content')
   const table = strongFlowElement(document, 'table', 'wwc-candidate-diff-table')
+  const caption = strongFlowElement(document, 'caption', 'wwc-candidate-diff-caption')
+  const head = strongFlowElement(document, 'thead', 'wwc-candidate-diff-head')
+  const headRow = strongFlowElement(document, 'tr', 'wwc-candidate-diff-head-row')
   const body = strongFlowElement(document, 'tbody', 'wwc-candidate-diff-body')
   const renderMore = strongFlowElement(
     document,
@@ -208,13 +211,14 @@ export function mountCandidateDiffViewer(
   scroll.setAttribute('role', 'group')
   scroll.setAttribute('aria-label', 'Selected file Diff')
   table.setAttribute('data-columns', '3')
+  head.append(headRow)
+  table.append(caption, head, body)
   renderMore.type = 'button'
   renderMore.textContent = 'Render more Diff rows'
   renderMore.hidden = true
   loadMore.type = 'button'
   loadMore.textContent = 'Load more Diff'
   loadMore.hidden = true
-  table.append(body)
   toolbar.append(viewToggle, searchLabel, contextToggle)
   scroll.append(table)
   root.append(toolbar, status, matchStatus, scroll, renderMore, loadMore)
@@ -289,6 +293,23 @@ export function mountCandidateDiffViewer(
       row.replaceChildren(...cells)
     },
   })
+
+  // UI-604: the Diff body is a real table, so its columns need names.  Without a
+  // header row a screen reader reads "1 1 const one = 1" with no way to tell a
+  // line number from the changed text.
+  function renderColumnHeaders(): void {
+    const labels = effectiveMode === 'side-by-side'
+      ? ['Old line', 'Removed content', 'New line', 'Added content']
+      : ['Old line', 'New line', 'Line content']
+    headRow.replaceChildren()
+    for (const label of labels) {
+      const cell = document.createElement('th')
+      cell.className = 'wwc-candidate-diff-column'
+      cell.setAttribute('scope', 'col')
+      cell.textContent = label
+      headRow.append(cell)
+    }
+  }
 
   function numberCell(side: 'old' | 'new', value: number | null): HTMLTableCellElement {
     const cell = document.createElement('td')
@@ -649,6 +670,7 @@ export function mountCandidateDiffViewer(
     effectiveMode = nextMode
     preferredMode = props.viewMode
     table.setAttribute('data-columns', effectiveMode === 'side-by-side' ? '4' : '3')
+    renderColumnHeaders()
     unifiedOption.setAttribute('aria-pressed', String(effectiveMode === 'unified'))
     sideBySideOption.setAttribute('aria-pressed', String(effectiveMode === 'side-by-side'))
     sideBySideOption.disabled = narrowViewport
@@ -682,6 +704,7 @@ export function mountCandidateDiffViewer(
     loadMore.textContent = props.diff.status === 'error' ? 'Retry Diff' : 'Load more Diff'
     loadMore.disabled = props.diff.status === 'loading'
     status.textContent = statusTextFor(props.diff)
+    caption.textContent = props.selectedPath ?? 'No file selected'
   }
 
   update({
