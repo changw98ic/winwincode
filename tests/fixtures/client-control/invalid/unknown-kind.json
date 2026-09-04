@@ -1,0 +1,21 @@
+{
+  "name": "misspelled heartbeat kind is not part of the protocol",
+  "expectedViolations": [
+    "kind.unknown"
+  ],
+  "envelope": {
+    "schemaVersion": "winwincode/v1",
+    "messageId": "msg_000000000000000000000903",
+    "clientNodeId": "cln_000000000000000000000001",
+    "clientInstanceId": "cli_000000000000000000000001",
+    "sequence": 403,
+    "occurredAt": "2026-09-01T09:30:15.000Z",
+    "kind": "client.hearbeat",
+    "expectedRevision": 12,
+    "idempotencyKey": "idem-client-heartbeat-invalid-0001",
+    "payload": {
+      "lastHeartbeatAt": "2026-09-01T09:30:15.000Z",
+      "presenceState": "online"
+    }
+  }
+}

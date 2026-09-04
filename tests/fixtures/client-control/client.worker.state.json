@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000012",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 412,
+  "occurredAt": "2026-09-01T09:32:15.000Z",
+  "kind": "client.worker.state",
+  "expectedRevision": 15,
+  "idempotencyKey": "idem-client-worker-state-040932",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": 3,
+  "payload": {
+    "workerSessionId": "wks_000000000000000000000001",
+    "workerState": "running",
+    "capacity": {
+      "maxConcurrentWorkerSessions": 2,
+      "runningWorkerSessions": 1,
+      "reservedWorkerSessions": 0,
+      "draining": false
+    },
+    "lastObservedAt": "2026-09-01T09:32:15.000Z"
+  }
+}

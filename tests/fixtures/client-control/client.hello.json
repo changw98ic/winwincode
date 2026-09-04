@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000002",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 402,
+  "occurredAt": "2026-09-01T09:30:05.000Z",
+  "kind": "client.hello",
+  "expectedRevision": 12,
+  "idempotencyKey": "idem-client-hello-0001",
+  "payload": {
+    "currentInstanceId": "cli_000000000000000000000001",
+    "presenceState": "online",
+    "acceptingConnections": true,
+    "lockState": "unlocked",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "clientVersion": "1.0.0-demo.0",
+    "maxConcurrentWorkerSessions": 2,
+    "reportedRunningWorkerSessions": 0
+  }
+}

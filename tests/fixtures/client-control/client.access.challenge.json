@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000018",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 902,
+  "occurredAt": "2026-09-01T09:31:02.000Z",
+  "kind": "client.access.challenge",
+  "payload": {
+    "challengeId": "chl_000000000000000000000001",
+    "connectCodeId": "cct_000000000000000000000001",
+    "requestedByUserId": "usr_00000000000000000000000b",
+    "codeGeneration": 7,
+    "trustMode": "trusted",
+    "requestedPermissions": [
+      "use"
+    ],
+    "expiresAt": "2026-09-01T09:33:02.000Z"
+  }
+}

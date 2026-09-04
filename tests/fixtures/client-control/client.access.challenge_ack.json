@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000005",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 405,
+  "occurredAt": "2026-09-01T09:31:05.000Z",
+  "kind": "client.access.challenge_ack",
+  "expectedRevision": 13,
+  "idempotencyKey": "idem-client-access-challenge-ack-0001",
+  "payload": {
+    "challengeId": "chl_000000000000000000000001",
+    "connectCodeId": "cct_000000000000000000000001",
+    "codeGeneration": 7,
+    "codeStillValid": true,
+    "acknowledgedAt": "2026-09-01T09:31:05.000Z"
+  }
+}

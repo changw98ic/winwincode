@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000019",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 903,
+  "occurredAt": "2026-09-01T09:31:08.000Z",
+  "kind": "client.occupancy.offer",
+  "expectedRevision": 14,
+  "idempotencyKey": "idem-client-occupancy-offer-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": 3,
+  "payload": {
+    "clientOccupancyLeaseId": "lse_000000000000000000000001",
+    "holderUserId": "usr_00000000000000000000000a",
+    "claimRequestId": "crq_000000000000000000000001",
+    "leaseState": "reserving",
+    "fencingToken": 3,
+    "claimedAt": "2026-09-01T09:31:08.000Z",
+    "idleExpiresAt": "2026-09-01T11:31:08.000Z"
+  }
+}

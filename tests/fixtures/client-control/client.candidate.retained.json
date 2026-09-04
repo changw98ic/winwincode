@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000014",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 414,
+  "occurredAt": "2026-09-01T09:35:00.000Z",
+  "kind": "client.candidate.retained",
+  "expectedRevision": 16,
+  "idempotencyKey": "idem-client-candidate-retained-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": 3,
+  "payload": {
+    "localCandidateReceiptId": "lcr_000000000000000000000001",
+    "candidateRef": "cand_000000000000000000000001",
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "candidateCommit": "0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776",
+    "localRefName": "refs/winwincode/candidates/cand_000000000000000000000001",
+    "state": "retained",
+    "diffSummary": {
+      "filesChanged": 3,
+      "insertions": 42,
+      "deletions": 7
+    },
+    "retainedAt": "2026-09-01T09:34:58.000Z"
+  }
+}

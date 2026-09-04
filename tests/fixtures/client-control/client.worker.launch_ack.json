@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000011",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 411,
+  "occurredAt": "2026-09-01T09:31:22.000Z",
+  "kind": "client.worker.launch_ack",
+  "expectedRevision": 15,
+  "idempotencyKey": "idem-client-worker-launch-ack-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": 3,
+  "payload": {
+    "workerLaunchGrantId": "wlg_000000000000000000000001",
+    "workerSessionId": "wks_000000000000000000000001",
+    "workerId": "wrk_000000000000000000000001",
+    "workerInstanceId": "wki_000000000000000000000001",
+    "repositoryBindingId": "rbd_000000000000000000000001",
+    "accepted": true,
+    "processStartIdentity": "spawn:2026-09-01T09:31:20.000Z:1",
+    "startedAt": "2026-09-01T09:31:22.000Z"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "winwincode/v1",
+  "messageId": "msg_000000000000000000000020",
+  "clientNodeId": "cln_000000000000000000000001",
+  "clientInstanceId": "cli_000000000000000000000001",
+  "sequence": 904,
+  "occurredAt": "2026-09-01T09:36:00.000Z",
+  "kind": "client.occupancy.release",
+  "expectedRevision": 17,
+  "idempotencyKey": "idem-client-occupancy-release-0001",
+  "occupancyLeaseId": "lse_000000000000000000000001",
+  "occupancyFencingToken": 3,
+  "payload": {
+    "clientOccupancyLeaseId": "lse_000000000000000000000001",
+    "holderUserId": "usr_00000000000000000000000a",
+    "releasePolicy": "cancel_tasks_and_release",
+    "reason": "user_requested",
+    "releaseRequestedAt": "2026-09-01T09:36:00.000Z"
+  }
+}
