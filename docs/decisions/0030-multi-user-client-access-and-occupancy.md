@@ -1,6 +1,6 @@
 # ADR-0030：多用户共享 Client 的访问授权与独占占用
 
-- 状态：已提议
+- 状态：已接受
 - 日期：2026-09-05
 - 对应任务：`winwincode-9fu.1`（CLIENT-000.1）
 - 上层运行边界：[ADR-0028](0028-control-plane-worker-migration.md)
@@ -178,5 +178,6 @@ V1 主链不包含：
 - 容量不超卖要求 Control Plane 的 durable reservation 与 Device Client 的本地资源校验
   保持一致，两处容量账本需要在对账与测试中持续验证。
 
-本 ADR 状态为"已提议"：Phase 0 的 schema 冻结、合同生成与 source-boundary lint 完成并
-通过 Gate 后，方可改为"已接受"。
+2026-09-05 Phase 0 Gate 通过后状态改为"已接受"：schema 冻结（client-control.schema.json）、
+Rust/TS 合同生成与 round-trip、状态机与协议合同、ExecutionPort 边界守卫、source-boundary
+lint 全部合入 main；Node 727/727、合同测试 36/36、winwincode-client-port 27/27 全绿。
