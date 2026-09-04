@@ -224,6 +224,7 @@ function contractFake() {
   let currentInteractions = [input()]
   let currentApprovals = [approval()]
   let currentDeliverySummaries = [deliverySummary()]
+  let currentInteractionsHasMore = false
   const currentDeliveryDetails = new Map([[deliveryId, deliveryDetail()]])
 
   return {
@@ -234,6 +235,8 @@ function contractFake() {
     set sessions(value) { currentSessions = value },
     get interactions() { return currentInteractions },
     set interactions(value) { currentInteractions = value },
+    get interactionsHasMore() { return currentInteractionsHasMore },
+    set interactionsHasMore(value) { currentInteractionsHasMore = value },
     get approvals() { return currentApprovals },
     set approvals(value) { currentApprovals = value },
     get deliverySummaries() { return currentDeliverySummaries },
@@ -252,12 +255,17 @@ function contractFake() {
         })
       }
       if (request.query === 'session.interactions.list') {
-        return queryResponse(request, {
+        const matched = currentInteractions.filter(item => (
+          item.binding.productSessionId === request.parameters.productSessionId
+        ))
+        const response = queryResponse(request, {
           kind: 'chat_interaction_page',
-          items: currentInteractions.filter(item => (
-            item.binding.productSessionId === request.parameters.productSessionId
-          )),
+          items: matched.slice(0, request.page.limit),
         })
+        if (currentInteractionsHasMore) {
+          response.page = { hasMore: true, nextCursor: 'next-interactions-cursor' }
+        }
+        return response
       }
       if (request.query === 'approval.list') {
         return queryResponse(request, { kind: 'approval_page', items: currentApprovals })
@@ -525,6 +533,25 @@ test('refresh revalidates the snapshot and a network drop only degrades to recon
   assert.equal(model.state.realtime, 'reconnecting')
   assert.equal(model.state.items.length > 0, true, 'a network drop must not discard the loaded list')
   model.reconnect()
+  model.close()
+})
+
+test('pending inputs beyond one interaction page never disappear silently', async () => {
+  const client = contractFake()
+  client.interactions = Array.from({ length: 201 }, (_, index) => input({
+    inputRequestId: canonicalId('inp', String(index + 2).padStart(26, '0')),
+  }))
+  client.interactionsHasMore = true
+  const model = modelFor(client)
+  await model.start()
+  const inputItems = model.state.items.filter(item => item.kind === 'input')
+  const explicitFailure = model.state.status === 'error'
+    && model.state.error?.code === 'ATTENTION_CENTER_PAGE_LIMIT_EXCEEDED'
+  assert.equal(
+    explicitFailure || inputItems.length === 201,
+    true,
+    `the center showed ${String(inputItems.length)} of 201 inputs with status '${model.state.status}': silent truncation`,
+  )
   model.close()
 })
 
