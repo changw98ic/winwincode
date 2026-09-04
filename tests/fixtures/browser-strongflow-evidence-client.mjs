@@ -128,8 +128,16 @@ function binding() {
   }
 }
 
+const screenshotEvidenceId = evidenceIdFor(5)
+// One real 1x1 PNG so the browser actually decodes the screenshot.
+const SCREENSHOT_PNG_BASE64
+  = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const screenshotBytes = Uint8Array.from(atob(SCREENSHOT_PNG_BASE64), character =>
+  character.charCodeAt(0))
+const screenshotDataBase64 = btoa(String.fromCharCode(...screenshotBytes))
+
 function evidenceRows() {
-  return [1, 2, 3, 4].map(value => ({
+  const rows = [1, 2, 3, 4].map(value => ({
     candidateRef,
     createdAt: '2026-09-02T01:00:00.000Z',
     deliverySpecId: 'spec:1',
@@ -140,6 +148,38 @@ function evidenceRows() {
     stageRunId,
     type: value === 1 ? 'test' : value === 2 ? 'command' : value === 3 ? 'runtime_event' : 'diff',
   }))
+  rows.push({
+    candidateRef,
+    createdAt: '2026-09-02T01:00:02.000Z',
+    deliverySpecId: 'spec:1',
+    deliverySpecRevision: 1,
+    id: screenshotEvidenceId,
+    sessionBindingId,
+    sourceRef: 'artifact:source:screenshot',
+    stageRunId,
+    type: 'runtime_event',
+  })
+  return rows
+}
+
+function screenshotDescriptor(row) {
+  return {
+    artifactId: 'art_screenshot_0000000000000001',
+    digest: `sha256:${'7'.repeat(64)}`,
+    fileName: 'candidate.png',
+    kind: 'report',
+    mediaType: 'image/png',
+    previewMode: 'inline_text',
+    provenance: {
+      candidateRef: row.candidateRef,
+      deliveryId,
+      deliveryRevision,
+      evidenceId: row.id,
+      sessionBindingId: row.sessionBindingId,
+      stageRunId: row.stageRunId,
+    },
+    sizeBytes: screenshotBytes.length,
+  }
 }
 
 function summary() {
@@ -304,6 +344,15 @@ function evidenceDetail(request) {
   ) {
     throw new Error('evidence.get binding does not match the snapshot row')
   }
+  if (row.id === screenshotEvidenceId) {
+    return response(request, {
+      kind: 'evidence_detail',
+      artifactAccess: { state: 'available', items: [screenshotDescriptor(row)] },
+      evidence: row,
+      outcome: 'succeeded',
+      readCursor: readCursor(),
+    })
+  }
   const artifacts = [1, 2].map(value => ({
     artifactId: `art_${String(value).padStart(26, '0')}`,
     digest: `sha256:${String(value).repeat(64)}`,
@@ -384,7 +433,33 @@ const controlPlane = {
     if (request.query === 'delivery.get') return response(request, detail())
     if (request.query === 'evidence.get') return evidenceDetail(request)
     if (request.query === 'evidence.artifact.content.get') {
-      throw new Error('unavailable Evidence must not trigger artifact content reads')
+      const parameters = request.parameters
+      const row = evidenceRows().find(candidate => candidate.id === screenshotEvidenceId)
+      const descriptor = screenshotDescriptor(row)
+      if (
+        parameters.evidence.evidenceId !== screenshotEvidenceId
+        || parameters.artifactId !== descriptor.artifactId
+        || parameters.offset !== 0
+        || parameters.length !== screenshotBytes.length
+      ) {
+        throw new Error('unsafe Artifact content read must not be answered')
+      }
+      return response(request, {
+        artifact: descriptor,
+        contentEncoding: 'binary',
+        dataBase64: screenshotDataBase64,
+        encoding: 'base64',
+        evidence: row,
+        kind: 'evidence_artifact_content_chunk',
+        nextOffset: null,
+        offset: 0,
+        previewMode: 'inline_text',
+        readCursor: readCursor(),
+        returnedBytes: screenshotBytes.length,
+        state: 'available',
+        totalBytes: screenshotBytes.length,
+        truncated: false,
+      })
     }
     if (request.query === 'runtime.projection.get') return response(request, deliveryRuntime())
     throw new Error(`unexpected query: ${request.query}`)
@@ -446,7 +521,7 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     'StrongFlow snapshot with evidence',
   )
   await waitFor(
-    () => document.querySelectorAll('.wwc-strongflow-evidence-row').length === 4,
+    () => document.querySelectorAll('.wwc-strongflow-evidence-row').length === 5,
     'evidence rows',
   )
   const tabs = [...document.querySelectorAll('.wwc-strongflow-evidence-tabs [role="tab"]')]
@@ -549,10 +624,24 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
 
   const selectedTab = document.querySelector('.wwc-strongflow-evidence-tabs [aria-selected="true"]')
   selectedTab.focus()
+  // Tests -> Preview: the keyboard walk crosses the Preview tab.
   selectedTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
   await waitFor(
+    () => document.querySelector('.wwc-strongflow-evidence-tabs [aria-selected="true"]')
+      .textContent === 'Preview'
+      && document.querySelectorAll('.wwc-strongflow-preview-row').length === 3,
+    'keyboard tab navigation to Preview',
+  )
+  const selectedPreviewTab = document.querySelector(
+    '.wwc-strongflow-evidence-tabs [aria-selected="true"]',
+  )
+  selectedPreviewTab.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }),
+  )
+  await waitFor(
     () => [...document.querySelectorAll('.wwc-strongflow-evidence-row')]
-      .map(row => row.dataset.evidenceType).join(',') === 'test,command,runtime_event,diff'
+      .map(row => row.dataset.evidenceType)
+      .join(',') === 'test,command,runtime_event,diff,runtime_event'
       && document.querySelector('.wwc-strongflow-evidence-tabs [aria-selected="true"]')
         .textContent === 'Evidence',
     'keyboard tab navigation back to Evidence',
@@ -587,12 +676,61 @@ globalThis.runEvidenceWorkbenchScenario = async () => {
     binding: document.querySelector('.wwc-strongflow-evidence-detail-summary dd').textContent,
   }
 
+  // UI-407: the Preview tab reports health, joins Criteria, and opens the one
+  // raster screenshot Artifact inside a sandboxed image node.
+  const previewTab = tabs.find(tab => tab.textContent === 'Preview')
+  previewTab.click()
+  await waitFor(
+    () => document.querySelectorAll('.wwc-strongflow-preview-row').length === 3,
+    'Preview rows',
+  )
+  const previewHealth = document.querySelector('.wwc-strongflow-preview-health')
+  const previewReason = document.querySelector('.wwc-strongflow-preview-reason')
+  const previewRows = [...document.querySelectorAll('.wwc-strongflow-preview-row')]
+  const previewRow = previewRows.find(row => row.dataset.evidenceId === screenshotEvidenceId)
+  previewRow.querySelector('.wwc-strongflow-evidence-open').click()
+  await waitFor(
+    () => document.querySelector('.wwc-strongflow-evidence-detail')?.dataset.status === 'ready',
+    'Preview screenshot detail',
+  )
+  await waitFor(
+    () => {
+      const image = document.querySelector('.wwc-strongflow-evidence-image-content')
+      return image !== null && image.complete && image.naturalWidth > 0
+    },
+    'screenshot decoded',
+  )
+  const screenshot = document.querySelector('.wwc-strongflow-evidence-image-content')
+  const screenshotContentReads = () => calls.queries.filter(
+    query => query.query === 'evidence.artifact.content.get',
+  ).length
+  const readsAfterScreenshot = screenshotContentReads()
+  const preview = {
+    hash: location.hash,
+    health: previewHealth.dataset.previewHealth,
+    healthTone: previewHealth.dataset.tone,
+    reason: previewReason.textContent,
+    kinds: previewRows.map(row => row.dataset.previewKind),
+    screenshotCaption: document.querySelector(
+      '.wwc-strongflow-evidence-image-caption',
+    ).textContent,
+    screenshotSandboxed: screenshot.getAttribute('data-preview-sandbox'),
+    screenshotDecoded: screenshot.complete && screenshot.naturalWidth > 0,
+    screenshotReferrerPolicy: screenshot.getAttribute('referrerpolicy'),
+    textViewerHidden: document.querySelector('.wwc-strongflow-evidence-content-text').hidden,
+    screenshotReads: readsAfterScreenshot,
+  }
+  // The screenshot bytes come from exactly one bounded Artifact read.
+  const revokedNaturally = screenshot.src.startsWith('blob:')
+
   return {
     initial,
     testsView,
     detail,
     closed,
     refreshed,
+    preview,
+    screenshotUrlIsBlob: revokedNaturally,
     evidenceQueries: calls.queries
       .filter(query => query.query === 'evidence.get')
       .map(query => ({

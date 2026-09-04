@@ -573,7 +573,7 @@ function pageEvidenceDeepLink() {
       const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
       const tab = parameters.get('tab')
       return {
-        tab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
+        tab: tab === 'preview' || tab === 'tests' || tab === 'logs' ? tab : 'evidence',
         evidenceId: parameters.get('evidence'),
       }
     },
@@ -673,7 +673,7 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.equal(evidenceTabs.getAttribute('role'), 'tablist')
   assert.deepEqual(
     evidenceTabs.children.map(tab => tab.textContent),
-    ['Evidence', 'Tests', 'Logs'],
+    ['Evidence', 'Preview', 'Tests', 'Logs'],
   )
   assert.equal(evidenceList.children.length, 2)
   assert.equal(

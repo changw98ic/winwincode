@@ -71,6 +71,8 @@
   --wwc-readable-max: 48rem;
   --wwc-drawer-width: 28rem;
   --wwc-log-preview-max-height: 24rem;
+  /* Screenshots open inside the Evidence drawer, never taller than its body. */
+  --wwc-preview-image-max-height: 24rem;
   --wwc-control-min-height: 2.75rem;
   --wwc-graph-viewport-max-height: 28rem;
   --wwc-graph-viewport-narrow-max-height: 20rem;

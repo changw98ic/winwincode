@@ -22,8 +22,6 @@ import type {
   RequestId,
 } from './generated/contracts.js'
 import {
-  EvidenceArtifactContentEncoding,
-  EvidenceArtifactPreviewMode,
   EvidenceOutcome,
   QueryName,
 } from './generated/contracts.js'
@@ -41,6 +39,17 @@ import {
   DEFAULT_STRONGFLOW_RENDER_LIMITS,
   strongFlowElement,
 } from './strongflow-rendering.js'
+import {
+  DEFAULT_PREVIEW_ROW_LIMIT,
+  strongFlowPreviewChannel,
+  strongFlowPreviewDescriptorChannel,
+  strongFlowPreviewRowsForTab,
+  strongFlowPreviewScreenshotNote,
+  strongFlowPreviewSnapshot,
+  type StrongFlowPreviewConnection,
+  type StrongFlowPreviewEvidenceItem,
+  type StrongFlowPreviewSnapshot,
+} from './strongflow-preview.js'
 import type {
   StrongFlowProjection,
   StrongFlowViewModel,
@@ -86,10 +95,24 @@ export interface StrongFlowEvidenceDetailState {
   readonly error: ControlPlaneClientError | null
 }
 
+/** One verified raster screenshot kept only as long as its viewer is open. */
+export interface StrongFlowEvidenceImageState {
+  readonly mediaType: string
+  readonly bytes: Uint8Array<ArrayBuffer>
+}
+
 export interface StrongFlowEvidenceContentState {
-  readonly status: 'idle' | 'loading' | 'ready' | 'download-only' | 'unavailable' | 'error'
+  readonly status: 'idle'
+    | 'loading'
+    | 'ready'
+    | 'download-only'
+    | 'image'
+    | 'unavailable'
+    | 'error'
   readonly artifact: EvidenceArtifactDescriptorProjection | null
   readonly text: string | null
+  readonly image: StrongFlowEvidenceImageState | null
+  readonly channelReason: string | null
   readonly loadedBytes: number
   readonly totalBytes: number
   readonly complete: boolean
@@ -104,6 +127,8 @@ export interface StrongFlowEvidenceViewModelState {
   readonly detail: StrongFlowEvidenceDetailState | null
   readonly content: StrongFlowEvidenceContentState | null
   readonly search: string
+  /** Connection facts the Preview health is allowed to report on. */
+  readonly connection: StrongFlowPreviewConnection
 }
 
 export type StrongFlowEvidenceViewModelListener = (
@@ -140,10 +165,18 @@ export interface StrongFlowEvidenceOptions {
   readonly actor: Actor
   readonly scope: RepositoryScope
   readonly nextRequestId: () => RequestId
-  readonly limits?: { readonly evidence: number }
+  readonly limits?: { readonly evidence: number; readonly preview?: number }
   readonly route: StrongFlowEvidenceRouteState
   readonly onRouteChange: (route: StrongFlowEvidenceRouteState) => void
   readonly downloader?: (download: StrongFlowEvidenceDownload) => void
+  /**
+   * Screenshot object URLs are created and revoked through this seam so no
+   * Artifact byte handle outlives the workbench that opened it.
+   */
+  readonly objectUrls?: {
+    readonly create: (blob: Blob) => string
+    readonly revoke: (url: string) => void
+  }
 }
 
 export interface StrongFlowEvidenceWorkbenchOptions extends StrongFlowEvidenceOptions {
@@ -176,9 +209,17 @@ const EVIDENCE_TABS: ReadonlyArray<{
   readonly label: string
 }> = Object.freeze([
   Object.freeze({ id: 'evidence', label: 'Evidence' }),
+  Object.freeze({ id: 'preview', label: 'Preview' }),
   Object.freeze({ id: 'tests', label: 'Tests' }),
   Object.freeze({ id: 'logs', label: 'Logs' }),
 ])
+
+const PREVIEW_KIND_LABELS: Readonly<
+  Record<'runtime-log' | 'test-run', string>
+> = Object.freeze({
+  'runtime-log': 'Runtime log (console and network)',
+  'test-run': 'Test run',
+})
 
 /**
  * Canonical outcome presentation only. The current producer emits no skipped or
@@ -497,6 +538,8 @@ function unavailableContent(): StrongFlowEvidenceContentState {
     status: 'unavailable',
     artifact: null,
     text: null,
+    image: null,
+    channelReason: null,
     loadedBytes: 0,
     totalBytes: 0,
     complete: false,
@@ -530,6 +573,7 @@ export function createStrongFlowEvidenceViewModel(
     detail: null,
     content: null,
     search: '',
+    connection: { viewStatus: options.model.state.status, realtime: options.model.state.realtime },
   })
   let generation = 0
   let closed = false
@@ -590,11 +634,15 @@ export function createStrongFlowEvidenceViewModel(
   function contentForDescriptor(
     descriptor: EvidenceArtifactDescriptorProjection,
   ): StrongFlowEvidenceContentState {
-    const downloadOnly = descriptor.previewMode === EvidenceArtifactPreviewMode.DownloadOnly
+    // The descriptor alone closes unsafe channels, so no Artifact byte is read
+    // for a download-only, scriptable, or oversized Artifact.
+    const closed = strongFlowPreviewDescriptorChannel(descriptor)
     return Object.freeze({
-      status: downloadOnly ? 'download-only' : 'idle',
+      status: closed === null ? 'idle' : 'download-only',
       artifact: descriptor,
       text: null,
+      image: null,
+      channelReason: closed,
       loadedBytes: 0,
       totalBytes: descriptor.sizeBytes,
       complete: false,
@@ -650,7 +698,7 @@ export function createStrongFlowEvidenceViewModel(
         content: contentForDetail(result),
       })
       const descriptor = firstDescriptor(result.artifactAccess)
-      if (descriptor !== null && descriptor.previewMode === EvidenceArtifactPreviewMode.InlineText) {
+      if (descriptor !== null && currentState.content?.status === 'idle') {
         await loadNextChunk()
       }
     } catch (error) {
@@ -716,6 +764,7 @@ export function createStrongFlowEvidenceViewModel(
         detail: null,
         content: null,
         search: '',
+        connection: { viewStatus: state.status, realtime: state.realtime },
       })
       return
     }
@@ -749,6 +798,7 @@ export function createStrongFlowEvidenceViewModel(
           : currentState.detail,
       content: nextSelected === null || identityChanged ? null : currentState.content,
       search: nextSelected === null || identityChanged ? '' : currentState.search,
+      connection: { viewStatus: state.status, realtime: state.realtime },
     })
     if (identityChanged && nextSelected !== null) void runDetail(nextSelected.row.id)
     if (pendingDeepLinkEvidence !== null && projection !== null) {
@@ -816,13 +866,42 @@ export function createStrongFlowEvidenceViewModel(
     state: StrongFlowEvidenceContentState,
     chunk: EvidenceArtifactContentChunkProjection,
   ): StrongFlowEvidenceContentState {
-    const inlineEligible = chunk.contentEncoding === EvidenceArtifactContentEncoding.Utf8
-      && chunk.previewMode === EvidenceArtifactPreviewMode.InlineText
-    if (!inlineEligible) {
+    const decision = strongFlowPreviewChannel(
+      chunk.artifact,
+      chunk.contentEncoding,
+      chunk.totalBytes,
+    )
+    if (decision.channel === 'image') {
+      const previous = state.image
+      const start = chunk.offset
+      const bytes = new Uint8Array(new ArrayBuffer(chunk.totalBytes))
+      if (previous !== null && start === state.loadedBytes) bytes.set(previous.bytes.subarray(0, start))
+      bytes.set(decodeBase64(chunk.dataBase64), start)
+      const complete = chunk.nextOffset === null
+      return Object.freeze({
+        ...state,
+        status: complete ? 'image' : 'loading',
+        artifact: chunk.artifact,
+        image: Object.freeze({
+          mediaType: chunk.artifact.mediaType,
+          bytes: complete ? bytes : bytes.subarray(0, start + chunk.returnedBytes),
+        }),
+        text: null,
+        channelReason: decision.reason,
+        loadedBytes: Math.max(state.loadedBytes, chunk.offset + chunk.returnedBytes),
+        totalBytes: chunk.totalBytes,
+        complete,
+        truncated: chunk.truncated,
+        error: null,
+      })
+    }
+    if (decision.channel !== 'text') {
       return Object.freeze({
         ...state,
         status: 'download-only',
         text: null,
+        image: null,
+        channelReason: decision.reason,
         complete: false,
       })
     }
@@ -841,6 +920,8 @@ export function createStrongFlowEvidenceViewModel(
       status: 'ready',
       artifact: chunk.artifact,
       text,
+      image: null,
+      channelReason: decision.reason,
       loadedBytes: Math.max(state.loadedBytes, chunk.offset + chunk.returnedBytes),
       totalBytes: chunk.totalBytes,
       complete,
@@ -849,18 +930,10 @@ export function createStrongFlowEvidenceViewModel(
     })
   }
 
-  async function loadNextChunk(): Promise<void> {
-    if (closed) return
+  async function readNextChunk(): Promise<void> {
     const content = currentState.content
     const selected = currentState.selected
-    if (
-      content === null
-      || selected === null
-      || content.artifact === null
-      || (content.status !== 'idle' && content.status !== 'ready')
-      || content.complete
-      || content.loadedBytes >= content.totalBytes
-    ) return
+    if (content === null || selected === null || content.artifact === null) return
     const ownGeneration = generation
     contentController?.abort()
     contentController = null
@@ -899,6 +972,30 @@ export function createStrongFlowEvidenceViewModel(
         error: normalizedError(error),
       }) })
     }
+  }
+
+  async function loadNextChunk(): Promise<void> {
+    if (closed) return
+    const content = currentState.content
+    if (
+      content === null
+      || (content.status !== 'idle' && content.status !== 'ready')
+      || content.complete
+      || content.loadedBytes >= content.totalBytes
+    ) return
+    await readNextChunk()
+    // A bounded screenshot assembles from consecutive Artifact ranges; each
+    // range is one authoritative read, so the loop stays inside the size gate
+    // that admitted the image channel in the first place.
+    const assembling = currentState.content
+    if (
+      !closed
+      && assembling !== null
+      && assembling.image !== null
+      && assembling.status === 'loading'
+      && !assembling.complete
+      && assembling.loadedBytes < assembling.totalBytes
+    ) await loadNextChunk()
   }
 
   async function downloadArtifact(): Promise<void> {
@@ -1004,7 +1101,7 @@ export function createStrongFlowEvidenceViewModel(
       generation += 1
       cancelContent()
       patch({ content: contentForDescriptor(descriptor), search: '' })
-      if (descriptor.previewMode === EvidenceArtifactPreviewMode.InlineText) await loadNextChunk()
+      if (currentState.content?.status === 'idle') await loadNextChunk()
     },
     async downloadArtifact() {
       await downloadArtifact()
@@ -1036,6 +1133,22 @@ function candidateStateText(state: StrongFlowEvidenceCandidateState): string {
   return 'no current candidate'
 }
 
+function previewCandidateText(state: StrongFlowPreviewSnapshot['candidateState']): string {
+  return state === 'current' ? 'current candidate' : 'no current candidate'
+}
+
+/**
+ * Name the exact authority reason: today the producer retains no Evidence to
+ * Artifact link, so a missing screenshot is reported as missing, never hidden.
+ */
+function unavailableArtifactText(
+  access: StrongFlowEvidenceDetailState['artifactAccess'],
+): string {
+  return access !== null && access.state === 'unavailable'
+    ? 'No authoritative Artifact link exists for this Evidence, so no screenshot can be shown.'
+    : 'Artifact content is not available for this Evidence.'
+}
+
 function outcomeStatusTone(tone: StrongFlowEvidenceOutcomeTone): StatusTone {
   if (tone === 'pass') return 'success'
   if (tone === 'business-fail') return 'danger'
@@ -1043,12 +1156,19 @@ function outcomeStatusTone(tone: StrongFlowEvidenceOutcomeTone): StatusTone {
   return 'neutral'
 }
 
-/** Mount the Evidence, Tests, and Logs workbench against one StrongFlow view-model. */
+/** Mount the Evidence, Preview, Tests, and Logs workbench against one view-model. */
 export function mountStrongFlowEvidence(
   options: StrongFlowEvidenceWorkbenchOptions,
 ): StrongFlowEvidenceWorkbench {
   const document = options.root.ownerDocument
-  const limits = options.limits ?? { evidence: DEFAULT_STRONGFLOW_RENDER_LIMITS.evidence }
+  const limits = options.limits ?? {
+    evidence: DEFAULT_STRONGFLOW_RENDER_LIMITS.evidence,
+    preview: DEFAULT_PREVIEW_ROW_LIMIT,
+  }
+  const objectUrls = options.objectUrls ?? {
+    create: blob => URL.createObjectURL(blob),
+    revoke: url => { URL.revokeObjectURL(url) },
+  }
   const model = createStrongFlowEvidenceViewModel({
     client: options.client,
     actor: options.actor,
@@ -1107,6 +1227,37 @@ export function mountStrongFlowEvidence(
     'button',
     'wwc-strongflow-evidence-load-more',
   ) as HTMLButtonElement
+  const previewPanel = strongFlowElement(
+    document,
+    'section',
+    'wwc-strongflow-preview-panel',
+  )
+  const previewHealthView = mountStatusBadge({
+    document,
+    props: {
+      className: 'wwc-strongflow-preview-health',
+      label: 'Preview source unavailable',
+      tone: 'neutral',
+    },
+  })
+  const previewHealth = previewHealthView.root
+  const previewReason = strongFlowElement(document, 'p', 'wwc-strongflow-preview-reason')
+  const previewScreenshots = strongFlowElement(document, 'p', 'wwc-strongflow-preview-screenshots')
+  const previewSummary = strongFlowElement(document, 'p', 'wwc-strongflow-preview-summary')
+  const previewList = strongFlowElement(document, 'ul', 'wwc-strongflow-preview-list')
+  const previewOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-preview-omitted')
+  const imageFrame = strongFlowElement(document, 'figure', 'wwc-strongflow-evidence-image')
+  const imageNode = document.createElement('img')
+  const imageCaption = document.createElement('figcaption')
+  imageNode.className = 'wwc-strongflow-evidence-image-content'
+  imageCaption.className = 'wwc-strongflow-evidence-image-caption'
+  imageNode.setAttribute('referrerpolicy', 'no-referrer')
+  imageNode.setAttribute('decoding', 'async')
+  // The image node is the whole sandbox: no link wraps it, it loads one
+  // blob: URL minted from the exact Artifact bytes, and that URL is revoked as
+  // soon as the viewer closes, so no durable handle to Artifact bytes remains.
+  imageNode.setAttribute('data-preview-sandbox', 'image-only')
+  imageFrame.append(imageNode, imageCaption)
   let closed = false
   let drawerProps = {
     id: 'strongflow-evidence-drawer',
@@ -1177,11 +1328,24 @@ export function mountStrongFlowEvidence(
     artifactList,
     search,
     artifact,
+    imageFrame,
     contentScope,
     contentText,
     retryDetail,
     loadMore,
     download,
+  )
+  imageFrame.hidden = true
+  // The page keeps exactly one polite live region (the StrongFlow header), so
+  // this panel announces through structure and labels instead of a second one.
+  previewPanel.setAttribute('aria-label', 'Candidate Preview and browser evidence')
+  previewPanel.append(
+    previewHealth,
+    previewReason,
+    previewScreenshots,
+    previewSummary,
+    previewList,
+    previewOmitted,
   )
   drawerContent.append(detailPanel)
   summary.append(summaryCounts, summaryFailures, summaryOmitted)
@@ -1306,6 +1470,151 @@ export function mountStrongFlowEvidence(
     outcome.setAttribute('aria-label', `Evidence outcome: ${label}`)
   }
 
+  /** The one Artifact byte handle this workbench owns; revoked on every close. */
+  let screenshotUrl: string | null = null
+  function revokeScreenshot(): void {
+    if (screenshotUrl !== null) {
+      objectUrls.revoke(screenshotUrl)
+      screenshotUrl = null
+    }
+    imageNode.removeAttribute('src')
+    imageFrame.hidden = true
+  }
+
+  function showScreenshot(
+    content: StrongFlowEvidenceContentState,
+    image: NonNullable<StrongFlowEvidenceContentState['image']>,
+  ): void {
+    const next = objectUrls.create(new Blob([image.bytes], { type: image.mediaType }))
+    revokeScreenshot()
+    screenshotUrl = next
+    imageNode.src = next
+    imageNode.setAttribute(
+      'alt',
+      `Screenshot Artifact ${content.artifact?.fileName ?? ''} from Evidence ${
+        content.artifact?.provenance.evidenceId ?? ''
+      }`.trim(),
+    )
+    imageCaption.textContent = `${image.mediaType} · ${
+      formatBytes(content.totalBytes)
+    } · opened as one sandboxed image, never as a page`
+    imageFrame.hidden = false
+  }
+
+  function downloadOnlyText(reason: string | null): string {
+    if (reason === 'scriptable-image') {
+      return 'This screenshot media type can execute markup, so it is never opened inline. '
+        + 'Use the download control.'
+    }
+    if (reason === 'unsupported-media-type') {
+      return 'This Artifact media type cannot be previewed safely. Use the download control.'
+    }
+    if (reason === 'oversized') {
+      return 'This Artifact exceeds the bounded Preview size, so it is not opened inline. '
+        + 'Use the download control.'
+    }
+    if (reason === 'encoding') {
+      return 'This Artifact range is not delivered in a previewable encoding. '
+        + 'Use the download control.'
+    }
+    return 'Binary or download-only artifact. Use the download control.'
+  }
+
+  interface PreviewRowItem {
+    readonly snapshot: StrongFlowPreviewSnapshot
+    readonly item: StrongFlowPreviewEvidenceItem
+  }
+  const previewRecords = new WeakMap<HTMLElement, {
+    readonly onClick: () => void
+    readonly title: HTMLElement
+    readonly source: HTMLElement
+    readonly candidate: HTMLElement
+    readonly criteria: HTMLElement
+  }>()
+  const previewRows = mountKeyedCollection<PreviewRowItem, string, HTMLLIElement>({
+    parent: previewList,
+    key: value => value.item.row.id,
+    create() {
+      const item = strongFlowElement(document, 'li', 'wwc-strongflow-preview-row')
+      const title = document.createElement('strong')
+      const source = document.createElement('p')
+      const candidate = document.createElement('span')
+      const criteria = strongFlowElement(document, 'span', 'wwc-strongflow-preview-criteria')
+      const open = strongFlowElement(
+        document,
+        'button',
+        'wwc-strongflow-evidence-open',
+      ) as HTMLButtonElement
+      open.type = 'button'
+      open.textContent = 'Open'
+      const onClick = () => {
+        const identity = item.dataset.evidenceId
+        if (identity === undefined) return
+        rememberEvidenceOpener()
+        void model.openEvidence(identity as EvidenceId)
+      }
+      item.addEventListener('click', onClick)
+      item.append(title, source, candidate, criteria, open)
+      previewRecords.set(item, { onClick, title, source, candidate, criteria })
+      return item
+    },
+    update(item, value) {
+      item.dataset.evidenceId = value.item.row.id
+      item.dataset.previewKind = value.item.kind
+      item.dataset.candidateState = value.snapshot.candidateState
+      const record = previewRecords.get(item)
+      if (record === undefined) return
+      record.title.textContent = `${PREVIEW_KIND_LABELS[value.item.kind]} · ${value.item.row.id}`
+      record.source.textContent = `${value.item.row.sourceRef} · ${value.item.row.createdAt}`
+      record.candidate.textContent = previewCandidateText(value.snapshot.candidateState)
+      record.criteria.textContent = value.item.criterionIds.length === 0
+        ? 'No current criterion join'
+        : value.item.failingCriterionIds.length === 0
+          ? `Criteria passed: ${value.item.criterionIds.join(', ')}`
+          : `Criteria failed: ${value.item.failingCriterionIds.join(', ')}`
+    },
+    remove(item) {
+      const record = previewRecords.get(item)
+      if (record === undefined) return
+      item.removeEventListener?.('click', record.onClick)
+      previewRecords.delete(item)
+    },
+  })
+
+  function renderPreview(state: StrongFlowEvidenceViewModelState): void {
+    const snapshot = strongFlowPreviewSnapshot(state.projection, {
+      connection: state.connection,
+      ...(limits.preview === undefined ? {} : { limit: limits.preview }),
+    })
+    previewHealthView.update({
+      className: 'wwc-strongflow-preview-health',
+      label: snapshot.health.label,
+      tone: outcomeStatusTone(snapshot.health.tone),
+    })
+    previewHealth.dataset.previewHealth = snapshot.health.id
+    previewHealth.dataset.tone = snapshot.health.tone
+    previewHealth.setAttribute('aria-label', `Preview health: ${snapshot.health.label}`)
+    previewReason.textContent = snapshot.health.detail
+    previewSummary.textContent = snapshot.items.length === 0
+      ? 'No browser Evidence belongs to the current Candidate.'
+      : `${String(snapshot.items.length)} Preview record${
+        snapshot.items.length === 1 ? '' : 's'
+      } · newest ${snapshot.newestEvidenceAt ?? 'unknown'} · valid for ${
+        String(Math.round(snapshot.validityMillis / (60 * 60 * 1000)))
+      } h after generation`
+    previewScreenshots.textContent = strongFlowPreviewScreenshotNote(
+      state.selected === null
+        ? null
+        : {
+            evidenceId: state.selected.row.id,
+            status: state.content?.status ?? null,
+          },
+    )
+    previewRows.update(snapshot.items.map(item => ({ snapshot, item })))
+    previewOmitted.hidden = snapshot.omitted === 0
+    previewOmitted.textContent = `${String(snapshot.omitted)} more Preview record not rendered.`
+  }
+
   function renderDetail(state: StrongFlowEvidenceViewModelState): void {
     const selected = state.selected
     drawerProps = {
@@ -1325,6 +1634,7 @@ export function mountStrongFlowEvidence(
       detailPanel.removeAttribute('data-candidate-state')
       detailPanel.setAttribute('aria-busy', 'false')
       artifacts.update([])
+      revokeScreenshot()
       return
     }
     const detail = state.detail
@@ -1347,6 +1657,7 @@ export function mountStrongFlowEvidence(
     retryDetail.hidden = true
     artifactList.hidden = true
     artifact.hidden = true
+    imageFrame.hidden = true
     contentScope.hidden = true
     contentText.hidden = true
     search.hidden = true
@@ -1354,6 +1665,7 @@ export function mountStrongFlowEvidence(
     download.hidden = true
     if (detail === null) {
       artifacts.update([])
+      revokeScreenshot()
       renderOutcome('Loading Evidence detail…', 'neutral')
       return
     }
@@ -1366,6 +1678,7 @@ export function mountStrongFlowEvidence(
     )
     if (detail.status === 'error' && detail.error !== null) {
       artifacts.update([])
+      revokeScreenshot()
       detailErrorNode.hidden = false
       detailErrorNode.textContent = strongFlowEvidenceErrorText(detail.error)
       retryDetail.hidden = false
@@ -1377,15 +1690,23 @@ export function mountStrongFlowEvidence(
     artifacts.update(descriptors)
     artifactList.hidden = descriptors.length === 0
     if (content === null || content.status === 'unavailable') {
+      revokeScreenshot()
       artifact.hidden = false
-      artifact.textContent = 'Artifact content is not available for this Evidence.'
+      artifact.textContent = content === null
+        ? 'Artifact content is not available for this Evidence.'
+        : unavailableArtifactText(detail.artifactAccess)
     } else if (content.status === 'download-only') {
+      revokeScreenshot()
       artifact.hidden = false
-      artifact.textContent = 'Binary or download-only artifact. Use the download control.'
+      artifact.textContent = downloadOnlyText(content.channelReason)
       download.hidden = false
     } else if (content.status === 'error' && content.error !== null) {
+      revokeScreenshot()
       detailErrorNode.hidden = false
       detailErrorNode.textContent = strongFlowEvidenceErrorText(content.error)
+    } else if (content.status === 'image' && content.image !== null) {
+      showScreenshot(content, content.image)
+      artifact.hidden = true
     } else if (content.artifact !== null) {
       const needle = state.search.trim().toLowerCase()
       const lines = (content.text ?? '').split('\n')
@@ -1445,6 +1766,7 @@ export function mountStrongFlowEvidence(
     const projection = state.projection
     const evidenceSummary = renderSummary(projection)
     const source = projection === null ? [] : projection.evidence
+    const previewSelected = state.tab === 'preview'
     const filtered = strongFlowEvidenceRowsForTab(source, state.tab)
     const bounded = boundedItems(filtered, limits.evidence)
     rows.update(bounded.items.map(row => ({
@@ -1461,8 +1783,10 @@ export function mountStrongFlowEvidence(
       const selected = tab === state.tab
       panel.hidden = !selected
       panel.setAttribute('aria-busy', String(selected && projection === null))
-      if (selected) panel.append(list, omitted)
+      if (selected && tab === 'preview') panel.append(previewPanel)
+      else if (selected) panel.append(list, omitted)
     }
+    if (previewSelected) renderPreview(state)
     renderDetail(state)
   }
 
@@ -1490,9 +1814,12 @@ export function mountStrongFlowEvidence(
       download.removeEventListener?.('click', onDownload)
       retryDetail.removeEventListener?.('click', onRetryDetail)
       loadMore.removeEventListener?.('click', onLoadMore)
+      revokeScreenshot()
       rows.close()
       artifacts.close()
+      previewRows.close()
       outcomeView.close()
+      previewHealthView.close()
       tabs.close()
       drawer.close()
       model.close()

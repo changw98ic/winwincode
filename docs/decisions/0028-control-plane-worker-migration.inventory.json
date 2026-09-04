@@ -1004,6 +1004,7 @@
         "apps/client/src/strongflow-diff-viewer.ts",
         "apps/client/src/strongflow-evidence.ts",
         "apps/client/src/strongflow-execution-graph.ts",
+        "apps/client/src/strongflow-preview.ts",
         "apps/client/src/strongflow-header.ts",
         "apps/client/src/strongflow-history-navigation.ts",
         "apps/client/src/strongflow-history-selection.ts",
@@ -1035,7 +1036,8 @@
         "first-run-vertical",
         "ui604-a11y-shell",
         "ui604-a11y-semantics",
-        "candidate-comparison"
+        "candidate-comparison",
+        "candidate-preview"
       ]
     },
     {
@@ -1494,6 +1496,18 @@
         "one Delivery compares only its own frozen Candidates",
         "a stale, missing, or foreign comparison link is rejected",
         "the comparison summary reports changed paths, Diff, Evidence, and Verdict"
+      ]
+    },
+    {
+      "id": "candidate-preview",
+      "scenario": "candidate-preview",
+      "testFile": "tests/strongflow-preview.test.mjs",
+      "testName": "the workbench renders one Preview tab with health, reasons, and criterion joins",
+      "expectedFacts": [
+        "the Preview tab keeps only test and runtime Evidence and joins Criterion results to it",
+        "Preview health names no-candidate, not-generated, expired, unverified, degraded, and unreachable instead of inventing a pass",
+        "only a bounded raster screenshot Artifact opens, inside one sandboxed image whose object URL is revoked on close",
+        "missing, scriptable, oversized, and link-less Artifacts stay download-only with the exact reason"
       ]
     }
   ],

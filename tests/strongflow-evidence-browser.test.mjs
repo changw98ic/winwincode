@@ -20,8 +20,9 @@ import {
 
 const root = resolve(import.meta.dirname, '..')
 const evidenceId = 'evd_00000000000000000000000001'
+const screenshotEvidenceId = 'evd_00000000000000000000000005'
 
-test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings and deep links', async t => {
+test('a real browser opens Evidence, Preview, Tests, and Logs tabs with exact bindings and deep links', async t => {
   const chromePath = chromeBinary()
   assert.notEqual(
     chromePath,
@@ -76,13 +77,22 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
   const result = await evaluate(devtools, sessionId, 'globalThis.runEvidenceWorkbenchScenario()')
 
   assert.match(result.initial.hash, /^#\/strongflow\?delivery=dlv_00000000000000000000000002/u)
-  assert.deepEqual(result.initial.tabLabels, ['Evidence', 'Tests', 'Logs'])
+  assert.deepEqual(result.initial.tabLabels, ['Evidence', 'Preview', 'Tests', 'Logs'])
   assert.equal(result.initial.selected, 'Evidence')
-  assert.deepEqual(result.initial.rowTypes, ['test', 'command', 'runtime_event', 'diff'])
+  assert.deepEqual(result.initial.rowTypes, [
+    'test',
+    'command',
+    'runtime_event',
+    'diff',
+    'runtime_event',
+  ])
   assert.deepEqual(result.initial.candidateStates, ['current'])
-  assert.deepEqual(result.initial.panels.map(panel => panel.role), ['tabpanel', 'tabpanel', 'tabpanel'])
+  assert.deepEqual(
+    result.initial.panels.map(panel => panel.role),
+    ['tabpanel', 'tabpanel', 'tabpanel', 'tabpanel'],
+  )
   assert.equal(result.initial.panels.filter(panel => !panel.hidden).length, 1)
-  assert.deepEqual(result.initial.entryPoints, { stage: 4, candidate: 4, criterion: 1 })
+  assert.deepEqual(result.initial.entryPoints, { stage: 5, candidate: 5, criterion: 1 })
   assert.match(result.initial.summary, /1 criteria · 0 passed · 1 failed/u)
   assert.match(result.initial.criterionJoin, /criterion:browser/u)
 
@@ -118,6 +128,21 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
   assert.match(result.refreshed.binding, /revision 3/u)
   assert.equal(result.navigationEntryCount, 1)
 
+  assert.equal(result.preview.health, 'degraded')
+  assert.equal(result.preview.healthTone, 'business-fail')
+  assert.match(result.preview.reason, /did not pass/u)
+  assert.deepEqual(result.preview.kinds, ['runtime-log', 'runtime-log', 'test-run'])
+  assert.match(result.preview.screenshotCaption, /image\/png/u)
+  assert.equal(result.preview.screenshotSandboxed, 'image-only')
+  assert.equal(result.preview.screenshotDecoded, true)
+  assert.equal(result.preview.screenshotReferrerPolicy, 'no-referrer')
+  assert.equal(result.preview.textViewerHidden, true)
+  assert.match(result.preview.hash, /tab=preview/u)
+  assert.match(result.preview.hash, new RegExp(`evidence=${screenshotEvidenceId}`))
+  assert.equal(result.preview.screenshotReads, 1)
+
+  // Two reads of the selected Evidence, then one read of the screenshot
+  // Evidence, each bound to the exact cursor the snapshot published.
   assert.deepEqual(result.evidenceQueries, [
     {
       evidenceId,
@@ -131,8 +156,14 @@ test('a real browser opens Evidence, Tests, and Logs tabs with exact bindings an
       cursorToken: 'cursor_00000000000000000000000000000003',
       page: { cursor: null, limit: 1 },
     },
+    {
+      evidenceId: screenshotEvidenceId,
+      readPageLimit: 1,
+      cursorToken: 'cursor_00000000000000000000000000000003',
+      page: { cursor: null, limit: 1 },
+    },
   ])
-  assert.equal(result.contentQueries, 0)
+  assert.equal(result.contentQueries, 1)
 
   await devtools.send('Page.navigate', {
     url: `https://client.localhost:${String(clientPort)}/${result.detail.hash}`,

@@ -1695,6 +1695,120 @@
   background: var(--wwc-color-surface);
 }
 
+.wwc-strongflow-preview-panel {
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-strongflow-preview-health {
+  display: inline-flex;
+  gap: var(--wwc-space-2);
+  align-items: center;
+}
+
+.wwc-strongflow-preview-health[data-tone='pass'] {
+  color: var(--wwc-color-success-text);
+}
+
+.wwc-strongflow-preview-health[data-tone='business-fail'] {
+  color: var(--wwc-color-danger-text);
+}
+
+.wwc-strongflow-preview-health[data-tone='infra'],
+.wwc-strongflow-preview-health[data-tone='neutral'] {
+  color: var(--wwc-color-text-secondary);
+}
+
+.wwc-strongflow-preview-reason,
+.wwc-strongflow-preview-screenshots,
+.wwc-strongflow-preview-summary {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-strongflow-preview-health[data-preview-health='expired'] + .wwc-strongflow-preview-reason,
+.wwc-strongflow-preview-health[data-preview-health='unreachable'] + .wwc-strongflow-preview-reason {
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-strongflow-preview-list {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding-left: var(--wwc-space-6);
+}
+
+.wwc-strongflow-preview-row {
+  flex-wrap: wrap;
+  cursor: pointer;
+}
+
+.wwc-strongflow-preview-row p {
+  margin: var(--wwc-space-1) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-preview-row span {
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-preview-criteria {
+  flex-basis: 100%;
+}
+
+.wwc-strongflow-preview-row[data-candidate-state='none'] span {
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-strongflow-preview-omitted {
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-evidence-image {
+  max-width: var(--wwc-readable-max);
+  margin: var(--wwc-space-2) var(--wwc-space-0);
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-strongflow-evidence-image[hidden] {
+  display: none;
+}
+
+/* The screenshot is one non-interactive image: no link, no script, no referrer,
+   and its object URL is revoked the moment the viewer closes. */
+.wwc-strongflow-evidence-image-content {
+  display: block;
+  max-width: 100%;
+  max-height: var(--wwc-preview-image-max-height);
+  margin: var(--wwc-space-0) auto;
+  border-radius: var(--wwc-radius-sm);
+}
+
+.wwc-strongflow-evidence-image-caption {
+  margin: var(--wwc-space-2) var(--wwc-space-0) var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+@media (max-width: 48rem) {
+  .wwc-strongflow-preview-row {
+    display: grid;
+    gap: var(--wwc-space-1);
+  }
+
+  .wwc-strongflow-preview-row .wwc-strongflow-evidence-open {
+    justify-self: start;
+  }
+}
+
 @media (max-width: 48rem) {
   .wwc-strongflow-evidence-row {
     display: grid;
