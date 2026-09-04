@@ -30,16 +30,56 @@
       "kind": "env-contract",
       "currentResponsibility": "The Server process reads one fixed user identity from WWC_SERVER_AUTH_SUBJECT and uses it as the only actor for browser sessions, model authority setup, execution admission identity, and enterprise identity composition; there is no UserAccount store.",
       "references": [
-        {"path": "crates/winwincode-server/src/main.rs", "line": 139, "role": "required_environment(\"WWC_SERVER_AUTH_SUBJECT\")"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 143, "role": "subject becomes the sole AuthSessionBootstrap UserActor id"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 208, "role": "subject seeds configure_local_model_authority"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 326, "role": "with_admission_identity binds subject to the worker pool admission identity"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 526, "role": "subject passed into compose_enterprise_identity_protocol"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 645, "role": "configure_local_model_authority rebuilds UserId(subject)"},
-        {"path": "crates/winwincode-server/README.md", "line": 26, "role": "documented required environment value"},
-        {"path": "tests/browser-auth-session.test.mjs", "line": 169, "role": "browser vertical sets one fixed subject"},
-        {"path": "tests/fixtures/real-browser-harness.mjs", "line": 212, "role": "browser harness sets one fixed subject"},
-        {"path": "scripts/run-api-production-vertical.mjs", "line": 1021, "role": "production vertical sets subject from IDS.actor"}
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 139,
+          "role": "required_environment(\"WWC_SERVER_AUTH_SUBJECT\")"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 143,
+          "role": "subject becomes the sole AuthSessionBootstrap UserActor id"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 208,
+          "role": "subject seeds configure_local_model_authority"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 326,
+          "role": "with_admission_identity binds subject to the worker pool admission identity"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 526,
+          "role": "subject passed into compose_enterprise_identity_protocol"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 645,
+          "role": "configure_local_model_authority rebuilds UserId(subject)"
+        },
+        {
+          "path": "crates/winwincode-server/README.md",
+          "line": 26,
+          "role": "documented required environment value"
+        },
+        {
+          "path": "tests/browser-auth-session.test.mjs",
+          "line": 169,
+          "role": "browser vertical sets one fixed subject"
+        },
+        {
+          "path": "tests/fixtures/real-browser-harness.mjs",
+          "line": 212,
+          "role": "browser harness sets one fixed subject"
+        },
+        {
+          "path": "scripts/run-api-production-vertical.mjs",
+          "line": 1021,
+          "role": "production vertical sets subject from IDS.actor"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 1",
@@ -58,12 +98,36 @@
       "kind": "env-contract",
       "currentResponsibility": "The Server process binds the whole Control Plane to exactly one local Git repository root plus four tenant-scope IDs; startup opens the repository scanner, candidate resolver, and Delivery execution queue against that single root.",
       "references": [
-        {"path": "crates/winwincode-server/src/main.rs", "line": 1090, "role": "LocalDeliveryAdapterConfig::new(PathBuf::from(required_environment(\"WWC_SERVER_REPOSITORY_ROOT\")))"},
-        {"path": "crates/winwincode-server/README.md", "line": 27, "role": "documented required environment value"},
-        {"path": "crates/winwincode-server/tests/application_composition.rs", "line": 46, "role": "composition test asserts main.rs source still contains the variable name"},
-        {"path": "tests/browser-auth-session.test.mjs", "line": 170, "role": "browser vertical points the Server at one repository root"},
-        {"path": "tests/fixtures/real-browser-harness.mjs", "line": 213, "role": "browser harness points the Server at one repository root"},
-        {"path": "scripts/run-api-production-vertical.mjs", "line": 1022, "role": "production vertical points the Server at one repository root"}
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 1090,
+          "role": "LocalDeliveryAdapterConfig::new(PathBuf::from(required_environment(\"WWC_SERVER_REPOSITORY_ROOT\")))"
+        },
+        {
+          "path": "crates/winwincode-server/README.md",
+          "line": 27,
+          "role": "documented required environment value"
+        },
+        {
+          "path": "crates/winwincode-server/tests/application_composition.rs",
+          "line": 46,
+          "role": "composition test asserts main.rs source still contains the variable name"
+        },
+        {
+          "path": "tests/browser-auth-session.test.mjs",
+          "line": 170,
+          "role": "browser vertical points the Server at one repository root"
+        },
+        {
+          "path": "tests/fixtures/real-browser-harness.mjs",
+          "line": 213,
+          "role": "browser harness points the Server at one repository root"
+        },
+        {
+          "path": "scripts/run-api-production-vertical.mjs",
+          "line": 1022,
+          "role": "production vertical points the Server at one repository root"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 5",
@@ -83,28 +147,116 @@
       "kind": "credential-flow",
       "currentResponsibility": "A short-window bootstrap proof supplied through WWC_SERVER_BOOTSTRAP_PROOF is exchanged once at POST /api/v1/auth/session for an independent random cookie session; the proof is digest-persisted, write-only, and never echoed. The Client login page, HTTP contract security scheme, and all browser verticals are built around this one-proof flow.",
       "references": [
-        {"path": "crates/winwincode-server/src/main.rs", "line": 138, "role": "required_environment(\"WWC_SERVER_BOOTSTRAP_PROOF\")"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 141, "role": "AuthSessionBootstrap::new binds proof to the fixed actor and repository scope"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 32, "role": "MAX_BOOTSTRAP_WINDOW_SECONDS caps the exchange window"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 117, "role": "AuthSessionBootstrap: one short-window proof bound to an exact Actor and Scope set"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 326, "role": "SqliteAuthSessionManager::bootstrap exchanges the proof for an independent random cookie"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 897, "role": "unit test: digest persisted, secret-free context, revoke on reuse"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 1155, "role": "unit test: bootstrap exchange survives restart"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 298, "role": "POST /api/v1/auth/session route accepts the bootstrap proof"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 418, "role": "create_auth_session validates body and delegates to auth_sessions.bootstrap"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 449, "role": "issued session becomes a Set-Cookie header"},
-        {"path": "crates/winwincode-server/tests/server.rs", "line": 300, "role": "integration helper create_session exchanges proof for cookie"},
-        {"path": "crates/winwincode-server/tests/server.rs", "line": 651, "role": "session context isolation, scope shrink, revocation and restart vertical"},
-        {"path": "crates/winwincode-server/README.md", "line": 25, "role": "documented required environment value"},
-        {"path": "crates/winwincode-server/examples/browser_local_controls_fixture.rs", "line": 102, "role": "example fixture reads the proof from environment"},
-        {"path": "apps/client/src/control-plane-client.ts", "line": 508, "role": "client validates bootstrapProof shape and sends it as Bearer credential"},
-        {"path": "apps/client/src/control-plane-client.ts", "line": 656, "role": "client login(bootstrapProof) calls POST auth/session"},
-        {"path": "apps/client/src/auth-page.ts", "line": 72, "role": "browser bootstrap proof form"},
-        {"path": "tests/control-plane-http-contract.test.mjs", "line": 674, "role": "bootstrapProof is the declared security scheme for session creation"},
-        {"path": "tests/browser-auth-session.test.mjs", "line": 168, "role": "browser vertical signs in with the proof"},
-        {"path": "tests/first-run-strongflow-browser.test.mjs", "line": 42, "role": "first-run vertical proves the proof never leaks into DOM, URL, storage or artifacts"},
-        {"path": "tests/browser-chat-strongflow-production.test.mjs", "line": 64, "role": "asserts proof absent from URL, DOM, storage, console, network and Server output"},
-        {"path": "scripts/run-api-production-vertical.mjs", "line": 1020, "role": "production vertical injects the proof"}
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 138,
+          "role": "required_environment(\"WWC_SERVER_BOOTSTRAP_PROOF\")"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 141,
+          "role": "AuthSessionBootstrap::new binds proof to the fixed actor and repository scope"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 32,
+          "role": "MAX_BOOTSTRAP_WINDOW_SECONDS caps the exchange window"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 117,
+          "role": "AuthSessionBootstrap: one short-window proof bound to an exact Actor and Scope set"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 326,
+          "role": "SqliteAuthSessionManager::bootstrap exchanges the proof for an independent random cookie"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 897,
+          "role": "unit test: digest persisted, secret-free context, revoke on reuse"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 1155,
+          "role": "unit test: bootstrap exchange survives restart"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 298,
+          "role": "POST /api/v1/auth/session route accepts the bootstrap proof"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 418,
+          "role": "create_auth_session validates body and delegates to auth_sessions.bootstrap"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 449,
+          "role": "issued session becomes a Set-Cookie header"
+        },
+        {
+          "path": "crates/winwincode-server/tests/server.rs",
+          "line": 300,
+          "role": "integration helper create_session exchanges proof for cookie"
+        },
+        {
+          "path": "crates/winwincode-server/tests/server.rs",
+          "line": 651,
+          "role": "session context isolation, scope shrink, revocation and restart vertical"
+        },
+        {
+          "path": "crates/winwincode-server/README.md",
+          "line": 25,
+          "role": "documented required environment value"
+        },
+        {
+          "path": "crates/winwincode-server/examples/browser_local_controls_fixture.rs",
+          "line": 102,
+          "role": "example fixture reads the proof from environment"
+        },
+        {
+          "path": "apps/client/src/control-plane-client.ts",
+          "line": 508,
+          "role": "client validates bootstrapProof shape and sends it as Bearer credential"
+        },
+        {
+          "path": "apps/client/src/control-plane-client.ts",
+          "line": 656,
+          "role": "client login(bootstrapProof) calls POST auth/session"
+        },
+        {
+          "path": "apps/client/src/auth-page.ts",
+          "line": 72,
+          "role": "browser bootstrap proof form"
+        },
+        {
+          "path": "tests/control-plane-http-contract.test.mjs",
+          "line": 674,
+          "role": "bootstrapProof is the declared security scheme for session creation"
+        },
+        {
+          "path": "tests/browser-auth-session.test.mjs",
+          "line": 168,
+          "role": "browser vertical signs in with the proof"
+        },
+        {
+          "path": "tests/first-run-strongflow-browser.test.mjs",
+          "line": 42,
+          "role": "first-run vertical proves the proof never leaks into DOM, URL, storage or artifacts"
+        },
+        {
+          "path": "tests/browser-chat-strongflow-production.test.mjs",
+          "line": 64,
+          "role": "asserts proof absent from URL, DOM, storage, console, network and Server output"
+        },
+        {
+          "path": "scripts/run-api-production-vertical.mjs",
+          "line": 1020,
+          "role": "production vertical injects the proof"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 1",
@@ -123,18 +275,66 @@
       "kind": "http-endpoint",
       "currentResponsibility": "POST /internal/v1/execution-port/exchange is the private Remote Worker HTTPS exchange: the Worker presents a file-backed Bearer credential, the Server authenticates it against a registered remote worker credential, validates worker registration scope/expiry, and forwards ExecutionPort frames between Worker and Control Plane scheduler.",
       "references": [
-        {"path": "crates/winwincode-server/src/server.rs", "line": 308, "role": "route registration under /internal/v1/execution-port/exchange"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 319, "role": "remote_worker_exchange handler checks Bearer credential and delegates to the exchange port"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 214, "role": "start_server_with_remote_worker refuses the internal endpoint without TLS"},
-        {"path": "crates/winwincode-server/src/remote_worker_transport.rs", "line": 65, "role": "FileRemoteWorkerAuthenticator: credential file is the only Worker identity"},
-        {"path": "crates/winwincode-server/src/remote_worker_transport.rs", "line": 264, "role": "ProductionRemoteWorkerExchange binds authenticator, scheduler and ExecutionPort"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 492, "role": "FileRemoteWorkerAuthenticator::open with WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE"},
-        {"path": "crates/winwincode-server/src/main.rs", "line": 497, "role": "remote worker issuer/subject/security-zone/expires-at environment values"},
-        {"path": "crates/winwincode-worker/src/remote_transport.rs", "line": 125, "role": "RemoteWorkerPort::open loads TLS root plus private credential file"},
-        {"path": "crates/winwincode-worker/src/remote_transport.rs", "line": 286, "role": "POST /internal/v1/execution-port/exchange with Authorization: Bearer credential"},
-        {"path": "crates/winwincode-worker/src/remote_transport.rs", "line": 413, "role": "read_private_credential enforces private credential file permissions"},
-        {"path": "scripts/run-api-production-vertical.mjs", "line": 1105, "role": "vertical passes WWC_WORKER_CREDENTIAL_FILE to the spawned Worker"},
-        {"path": "scripts/run-api-production-vertical.mjs", "line": 1744, "role": "vertical passes WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE to the Server"}
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 308,
+          "role": "route registration under /internal/v1/execution-port/exchange"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 319,
+          "role": "remote_worker_exchange handler checks Bearer credential and delegates to the exchange port"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 214,
+          "role": "start_server_with_remote_worker refuses the internal endpoint without TLS"
+        },
+        {
+          "path": "crates/winwincode-server/src/remote_worker_transport.rs",
+          "line": 65,
+          "role": "FileRemoteWorkerAuthenticator: credential file is the only Worker identity"
+        },
+        {
+          "path": "crates/winwincode-server/src/remote_worker_transport.rs",
+          "line": 264,
+          "role": "ProductionRemoteWorkerExchange binds authenticator, scheduler and ExecutionPort"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 492,
+          "role": "FileRemoteWorkerAuthenticator::open with WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE"
+        },
+        {
+          "path": "crates/winwincode-server/src/main.rs",
+          "line": 497,
+          "role": "remote worker issuer/subject/security-zone/expires-at environment values"
+        },
+        {
+          "path": "crates/winwincode-worker/src/remote_transport.rs",
+          "line": 125,
+          "role": "RemoteWorkerPort::open loads TLS root plus private credential file"
+        },
+        {
+          "path": "crates/winwincode-worker/src/remote_transport.rs",
+          "line": 286,
+          "role": "POST /internal/v1/execution-port/exchange with Authorization: Bearer credential"
+        },
+        {
+          "path": "crates/winwincode-worker/src/remote_transport.rs",
+          "line": 413,
+          "role": "read_private_credential enforces private credential file permissions"
+        },
+        {
+          "path": "scripts/run-api-production-vertical.mjs",
+          "line": 1105,
+          "role": "vertical passes WWC_WORKER_CREDENTIAL_FILE to the spawned Worker"
+        },
+        {
+          "path": "scripts/run-api-production-vertical.mjs",
+          "line": 1744,
+          "role": "vertical passes WWC_SERVER_REMOTE_WORKER_CREDENTIAL_FILE to the Server"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 6",
@@ -153,11 +353,31 @@
       "kind": "process-entry",
       "currentResponsibility": "winwincode-worker --remote runs the standalone remote Worker: all configuration arrives from WWC_WORKER_* environment variables (identity, data directory, source root, server origin, TLS root, credential file, helper manifest, model route), the process registers over the exchange endpoint and loops heartbeat/control/poll until signal.",
       "references": [
-        {"path": "crates/winwincode-worker/src/main.rs", "line": 32, "role": "--remote argument branch builds the tokio runtime"},
-        {"path": "crates/winwincode-worker/src/main.rs", "line": 45, "role": "usage string enumerates [--check|--remote|--version]"},
-        {"path": "crates/winwincode-worker/src/main.rs", "line": 61, "role": "run_remote reads WWC_WORKER_ID, INSTANCE_ID, DATA_DIRECTORY, SOURCE_ROOT, SERVER_ORIGIN, TLS_ROOT_DER_FILE, CREDENTIAL_FILE"},
-        {"path": "crates/winwincode-worker/src/main.rs", "line": 95, "role": "WorkerMain registration loop over the remote exchange"},
-        {"path": "scripts/run-api-production-vertical.mjs", "line": 1093, "role": "production vertical spawns the Worker binary with ['--remote']"}
+        {
+          "path": "crates/winwincode-worker/src/main.rs",
+          "line": 32,
+          "role": "--remote argument branch builds the tokio runtime"
+        },
+        {
+          "path": "crates/winwincode-worker/src/main.rs",
+          "line": 45,
+          "role": "usage string enumerates [--check|--remote|--version]"
+        },
+        {
+          "path": "crates/winwincode-worker/src/main.rs",
+          "line": 61,
+          "role": "run_remote reads WWC_WORKER_ID, INSTANCE_ID, DATA_DIRECTORY, SOURCE_ROOT, SERVER_ORIGIN, TLS_ROOT_DER_FILE, CREDENTIAL_FILE"
+        },
+        {
+          "path": "crates/winwincode-worker/src/main.rs",
+          "line": 95,
+          "role": "WorkerMain registration loop over the remote exchange"
+        },
+        {
+          "path": "scripts/run-api-production-vertical.mjs",
+          "line": 1093,
+          "role": "production vertical spawns the Worker binary with ['--remote']"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 6",
@@ -176,23 +396,91 @@
       "kind": "session-state",
       "currentResponsibility": "wwc_session is an HttpOnly; Secure; SameSite=None cookie backed by SqliteAuthSessionManager: sessions are issued from the bootstrap proof, validated on every command/query/event request, support scope shrink, actor-wide revocation, logout, and survive restart; live WebSocket connections close when authorization changes.",
       "references": [
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 30, "role": "SESSION_COOKIE_NAME wwc_session"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 37, "role": "AuthSessionConfig bootstrap window and session TTL limits"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 147, "role": "SqliteAuthSessionManager durable session store"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 407, "role": "revoke one session"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 484, "role": "current validates presented cookie credentials"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 502, "role": "replace_authorized_scopes shrinks a live session"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 535, "role": "revoke_actor_sessions revokes everything for one actor"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 597, "role": "Set-Cookie wwc_session=...; HttpOnly; Secure; SameSite=None"},
-        {"path": "crates/winwincode-server/src/auth_session.rs", "line": 628, "role": "cleared session cookie header for logout"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 386, "role": "GET /api/v1/auth/session returns current session state"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 468, "role": "DELETE /api/v1/auth/session closes the session"},
-        {"path": "crates/winwincode-server/src/server.rs", "line": 891, "role": "authenticator.authenticate validates cookie on command/query/event requests"},
-        {"path": "crates/winwincode-server/src/enterprise_identity_protocol.rs", "line": 318, "role": "external identity login issues the same cookie shape"},
-        {"path": "crates/winwincode-server/tests/server.rs", "line": 587, "role": "one origin serves authenticated commands, queries and events"},
-        {"path": "crates/winwincode-server/tests/server.rs", "line": 651, "role": "session isolation, scope shrink, revocation, restart survival"},
-        {"path": "crates/winwincode-server/tests/server.rs", "line": 740, "role": "live WebSocket closes when session authorization changes"},
-        {"path": "tests/browser-auth-session.test.mjs", "line": 300, "role": "browser vertical for cross-origin session workflows and restart"}
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 30,
+          "role": "SESSION_COOKIE_NAME wwc_session"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 37,
+          "role": "AuthSessionConfig bootstrap window and session TTL limits"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 147,
+          "role": "SqliteAuthSessionManager durable session store"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 407,
+          "role": "revoke one session"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 484,
+          "role": "current validates presented cookie credentials"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 502,
+          "role": "replace_authorized_scopes shrinks a live session"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 535,
+          "role": "revoke_actor_sessions revokes everything for one actor"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 597,
+          "role": "Set-Cookie wwc_session=...; HttpOnly; Secure; SameSite=None"
+        },
+        {
+          "path": "crates/winwincode-server/src/auth_session.rs",
+          "line": 628,
+          "role": "cleared session cookie header for logout"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 386,
+          "role": "GET /api/v1/auth/session returns current session state"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 468,
+          "role": "DELETE /api/v1/auth/session closes the session"
+        },
+        {
+          "path": "crates/winwincode-server/src/server.rs",
+          "line": 891,
+          "role": "authenticator.authenticate validates cookie on command/query/event requests"
+        },
+        {
+          "path": "crates/winwincode-server/src/enterprise_identity_protocol.rs",
+          "line": 318,
+          "role": "external identity login issues the same cookie shape"
+        },
+        {
+          "path": "crates/winwincode-server/tests/server.rs",
+          "line": 587,
+          "role": "one origin serves authenticated commands, queries and events"
+        },
+        {
+          "path": "crates/winwincode-server/tests/server.rs",
+          "line": 651,
+          "role": "session isolation, scope shrink, revocation, restart survival"
+        },
+        {
+          "path": "crates/winwincode-server/tests/server.rs",
+          "line": 740,
+          "role": "live WebSocket closes when session authorization changes"
+        },
+        {
+          "path": "tests/browser-auth-session.test.mjs",
+          "line": 300,
+          "role": "browser vertical for cross-origin session workflows and restart"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 1",
@@ -211,19 +499,71 @@
       "kind": "domain-entry",
       "currentResponsibility": "ProductSession and SessionBinding are established through the generated HTTP Session command family: dispatcher routes SessionCreate/ChatSubmit into the Control Plane product session service, which creates the ProductSession, binds Chat turns to worker slots, and persists SessionBinding identities (product-session or delivery-stage scope) with exact execution identity checks.",
       "references": [
-        {"path": "crates/winwincode-server/src/dispatcher.rs", "line": 32, "role": "CommandName::SessionCreate routes into the Session command family"},
-        {"path": "crates/winwincode-server/src/application.rs", "line": 425, "role": "SessionCreateCommand dispatches to ProductSessionApiService::create"},
-        {"path": "crates/winwincode-server/src/application.rs", "line": 428, "role": "ChatSubmitCommand dispatches to submit_chat which opens a turn"},
-        {"path": "crates/winwincode-control-plane/src/product_session_service.rs", "line": 657, "role": "create: expected-revision-zero, replay, scope and model-route validation before ProductSession::create"},
-        {"path": "crates/winwincode-control-plane/src/product_session_service.rs", "line": 710, "role": "continue_session persists a new SessionBinding when a turn binds to a worker slot"},
-        {"path": "crates/winwincode-control-plane/src/product_session_service.rs", "line": 777, "role": "durable PersistedSessionBinding append with slot, reservation and model exchange id"},
-        {"path": "crates/winwincode-control-plane/src/product_session_service.rs", "line": 1605, "role": "build_binding: SessionBinding::pending then accept_worker_session"},
-        {"path": "crates/winwincode-session/src/product_session.rs", "line": 91, "role": "ProductSession::create domain entry"},
-        {"path": "crates/winwincode-session/src/binding.rs", "line": 303, "role": "SessionBinding::pending"},
-        {"path": "crates/winwincode-session/src/binding.rs", "line": 342, "role": "accept_worker_session binds WorkerSession identity"},
-        {"path": "crates/winwincode-delivery/src/application/session_binding.rs", "line": 248, "role": "accept_worker_session_with_authority for Delivery-stage bindings"},
-        {"path": "crates/winwincode-delivery/src/store.rs", "line": 1639, "role": "DeliveryCommand::AcceptWorkerSession store dispatch"},
-        {"path": "tests/api-production-vertical-runner.test.mjs", "line": 38, "role": "vertical runner asserts sessionBinding facts"}
+        {
+          "path": "crates/winwincode-server/src/dispatcher.rs",
+          "line": 32,
+          "role": "CommandName::SessionCreate routes into the Session command family"
+        },
+        {
+          "path": "crates/winwincode-server/src/application.rs",
+          "line": 425,
+          "role": "SessionCreateCommand dispatches to ProductSessionApiService::create"
+        },
+        {
+          "path": "crates/winwincode-server/src/application.rs",
+          "line": 428,
+          "role": "ChatSubmitCommand dispatches to submit_chat which opens a turn"
+        },
+        {
+          "path": "crates/winwincode-control-plane/src/product_session_service.rs",
+          "line": 657,
+          "role": "create: expected-revision-zero, replay, scope and model-route validation before ProductSession::create"
+        },
+        {
+          "path": "crates/winwincode-control-plane/src/product_session_service.rs",
+          "line": 710,
+          "role": "continue_session persists a new SessionBinding when a turn binds to a worker slot"
+        },
+        {
+          "path": "crates/winwincode-control-plane/src/product_session_service.rs",
+          "line": 777,
+          "role": "durable PersistedSessionBinding append with slot, reservation and model exchange id"
+        },
+        {
+          "path": "crates/winwincode-control-plane/src/product_session_service.rs",
+          "line": 1605,
+          "role": "build_binding: SessionBinding::pending then accept_worker_session"
+        },
+        {
+          "path": "crates/winwincode-session/src/product_session.rs",
+          "line": 91,
+          "role": "ProductSession::create domain entry"
+        },
+        {
+          "path": "crates/winwincode-session/src/binding.rs",
+          "line": 303,
+          "role": "SessionBinding::pending"
+        },
+        {
+          "path": "crates/winwincode-session/src/binding.rs",
+          "line": 342,
+          "role": "accept_worker_session binds WorkerSession identity"
+        },
+        {
+          "path": "crates/winwincode-delivery/src/application/session_binding.rs",
+          "line": 248,
+          "role": "accept_worker_session_with_authority for Delivery-stage bindings"
+        },
+        {
+          "path": "crates/winwincode-delivery/src/store.rs",
+          "line": 1639,
+          "role": "DeliveryCommand::AcceptWorkerSession store dispatch"
+        },
+        {
+          "path": "tests/api-production-vertical-runner.test.mjs",
+          "line": 38,
+          "role": "vertical runner asserts sessionBinding facts"
+        }
       ],
       "migrationTarget": {
         "phase": "Phase 7",
@@ -245,9 +585,36 @@
     "The bootstrap proof remains write-only, digest-persisted, and never echoed; migration changes who may present it (uninitialized Server, exactly once) not its secrecy guarantees."
   ],
   "migrationOrder": [
-    {"order": 1, "touchpointIds": ["bootstrap-proof-credential", "server-fixed-auth-subject", "browser-secure-cookie-session"], "rationale": "Phase 1 / AUTH-100: UserAccountService and Owner bootstrap unblock every later grant, occupancy, and audit fact that must name a real user."},
-    {"order": 2, "touchpointIds": ["worker-remote-entrypoint", "remote-worker-exchange-endpoint"], "rationale": "Phase 6 / WORKER-100 + WORKER-200: managed-session launch and LaunchGrant verification reuse today's exchange transport and can land while single-root scheduling still works."},
-    {"order": 3, "touchpointIds": ["server-single-repository-root"], "rationale": "Phase 5 / REPO-100: repository registry and ACL need Device Client local path storage, which depends on Phase 2-4; the built-in Local Client projection bridges the compatibility window."},
-    {"order": 4, "touchpointIds": ["product-session-binding-entry"], "rationale": "Phase 7 / FLOW-100: session creation gains occupancy and repository-grant checks only after AUTH-100, CLIENT-300, REPO-100 and WORKER-200 facts exist; identity and replay rules stay frozen."}
+    {
+      "order": 1,
+      "touchpointIds": [
+        "bootstrap-proof-credential",
+        "server-fixed-auth-subject",
+        "browser-secure-cookie-session"
+      ],
+      "rationale": "Phase 1 / AUTH-100: UserAccountService and Owner bootstrap unblock every later grant, occupancy, and audit fact that must name a real user."
+    },
+    {
+      "order": 2,
+      "touchpointIds": [
+        "worker-remote-entrypoint",
+        "remote-worker-exchange-endpoint"
+      ],
+      "rationale": "Phase 6 / WORKER-100 + WORKER-200: managed-session launch and LaunchGrant verification reuse today's exchange transport and can land while single-root scheduling still works."
+    },
+    {
+      "order": 3,
+      "touchpointIds": [
+        "server-single-repository-root"
+      ],
+      "rationale": "Phase 5 / REPO-100: repository registry and ACL need Device Client local path storage, which depends on Phase 2-4; the built-in Local Client projection bridges the compatibility window."
+    },
+    {
+      "order": 4,
+      "touchpointIds": [
+        "product-session-binding-entry"
+      ],
+      "rationale": "Phase 7 / FLOW-100: session creation gains occupancy and repository-grant checks only after AUTH-100, CLIENT-300, REPO-100 and WORKER-200 facts exist; identity and replay rules stay frozen."
+    }
   ]
 }
