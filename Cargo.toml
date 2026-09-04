@@ -8,6 +8,7 @@ members = [
   "crates/winwincode-cli",
   "crates/winwincode-client-port",
   "crates/winwincode-delivery",
+  "crates/winwincode-device-client",
   "crates/winwincode-drill",
   "crates/winwincode-control-plane",
   "crates/winwincode-codex",

@@ -1,0 +1,24 @@
+[package]
+name = "winwincode-device-client"
+description = "Local device-client store and identity for the WinWinCode device client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+include = ["src/**", "tests/**", "Cargo.toml"]
+
+[dependencies]
+getrandom.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# Direct path dependency on purpose: `winwincode-client-port` is not part of
+# `[workspace.dependencies]`, matching how `winwincode-server` and
+# `winwincode-local` reference sibling crates.
+winwincode-client-port = { path = "../winwincode-client-port" }
+
+[lints]
+workspace = true
