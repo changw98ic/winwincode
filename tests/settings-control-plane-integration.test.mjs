@@ -697,6 +697,7 @@ test('settings keeps write-only inputs only in mounted controls until success or
 test('an accepted Credential create keeps its submission until the refreshed snapshot confirms success', () => {
   const document = new FakeDocument()
   const rootElement = new FakeElement(document, 'div')
+  const calls = []
   let current = pageState()
   let listener = () => {}
   const model = {
@@ -710,7 +711,7 @@ test('an accepted Credential create keeps its submission until the refreshed sna
     async start() {},
     async refresh() {},
     async updateSettings() {},
-    async createCredentialReference() {},
+    async createCredentialReference(input) { calls.push(input) },
     async rotateCredentialReference() {},
     async revokeCredentialReference() {},
     cancelPending() {},
@@ -735,6 +736,18 @@ test('an accepted Credential create keeps its submission until the refreshed sna
   listener(current)
   current = pageState({ status: 'refreshing', realtime: 'reloading' })
   listener(current)
+  current = pageState()
+  listener(current)
+  byClass(rootElement, 'wwc-settings-create-form').dispatch('submit')
+  assert.deepEqual({
+    calls: calls.length,
+    disabled: byClass(rootElement, 'wwc-settings-create-submit').disabled,
+    secret: createSecret.value,
+  }, {
+    calls: 1,
+    disabled: true,
+    secret: 'ASYNC_CREATE_SECRET',
+  })
   current = pageState({
     credentials: [credential(), credential({
       id: externalCredentialId,
