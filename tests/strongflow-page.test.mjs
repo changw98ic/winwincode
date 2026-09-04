@@ -739,6 +739,36 @@ test('typed StrongFlow routes reject values outside the canonical entity identit
   )
 })
 
+test('canonical TypeScript lane executes every UI-406 Evidence acceptance suite once', () => {
+  const runner = readFileSync(resolve(root, 'scripts/run-ts-tests.mjs'), 'utf8')
+  for (const path of [
+    'tests/strongflow-evidence.test.mjs',
+    'tests/strongflow-page.test.mjs',
+    'tests/strongflow-evidence-browser.test.mjs',
+  ]) {
+    assert.equal(
+      runner.split(`'${path}'`).length - 1,
+      1,
+      `${path} must be registered exactly once in the canonical TypeScript lane`,
+    )
+  }
+})
+
+test('UI-406 acceptance fixtures use only generated-schema Evidence identities', () => {
+  for (const path of [
+    'tests/strongflow-evidence.test.mjs',
+    'tests/strongflow-page.test.mjs',
+    'tests/strongflow-evidence-browser.test.mjs',
+    'tests/fixtures/browser-strongflow-evidence-client.mjs',
+  ]) {
+    assert.doesNotMatch(
+      readFileSync(resolve(root, path), 'utf8'),
+      /\bevidence:[A-Za-z0-9]/u,
+      `${path} must use canonical evd_ EvidenceId values`,
+    )
+  }
+})
+
 test('Evidence entry controls preserve keyed identity across equivalent projections', () => {
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
