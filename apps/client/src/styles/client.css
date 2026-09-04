@@ -10,5 +10,6 @@
 @import './features/local-operations.css' layer(features);
 @import './features/local-decisions.css' layer(features);
 @import './features/attention-center.css' layer(features);
+@import './features/home.css' layer(features);
 @import './features/enterprise.css' layer(features);
 @import './features/usage-health.css' layer(features);

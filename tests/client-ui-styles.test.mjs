@@ -16,6 +16,7 @@ const sourceFiles = [
   'features/local-operations.css',
   'features/local-decisions.css',
   'features/attention-center.css',
+  'features/home.css',
   'features/enterprise.css',
   'features/usage-health.css',
 ]
@@ -110,4 +111,16 @@ test('global connection and error states have one responsive non-color presentat
     '.wwc-client-error-boundary',
   ]) assert.equal(components.includes(selector), true, selector)
   assert.match(components, /@media \(max-width: 48rem\)[\s\S]+connection-bar/u)
+})
+
+test('the Home dashboard keeps one token-driven responsive card layout', () => {
+  const home = source('features/home.css')
+  assert.match(home, /\[data-wwc-page='home'\]/u)
+  assert.match(home, /@media \(max-width: 48rem\)/u)
+  for (const className of [
+    '.wwc-home-section',
+    '.wwc-home-card',
+    '.wwc-home-card-context',
+    '.wwc-home-unavailable',
+  ]) assert.equal(home.includes(className), true, className)
 })

@@ -136,14 +136,18 @@ test('deployable Client files contain only browser assets and runtime serverUrl 
   assert.doesNotMatch(buildScript, /cargo|build-native|winwincode-server|winwincode-worker/u)
 })
 
-test('Client shell has one facade and the five canonical product entries with Chat first', () => {
+test('Client shell has one facade and the six canonical product entries with Home first', () => {
   const application = readFileSync(join(clientRoot, 'src', 'application.ts'), 'utf8')
   const surfaces = readFileSync(join(clientRoot, 'src', 'client-surface.ts'), 'utf8')
   const index = readFileSync(join(clientRoot, 'src', 'index.ts'), 'utf8')
-  for (const surface of ['chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
+  for (const surface of ['home', 'chat', 'strongflow', 'settings', 'attention', 'enterprise']) {
     assert.match(surfaces, new RegExp(`id: '${surface}'`, 'u'))
   }
-  assert.match(surfaces, /id: 'chat'[\s\S]+default: true/u)
+  // UI-504: the Attention-first dashboard is the canonical first screen, so a
+  // start-up without a route never lands in an arbitrary Chat or Delivery.
+  assert.match(surfaces, /id: 'home'[\s\S]+default: true/u)
+  assert.match(surfaces, /id: 'home'[\s\S]+default: true[\s\S]+id: 'chat'/u)
+  assert.match(application, /activeSurface\.id === 'home'/u)
   assert.equal((`${application}\n${index}`.match(/createControlPlaneClient/g) ?? []).length, 2)
   assert.doesNotMatch(application, /\bfetch\s*\(|new\s+WebSocket/u)
 })

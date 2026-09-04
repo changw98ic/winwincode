@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export type ClientSurfaceId =
+  | 'home'
   | 'chat'
   | 'strongflow'
   | 'settings'
@@ -15,13 +16,25 @@ export interface ClientSurface {
   readonly default: boolean
 }
 
+/**
+ * UI-504: Home is the canonical first screen.  A start-up that has no route
+ * lands on the Attention-first dashboard instead of an arbitrary Chat session
+ * or the first Delivery, and every other product area stays one link away.
+ */
 export const CLIENT_SURFACES: readonly ClientSurface[] = Object.freeze([
+  Object.freeze({
+    id: 'home',
+    path: '/home',
+    label: 'Home',
+    description: 'Attention-first dashboard for the current repository Scope',
+    default: true,
+  }),
   Object.freeze({
     id: 'chat',
     path: '/chat',
     label: 'Chat',
     description: 'Conversation workspace',
-    default: true,
+    default: false,
   }),
   Object.freeze({
     id: 'strongflow',

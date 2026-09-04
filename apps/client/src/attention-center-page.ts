@@ -197,9 +197,19 @@ function urgencyLabel(urgency: AttentionCenterItem['urgency']): string {
   return 'Binding invalid · action disabled'
 }
 
+/**
+ * The route facts of one card.  The full Attention item satisfies this subset,
+ * so the Attention Center and each composed surface (UI-504 Home) build the same
+ * authoritative decision link from the same function.
+ */
+export type AttentionCenterItemRoute = Pick<
+  AttentionCenterItem,
+  'kind' | 'id' | 'productSessionId' | 'stageRunId' | 'deliveryId'
+>
+
 /** Real entry point for one card: the authoritative decision or Delivery surface. */
 export function attentionCenterItemHash(
-  item: AttentionCenterItem,
+  item: AttentionCenterItemRoute,
   scopeSelection: ScopeRouteSelection,
   origins?: readonly AttentionCenterOrigin[],
 ): string {
