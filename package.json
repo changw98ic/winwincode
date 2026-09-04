@@ -17,6 +17,7 @@
     "contracts:generate": "node scripts/generate-contracts.mjs",
     "contracts:check": "node scripts/generate-contracts.mjs --check",
     "lint:source": "node scripts/lint-workspace.mjs",
+    "check:no-absolute-paths": "node scripts/check-no-absolute-paths.mjs",
     "lint:rust": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
     "lint": "pnpm lint:source && pnpm typecheck && pnpm lint:rust",
     "typecheck": "pnpm contracts:check && tsc -p tsconfig.check.json --pretty false",
