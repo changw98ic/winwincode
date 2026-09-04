@@ -4,6 +4,7 @@ import type {
   DeliveryAttentionProjection,
   DeliveryProjection,
   DeliveryTaskDetailProjection,
+  EvidenceId,
   RepositoryScope,
 } from './generated/contracts.js'
 import { scopeHash, type ScopeRouteSelection } from './core/scope-context.js'
@@ -24,6 +25,11 @@ import {
   mountStrongFlowDiagrams,
   type StrongFlowDiagramSelection,
 } from './strongflow-diagrams.js'
+import {
+  mountStrongFlowEvidence,
+  type StrongFlowEvidenceOptions,
+  type StrongFlowEvidenceWorkbench,
+} from './strongflow-evidence.js'
 import { mountStrongFlowHistoryNavigation } from './strongflow-history-navigation.js'
 import { mountStrongFlowRunDetail } from './strongflow-run-detail.js'
 import {
@@ -79,6 +85,8 @@ export interface StrongFlowPageOptions {
   /** Candidate Diff layout requested by the typed route seam. */
   readonly candidateView?: CandidateDiffViewMode
   readonly onCandidateViewModeChange?: (mode: CandidateDiffViewMode) => void
+  /** Canonical Evidence read/query and typed-route boundary. */
+  readonly evidence: StrongFlowEvidenceOptions
 }
 
 export interface StrongFlowLayoutViewport {
@@ -494,36 +502,6 @@ const ARTIFACT_TAB_LABELS: Readonly<Record<StrongFlowArtifactsTab, string>> = Ob
   evidence: 'Evidence',
 })
 
-function renderEvidencePanel(
-  document: Document,
-  projection: StrongFlowProjection,
-  limits: StrongFlowRenderLimits,
-): HTMLElement {
-  const section = strongFlowElement(document, 'section', 'wwc-strongflow-view-evidence')
-  const heading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
-  const evidence = strongFlowElement(document, 'ul', 'wwc-strongflow-evidence')
-  const bounded = boundedItems(projection.evidence, limits.evidence)
-  heading.textContent = 'Evidence'
-  evidence.setAttribute('aria-label', 'Delivery evidence')
-  evidence.append(...bounded.items.map(item => {
-    const row = document.createElement('li')
-    const title = document.createElement('strong')
-    const source = document.createElement('p')
-    title.textContent = `${item.type} · ${item.id}`
-    source.textContent = item.sourceRef
-    row.dataset.candidateRef = item.candidateRef
-    row.dataset.evidenceRefId = item.id
-    row.append(title, source)
-    return row
-  }))
-  section.append(heading, evidence)
-  const omitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
-  omitted.hidden = bounded.omitted === 0
-  omitted.textContent = `${String(bounded.omitted)} more evidence records not shown.`
-  section.append(omitted)
-  return section
-}
-
 interface StrongFlowResizeHandle {
   readonly root: HTMLElement
   update(value: number): void
@@ -745,17 +723,12 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   const attentionHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
   const attention = strongFlowElement(document, 'ul', 'wwc-strongflow-attention-list')
   const attentionOmitted = strongFlowElement(document, 'p', 'wwc-strongflow-omitted')
-  const contextEvidenceHost = strongFlowElement(
-    document,
-    'div',
-    'wwc-strongflow-context-evidence-host',
-  )
   const diagramsHost = strongFlowElement(document, 'div', 'wwc-strongflow-diagrams-host')
   const candidateHost = strongFlowElement(document, 'div', 'wwc-strongflow-candidate-host')
-  const artifactEvidenceHost = strongFlowElement(
+  const evidenceHost = strongFlowElement(
     document,
     'div',
-    'wwc-strongflow-artifact-evidence-host',
+    'wwc-strongflow-evidence-host',
   )
   const actions = strongFlowElement(document, 'section', 'wwc-strongflow-actions')
   const actionsHeading = strongFlowElement(document, 'h3', 'wwc-strongflow-section-heading')
@@ -831,7 +804,15 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   )
   let closed = false
   let preferences = strongFlowLayoutPreferencesFromStorage(storage)
-  if (options.model.state.candidateFiles.selectedPath !== null) {
+  if (
+    options.evidence !== undefined
+    && (options.evidence.route.evidenceId !== null || options.evidence.route.tab !== 'evidence')
+  ) {
+    preferences = normalizeStrongFlowLayoutPreferences({
+      ...preferences,
+      artifactsTab: 'evidence',
+    })
+  } else if (options.model.state.candidateFiles.selectedPath !== null) {
     preferences = normalizeStrongFlowLayoutPreferences({
       ...preferences,
       artifactsTab: 'candidate',
@@ -839,9 +820,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   }
   let navigationDrawerOpen = false
   let contextDrawerOpen = false
-  let contextEvidenceNode: HTMLElement | null = null
-  let artifactEvidenceNode: HTMLElement | null = null
-  let lastEvidenceKey: string | null = null
+  let evidenceWorkbench: StrongFlowEvidenceWorkbench | null = null
   let lastLayoutKey: string | null = null
   // One shared history tree per snapshot: navigation and the run detail must
   // never each re-derive their own copy of the same business display state.
@@ -876,6 +855,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
 
   function selectArtifactTab(id: string): void {
     if (!STRONGFLOW_ARTIFACTS_TABS.includes(id as StrongFlowArtifactsTab)) return
+    if (preferences.artifactsTab === id) return
     persist({ ...preferences, artifactsTab: id as StrongFlowArtifactsTab })
   }
 
@@ -905,7 +885,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     for (const item of Array.from(attention.children) as HTMLElement[]) {
       item.dataset.diagramLinked = String(attentionIds.has(item.dataset.attentionItemId ?? ''))
     }
-    for (const host of [candidateHost, contextEvidenceHost, artifactEvidenceHost]) {
+    for (const host of [candidateHost, evidenceHost]) {
       host.dataset.diagramLinked = String(
         (selection?.diffPaths.length ?? 0) > 0 || evidenceIds.size > 0,
       )
@@ -997,7 +977,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   }
   artifactPanels.get('solution')?.append(diagramsHost)
   artifactPanels.get('candidate')?.append(candidateHost)
-  artifactPanels.get('evidence')?.append(artifactEvidenceHost)
+  artifactPanels.get('evidence')?.append(evidenceHost)
   artifacts.append(artifactsHeading, artifactTabs.root, ...artifactPanels.values())
 
   const diagrams = mountStrongFlowDiagrams({
@@ -1156,7 +1136,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   )
   navigation.append(deliveriesRoot, tasksSection, stagesSection)
   mainRegion.append(details, historyHost, actions)
-  context.append(attentionSection, contextEvidenceHost)
+  context.append(attentionSection)
   outerSplit.root.replaceChildren(
     outerSplit.primary,
     navigationResize.root,
@@ -1174,6 +1154,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
   layout.append(status, error, content)
   options.root.replaceChildren(layout)
 
+  function openEvidence(evidenceId: EvidenceId): void {
+    selectArtifactTab('evidence')
+    void evidenceWorkbench?.openEvidence(evidenceId)
+  }
+
   const candidateView = mountStrongFlowCandidate({
     document,
     limits,
@@ -1186,8 +1171,21 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     onLoadMoreFiles() { void options.model.loadMoreCandidateFiles() },
     onSelectFile(path) { void options.model.selectCandidateFile(path) },
     onLoadMoreDiff() { void options.model.loadMoreCandidateDiff() },
+    onOpenEvidence: openEvidence,
   })
   candidateHost.append(candidateView.root)
+  if (options.evidence !== undefined) {
+    evidenceWorkbench = mountStrongFlowEvidence({
+      ...options.evidence,
+      root: evidenceHost,
+      model: options.model,
+      limits: { evidence: limits.evidence },
+      onRouteChange(next) {
+        selectArtifactTab('evidence')
+        options.evidence?.onRouteChange(next)
+      },
+    })
+  }
 
   const deliveryRows = new WeakMap<HTMLLIElement, {
     readonly link: HTMLAnchorElement
@@ -1252,6 +1250,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     stagesOmitted,
     tasksEmpty,
     stagesEmpty,
+    onOpenEvidence: openEvidence,
     initialSelection: strongFlowHistorySelectionFromHash(historyLocation?.hash() ?? ''),
     onSelect(selection) {
       if (historyLocation !== null) {
@@ -1707,6 +1706,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     attentionSection.hidden = projection === null
     diagramsHost.hidden = projection === null
     candidateHost.hidden = projection === null
+    evidenceHost.hidden = projection === null
     if (projection === null) {
       empty.textContent = stateStatus === 'loading' || stateStatus === 'refreshing'
         ? 'Loading the exact Delivery snapshot…'
@@ -1719,11 +1719,6 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       attentionCollection.update([])
       updateOmitted(attentionOmitted, 0, 'Attention records')
       diagrams.update({ projection: null, narrow: strongFlowLayoutMode(viewport.width) === 'narrow' })
-      if (contextEvidenceNode !== null) contextEvidenceNode.remove()
-      if (artifactEvidenceNode !== null) artifactEvidenceNode.remove()
-      contextEvidenceNode = null
-      artifactEvidenceNode = null
-      lastEvidenceKey = null
       candidateView.update({ projection: null, candidateFiles, viewMode: candidateViewMode })
       applyDiagramSelection(null)
       return
@@ -1747,25 +1742,11 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     attentionCollection.update(boundedAttention.items)
     updateOmitted(attentionOmitted, boundedAttention.omitted, 'Attention records')
 
-    const evidenceKey = JSON.stringify(projection.evidence)
     diagrams.update({
       projection,
       narrow: strongFlowLayoutMode(viewport.width) === 'narrow',
     })
     candidateView.update({ projection, candidateFiles, viewMode: candidateViewMode })
-    if (
-      contextEvidenceNode === null
-      || artifactEvidenceNode === null
-      || lastEvidenceKey !== evidenceKey
-    ) {
-      contextEvidenceNode?.remove()
-      artifactEvidenceNode?.remove()
-      contextEvidenceNode = renderEvidencePanel(document, projection, limits)
-      artifactEvidenceNode = renderEvidencePanel(document, projection, limits)
-      contextEvidenceHost.append(contextEvidenceNode)
-      artifactEvidenceHost.append(artifactEvidenceNode)
-    }
-    lastEvidenceKey = evidenceKey
     applyDiagramSelection(diagramSelection)
   }
 
@@ -1935,7 +1916,7 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
     )
     mountRegion(
       narrow ? contextDrawerContent : context,
-      [attentionSection, contextEvidenceHost],
+      [attentionSection],
     )
 
     desktopControls.hidden = narrow
@@ -2113,8 +2094,8 @@ export function mountStrongFlowPage(options: StrongFlowPageOptions): StrongFlowP
       deliveryCollection.close()
       diagrams.close()
       candidateView.close()
-      contextEvidenceNode?.remove()
-      artifactEvidenceNode?.remove()
+      evidenceWorkbench?.close()
+      evidenceWorkbench = null
       navigationResize.close()
       contextResize.close()
       navigationDrawer.close()

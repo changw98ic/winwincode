@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DeliveryTaskId } from './generated/contracts.js'
+import type { DeliveryTaskId, EvidenceId } from './generated/contracts.js'
 import {
   EMPTY_SELECTION,
   sameHistorySelection,
@@ -27,6 +27,7 @@ export interface StrongFlowHistoryNavigationOptions {
   readonly stagesEmpty: HTMLElement
   readonly initialSelection?: StrongFlowHistorySelection
   readonly onSelect: (selection: StrongFlowHistorySelection) => void
+  readonly onOpenEvidence: (evidenceId: EvidenceId) => void
 }
 
 export interface StrongFlowHistoryNavigationView {
@@ -39,6 +40,8 @@ interface RunRowState {
   run: StrongFlowHistoryRun
   context: RunRowContext
   button: HTMLButtonElement
+  evidence: HTMLElement
+  evidenceButtons: KeyedCollectionView<EvidenceId, string, HTMLButtonElement>
   onClick: () => void
   onKeydown: (event: KeyboardEvent) => void
 }
@@ -79,6 +82,7 @@ export function mountStrongFlowHistoryNavigation(
   const expandedTasks = new Set<DeliveryTaskId>()
   const taskRows = new WeakMap<HTMLLIElement, TaskRowState>()
   const runRows = new WeakMap<HTMLLIElement, RunRowState>()
+  const evidenceButtonListeners = new WeakMap<HTMLButtonElement, () => void>()
   let taskCollection: ReturnType<typeof mountTaskCollection>
   let timelineCollection: KeyedCollectionView<StrongFlowHistoryRun, string, HTMLLIElement>
 
@@ -103,12 +107,41 @@ export function mountStrongFlowHistoryNavigation(
     return () => {
       const item = document.createElement('li')
       const button = document.createElement('button')
+      const evidence = document.createElement('span')
       button.type = 'button'
-      item.append(button)
+      evidence.className = 'wwc-strongflow-stage-evidence'
+      item.append(button, evidence)
+      const evidenceButtons = mountKeyedCollection<EvidenceId, string, HTMLButtonElement>({
+        parent: evidence,
+        key: evidenceId => evidenceId,
+        create() {
+          const opener = document.createElement('button')
+          opener.type = 'button'
+          opener.className = 'wwc-strongflow-stage-evidence-open'
+          const onOpen = () => {
+            const evidenceId = opener.dataset.evidenceId
+            if (evidenceId !== undefined) options.onOpenEvidence(evidenceId as EvidenceId)
+          }
+          opener.addEventListener('click', onOpen)
+          evidenceButtonListeners.set(opener, onOpen)
+          return opener
+        },
+        update(opener, evidenceId) {
+          opener.dataset.evidenceId = evidenceId
+          opener.textContent = `Open Evidence ${evidenceId}`
+        },
+        remove(opener) {
+          const onOpen = evidenceButtonListeners.get(opener)
+          if (onOpen !== undefined) opener.removeEventListener('click', onOpen)
+          evidenceButtonListeners.delete(opener)
+        },
+      })
       const state: RunRowState = {
         run: undefined as unknown as StrongFlowHistoryRun,
         context,
         button,
+        evidence,
+        evidenceButtons,
         onClick: () => activateRun(state),
         onKeydown: (event: KeyboardEvent) => handleRunKeydown(event, state),
       }
@@ -130,6 +163,9 @@ export function mountStrongFlowHistoryNavigation(
     if (run.attempt !== null) state.button.dataset.attempt = String(run.attempt)
     else delete state.button.dataset.attempt
     const label = runLabel(run)
+    const evidenceIds = run.evidence.map(row => row.id)
+    state.evidenceButtons.update(evidenceIds)
+    state.evidence.hidden = evidenceIds.length === 0
     if (run.isCurrent) {
       state.button.className = 'wwc-strongflow-current-run'
       state.button.setAttribute('aria-current', 'true')
@@ -160,6 +196,7 @@ export function mountStrongFlowHistoryNavigation(
         if (state === undefined) return
         state.button.removeEventListener('click', state.onClick)
         state.button.removeEventListener('keydown', state.onKeydown)
+        state.evidenceButtons.close()
         runRows.delete(item)
       },
     })

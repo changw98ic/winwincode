@@ -50,10 +50,15 @@ const {
   strongFlowPagePresentation,
 } = page
 const { boundedItems } = rendering
-const { strongFlowRouteHash } = application
+const { parseStrongFlowRouteHash, strongFlowRouteHash } = application
 const { clientSurfaceFromHash } = clientSurface
 const deliveryId = 'dlv_00000000000000000000000001'
 const stageRunId = 'run_00000000000000000000000001'
+const evidenceId = 'evd_00000000000000000000000001'
+
+function evidenceIdFor(value) {
+  return `evd_${String(value).padStart(26, '0')}`
+}
 
 function many(count, create) {
   return Array.from({ length: count }, (_, index) => create(index + 1))
@@ -153,15 +158,28 @@ function projection() {
       })),
     },
     evidence: many(5, value => ({
-      id: `evidence:${String(value)}`,
+      id: evidenceIdFor(value),
       type: 'test',
       sourceRef: `artifact:test:${String(value)}`,
       candidateRef,
+      createdAt: '2026-08-27T01:00:04.000Z',
+      deliverySpecId: 'spec:1',
+      deliverySpecRevision: 3,
+      sessionBindingId: 'binding:1',
+      stageRunId: value === 1 ? stageRunId : `run_${String(value).padStart(26, '0')}`,
     })),
     verdict: {
       id: 'verdict:1',
       status: 'pass',
       producedAt: '2026-08-27T01:00:05.000Z',
+      criteria: [{
+        criterionId: 'criterion:1',
+        evaluatedAt: '2026-08-27T01:00:05.000Z',
+        evidenceRefs: [evidenceId],
+        explanation: 'The exact check passed.',
+        resultId: 'result:1',
+        verdict: 'pass',
+      }],
     },
     attention: many(5, value => ({
       id: `attention:${String(value)}`,
@@ -344,6 +362,10 @@ class FakeElement {
 
   focus() { this.ownerDocument.activeElement = this }
 
+  blur() {
+    if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null
+  }
+
   click() { this.emit('click') }
 }
 
@@ -377,17 +399,17 @@ class FakeStrongFlowViewModel {
 
   draftScope = '["strongflow-page-test-actor","strongflow-page-test-scope"]'
   calls = []
-  listener = null
+  listeners = new Set()
 
   subscribe(listener) {
-    this.listener = listener
+    this.listeners.add(listener)
     listener(this.state)
-    return () => { this.listener = null }
+    return () => { this.listeners.delete(listener) }
   }
 
   publish(next) {
     this.state = next
-    this.listener?.(next)
+    for (const listener of this.listeners) listener(next)
   }
 
   async start() { this.calls.push(['start']) }
@@ -425,6 +447,87 @@ class FakeStrongFlowCreateViewModel {
   async create(input) { this.calls.push(['create', input]) }
   cancelPending() { this.calls.push(['cancelPending']) }
   close() { this.calls.push(['close']) }
+}
+
+const pageActor = { kind: 'user', id: 'usr_00000000000000000000000001' }
+const pageScope = {
+  kind: 'repository',
+  organizationId: 'org_00000000000000000000000001',
+  workspaceId: 'wsp_00000000000000000000000001',
+  projectId: 'prj_00000000000000000000000001',
+  repositoryId: 'rep_00000000000000000000000001',
+}
+
+function pageEvidenceClient() {
+  return {
+    queries: [],
+    async query(request) {
+      this.queries.push(request)
+      if (request.query === 'evidence.get') {
+        const binding = request.parameters
+        return {
+          schemaVersion: 'winwincode/v1',
+          requestId: request.requestId,
+          query: request.query,
+          result: {
+            kind: 'evidence_detail',
+            artifactAccess: { state: 'unavailable', reason: 'no_authoritative_link' },
+            evidence: {
+              candidateRef: binding.candidateRef,
+              createdAt: '2026-08-27T01:00:04.000Z',
+              deliverySpecId: 'spec:1',
+              deliverySpecRevision: 3,
+              id: binding.evidenceId,
+              sessionBindingId: binding.sessionBindingId,
+              sourceRef: binding.sourceRef,
+              stageRunId: binding.stageRunId,
+              type: binding.type,
+            },
+            outcome: 'succeeded',
+            readCursor: request.parameters.atCursor,
+          },
+          page: { hasMore: false, nextCursor: null },
+        }
+      }
+      throw new Error(`unexpected page evidence query: ${request.query}`)
+    },
+  }
+}
+
+function pageEvidenceDeepLink() {
+  const state = { hash: `#/strongflow?delivery=${deliveryId}` }
+  const link = {
+    get route() {
+      const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
+      const tab = parameters.get('tab')
+      return {
+        tab: tab === 'tests' || tab === 'logs' ? tab : 'evidence',
+        evidenceId: parameters.get('evidence'),
+      }
+    },
+    onRouteChange(route) {
+      const parameters = new URLSearchParams(state.hash.slice(state.hash.indexOf('?') + 1))
+      parameters.set('tab', route.tab)
+      if (route.evidenceId === null) parameters.delete('evidence')
+      else parameters.set('evidence', route.evidenceId)
+      state.hash = `#/strongflow?${parameters.toString()}`
+    },
+    state,
+  }
+  return link
+}
+
+function pageEvidenceOptions(overrides = {}) {
+  const link = pageEvidenceDeepLink()
+  return {
+    client: pageEvidenceClient(),
+    actor: pageActor,
+    scope: pageScope,
+    nextRequestId: () => 'req_00000000000000000000000001',
+    route: link.route,
+    onRouteChange: link.onRouteChange,
+    ...overrides,
+  }
 }
 
 const limits = {
@@ -469,11 +572,13 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   const document = new FakeDocument()
   const rootElement = document.createElement('main')
   const model = new FakeStrongFlowViewModel(state())
+  const evidenceOptions = pageEvidenceOptions()
   const mounted = mountStrongFlowPage({
     root: rootElement,
     model,
     deliveries: many(5, deliverySummary),
     limits,
+    evidence: evidenceOptions,
   })
 
   const status = findByClass(rootElement, 'wwc-strongflow-status')
@@ -481,7 +586,8 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   const content = findByClass(rootElement, 'wwc-strongflow-content')
   const deliveryList = findByClass(rootElement, 'wwc-strongflow-delivery-list')
   const tasks = findByClass(rootElement, 'wwc-strongflow-task-list')
-  const evidence = findByClass(rootElement, 'wwc-strongflow-evidence')
+  const evidenceTabs = findByClass(rootElement, 'wwc-strongflow-evidence-tabs')
+  const evidenceList = findByClass(rootElement, 'wwc-strongflow-evidence-list')
   const graphs = findAllByClass(rootElement, 'wwc-strongflow-graph')
   const executionSessions = findAllByClass(rootElement, 'wwc-strongflow-execution-session')
   assert.equal(status.getAttribute('role'), 'status')
@@ -492,7 +598,19 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.equal(deliveryList.children.length, 2)
   assert.match(deliveryList.children[0].children[0].href, /^#\/strongflow\?delivery=/u)
   assert.equal(tasks.children.length, 2)
-  assert.equal(evidence.children.length, 2)
+  assert.equal(evidenceTabs.getAttribute('role'), 'tablist')
+  assert.deepEqual(
+    evidenceTabs.children.map(tab => tab.textContent),
+    ['Evidence', 'Tests', 'Logs'],
+  )
+  assert.equal(evidenceList.children.length, 2)
+  assert.equal(
+    findAllByClass(rootElement, 'wwc-strongflow-omitted').some(note => (
+      /3 more evidence records/u.test(note.textContent)
+    )),
+    true,
+  )
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence'), null)
   assert.equal(graphs.length, 2)
   assert.equal(graphs.every(graph => (
     findAllByClass(graph, 'wwc-strongflow-graph-node').length === 2
@@ -504,6 +622,26 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
   assert.equal(findByClass(rootElement, 'wwc-strongflow-verdict').dataset.status, 'pass')
   assert.equal(findByClass(rootElement, 'wwc-strongflow-publication').dataset.status, 'pending')
   assert.equal(findAllByClass(rootElement, 'wwc-strongflow-omitted').length > 0, true)
+
+  assert.equal(evidenceOptions.client.queries.length, 0)
+  findAllByClass(rootElement, 'wwc-strongflow-evidence-row')[0].emit('click')
+  assert.equal(evidenceOptions.client.queries.length, 1)
+  assert.equal(evidenceOptions.client.queries[0].query, 'evidence.get')
+  assert.equal(evidenceOptions.client.queries[0].parameters.evidenceId, evidenceId)
+
+  for (const className of [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]) {
+    const entry = findByClass(rootElement, className)
+    assert.notEqual(entry, null, `${className} must expose an exact Evidence entry point`)
+    entry.emit('click')
+  }
+  assert.deepEqual(
+    evidenceOptions.client.queries.slice(-3).map(query => query.parameters.evidenceId),
+    [evidenceId, evidenceId, evidenceId],
+  )
 
   model.publish(state({
     realtime: 'reconnecting',
@@ -517,6 +655,8 @@ test('workspace renders Delivery, solution, execution, candidate, Evidence, Verd
     projection: null,
     error: error('protocol', 'Failed.'),
   }))
+  assert.equal(findAllByClass(rootElement, 'wwc-strongflow-evidence-row').length, 0)
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-evidence-host').hidden, true)
   findByClass(rootElement, 'wwc-strongflow-retry').emit('click')
   assert.deepEqual(model.calls.at(-1), ['refresh'])
 
@@ -690,37 +830,47 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
   assert.equal(clientSurfaceFromHash('#/chat').id, 'chat')
   assert.equal(clientSurfaceFromHash('#/strongflow?delivery=dlv_1').id, 'strongflow')
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: null,
+      candidateView: 'unified',
+      evidenceTab: 'logs',
+      evidenceId,
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
-      + '&view=unified',
+      + '&view=unified'
+      + `&tab=logs&evidence=${evidenceId}`,
   )
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-      'src/current file.ts',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: 'src/current file.ts',
+      candidateView: 'unified',
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
-      + '&file=src%2Fcurrent%20file.ts'
+      + '&file=src%2Fcurrent+file.ts'
       + '&view=unified',
   )
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-      'src/app.ts',
-      'side-by-side',
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: 'src/app.ts',
+      candidateView: 'side-by-side',
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
@@ -728,19 +878,20 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       + '&view=side-by-side',
   )
   assert.equal(
-    strongFlowRouteHash(
+    strongFlowRouteHash({
       deliveryId,
-      'psn_00000000000000000000000002',
-      'run_00000000000000000000000003',
-      'src/current file.ts',
-      'unified',
-      {
-        organizationId: 'org_00000000000000000000000001',
-        workspaceId: 'wsp_00000000000000000000000001',
-        projectId: 'prj_00000000000000000000000001',
-        repositoryId: 'rep_00000000000000000000000001',
-      },
-    ),
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: 'src/current file.ts',
+      candidateView: 'unified',
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    }, {
+      organizationId: 'org_00000000000000000000000001',
+      workspaceId: 'wsp_00000000000000000000000001',
+      projectId: 'prj_00000000000000000000000001',
+      repositoryId: 'rep_00000000000000000000000001',
+    }),
     `#/strongflow?delivery=${deliveryId}`
       + '&session=psn_00000000000000000000000002'
       + '&stageRun=run_00000000000000000000000003'
@@ -752,23 +903,23 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
       + '&repositoryId=rep_00000000000000000000000001',
   )
 
-  const completeRoute = strongFlowRouteHash(
+  const completeRoute = strongFlowRouteHash({
     deliveryId,
-    'psn_00000000000000000000000002',
-    'run_00000000000000000000000003',
-    'src/current file.ts',
-    'side-by-side',
-    {
+    productSessionId: 'psn_00000000000000000000000002',
+    stageRunId: 'run_00000000000000000000000003',
+    candidatePath: 'src/current file.ts',
+    candidateView: 'side-by-side',
+    evidenceTab: 'logs',
+    evidenceId,
+  }, {
       organizationId: 'org_00000000000000000000000001',
       workspaceId: 'wsp_00000000000000000000000001',
       projectId: 'prj_00000000000000000000000001',
       repositoryId: 'rep_00000000000000000000000001',
-    },
-    {
+  }, {
       taskId: 'task:history',
       stageRunId: 'run_00000000000000000000000004',
-    },
-  )
+  })
   const completeParameters = new URLSearchParams(completeRoute.split('?')[1])
   assert.equal(completeParameters.get('file'), 'src/current file.ts')
   assert.equal(completeParameters.get('view'), 'side-by-side')
@@ -777,6 +928,177 @@ test('default route remains Chat while StrongFlow query routes stay on the advan
     'Diff route updates must retain the selected historical Task')
   assert.equal(completeParameters.get('run'), 'run_00000000000000000000000004',
     'Diff route updates must retain the selected historical StageRun')
+  assert.equal(completeParameters.get('tab'), 'logs')
+  assert.equal(completeParameters.get('evidence'), evidenceId)
+  assert.deepEqual(
+    parseStrongFlowRouteHash(
+      `#/strongflow?delivery=${deliveryId}`
+        + '&session=psn_00000000000000000000000002'
+        + '&stageRun=run_00000000000000000000000003'
+        + '&tab=bogus&evidence=',
+    ),
+    {
+      deliveryId,
+      productSessionId: 'psn_00000000000000000000000002',
+      stageRunId: 'run_00000000000000000000000003',
+      candidatePath: null,
+      candidateView: 'unified',
+      evidenceTab: 'evidence',
+      evidenceId: null,
+    },
+  )
+})
+
+test('typed StrongFlow routes reject values outside the canonical entity identities', () => {
+  assert.deepEqual(
+    parseStrongFlowRouteHash(
+      '#/strongflow?delivery=../../private&session=%2500'
+        + '&stageRun=not%20valid&evidence=%3Cscript%3E&tab=tests&view=bogus',
+    ),
+    {
+      deliveryId: null,
+      productSessionId: null,
+      stageRunId: null,
+      candidatePath: null,
+      candidateView: 'unified',
+      evidenceTab: 'tests',
+      evidenceId: null,
+    },
+  )
+  assert.equal(
+    parseStrongFlowRouteHash(
+      `#/strongflow?delivery=${deliveryId}&delivery=${deliveryId}`,
+    ).deliveryId,
+    null,
+  )
+})
+
+test('canonical TypeScript lane executes every UI-406 Evidence acceptance suite once', () => {
+  const runner = readFileSync(resolve(root, 'scripts/run-ts-tests.mjs'), 'utf8')
+  for (const path of [
+    'tests/strongflow-evidence.test.mjs',
+    'tests/strongflow-page.test.mjs',
+    'tests/strongflow-evidence-browser.test.mjs',
+  ]) {
+    assert.equal(
+      runner.split(`'${path}'`).length - 1,
+      1,
+      `${path} must be registered exactly once in the canonical TypeScript lane`,
+    )
+  }
+})
+
+test('UI-406 acceptance fixtures use only generated-schema Evidence identities', () => {
+  const legacyEncodedEvidencePrefix = `evidence%${'3A'}`
+  for (const value of Array.from({ length: 5 }, (_, index) => evidenceIdFor(index + 1))) {
+    assert.equal(
+      parseStrongFlowRouteHash(`#/strongflow?evidence=${value}`).evidenceId,
+      value,
+    )
+  }
+  for (const path of [
+    'tests/strongflow-evidence.test.mjs',
+    'tests/strongflow-page.test.mjs',
+    'tests/strongflow-evidence-browser.test.mjs',
+    'tests/fixtures/browser-strongflow-evidence-client.mjs',
+  ]) {
+    const source = readFileSync(resolve(root, path), 'utf8')
+    assert.doesNotMatch(
+      source,
+      /\bevidence:[A-Za-z0-9]/u,
+      `${path} must use canonical evd_ EvidenceId values`,
+    )
+    assert.equal(source.includes(legacyEncodedEvidencePrefix), false)
+  }
+})
+
+test('Evidence entry controls preserve keyed identity across equivalent projections', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const classNames = [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]
+  const entries = classNames.map(className => findByClass(rootElement, className))
+
+  model.publish(state())
+
+  for (const [index, className] of classNames.entries()) {
+    assert.equal(
+      findByClass(rootElement, className),
+      entries[index],
+      `${className} must retain its keyed DOM identity`,
+    )
+  }
+  mounted.close()
+})
+
+test('removing entries and closing StrongFlow clean every Evidence entry listener', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const classNames = [
+    'wwc-strongflow-stage-evidence-open',
+    'wwc-strongflow-candidate-evidence-open',
+    'wwc-strongflow-criterion-evidence-open',
+  ]
+  const removedEntries = classNames.map(className => findByClass(rootElement, className))
+  const withoutEntries = projection()
+  withoutEntries.delivery.stages = []
+  withoutEntries.evidence = []
+  withoutEntries.verdict = { ...withoutEntries.verdict, criteria: [] }
+
+  model.publish(state({ projection: withoutEntries }))
+
+  for (const entry of removedEntries) {
+    assert.deepEqual(entry.listeners.get('click') ?? [], [])
+  }
+
+  model.publish(state())
+  const retainedEntries = classNames.map(className => findByClass(rootElement, className))
+
+  mounted.close()
+
+  for (const entry of retainedEntries) {
+    assert.deepEqual(entry.listeners.get('click') ?? [], [])
+  }
+})
+
+test('Evidence Drawer restores focus to the keyed StageRun opener after an equivalent snapshot', () => {
+  const document = new FakeDocument()
+  const rootElement = document.createElement('main')
+  const model = new FakeStrongFlowViewModel(state())
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
+  const opener = findByClass(rootElement, 'wwc-strongflow-stage-evidence-open')
+  opener.focus()
+  opener.emit('click')
+  assert.equal(document.activeElement, findByClass(rootElement, 'wwc-drawer-close'))
+
+  model.publish(state())
+  assert.equal(findByClass(rootElement, 'wwc-strongflow-stage-evidence-open'), opener)
+  findByClass(rootElement, 'wwc-drawer-close').emit('click')
+
+  assert.equal(document.activeElement, opener)
+  mounted.close()
 })
 
 test('review controls send only current view-model decisions and disable while waiting', () => {
@@ -785,7 +1107,12 @@ test('review controls send only current view-model decisions and disable while w
   const current = projection()
   current.solutionReview.reviewStatus = 'pending'
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
   const actions = findByClass(rootElement, 'wwc-strongflow-solution-actions')
   actions.children[0].children[0].value = 'Approve the exact current review.'
   findByClass(rootElement, 'wwc-strongflow-approve-solution').emit('click')
@@ -864,6 +1191,7 @@ test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, a
     model,
     deliveries: many(5, deliverySummary),
     limits,
+    evidence: pageEvidenceOptions(),
   })
   const workspace = findByClass(rootElement, 'wwc-strongflow-workspace')
   const deliveryList = findByClass(rootElement, 'wwc-strongflow-delivery-list')
@@ -916,7 +1244,7 @@ test('StrongFlow keyed updates retain workspace, review drafts, focus, scroll, a
   assert.equal((approve.listeners.get('click') ?? []).length, 0)
   assert.equal(comments.value, '')
   assert.equal(resolution.value, '')
-  assert.equal(model.listener, null)
+  assert.equal(model.listeners.size, 0)
 })
 
 test('StrongFlow review isolates its draft, exposes revision changes, and submits one snapshot', () => {
@@ -1124,7 +1452,12 @@ test('verdict control stays hidden until all active StageRuns settle', () => {
   const current = projection()
   current.verdict = null
   const model = new FakeStrongFlowViewModel(state({ projection: current }))
-  const mounted = mountStrongFlowPage({ root: rootElement, model, limits })
+  const mounted = mountStrongFlowPage({
+    root: rootElement,
+    model,
+    limits,
+    evidence: pageEvidenceOptions(),
+  })
 
   assert.equal(findByClass(rootElement, 'wwc-strongflow-submit-verdict'), null)
 

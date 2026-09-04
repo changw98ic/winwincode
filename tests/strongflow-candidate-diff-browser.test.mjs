@@ -69,6 +69,8 @@ const route = 'https://client.localhost:PORT/#/strongflow'
   + '&repositoryId=rep_00000000000000000000000001'
   + '&task=task%3Ahistory'
   + '&run=run_00000000000000000000000004'
+  + '&tab=logs'
+  + '&evidence=evd_00000000000000000000000001'
 
 const routeContext = {
   organizationId: 'org_00000000000000000000000001',
@@ -77,6 +79,8 @@ const routeContext = {
   repositoryId: 'rep_00000000000000000000000001',
   task: 'task:history',
   run: 'run_00000000000000000000000004',
+  tab: 'logs',
+  evidence: 'evd_00000000000000000000000001',
 }
 
 test('real Chrome reviews the Candidate Diff in both layouts with keyboard and search', async t => {
