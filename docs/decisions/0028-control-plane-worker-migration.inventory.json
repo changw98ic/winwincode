@@ -1015,6 +1015,7 @@
         "apps/client/src/strongflow-page.ts",
         "apps/client/src/strongflow-rendering.ts",
         "apps/client/src/strongflow-review-annotations.ts",
+        "apps/client/src/strongflow-review-detail.ts",
         "apps/client/src/strongflow-route.ts",
         "apps/client/src/strongflow-run-detail.ts",
         "apps/client/src/strongflow-view-model.ts"

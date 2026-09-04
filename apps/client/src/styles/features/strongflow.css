@@ -1984,3 +1984,180 @@
 .wwc-strongflow-review-draft-scope-blocker[hidden] {
   display: none;
 }
+
+.wwc-strongflow-review-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wwc-space-2);
+  margin: var(--wwc-space-3) var(--wwc-space-0);
+  padding: var(--wwc-space-3);
+  border: var(--wwc-border-width) solid var(--wwc-color-border);
+  border-radius: var(--wwc-radius-md);
+  background: var(--wwc-color-surface-subtle);
+}
+
+.wwc-strongflow-review-detail[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-review-detail-heading {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-sm);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-strongflow-review-detail-conclusion {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-sm);
+}
+
+.wwc-strongflow-review-detail-hint,
+.wwc-strongflow-review-detail-copy-status {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text-muted);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-copy-status[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-review-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-strongflow-review-detail-toggle,
+.wwc-strongflow-review-detail-copy,
+.wwc-strongflow-review-detail-receipt-refresh {
+  align-self: flex-start;
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wwc-space-2);
+}
+
+.wwc-strongflow-review-detail-body[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-review-detail-technical,
+.wwc-strongflow-review-detail-receipt {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(0, 1fr);
+  gap: var(--wwc-space-1) var(--wwc-space-3);
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-technical[hidden],
+.wwc-strongflow-review-detail-receipt[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-review-detail-term {
+  color: var(--wwc-color-text-secondary);
+}
+
+.wwc-strongflow-review-detail-description {
+  margin: var(--wwc-space-0);
+  color: var(--wwc-color-text);
+  font-family: var(--wwc-font-family-mono);
+  overflow-wrap: anywhere;
+}
+
+.wwc-strongflow-review-detail-technical-evidence,
+.wwc-strongflow-review-detail-criteria,
+.wwc-strongflow-review-detail-reasons,
+.wwc-strongflow-review-detail-unmatched,
+.wwc-strongflow-review-detail-findings,
+.wwc-strongflow-review-detail-receipt-history,
+.wwc-strongflow-review-detail-receipt-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wwc-space-1);
+  margin: var(--wwc-space-0);
+  padding-inline-start: var(--wwc-space-4);
+  color: var(--wwc-color-text-secondary);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-technical-evidence[hidden],
+.wwc-strongflow-review-detail-criteria[hidden],
+.wwc-strongflow-review-detail-reasons[hidden],
+.wwc-strongflow-review-detail-unmatched[hidden],
+.wwc-strongflow-review-detail-findings[hidden],
+.wwc-strongflow-review-detail-receipt-history[hidden],
+.wwc-strongflow-review-detail-receipt-steps[hidden] {
+  display: none;
+}
+
+.wwc-strongflow-review-detail-criterion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wwc-space-1);
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-subtle);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+}
+
+.wwc-strongflow-review-detail-criterion-outcome {
+  color: var(--wwc-color-text-secondary);
+  font-weight: var(--wwc-font-weight-medium);
+}
+
+.wwc-strongflow-review-detail-criterion[data-outcome='pass'] .wwc-strongflow-review-detail-criterion-outcome {
+  color: var(--wwc-color-success-text);
+}
+
+.wwc-strongflow-review-detail-criterion[data-outcome='fail'] .wwc-strongflow-review-detail-criterion-outcome {
+  color: var(--wwc-color-danger-text);
+}
+
+.wwc-strongflow-review-detail-criterion[data-outcome='infra_error'] .wwc-strongflow-review-detail-criterion-outcome {
+  color: var(--wwc-color-warning-text);
+}
+
+.wwc-strongflow-review-detail-criterion-title,
+.wwc-strongflow-review-detail-criterion-explanation {
+  margin: var(--wwc-space-0);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-criterion-explanation {
+  color: var(--wwc-color-text-secondary);
+}
+
+.wwc-strongflow-review-detail-criterion button {
+  align-self: flex-start;
+  padding: var(--wwc-space-1) var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-summary {
+  min-height: var(--wwc-control-min-height);
+  padding: var(--wwc-space-2);
+  border: var(--wwc-border-width) solid var(--wwc-color-border-control);
+  border-radius: var(--wwc-radius-sm);
+  background: var(--wwc-color-surface);
+  color: var(--wwc-color-text);
+  font-family: var(--wwc-font-family-mono);
+  font-size: var(--wwc-font-size-xs);
+}
+
+.wwc-strongflow-review-detail-summary[hidden] {
+  display: none;
+}
