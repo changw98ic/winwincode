@@ -1641,11 +1641,22 @@ test('the Delivery view choice persists as a browser preference only', () => {
   })
 
   findByClass(rootElement, 'wwc-delivery-view-kanban').click()
+  // Only the active view mounts rows, so the hidden list costs no DOM while
+  // the kanban board keeps its own keyed cards.
   const rows = findByClass(rootElement, 'wwc-strongflow-delivery-list').children
-  assert.equal(rows.length, 2, 'the list rows stay mounted behind the hidden view')
+  assert.equal(rows.length, 0, 'the hidden list view kept its rows mounted')
+  const kanbanCards = findAllByClass(rootElement, 'wwc-delivery-kanban-card')
+  assert.equal(kanbanCards.length, 2, 'the kanban board lost its cards')
   const saved = JSON.parse(store.get('winwincode.strongflow.layout.v1'))
   assert.equal(saved.deliveriesView, 'kanban')
   assert.equal('deliveryId' in saved, false, 'no business identity enters the preference store')
+
+  findByClass(rootElement, 'wwc-delivery-view-list').click()
+  assert.equal(
+    findByClass(rootElement, 'wwc-strongflow-delivery-list').children.length,
+    2,
+    'switching back lost the list rows',
+  )
 
   mounted.close()
 })

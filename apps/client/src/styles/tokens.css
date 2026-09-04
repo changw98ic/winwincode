@@ -78,6 +78,8 @@
   --wwc-graph-node-narrow-width: 9rem;
   --wwc-graph-overview-width: 12rem;
   --wwc-graph-overview-height: 6rem;
+  /* Windowed lists: the scroll math in apps/client/src uses the same value. */
+  --wwc-window-row-height: 60px;
   --wwc-shadow-dialog: 0 1.5rem 4rem rgb(15 23 42 / 22%);
   --wwc-transition-fast: 120ms ease;
   --wwc-opacity-disabled: 0.58;
