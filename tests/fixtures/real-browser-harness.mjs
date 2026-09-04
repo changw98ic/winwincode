@@ -5,6 +5,31 @@ import { createServer } from 'node:https'
 import { createServer as createNetServer } from 'node:net'
 import { normalize, resolve } from 'node:path'
 
+// Every real-browser test rebuilds the client into the shared
+// `apps/client/dist` tree, and a rebuild empties that tree before writing it
+// again.  A test that serves that tree while another test rebuilds it can
+// therefore observe a missing file for the length of one build.  Waiting a
+// bounded time for the file to come back reads the completed artifact instead
+// of failing inside the request; an asset that never returns still throws.
+const SHARED_CLIENT_READ_TIMEOUT_MILLIS = 60_000
+const SHARED_CLIENT_READ_POLL_MILLIS = 25
+
+function waitSync(millis) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, millis)
+}
+
+function readSharedClientFile(path) {
+  const deadline = Date.now() + SHARED_CLIENT_READ_TIMEOUT_MILLIS
+  for (;;) {
+    try {
+      return readFileSync(path)
+    } catch (error) {
+      if (error.code !== 'ENOENT' || Date.now() >= deadline) throw error
+      waitSync(SHARED_CLIENT_READ_POLL_MILLIS)
+    }
+  }
+}
+
 export function chromeBinary() {
   const candidates = [
     process.env.CHROME_BIN,
@@ -100,7 +125,8 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
   const moduleRoot = resolve(root, 'apps/client/dist/module')
   const publicRoot = resolve(root, 'apps/client/dist/public')
   const fixture = resolve(root, fixturePath)
-  const productionIndex = readFileSync(resolve(publicRoot, 'index.html'), 'utf8')
+  const productionIndex = readSharedClientFile(resolve(publicRoot, 'index.html'))
+    .toString('utf8')
     .replace(/\s*<script src="\.\/runtime-config\.js"><\/script>/u, '')
     .replace(
       /<script type="module" src="\.\/assets\/client\.js"><\/script>/u,
@@ -149,7 +175,7 @@ export function staticClientServer({ root, certificateFiles, fixturePath, config
           ? 'text/css; charset=utf-8'
           : 'text/javascript; charset=utf-8',
       })
-      response.end(readFileSync(source))
+      response.end(readSharedClientFile(source))
       return
     }
     response.writeHead(404).end()

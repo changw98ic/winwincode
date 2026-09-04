@@ -10,6 +10,11 @@ const root = resolve(import.meta.dirname, '..')
 // boundaries.  Product-process checks (Rust, Server API, and release assets)
 // have their own root scripts so this lane stays deterministic and does not
 // start a second process-boundary build.
+//
+// The real-browser suites each rebuild the client into the shared
+// `apps/client/dist` tree, and this lane runs files concurrently, so the
+// browser harness waits out another suite's rebuild instead of failing on a
+// momentarily missing asset (see tests/fixtures/real-browser-harness.mjs).
 const canonicalTestFiles = Object.freeze([
   'tests/api-production-vertical-runner.test.mjs',
   'tests/architecture-documentation.test.mjs',
