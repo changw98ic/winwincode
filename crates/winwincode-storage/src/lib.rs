@@ -25,6 +25,7 @@ mod provider_exchange;
 mod repository_scheduler;
 mod repository_scheduler_replacement;
 mod scheduler_policy;
+mod user_accounts;
 mod worker_fleet_inventory;
 mod worker_fleet_operations;
 mod worker_outbound_queue;
@@ -145,6 +146,7 @@ pub use scheduler_policy::{
     SchedulerPolicy, SchedulerPolicyError, SchedulerPriority, SchedulerRetryDecision,
     SchedulerRetryPolicy, SchedulerWeights, plan_scheduler_cancellation, scheduler_retry_decision,
 };
+pub use user_accounts::{UserAccountLedger, UserAccountStoreError, UserAccountStoreErrorKind};
 pub use worker_fleet_inventory::{
     WorkerFleetInventoryPage, WorkerFleetInventoryState, WorkerFleetInventoryStore,
     WorkerFleetPoolInventory, WorkerFleetSnapshotCursor, WorkerFleetSnapshotRequest,
