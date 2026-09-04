@@ -63,6 +63,7 @@ const domainDefinitions = [
   'CodexThreadId',
   'DeliveryId',
   'DeliveryTaskId',
+  'EvidenceId',
   'ExecutionJobId',
   'InputRequestId',
   'Instant',
@@ -435,6 +436,63 @@ test('ExecutionPort supports default Chat jobs without inventing a Delivery', ()
     assert.equal(validate(sample), true, `${sample.kind}: ${JSON.stringify(validate.errors)}`)
   }
 })
+
+test('DeliveryReworkTargetScope.evidenceRefIds uses the canonical domain EvidenceId', () => {
+  const schema = json(schemaPath)
+  const evidenceRefIds = schema.$defs.DeliveryReworkTargetScope.properties.evidenceRefIds
+
+  assert.deepEqual(evidenceRefIds.items, {
+    $ref: './domain.schema.json#/$defs/EvidenceId',
+  })
+  assert.equal(evidenceRefIds.items.pattern, undefined)
+
+  const scopeSchema = {
+    ...schema,
+    $id: 'https://schemas.winwincode.dev/winwincode/v1/execution-scope.test.schema.json',
+    $ref: '#/$defs/ExecutionScope',
+  }
+  const validate = validator(scopeSchema)
+  const canonicalEvidenceId = `evd_${'F'.repeat(26)}`
+  const legacyEvidenceId = `evidence:sha256:${'a'.repeat(64)}`
+
+  const canonicalScope = deliveryReworkExecutionScope([canonicalEvidenceId])
+  assert.equal(
+    validate(canonicalScope),
+    true,
+    `canonical evd_ evidenceRefIds rejected: ${JSON.stringify(validate.errors)}`,
+  )
+
+  const legacyScope = deliveryReworkExecutionScope([legacyEvidenceId])
+  assert.equal(validate(legacyScope), false)
+})
+
+function deliveryReworkExecutionScope(evidenceRefIds) {
+  return {
+    kind: 'delivery-stage',
+    productSessionId: `psn_${'A'.repeat(26)}`,
+    deliveryId: `dlv_${'A'.repeat(26)}`,
+    deliveryTaskId: `dtk_${'A'.repeat(26)}`,
+    stageRunId: `run_${'A'.repeat(26)}`,
+    reworkAuthorization: {
+      authorizationDigest: `sha256:${'a'.repeat(64)}`,
+      candidateRef: `git-candidate:sha256:${'a'.repeat(64)}`,
+      diffSha256: 'a'.repeat(64),
+      sourceCandidateCommitId: 'a'.repeat(64),
+      sourceCandidateTreeId: 'a'.repeat(64),
+      requiresFullReverification: true,
+      targets: [
+        {
+          deliveryTaskId: `dtk_${'A'.repeat(26)}`,
+          diagramId: 'diagrams/rework',
+          nodeId: 'node-1',
+          filePath: 'src/lib.rs',
+          sourceHunkSha256: 'a'.repeat(64),
+          evidenceRefIds,
+        },
+      ],
+    },
+  }
+}
 
 test('ProductSession runtime messages carry no fabricated StageRun identity', () => {
   const schema = json(schemaPath)

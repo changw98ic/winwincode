@@ -6245,8 +6245,7 @@
         },
         "evidenceRefIds": {
           "items": {
-            "pattern": "^evidence:sha256:[0-9a-f]{64}$",
-            "type": "string"
+            "$ref": "#/$defs/EvidenceId"
           },
           "maxItems": 1000,
           "minItems": 1,
@@ -17924,7 +17923,7 @@
     "https://schemas.winwincode.dev/winwincode/v1/domain.schema.json",
     "https://schemas.winwincode.dev/winwincode/v1/execution-port.schema.json"
   ],
-  "x-source-digest": "sha256:93122025a3365c4f846e4caa1c0391cdcf3919ae2f19cac545467adc40d28860",
+  "x-source-digest": "sha256:d14b55457418d6ba96eca4241ace1b37bc287735398d851f76b1f8ada3c64bc4",
   "x-winwincode-client-metadata": {
     "http": {
       "authentication": {
